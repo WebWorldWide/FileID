@@ -1,7 +1,4 @@
-//! Pure timeline logic shared by the portable timeline worker. Mirrors the
-//! macOS reference (`TimelineSignalAnalysis`, `TimelineMomentAnalysis`,
-//! `TimelineChapterSuggestions`) so both engines propose the same windows,
-//! samples and draft chapters from the same evidence.
+//! Pure timeline logic. Mirrors macOS `TimelineSignalAnalysis`, `TimelineMomentAnalysis` and `TimelineChapterSuggestions`, so both engines propose the same windows, samples and chapters.
 
 use crate::ipc::CatalogChapter;
 use anyhow::Result;

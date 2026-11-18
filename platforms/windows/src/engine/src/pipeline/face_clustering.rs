@@ -1,9 +1,7 @@
 // Face clustering — density-clustering driver over SFace (128-d) embeddings.
-//
 // Source of truth for thresholds: `identity_clustering::Hyperparameters::default()`
 // and the MERGE_SUGGEST_* / AUTOMERGE_* constants in THIS file. Do not
 // re-document numeric thresholds elsewhere — they drift.
-//
 // Pipeline (see `cluster()` + `consolidate()` here, and the DB-side handler in
 // `commands/face_clustering.rs`):
 //   1. Load every `face_prints` row whose `arcface_embedding` (column, not a
@@ -20,33 +18,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-/// Lower bound for surfacing MERGE suggestions in the People tab. A 0.32 floor
-/// flooded the sheet with anchor pairs deep in impostor territory, so a low floor
-/// is mostly noise. 0.55 keeps the genuinely-uncertain band (plausible cross-pose
-/// same person, plus the hardest impostors worth a human glance) and drops the
-/// rest — fewer, more actionable suggestions.
-///
-/// NOTE (2026-07-29): the earlier claim here that "genuine same-person SFace
-/// cosine sits at 0.88-0.95" is NOT true of a real family library, and was the
-/// premise behind the old 0.88 auto-merge bar. Measured on the Adlon catalog,
-/// clusters of <=150 faces (overwhelmingly single identities) have mean PAIRWISE
-/// cosine 0.71-0.86 with p10 0.54-0.78, and centroid-to-centroid cosine between
-/// genuinely-same-person fragments runs well below 0.88 — which is why
-/// consolidate at 0.88 fired only 3 times across 3,092 clusters. See
-/// AUTOMERGE_COS_DEFAULT below. This band (0.55..0.97) is unchanged and remains
-/// the right "ask a human" range.
+/// Lower bound for surfacing MERGE suggestions in the People tab. Below 0.55 the sheet fills with impostor-range pairs.
 pub const MERGE_SUGGEST_COS_LOW: f32 = 0.55;
 
-/// Upper bound for surfacing MERGE suggestions in the People tab. Previously
-/// pinned at the Pass-1 core threshold (0.66) on the theory that anything above
-/// 0.66 already auto-merged in Pass 1 — but Pass 1 is kNN-limited single-linkage
-/// and Pass 3 can re-split, so genuine same-person FRAGMENTS routinely strand in
-/// 0.66..0.95: too high to be suggested, too low/disconnected to have auto-merged.
-/// Those are exactly the obvious duplicates a user wants to merge. Raising the
-/// ceiling to 0.97 surfaces them (sorted to the top by similarity). The very
-/// top of this band (centroid ≥ FILEID_FACE_AUTOMERGE_COS) is instead folded
-/// automatically at clustering time, so in practice suggestions here are the
-/// anchor-high / centroid-borderline residue that auto-consolidation skipped.
+/// Upper bound for surfacing MERGE suggestions in the People tab. Same-person fragments often sit at 0.66..0.95: too high to auto-merge in Pass 1, too low to be suggested. The top of the band is folded automatically at clustering time.
 pub const MERGE_SUGGEST_COS_HIGH: f32 = 0.97;
 
 #[derive(Debug, Clone)]
@@ -95,7 +70,6 @@ fn compare_neighbors(
 
 /// Group `faces` into clusters via the 3-pass density algorithm in
 /// `identity_clustering`.
-///
 /// Returns (assignments, anchors). Cluster IDs are 1-based and stable
 /// in first-seen order.
 pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
@@ -431,42 +405,8 @@ where
     (assignments, anchors)
 }
 
-/// Default minimum CENTROID cosine to auto-fold two clusters into one person.
-/// 0.88 is a CONSERVATIVE re-merge bar: only clusters whose centroids are near-
-/// identical get folded, so it recovers a same-person over-split without ever
-/// gluing two different people together. Override with `FILEID_FACE_AUTOMERGE_COS`
-/// (clamped to [0.70, 1.0]; set 1.0 to disable and keep pure over-split).
-/// Centroids (means of all member embeddings) are denoised, so this is safer
-/// than any single anchor-to-anchor comparison.
-///
-/// **0.75 as of 2026-07-29, lowered from 0.88 on corpus measurement.** The prior
-/// 0.88 rationale assumed "genuine same-person SFace cosine sits at 0.88-0.95",
-/// which does not hold on a real family library: at 0.88 consolidate performed
-/// only **3 merges across 3,092 non-mega clusters** — effectively inert, which is
-/// why the same person stayed split across thousands of duplicate-burst clusters
-/// (the owner's "tons are the same people" complaint).
-///
-/// Re-measured on the 2026-07-29 Adlon catalog, judging each candidate merge by a
-/// LABEL-FREE safety criterion: a merge is unsafe if the merged cluster gains an
-/// anti-correlated face pair (cosine < 0), which a single identity cannot contain.
-///
-/// ```text
-/// automerge   merges   unsafe merges
-///   0.88          3        0          (shipped before — inert)
-///   0.78         78        0
-///   0.75        140        0          <- chosen
-///   0.70        329        1          <- safety margin ends here
-/// ```
-///
-/// 0.75 gives 47x more same-person recovery than 0.88 with zero identity mixing,
-/// and keeps a real margin above 0.70 where the first unsafe merge appears. It
-/// cannot re-glue the known mega-clusters: their pairwise centroid cosines measure
-/// 0.21-0.29, far below any threshold in this table.
-///
-/// Centroids (means of all member embeddings) are denoised, so this is safer than
-/// any single anchor-to-anchor comparison. Consolidate also still respects user
-/// "different people" verdicts and protected named clusters, so lowering the bar
-/// cannot override an explicit human decision.
+/// Minimum CENTROID cosine to auto-fold two clusters into one person. 0.75 rather than 0.88: 0.88 merged almost nothing on a real family library, and 0.70 is where the first anti-correlated (unsafe) merge appears.
+/// Override with FILEID_FACE_AUTOMERGE_COS (clamped to [0.70, 1.0]; 1.0 disables).
 pub const AUTOMERGE_COS_DEFAULT: f32 = 0.75;
 
 /// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
@@ -770,17 +710,14 @@ where
 
 /// Conservatively fold near-certain duplicate clusters that the over-split-safe
 /// 3-pass clusterer left fragmented, using denoised per-cluster CENTROIDS.
-///
 /// Returns the same (assignments, anchors) shape with merged clusters collapsed
 /// onto a single canonical id (the largest fragment, so its name + anchor face
 /// survive; ties broken to the smallest id for determinism) and member counts
 /// summed.
-///
 /// `blocked` holds normalized (min,max) cluster-id pairs the user has marked as
 /// DIFFERENT people. A union is rejected if it would co-locate ANY blocked pair,
 /// checked at every union step — so a blocked pair can never share a person even
 /// transitively (X–Y both high to Z can't sneak a blocked X–Y together).
-///
 /// `threshold` ≥ 1.0 (or < 2 clusters) is a no-op: the inputs pass through
 /// unchanged, preserving the pure over-split behavior.
 #[cfg(test)]
@@ -1950,11 +1887,7 @@ where
     (new_assignments, new_anchors)
 }
 
-/// Remove only the far tail of an unprotected high-quality cluster. The 0.30
-/// default is paired with the 0.33 pre-clustering quality gate and was measured
-/// on the isolated Family Photos catalog: it retained the labelled same-person
-/// pair, separated every reviewed impostor, and improved every top-cluster
-/// cohesion floor. Named, merged, and verdict-backed identities bypass it.
+/// Remove only the far tail of an unprotected high-quality cluster. Named, merged, and verdict-backed identities bypass it.
 pub fn outlier_cosine_floor() -> f32 {
     std::env::var("FILEID_FACE_OUTLIER_COSINE")
         .ok()
@@ -2060,17 +1993,7 @@ where
     (new_assignments, new_anchors)
 }
 
-/// Minimum CORROBORATED cluster size kept regardless of per-face quality:
-/// ≥ this many mutually-similar faces is a real recurring identity even when
-/// every frame is mediocre. `FILEID_FACE_MIN_CLUSTER_SIZE` (clamped [1,10000];
-/// default 3).
-///
-/// Stays 3 (NOT lowered to 2): a 2026-07-05 scale test on ~44k faces from
-/// F:\TrueNAS showed min=2 keeps ~3,800 size-2 clusters (HNSW at scale produces
-/// a flood of pairs), so min=2 traded the singleton flood for a pair flood.
-/// min=3 + `solo_quality_floor` 0.40 cut that scale run to ~1,566 persons with
-/// no pair flood. Recurrence is still the primary "is this a person" signal;
-/// the quality floor only rescues exceptional single faces.
+/// Minimum CORROBORATED cluster size kept regardless of per-face quality: ≥ this many mutually-similar faces is a real recurring identity. `FILEID_FACE_MIN_CLUSTER_SIZE` (clamped [1,10000]; default 3). Stays 3: min=2 lets a flood of size-2 pairs through at scale.
 pub fn min_cluster_size() -> u32 {
     std::env::var("FILEID_FACE_MIN_CLUSTER_SIZE")
         .ok()
@@ -2079,37 +2002,7 @@ pub fn min_cluster_size() -> u32 {
         .unwrap_or(3)
 }
 
-/// A cluster below `min_cluster_size` must contain a face at/above this quality
-/// to be persisted as a person; otherwise it is left UNCLUSTERED (no spurious
-/// singleton). `FILEID_FACE_SOLO_QUALITY` (clamped [0,1]; default 0.40). 0
-/// disables the quality escape entirely (pure recurrence gate).
-///
-/// Default 0.12→0.40 (2026-07-05, RTX 5080 / F:\TrueNAS calibration). The old
-/// 0.12 was a macOS Apple-Vision guess and the comment ASSUMED Windows scored
-/// on the same 0..~0.95 range. It does not: `face_quality` here is the YuNet
-/// detection score × landmark geometry (`scrfd::validate_face_geometry`, whose
-/// `geom_conf` structurally caps ~0.42), so measured on 84,629 real faces it is
-/// compressed into ~0.23..0.42 and 0.12 admitted EVERY single face — 91% of
-/// "persons" were one-off singletons
-/// (10,208 persons on the full corpus / 438 on the 1k-file subset). Worse,
-/// singleton quality (median 0.33) barely separates from genuine recurring-face
-/// quality (median 0.37), and 55% of singletons sit &lt;0.40 cosine from ANY real
-/// cluster centroid — i.e. they are genuine distinct one-off faces (crowds,
-/// backgrounds), NOT fragments a looser merge would recover. So quality alone
-/// can't gate them; recurrence (`min_cluster_size`) does the work and 0.40 (the
-/// measured ~90th percentile of the quality range) is a narrow escape that keeps
-/// only the crispest true solos. Subset (min=3): 438 → ~34 persons; ~44k-face
-/// scale run (min=3): singleton flood gone. macOS keeps its own Apple-Vision-
-/// calibrated floor (different quality scale — intentional lockstep divergence).
-///
-/// SCOPE NOTE: this floor is a POST-clustering suppression of small low-quality
-/// clusters. It works alongside two other levers added in the 2026-07-05
-/// label-driven retune: the PRE-clustering quality gate
-/// FILEID_FACE_CLUSTER_MIN_QUALITY (drops noise faces before they can chain into
-/// cones) and the Pass-1 threshold + mutual-kNN in identity_clustering.rs (which
-/// DID fix the bridge-face over-merge — see there). On the owner's labelled set
-/// that combination reached precision/recall 1.0; cross-corpus + full-84k recall
-/// confirmation is tracked in NEXT.md.
+/// A cluster below `min_cluster_size` must contain a face at/above this quality to be persisted; otherwise it is left UNCLUSTERED. `FILEID_FACE_SOLO_QUALITY` (clamped [0,1]; default 0.40; 0 disables). Face quality here is compressed to ~0.23..0.42 (YuNet score × geometry), so 0.12 admitted nearly every singleton.
 pub fn solo_quality_floor() -> f32 {
     std::env::var("FILEID_FACE_SOLO_QUALITY")
         .ok()
@@ -2118,19 +2011,7 @@ pub fn solo_quality_floor() -> f32 {
         .unwrap_or(0.40)
 }
 
-/// Drop "junk" micro-clusters so the People tab isn't flooded with spurious
-/// singleton/doubleton persons built from unrecognizable faces (blurry / motion
-/// / tiny / heavy-profile). A cluster is KEPT iff it has ≥ `min_cluster_size`
-/// members OR its best member quality ≥ `solo_quality_floor`; otherwise its
-/// faces are removed from the assignment (the caller's persist NULLs every
-/// unassigned face, so they land unclustered — still a candidate, never deleted).
-///
-/// This is the SAFE, high-impact fragmentation fix: it NEVER merges two clusters,
-/// so it cannot bridge distinct identities — it only suppresses low-confidence
-/// lone faces. On the macOS reference library it takes 407→~285 persons by
-/// dropping 127 junk micro-clusters with zero identity merges. `solo_quality_floor
-/// <= 0` is a no-op (every cluster kept). Mirrors `FaceClustering.swift`'s
-/// `suppressLowQualityClusters`.
+/// Drop junk micro-clusters so the People tab isn't flooded with singleton/doubleton persons built from unrecognizable faces. Never merges clusters: it only suppresses low-confidence lone faces. `solo_quality_floor <= 0` keeps every cluster. Mirrors `FaceClustering.swift`'s `suppressLowQualityClusters`.
 #[cfg(test)]
 pub fn suppress_low_quality_micro_clusters(
     faces: &[FaceRow],
@@ -2200,17 +2081,15 @@ where
 }
 
 /// Derive the name-based auto-merge blocked pairs from a face→name snapshot.
-///
 /// `face_name` maps each named face's id to the user-assigned name of the person
 /// it currently belongs to; `cluster_of` maps face ids to their freshly-computed
 /// cluster ids. Each cluster gets a single name by majority vote (ties broken to
 /// the lexicographically smallest name, never HashMap order, for determinism),
 /// then every pair of clusters carrying DIFFERENT names is blocked.
-///
 /// The caller MUST pass the snapshot read under the phase-3 persist lock (not a
 /// pre-clustering phase-1 capture): a rename committed in the lock-free window
 /// would otherwise leave a stale name in the guard and could unblock a
-/// wrong-cluster auto-merge. (audit C1-023) Same-named fragments and
+/// wrong-cluster auto-merge. Same-named fragments and
 /// named+unnamed pairs are intentionally NOT blocked — they still consolidate.
 #[cfg(test)]
 pub fn name_blocked_pairs<S: std::hash::BuildHasher>(

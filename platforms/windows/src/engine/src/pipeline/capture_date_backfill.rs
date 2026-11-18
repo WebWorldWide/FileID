@@ -1,10 +1,4 @@
-//! Catalogs written before scans read EXIF capture times (or before the RAW
-//! readers existed) store the file's copy date for photos, and an incremental
-//! scan skips unchanged files, so those dates would never be corrected. After a
-//! library folder's next completed scan this reads each photo's EXIF time once
-//! (file headers only, no decode) and fixes rows that differ by more than a
-//! second. A marker per folder keeps it to one pass. Mirrors macOS
-//! `CaptureDateBackfill`.
+//! Mirrors macOS `CaptureDateBackfill`: corrects copy dates to EXIF capture times once per library folder.
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +42,6 @@ pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
     }
 }
 
-/// Runs the pass for `root` unless its marker exists. Returns the rows fixed.
 /// Files are read with no database lock held; the writer is taken per chunk.
 pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root: &Path, cancelled: &dyn Fn() -> bool) -> usize {
     if marker(state_dir, root).exists() {

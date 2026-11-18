@@ -1,16 +1,10 @@
-// Restructure — pure-logic FolderClassifier.
-//
-// Inputs are file metadata + tags + (optional) VLM categories from Deep
-// Analyze; outputs are proposed destinations. No I/O happens here — this
-// module just decides *where* each file should go. The apply layer lives
-// in `pipeline/restructure_apply.rs`.
+// Pure-logic FolderClassifier: decides where each file goes. No I/O; the apply layer is in `pipeline/restructure_apply.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::pipeline::discovery::FileKind;
 
-/// One proposed move (or stay-in-place) for a single file.
 #[derive(Debug, Clone)]
 pub struct ProposedMove {
     pub file_id: i64,
@@ -27,7 +21,6 @@ pub struct ProposedMove {
 }
 
 /// Three-band autonomy tier for a single proposed move.
-///
 /// - **Auto**   = high confidence; safe to auto-file (still fully reversible).
 /// - **Review** = medium; show for one-click confirm.
 /// - **Ask**    = low; hold and ask, or leave in place.
@@ -53,7 +46,6 @@ impl Confidence {
 }
 
 /// Three-tier folder classification.
-///
 /// - **Anchor** = source folder where ≥80% of moves go to ONE destination
 ///   category (homogeneous; folder gets renamed in place).
 /// - **Mixed**  = source folder where moves span multiple destination
@@ -67,7 +59,6 @@ pub enum FolderClassification {
     Junk,
 }
 
-/// Per-source-folder classification.
 #[derive(Debug, Clone)]
 pub struct ClassifiedFolder {
     pub source_folder: PathBuf,
@@ -84,7 +75,6 @@ pub fn classify_folders(
 ) -> Vec<ClassifiedFolder> {
     use std::collections::BTreeMap;
 
-    // Group moves by source folder (parent dir of `source`).
     let mut by_folder: BTreeMap<PathBuf, Vec<&ProposedMove>> = BTreeMap::new();
     for m in moves {
         let parent = m.source.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -93,7 +83,6 @@ pub fn classify_folders(
 
     let mut out = Vec::with_capacity(by_folder.len());
     for (folder, items) in by_folder {
-        // Per-folder category histogram.
         let mut hist: HashMap<&str, u32> = HashMap::new();
         for m in &items {
             *hist.entry(m.category.as_str()).or_insert(0) += 1;
@@ -160,9 +149,7 @@ pub fn classify_folders(
 /// applies, even though the per-file classifier computes a canonical destination
 /// for them. The anchor COUNT for the informational "Keep" tile is the caller's
 /// responsibility, computed from the same `classified` slice BEFORE stripping.
-///
-/// Test-only convenience: production now calls [`strip_anchor_folder_moves_except`]
-/// directly (the semantic butler exempts only the files it claimed, F-C1-004).
+/// Test-only convenience: production calls [`strip_anchor_folder_moves_except`] directly, so the butler's claimed files survive.
 #[cfg(test)]
 pub fn strip_anchor_folder_moves(
     moves: Vec<ProposedMove>,
@@ -173,7 +160,6 @@ pub fn strip_anchor_folder_moves(
 
 /// Like [`strip_anchor_folder_moves`], but never strips a move whose file ID is
 /// in `exempt_file_ids`.
-///
 /// A homogeneous *source* folder whose files all route to a single *destination*
 /// group classifies Anchor on category homogeneity — but when that homogeneity
 /// is the semantic butler actively relocating every file into one new content
@@ -181,7 +167,6 @@ pub fn strip_anchor_folder_moves(
 /// stripping it would silently eat the highest-confidence proposals. The caller
 /// passes the exact files the butler claimed so those real relocations survive
 /// without exempting unrelated siblings in the same source folder.
-/// (audit F-C1-004)
 pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
     moves: Vec<ProposedMove>,
     classified: &[ClassifiedFolder],
@@ -369,9 +354,7 @@ pub struct FileForClassify {
     pub location_lat: Option<f64>,
     pub location_lon: Option<f64>,
     pub has_text: bool,
-    /// Deep Analyze's smart-name proposal. macOS applies it during restructure;
-    /// Windows previously kept the original basename, so the same library laid
-    /// out different filenames on each platform. (lockstep restructure-3)
+    /// Deep Analyze's smart-name proposal; macOS applies it during restructure, so Windows must too.
     pub vlm_proposed: Option<String>,
     /// The source identity as it existed when the plan was built. Carried onto
     /// the emitted move so apply can bind the move to THIS file rather than to
@@ -388,11 +371,7 @@ pub struct PlannedIdentity {
 }
 
 fn sanitize_path_component(s: &str) -> String {
-    // PAR-69/PAR-96: byte-faithful with macOS componentSafe (replace illegal +
-    // control chars with `_`, handle Windows reserved names / trailing dots /
-    // length / empty). The old version only DELETED illegal chars, which
-    // diverged from macOS and produced NTFS-invalid names (e.g. a category
-    // "CON" failed MoveFileExW with a cryptic error).
+    // Byte-faithful with macOS componentSafe: replace illegal and control chars with `_`, handle reserved names, trailing dots, length and empty.
     crate::util::path_safety::safe_filename_component(s)
 }
 
@@ -422,11 +401,7 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
         .into_iter()
         .map(|(category, count)| CategorySummary { category: category.to_string(), count })
         .collect();
-    // Count desc, then category asc. The secondary key is load-bearing: the source is
-    // a HashMap (arbitrary, run-to-run-randomized iteration), so a count-only sort left
-    // equal-count categories in nondeterministic order — both unstable across runs on
-    // Windows AND divergent from the macOS engine, which tie-breaks on category. The
-    // Sankey ribbon order is now deterministic and lockstep.
+    // Count desc, then category asc: the source is a HashMap, so ties must be ordered deterministically to match macOS.
     out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.category.cmp(&b.category)));
     out
 }
@@ -840,8 +815,6 @@ mod tests {
     }
 
     /// macOS parity: Deep Analyze's smart name is applied during restructure.
-    /// Windows previously kept the original basename, so the same library laid out
-    /// different filenames on each platform. (lockstep restructure-3)
     #[test]
     fn vlm_proposal_renames_the_file() {
         let mut f = img(1, "C:/scan/IMG_1234.jpg", 1_710_504_000.0);

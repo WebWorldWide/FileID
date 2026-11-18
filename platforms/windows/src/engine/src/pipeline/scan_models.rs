@@ -1,7 +1,4 @@
-//! The scan's model stack, loaded when a scan first has a file to analyse and
-//! kept between scans. A scan that finds nothing new loads nothing; a second
-//! scan shortly after the first reuses the loaded stack; an idle stack is
-//! freed after `PARK_AFTER`, or at once when another model needs the memory.
+//! The scan's model stack: loaded on first use, kept for the next scan, freed after `PARK_AFTER` or when another model needs the memory.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -26,7 +23,6 @@ pub struct AdapterModels {
     holders: Mutex<usize>,
 }
 
-/// The Mac adapter's scan models: held by every live scan stack and timeline pass.
 pub static ADAPTER_MODELS: AdapterModels = AdapterModels::new();
 
 /// One holder's claim on the adapter models; the last drop unloads them.
@@ -154,7 +150,6 @@ impl ModelSource {
             .clone()
     }
 
-    /// The stack if this scan has loaded it.
     pub fn loaded(&self) -> Option<Arc<ModelStack>> {
         self.cell.get().cloned().flatten()
     }

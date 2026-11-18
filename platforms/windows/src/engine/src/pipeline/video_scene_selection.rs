@@ -183,7 +183,6 @@ pub fn activity_frames(signatures: &[(f64, Vec<u8>)]) -> Vec<Frame> {
         .collect()
 }
 
-/// The parts of `[0, duration]` that no activity window covers.
 pub fn still_spans(windows: &[Window], duration: f64) -> Vec<(f64, f64)> {
     let mut spans = Vec::new();
     let mut cursor = 0.0_f64;

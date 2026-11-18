@@ -1,9 +1,4 @@
-//! Byte-identical images share one analysis. The decoder already hashes the
-//! file before decoding, so the first copy of a photo is the only one that
-//! is decoded and run through faces, CLIP, RAM++ and OCR; later copies in the
-//! same scan wait for it, and copies of photos analyzed in an earlier scan
-//! skip straight to the writer, which copies the twin's rows. Model work then
-//! grows with unique content, not with the number of files.
+//! Byte-identical images share one analysis: the first copy in a scan is decoded and analyzed, and others wait for it or copy its rows.
 
 use std::collections::HashMap;
 use std::sync::Arc;

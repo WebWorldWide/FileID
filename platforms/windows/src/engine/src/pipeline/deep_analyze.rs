@@ -1,5 +1,4 @@
 // Deep Analyze — VLM-powered captioning + smart-rename.
-//
 // Pipeline:
 //   1. Resolve selected registry model (Qwen3-VL, Qwen2.5-VL, Gemma 3, Mistral-Small).
 //   2. Load via llama.cpp (Vulkan / CUDA / CPU backend).
@@ -66,8 +65,7 @@ impl AnalyzeMode {
 /// subprocess wrapper → write results back to the DB. Cancellation
 /// honored via the shared `AtomicBool`.
 /// Removes the temp rasterized frame on EVERY exit path (`?` error, cancel
-/// bail, success), so VLM error paths no longer leak temp files (#24). Mirrors
-/// the discovery.rs `TempDir` Drop pattern.
+/// bail, success), so VLM error paths never leak temp files.
 struct TempFileGuard(Option<std::path::PathBuf>);
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
@@ -133,8 +131,7 @@ pub(crate) async fn analyze_file_scoped(
             return Err(e);
         }
     };
-    // Guard cleans the temp frame on any exit, including the `?`/bail paths
-    // below that previously leaked it (#24).
+    // Guard cleans the temp frame on any exit, including the ? and bail paths below.
     let _temp_guard = TempFileGuard(temp_to_clean);
 
     let mut description: Option<String> = None;
@@ -222,7 +219,7 @@ pub(crate) async fn analyze_file_scoped(
         }
     }
 
-    // (temp frame removed by `_temp_guard` on drop — #24)
+    // (temp frame removed by `_temp_guard` on drop)
 
     Ok(AnalyzeOutcome {
         file_id,
@@ -424,7 +421,7 @@ fn persist_vlm_results(
         .unwrap_or(0.0);
     // Single transaction so the caption/name UPDATE and the vlm-tag
     // DELETE+INSERT-replace commit atomically — a crash between the DELETE and
-    // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
+    // the INSERT loop must not drop a file's VLM tags. `unchecked_`
     // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
     context.validate(&tx)?;
@@ -509,13 +506,7 @@ pub(crate) fn inherit_vlm_results(
     Ok(AnalyzeOutcome { file_id, description, proposed_name })
 }
 
-/// one-shot probe that the persistent llama-server actually accepts our
-/// multimodal `image_url` data-URI payload shape. This payload format was never
-/// hardware-verified; if the server build rejects it (e.g.
-/// 400 on the request), EVERY file in the batch would fail identically and
-/// silently. Sending one tiny throwaway JPEG up front lets the batch detect the
-/// incompatibility and fall back to the per-file CLI path (a different,
-/// known-good code path) instead of producing zero tags.
+/// One-shot probe that the persistent llama-server accepts the multimodal `image_url` data-URI payload. An unsupported shape would otherwise fail every file silently, so on failure the batch falls back to the per-file CLI path.
 pub(crate) async fn vlm_server_payload_ok(
     server: &crate::models::vlm_server::VlmServer,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -671,8 +662,8 @@ pub(crate) async fn analyze_file_via_server(
             return Err(e);
         }
     };
-    // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
-    // paths below that previously leaked it (#24).
+    // Guard cleans the temp frame on any exit, including the cancel and ? paths below.
+    // paths below that previously leaked it.
     let _temp_guard = TempFileGuard(temp_to_clean);
 
     let mut description: Option<String> = None;
@@ -710,7 +701,7 @@ pub(crate) async fn analyze_file_via_server(
             Err(error) => tracing::warn!(?error, "[DEEP] transcription failed"),
         }
     }
-    // (temp frame removed by `_temp_guard` on drop — #24)
+    // (temp frame removed by `_temp_guard` on drop)
 
     Ok(AnalyzeOutcome {
         file_id,
@@ -1176,8 +1167,7 @@ pub(crate) fn sanitize_proposed_name(raw: &str) -> String {
 
 /// Generic, low-information tokens VLMs sometimes emit despite the prompt.
 /// A tag is dropped if any of its words is one of these — they describe the
-/// medium, not the content, and read as noise as a Library chip ("has location"
-/// used to be the worst offender; that one is no longer emitted at all).
+/// medium, not the content, and read as noise as a Library chip.
 pub(crate) const VLM_TAG_STOPWORDS: &[&str] = &[
     "photo", "photos", "image", "images", "picture", "pictures", "object",
     "objects", "thing", "things", "scene", "background", "foreground",

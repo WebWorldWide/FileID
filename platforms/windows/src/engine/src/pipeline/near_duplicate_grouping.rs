@@ -1,6 +1,4 @@
-//! Groups burst frames and RAW+JPEG pairs so Deep Analyze runs the VLM once per
-//! group. Mirror of the macOS `NearDuplicateGrouping.swift` with the same
-//! thresholds; change both together.
+//! Groups burst frames and RAW+JPEG pairs so Deep Analyze runs the VLM once per group. Mirror of macOS `NearDuplicateGrouping.swift`; thresholds must change together.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

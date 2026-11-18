@@ -1,12 +1,4 @@
-//! Largest embedded JPEG preview in a camera RAW file.
-//!
-//! Sony ARW, Nikon NEF, Canon CR2, Olympus ORF, Panasonic RW2, Pentax PEF and
-//! DNG are TIFF containers that carry a camera-rendered JPEG (often full size);
-//! Fujifilm RAF points at one from its header and Canon CR3 keeps one in an
-//! ISO-BMFF `PRVW` box. Decoding that JPEG is an order of magnitude cheaper
-//! than demosaicing the sensor data, and on Linux it is the only way the scan
-//! can read these files at all. Mirrors the macOS scan, which takes ImageIO's
-//! embedded preview when it is large enough.
+//! Largest embedded JPEG preview in a camera RAW. Decoding it is far cheaper than demosaicing, and on Linux it is the only way to read these files. Mirrors the macOS scan's embedded preview.
 
 const RAW_EXTENSIONS: &[&str] = &[
     "arw", "srf", "sr2", "nef", "nrw", "cr2", "cr3", "orf", "pef", "dng", "raf", "rw2", "rwl", "raw", "3fr", "erf",

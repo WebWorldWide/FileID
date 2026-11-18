@@ -1,7 +1,4 @@
-//! Audio metadata extraction (artist / album / title)
-//! via `symphonia`. Pure-Rust, no Java/ffmpeg system dependency, supports
-//! mp3 (ID3v1/v2), flac (Vorbis comments), ogg/vorbis, wav, m4a/aac (iso-mp4),
-//! and plain PCM containers.
+//! Audio artist/album/title tags via symphonia. Pure Rust: no Java or ffmpeg system dependency.
 //!
 //! Returns `(label, score)` pairs ready to push onto `TaggedFile.tags`. Each
 //! tag's score is `None` — these are metadata-derived facts, not model
@@ -31,7 +28,6 @@ fn probe(hint: &Hint, mss: MediaSourceStream) -> Option<symphonia::core::probe::
 
 /// Extract artist / album / title tags from `path`. Returns
 /// an empty Vec on any decode/probe failure — audio metadata is best-effort.
-///
 /// `bytes` is an optional pre-read buffer (decoder thread reads the file once
 /// for hashing + extraction on files ≤ FULL_HASH_MAX_BYTES). When supplied,
 /// symphonia probes the in-memory bytes via a tiny MediaSource adapter and
@@ -70,16 +66,9 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     let mut format = probed.format;
     let mut out: Vec<(String, Option<f32>)> = Vec::new();
 
-    // NOTE: duration is intentionally NOT emitted as a tag. A length like
-    // "3 sec" / "1 min" describes a capability, not content, and on a real
-    // library it dominated the chip row as pure noise (top tag-report run:
-    // thousands of "N sec" tags at score 0.000). This mirrors the earlier
-    // refinement that dropped "Has Faces"/"Has Text"/aspect tags for the same
-    // reason — metadata facts belong in columns/facets, not the tag stream.
+    // Duration is deliberately not emitted as a tag: it describes a capability, not content, and floods the chip row with 'N sec' noise.
 
-    // Some formats (FLAC, Vorbis, M4A) carry metadata on the FormatReader;
-    // others (MP3 with ID3v2) carry it on the probe's MetadataLog. Read
-    // both, dedup at the end.
+    // Metadata lives on the FormatReader (FLAC, Vorbis, M4A) or the probe's MetadataLog (ID3v2).
     if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
         push_metadata(&mut out, rev);
     }

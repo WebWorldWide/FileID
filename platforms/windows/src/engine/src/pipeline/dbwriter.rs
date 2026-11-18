@@ -1,6 +1,5 @@
 // DBWriter — drains the Tagging → DB channel into adaptive-size or 200 ms
 // batches on the single SQLite writer connection.
-//
 // Single-writer is by design: WAL permits concurrent readers but only
 // one writer. Every insert + the resume cursor update land in the same
 // transaction so a crash mid-batch leaves no partial state. The
@@ -22,7 +21,6 @@ use crate::platform::{dbwriter_batch_size_for, memory_tier};
 /// Fallback flush trigger if the adaptive sizing yields nothing.
 /// `current_batch_size()` polls memory tier and picks a tier-appropriate
 /// value (Low=64, Balanced=250, High=500). 250 is the Balanced default;
-/// previous behavior was 100/200ms.
 const BATCH_SIZE_FALLBACK: usize = 250;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -109,7 +107,6 @@ impl DbWriter {
     /// Drain the input receiver until the channel closes, flushing on
     /// the lesser of `BATCH_SIZE` accumulated rows or `FLUSH_INTERVAL`
     /// since the first row in the current batch.
-    ///
     /// Returns total processed + total failed counts when finished.
     pub async fn run<F>(self, mut input: mpsc::Receiver<TaggedFile>, mut on_batch: F)
         -> Result<(u64, u64)>
@@ -301,7 +298,6 @@ impl DbWriter {
         // order (file_ref matches first) — only those whose old path is gone.
         // The legacy BLAKE3 digests come from the decoder's own read
         // (`TaggedFile::legacy_hashes`), so the writer never re-reads a file.
-        // (F-C1-025, audit R3-16)
         let heal_candidates = if self.rename_heal_enabled {
             self.moved_heal_candidates(buffer)?
         } else {
@@ -313,8 +309,6 @@ impl DbWriter {
         {
             // INSERT ... RETURNING id (SQLite 3.35+, bundled is 3.46+)
             // eliminates the per-row "SELECT id FROM files WHERE path_text = ?"
-            // round-trip. Previously the dbwriter ran one INSERT + one SELECT
-            // per file = 2N statement executions per batch; this drops to N.
             // The RETURNING clause yields the row id whether the row was
             // freshly inserted OR updated via the ON CONFLICT DO UPDATE
             // branch — same id stability the SELECT provided.
@@ -343,7 +337,7 @@ impl DbWriter {
                 )
                 .context("preparing text_embeddings insert")?;
             // Records that a doc/pdf's text stage ran so the BGE backfill carve-out stops
-            // re-walking a text-less doc. Separate idempotent UPDATE (lockstep with macOS)
+            // re-walking a text-less doc. Separate idempotent UPDATE
             // keeps it off the big positional file upsert.
             let mut text_stage_stmt = tx
                 .prepare_cached(
@@ -604,7 +598,7 @@ impl DbWriter {
                 // ran this session, NOT on `faces.is_empty()`: an edited/zero-
                 // face re-process must clear orphaned face_prints (else they
                 // keep polluting clusters), while a face-disabled / GPU-dead
-                // session leaves still-valid rows intact (#5). The insert loop
+                // session leaves still-valid rows intact. The insert loop
                 // is naturally a no-op when there are no faces.
                 if f.faces_evaluated {
                     // Capture the face ids being replaced so their now-orphaned
@@ -612,11 +606,8 @@ impl DbWriter {
                     // re-inserted faces get fresh AUTOINCREMENT ids, so without
                     // this every faces_evaluated re-process leaks the prior crops
                     // on disk (face_crops/ grows unbounded across re-scans).
-                    // DELETE ... RETURNING id captures the ids being replaced AND
+                    // DELETE ... RETURNING captures the replaced face ids and deletes them in one statement under the writer lock.
                     // deletes in one statement (vs a separate SELECT then DELETE) —
-                    // one fewer query per faces-evaluated file under the single
-                    // writer lock. Single-writer DB, so the returned set is exactly
-                    // the pre-delete rows.
                     let stale_face_ids: Vec<i64> = face_delete
                         .query_map(params![file_id], |r| r.get::<_, i64>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()
@@ -687,7 +678,7 @@ impl DbWriter {
                 // actually ran this session — never on the ambiguous default-
                 // skip path. This clears stale ocr_text (and, via the v15
                 // triggers, ocr_fts) when a re-process now yields empty text
-                // (phantom FTS hits, #11) while leaving valid prior text
+                // (phantom FTS hits) while leaving valid prior text
                 // untouched on the common skipped sessions. A Deep Analyze
                 // transcription (source 'vlm') outlives rescans of an unchanged
                 // file; the v25 trigger drops it when the file changes.
@@ -704,7 +695,7 @@ impl DbWriter {
                 }
 
                 // Document text — same stage-ran-gated
-                // delete-then-conditional-insert as ocr_text above (#11).
+                // delete-then-conditional-insert as ocr_text above.
                 if f.doc_stage_ran {
                     doc_text_delete
                         .execute(params![file_id])
@@ -937,14 +928,7 @@ impl DbWriter {
             remove_face_crop(old_id);
         }
 
-        // Periodic WAL checkpoint to keep the -wal file from growing
-        // unboundedly on long scans. SQLite's auto-checkpoint (on this
-        // connection) fires at ~1000 pages, but a -wal that never goes
-        // through TRUNCATE keeps growing on disk. Every WAL_CHECKPOINT_BATCHES
-        // commits we ask for a PASSIVE checkpoint; on success the WAL
-        // gets truncated next time it crosses the threshold. PASSIVE
-        // doesn't block readers, so this is safe to call from the
-        // hot scan path.
+            // Periodic PASSIVE WAL checkpoint: a -wal that never goes through TRUNCATE keeps growing on long scans. PASSIVE does not block readers.
         const WAL_CHECKPOINT_BATCHES: u32 = 32;
         if batch_index > 0 && batch_index % WAL_CHECKPOINT_BATCHES == 0 {
             // Invariant: no transaction open at this point — tx.commit
@@ -968,7 +952,7 @@ impl DbWriter {
 
         // Encode + write the batch's face-crop JPEGs now — AFTER the tx committed
         // and the writer lock dropped — so per-face JPEG encode + fs::write never
-        // blocks the engine's only writer (or a concurrent scan flush). (audit P1)
+        // blocks the engine's only writer (or a concurrent scan flush).
         for (face_id, crop) in crops_to_write {
             if let Err(err) = save_face_crop(face_id, crop) {
                 tracing::warn!(?err, face_id, "face crop write failed");
@@ -1013,11 +997,7 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
     values[idx]
 }
 
-/// Hot-path INSERT. Returns `id` whether the row was freshly inserted or
-/// updated via the ON CONFLICT DO UPDATE branch — SQLite 3.35+ guarantees
-/// RETURNING fires on both paths. Eliminates the per-row SELECT round
-/// trip the previous implementation paid (2N statement executions per
-/// batch → N).
+/// Hot-path INSERT. Returns `id` whether the row was freshly inserted or updated via ON CONFLICT (SQLite RETURNING fires on both).
 const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
     INSERT INTO files (
         path_text, path_hash, size_bytes,
@@ -1096,16 +1076,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
     LIMIT 32
 "#;
 
-// Heal: move the existing row to the new path. `UPDATE OR ABORT` is LOAD-BEARING:
-// `files.path_text` is declared `UNIQUE ON CONFLICT REPLACE`, so a PLAIN `UPDATE`
-// that collides on path_text silently REPLACE-deletes the row already sitting at
-// the new path (a content-identical copy scanned there independently) and
-// FK-cascades ITS user tags + person assignments — permanent, unrecoverable loss
-// of user-authored metadata. `OR ABORT` overrides the schema's REPLACE with ABORT
-// so the collision raises SQLITE_CONSTRAINT, which the call site catches to SKIP
-// the heal (leaving both rows intact — the intended behavior). Empirically
-// verified against SQLite: plain UPDATE deletes the copy's row; OR ABORT preserves
-// it. (audit 2026-07: rename-heal ON CONFLICT REPLACE data-loss)
+// Heal: `UPDATE OR ABORT` is load-bearing. path_text is UNIQUE ON CONFLICT REPLACE, so a plain UPDATE would silently delete a content-identical copy at the new path along with its user tags. OR ABORT turns that collision into a skipped heal.
 // ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
 // from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
 // query, mirroring the INSERT path.
@@ -1120,7 +1091,6 @@ const HEAL_UPDATE_SQL: &str = r#"
 
 /// Decide whether a heal candidate (an existing row matched by identity at a
 /// different path) genuinely MOVED, and may therefore re-bind to the new path.
-///
 /// Heal ONLY when the candidate's previous path no longer exists on disk — a
 /// genuine rename/move always leaves its old path gone. This single gate is
 /// required for BOTH match kinds. A `content_hash`-only match also fires for a
@@ -1271,7 +1241,6 @@ fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
 /// so the 140 files/s hot loop pays nothing on the common case. Stacked
 /// multi-mark sequences (vanishingly rare in filenames) are left as-is — still
 /// no worse than the prior verbatim behavior.
-///
 /// `pub(crate)` so the other path-mutating writers (restructure-apply, bulk
 /// rename, trash-restore) can reuse this single canonical normalizer instead
 /// of re-stamping `path_search = path_text` verbatim.
@@ -1781,9 +1750,7 @@ mod tests {
         /// unique.
         #[test]
         fn row_count_equals_distinct_paths(
-            // Generate a small set of candidate paths…
             paths in proptest::collection::vec(r"C:\\test\\[a-z0-9]{1,8}\\f\.jpg", 1..6),
-            // …then sample with repetition to force duplicates.
             order in proptest::collection::vec(0usize..6, 1..50),
         ) {
             let conn = crate::db::test_support::memory_db();
@@ -1806,7 +1773,6 @@ mod tests {
         /// matches what the C# app and the macOS engine do; any future
         /// switch to to_ne_bytes would silently corrupt embeddings when
         /// the same DB file moves between architectures.
-        ///
         /// We generate via u32 → f32::from_bits so NaN bit patterns are
         /// in scope: byte-level round-trip must preserve NaN payloads
         /// too, even though value equality wouldn't. We compare on bit
@@ -1844,7 +1810,6 @@ mod tests {
         assert!(bytes.iter().all(|&b| b == 0));
     }
 
-    // ---- rename-heal data-loss regression -----------------------------------
 
     #[test]
     fn only_new_or_changed_images_and_videos_count_as_analysed_media() {
@@ -2074,7 +2039,6 @@ mod tests {
         let dir = unique_tmp_dir("b1_move");
         let new_path = dir.join("moved.jpg");
         std::fs::write(&new_path, b"payload").unwrap();
-        // Old path is never created on disk → "gone" → a real move.
         let old_path = dir.join("gone").join("orig.jpg");
 
         let conn = crate::db::test_support::memory_db();
@@ -2149,7 +2113,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Regression (audit 2026-07 — rename-heal ON CONFLICT REPLACE data-loss):
+    /// Regression (rename-heal ON CONFLICT REPLACE data-loss):
     /// when a content-identical COPY already occupies the new path with a LIVE
     /// row carrying user-authored metadata, the heal of a moved-away orphan onto
     /// that path must NOT clobber the copy's row. Before the `UPDATE OR ABORT`
@@ -2216,7 +2180,6 @@ mod tests {
         let dir = unique_tmp_dir("b1_ref_rename");
         let new_path = dir.join("after.png");
         std::fs::write(&new_path, b"x").unwrap();
-        // Old path is never created on disk → "gone" → a real move.
         let old_path = dir.join("gone").join("before.png");
 
         let conn = crate::db::test_support::memory_db();
@@ -2280,7 +2243,6 @@ mod tests {
         let dir = unique_tmp_dir("r3_17_size");
         let new_path = dir.join("after.png");
         std::fs::write(&new_path, b"x").unwrap();
-        // Old path never created on disk → "gone" → would heal if size matched.
         let old_path = dir.join("gone").join("before.png");
 
         let conn = crate::db::test_support::memory_db();
@@ -2302,7 +2264,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ENG-18: an NTFS `file_ref` with the high bit set (a non-zero sequence
+    /// an NTFS `file_ref` with the high bit set (a non-zero sequence
     /// number lives in the top 16 bits) exceeds `i64::MAX`. rusqlite's
     /// `ToSql for u64` rejects values above `i64::MAX`, so binding the raw u64
     /// errored and the `?` aborted the entire flush batch — losing the whole

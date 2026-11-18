@@ -1,16 +1,4 @@
-//! Butler restructure — semantic + learn-your-style classification (Phase 1).
-//!
-//! See `shared/docs/RESTRUCTURE.md`. Where the legacy `restructure::classify`
-//! cascade buckets every photo into `Photos/Year/Month`, this fuses the rich
-//! signals FileID already computed — CLIP image embedding + content tags +
-//! capture time — into one feature vector, clusters files by *content* (reusing
-//! the proven `identity_clustering` density algorithm — no new deps), then
-//! assigns each cluster to the user's nearest EXISTING folder when the match is
-//! confident ("organize like I already do"), otherwise proposes a new
-//! tag-named group. Density-noise files fall back to the rule cascade.
-//!
-//! Pure logic: the DB load lives in `commands/restructure.rs`. VLM group naming,
-//! confidence-tier routing, and the learn-from-corrections loop are later phases.
+//! Butler restructure, semantic pass: fuses the CLIP embedding, content tags and capture time into one vector, clusters files by content, and routes each cluster to the nearest existing folder when the match is confident. Pure logic; the DB load lives in `commands/restructure.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,21 +35,12 @@ pub struct Profile {
     pub review_cohesion: f32,
     pub min_margin: f32,
     pub auto_min_members: usize,
-    /// The representative is a multi-hot bag of words, whose pairwise similarities take a handful of
-    /// values. An HNSW graph cannot prune among ties and visits nearly every node on every insert
-    /// (5,021 files: 37 s to build against 0.9 s for exact search), so these vectors always use the
-    /// exact search, which the Swift-lockstep result also matches exactly.
+    /// Multi-hot bag-of-words ties defeat HNSW pruning (37 s build vs 0.9 s exact on 5k files), so these use exact search, which matches the Swift result.
     pub quantized_vectors: bool,
 }
 
 /// Image pass — representative is the L2-normalized 512-d CLIP image embedding.
-/// Thresholds calibrated 2026-06-17 against a real ~3.3k-image personal-photo library
-/// (the "Adlon" corpus), kept byte-faithful with the Swift engine's `imageProfile`.
-/// Finding: CLIP cosines for personal photos compress into a HIGH band (intra-folder
-/// cohesion median ≈ 0.80, inter-folder centroid p90 ≈ 0.84), so the original
-/// folder_match_cos 0.55 / auto_folder_cos 0.72 sat BELOW the whole distribution and
-/// auto-routed every photo into the nearest catch-all folder. Env-overridable for owner
-/// tuning, mirroring the non-image knobs. (RESTRUCTURE.md R3 calibration)
+/// Thresholds are calibrated for CLIP cosines, which compress high on personal photos (intra-folder cohesion ~0.80); the original 0.55/0.72 routed every photo into one catch-all folder. Byte-faithful with the Swift `imageProfile`; env-overridable.
 pub fn image_profile() -> Profile {
     Profile {
         w_clip: 0.70,
@@ -145,7 +124,6 @@ const FILENAME_STOPWORDS: &[&str] = &[
 
 /// Density-clustering hyperparameters for *files* (looser than faces: a
 /// semantic group is broader than one identity).
-///
 /// SOTA single-knob (HDBSCAN `min_cluster_size` philosophy, deep-research 2026-06-16):
 /// one `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose, normal, tight} shifts the cluster
 /// cosines so the owner tunes folder count with ONE lever instead of many opaque
@@ -161,13 +139,7 @@ pub fn granularity_delta() -> f32 {
 }
 
 fn file_hyperparams() -> Hyperparameters {
-    // Cluster-merge cosines calibrated 2026-06-17 on the real ~3.3k-image Adlon corpus,
-    // byte-faithful with the Swift engine. The original 0.50/0.40/0.42 were tuned for
-    // DIVERSE images; CLIP cosines for a coherent personal library compress high (typical
-    // pair ≈ 0.71+, within-event ≈ 0.80), so those low bars merged the ENTIRE photo set
-    // into one cluster that routed to a single catch-all folder. The new bars sit at the
-    // within-event cohesion so a cluster ≈ one event. Env-overridable; the single-knob
-    // GRANULARITY delta still shifts all three together.
+    // Cluster-merge cosines sit in CLIP's compressed high band so a cluster ≈ one event. Env-overridable; GRANULARITY shifts all three together.
     let d = granularity_delta();
     Hyperparameters {
         pass1_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
@@ -294,16 +266,14 @@ fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
 /// the nearest confident existing folder or becomes a new tag-named group under
 /// `library_root`. Density-noise / singleton files are simply not returned — the
 /// caller routes anything left unmoved through its rule-cascade fallback.
-///
 /// The image pass pre-segments files by capture-time gap before clustering so
 /// events separated by > `FILEID_RESTRUCTURE_TIME_GAP` seconds (default 2 h)
 /// never compete in the same cluster. (RESTRUCTURE.md §2)
-///
 /// `used_group_names` is a caller-owned new-folder-name registry. The image /
 /// document / non-image passes all target the same `library_root`, so sharing
 /// one registry across them stops two passes independently minting the SAME new
 /// folder and silently merging unrelated content into it — the same de-collision
-/// the registry already gives clusters within a pass (#9) and across time-
+/// the registry already gives clusters within a pass and across time-
 /// segments, extended library-wide.
 pub(crate) fn semantic_classify(
     files: &[SemanticFile],
@@ -457,7 +427,7 @@ fn semantic_classify_profiled(
                         }
                     }
                     // Disambiguate a name already claimed by another new-group
-                    // cluster so distinct clusters get distinct folders (#9):
+                    // cluster so distinct clusters get distinct folders:
                     // prefer the next distinctive term, then a numeric suffix.
                     let mut pretty = base.clone();
                     let safe_base = crate::util::path_safety::safe_filename_component(&pretty);
@@ -509,7 +479,7 @@ fn semantic_classify_profiled(
                     // Path-safe directory name (mirrors the person route):
                     // illegal/separator chars in tag-derived names ("16:9",
                     // "dog/cat") would mis-route or fail the move and break
-                    // cross-platform name parity (#2). `safe` was computed during
+                    // cross-platform name parity. `safe` was computed during
                     // dedup above so the uniqueness check ran in this same folder
                     // namespace. Keep `pretty` for the human-facing category/reason.
                     (library_root.join(&safe), pretty, confidence, reason, None)
@@ -557,7 +527,6 @@ fn semantic_classify_profiled(
     moves
 }
 
-// ── Non-image semantic pass (RESTRUCTURE.md R1) ─────────────────────────────
 
 /// Cluster non-image files (documents, video, audio — anything without a CLIP
 /// image embedding) by a filename-token + content-tag bag-of-words signature, so
@@ -726,7 +695,7 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
         // point) keeps the result deterministic across architectures: with
         // k_nn >= n and all-tied zero similarities, the clusterer's kNN tie order
         // is arch-sensitive, which made a degenerate lone file group-or-not by
-        // luck. (CI determinism / lockstep with the Swift engine)
+        // luck.
         if !token_sets[i].iter().any(|t| freq.get(t).copied().unwrap_or(0) >= 2) {
             continue;
         }
@@ -772,7 +741,6 @@ pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
         .collect()
 }
 
-// ── Fusion ────────────────────────────────────────────────────────────────
 
 /// Global tag frequency across all files — drives both the vocab cap and the
 /// c-TF-IDF inverse-document weighting in [`distinctive_terms`].
@@ -860,7 +828,6 @@ fn time_features(time_unix: f64) -> [f32; 5] {
     ]
 }
 
-// ── Clustering (reuse identity_clustering) ──────────────────────────────────
 
 /// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
 /// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
@@ -868,7 +835,7 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
     const HNSW_MIN: usize = 5_000;
     let n = fused.len();
     // Can't request more neighbors than other points exist; k_nn >= n made the kNN
-    // over an all-tied set arch-sensitive (see non_image_signatures). (lockstep)
+    // over an all-tied set arch-sensitive (see non_image_signatures).
     let k = params.k_nn.min(n.saturating_sub(1).max(1));
 
     let hnsw = (n >= HNSW_MIN && !exact_only).then(|| crate::util::hnsw_index::DedupIndex::build(fused));
@@ -927,7 +894,6 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
     result.cluster_ids
 }
 
-// ── Learn-your-style assignment ─────────────────────────────────────────────
 
 /// Mean cosine of a cluster's members to its centroid — cluster tightness.
 /// Members and `centroid` are unit vectors, so dot == cosine.
@@ -996,7 +962,7 @@ fn distinctive_terms<'a>(
             // (can differ Windows↔macOS by ~1 ULP), which could flip the tie order of
             // two near-equal-score terms and pick a DIFFERENT group folder name across
             // platforms. f64 `ln` is consistently correctly-rounded, matching the macOS
-            // engine's `Float(log(Double(...)))`. (lockstep)
+            // engine's `Float(log(Double(...)))`.
             (t, tf * (((total / df) as f64).ln().max(0.0) as f32))
         })
         .collect();
@@ -1023,7 +989,6 @@ fn group_name_from_terms(terms: &[&str]) -> String {
     }
 }
 
-// ── Small numeric + string helpers ──────────────────────────────────────────
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -1398,7 +1363,6 @@ mod tests {
         assert!(moves.iter().all(|m| m.reason.as_deref().unwrap_or("").contains("Dogs")));
     }
 
-    // ── Name-based routing (Dropbox Smart Move; deep-research 2026-06-16) ───
     // Labeled ground truth: filename agreement with a target folder is a strong
     // routing signal that can decide a thin-margin content match. These encode the
     // expert call on what SHOULD happen and pin the additive behavior.
@@ -1464,7 +1428,6 @@ mod tests {
         );
     }
 
-    // ── Non-image pass (RESTRUCTURE.md R1) ─────────────────────────────────
 
     #[test]
     fn filename_tokens_keep_content_drop_generic() {

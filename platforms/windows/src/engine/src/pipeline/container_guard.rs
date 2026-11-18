@@ -1,9 +1,4 @@
-//! Pre-flight for symphonia. Its isomp4, Matroska and CAF readers size buffers
-//! from lengths declared in the file before reading them (sample tables, `data`
-//! atoms, EBML strings and binaries, CAF cookies and packet tables). A crafted
-//! 64-bit length makes the allocator abort the process, which `catch_unwind`
-//! cannot stop. This module finds the container symphonia's probe will pick and
-//! refuses one whose declared lengths don't fit inside the file.
+//! Pre-flight for symphonia: a crafted 64-bit length makes its readers' allocator abort, which catch_unwind cannot stop, so files whose declared lengths do not fit are refused.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
