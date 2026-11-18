@@ -173,9 +173,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void SyncBanners()
     {
         if (_unloaded) return;
-        // CLIP-missing hint: only when the user has typed ≥3 chars
-        // (semantic search threshold matches macOS) and the MobileCLIP
-        // slot isn't installed.
         // CLIP powers free-text semantic search; prompt to install it when the
         // user types a query (≥3 chars) and the MobileCLIP slot isn't installed.
         bool clipMissingShow = false;

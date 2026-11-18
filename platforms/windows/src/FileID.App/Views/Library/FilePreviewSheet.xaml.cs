@@ -193,7 +193,6 @@ public sealed partial class FilePreviewSheet : UserControl
         // because the sheet may be opened for a file the LibraryView
         // hasn't loaded yet).
         _ = LoadProposedNameAsync(fileId, navGen);
-        // Refresh the Vision Tags card (auto + user tags for this file).
         _ = LoadVisionTagsAsync(fileId, navGen);
 
         // Media + placeholder are cleared up front (media must stop the instant
@@ -288,10 +287,8 @@ public sealed partial class FilePreviewSheet : UserControl
         // route through the Deep Analyze tab).
         AnalyzeButton.Visibility = kind == "image" ? Visibility.Visible : Visibility.Collapsed;
 
-        // Build the sidebar metadata grid.
         BuildMetadata(path, kind, sizeBytes, modifiedAt);
 
-        // Set the kind glyph for the placeholder fallback.
         KindGlyphIcon.Glyph = GlyphFor(kind);
 
         // Kind dispatch — matches macOS LibraryView.swift:975-1006.
@@ -760,7 +757,6 @@ public sealed partial class FilePreviewSheet : UserControl
         _ => kind,
     };
 
-    // ─── Proposed rename card ─────────────────────────────────────────
     private string? _pendingProposedName;
 
     private async System.Threading.Tasks.Task LoadProposedNameAsync(long fileId, int navGen)
@@ -868,7 +864,6 @@ public sealed partial class FilePreviewSheet : UserControl
             _pendingProposedName = null;
         });
 
-    // ─── Vision Tags card ─────────────────────────────────────────────
     // Reads every auto + user tag for this file from the DB and renders
     // them as TagChip controls inside VisionTagsHost. Mirrors the Library
     // card chip strip — same control, same formatting, same visual weight.
