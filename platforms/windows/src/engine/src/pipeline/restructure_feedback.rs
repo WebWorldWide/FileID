@@ -14,8 +14,6 @@ use super::restructure_semantic::filename_tokens;
 /// the move is upgraded to auto-confidence. Lockstep with the Swift constant.
 pub(crate) const FEEDBACK_AUTO_WEIGHT: i64 = 3;
 
-/// Basename of a destination FILE path's parent folder — the "folder" key. None when
-/// the destination has no parent or an empty basename.
 fn dest_folder(dest: &Path) -> Option<String> {
     dest.parent()
         .and_then(|p| p.file_name())
@@ -24,9 +22,7 @@ fn dest_folder(dest: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Credit each applied move's filename tokens toward its destination folder. Best-
-/// effort — a feedback write never fails an apply. `now` is the unix timestamp stamped
-/// on the touched rows. Call ONLY on a forward apply (never undo).
+/// Best-effort: a feedback write never fails an apply. Call ONLY on a forward apply (never undo).
 pub(crate) fn record<'a>(
     conn: &Arc<Mutex<Connection>>,
     moves: impl Iterator<Item = (&'a Path, &'a Path)>,
@@ -117,9 +113,6 @@ mod tests {
 
     #[test]
     fn record_then_boost_upgrades_a_matching_move() {
-        // Labeled scenario: the user applied three "acme invoice" files into
-        // /lib/Invoices; a NEW similar file the planner only marked Review must be
-        // upgraded to Auto on the learned filing habit.
         let db = db();
         let applied: Vec<(PathBuf, PathBuf)> = (0..3)
             .map(|i| {

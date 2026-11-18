@@ -35,7 +35,6 @@ pub fn kill_switch_off() -> bool {
     std::env::var("FILEID_RESTRUCTURE_RESPECT").map(|v| v == "0").unwrap_or(false)
 }
 
-/// Generic or camera-generated folder names ("DCIM", "100MSDCF", "New Folder 3").
 pub fn is_generic_folder_name(raw: &str) -> bool {
     let name = raw.trim().to_lowercase();
     if name.is_empty() || GENERIC_FOLDERS.contains(&name.as_str()) {
@@ -106,7 +105,6 @@ pub fn fits(file: FormatRole, folder: Option<FormatRole>) -> bool {
     }
 }
 
-/// Folder names between the library root and the file, outermost first.
 pub fn components(path: &Path, root: &Path) -> Vec<String> {
     let Ok(relative) = path.strip_prefix(root) else { return Vec::new() };
     let mut parts: Vec<String> =
@@ -123,7 +121,6 @@ pub fn event_root(path: &Path, root: &Path) -> Option<String> {
     components(path, root).into_iter().next()
 }
 
-/// A camera filename stem or a raw tag identifier is not a folder name.
 pub fn is_usable_folder_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.chars().count() < 3 || trimmed.contains('_') {
@@ -206,7 +203,6 @@ pub fn is_format_correction(m: &ProposedMove, kind: FileKind, root: &Path) -> bo
     destination.is_some() && !fits(role, source) && fits(role, destination)
 }
 
-/// RAW in "JPEGs" (or the reverse) → sibling folder for its format.
 pub fn format_corrections(files: &[FileForClassify], root: &Path) -> Vec<ProposedMove> {
     let mut siblings: HashMap<PathBuf, Vec<(String, FormatRole)>> = HashMap::new();
     for f in files {
@@ -405,8 +401,6 @@ pub fn event_destination(f: &FileForClassify, spans: &[EventSpan]) -> Option<Pat
     Some(folder.join(f.source.file_name()?))
 }
 
-/// Applies the stage to a full proposal set. Returns the kept/added moves and
-/// the source folders that stay untouched (reported as Keep).
 pub fn apply(proposed: Vec<ProposedMove>, files: &[FileForClassify], root: &Path) -> (Vec<ProposedMove>, HashSet<PathBuf>) {
     let kinds: HashMap<i64, &FileForClassify> = files.iter().map(|f| (f.file_id, f)).collect();
     let spans = event_spans(files, root);

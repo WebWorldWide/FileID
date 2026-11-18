@@ -10,23 +10,12 @@ pub struct ProposedMove {
     pub file_id: i64,
     pub source: PathBuf,
     pub destination: PathBuf,
-    /// Logical category that drove the destination — surfaced in the
-    /// Sankey ribbon hover tooltip.
     pub category: String,
-    /// Butler confidence band (RESTRUCTURE.md §6): drives auto-file / review /
-    /// ask routing in the UI.
     pub confidence: Confidence,
-    /// Plain-language "why filed here" (RESTRUCTURE.md §6 trust mechanics).
     pub reason: Option<String>,
 }
 
-/// Three-band autonomy tier for a single proposed move.
-/// - **Auto**   = high confidence; safe to auto-file (still fully reversible).
-/// - **Review** = medium; show for one-click confirm.
-/// - **Ask**    = low; hold and ask, or leave in place.
-///
-/// Orthogonal to [`FolderClassification`] (which scores a *source folder's*
-/// homogeneity); this scores a *single move's* placement certainty.
+/// Autonomy tier for a single proposed move: **Auto** = high confidence, safe to auto-file (still reversible); **Review** = medium, one-click confirm; **Ask** = low, hold or leave in place. Scores a move's placement certainty, orthogonal to [`FolderClassification`] (a source folder's homogeneity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Confidence {
     Auto,
@@ -45,13 +34,7 @@ impl Confidence {
     }
 }
 
-/// Three-tier folder classification.
-/// - **Anchor** = source folder where ≥80% of moves go to ONE destination
-///   category (homogeneous; folder gets renamed in place).
-/// - **Mixed**  = source folder where moves span multiple destination
-///   categories (some files extracted as outliers).
-/// - **Junk**   = source folder with ≤2 files OR a folder name that
-///   matches the generic-name pattern (folder dissolves).
+/// Anchor = source folder where ≥80% of moves go to ONE destination category (renamed in place); Mixed = moves span categories (outliers extracted); Junk = ≤2 files or a generic folder name (dissolves).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderClassification {
     Anchor,
@@ -65,10 +48,7 @@ pub struct ClassifiedFolder {
     pub classification: FolderClassification,
 }
 
-/// Classify every source folder appearing in `moves`. Returns one
-/// `ClassifiedFolder` per distinct source folder. Folders that have NO
-/// moves (their files all stay put) are NOT included — they're the
-/// implicit "anchor folders intact" tier.
+/// One `ClassifiedFolder` per distinct source folder with moves; folders whose files all stay put are the implicit "anchor folders intact" tier and are not included.
 pub fn classify_folders(
     moves: &[ProposedMove],
     library_root: &Path,
@@ -91,8 +71,6 @@ pub fn classify_folders(
         let top = hist.values().copied().max().unwrap_or_default();
         let homogeneity = if total > 0 { top as f32 / total as f32 } else { 0.0 };
 
-        // Folder name heuristic — generic names like "Downloads",
-        // "Untitled", "New Folder" lean Junk regardless of size.
         let name = folder.file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
@@ -142,14 +120,7 @@ pub fn classify_folders(
     out
 }
 
-/// Drop every move whose source folder was classified
-/// [`FolderClassification::Anchor`]. Anchor folders are deliberately left
-/// untouched — the macOS reference emits NO proposals for them ("Files inside
-/// Anchor folders stay put") — so their moves must never reach the plan the app
-/// applies, even though the per-file classifier computes a canonical destination
-/// for them. The anchor COUNT for the informational "Keep" tile is the caller's
-/// responsibility, computed from the same `classified` slice BEFORE stripping.
-/// Test-only convenience: production calls [`strip_anchor_folder_moves_except`] directly, so the butler's claimed files survive.
+/// Drops every move whose source folder classified [`FolderClassification::Anchor`]: the macOS reference emits NO proposals for anchor folders, so their moves must never reach the plan. The anchor COUNT for the "Keep" tile is the caller's job, computed from `classified` BEFORE stripping. Test-only: production calls [`strip_anchor_folder_moves_except`] so the butler's claimed files survive.
 #[cfg(test)]
 pub fn strip_anchor_folder_moves(
     moves: Vec<ProposedMove>,
@@ -158,15 +129,7 @@ pub fn strip_anchor_folder_moves(
     strip_anchor_folder_moves_except(moves, classified, &std::collections::HashSet::new())
 }
 
-/// Like [`strip_anchor_folder_moves`], but never strips a move whose file ID is
-/// in `exempt_file_ids`.
-/// A homogeneous *source* folder whose files all route to a single *destination*
-/// group classifies Anchor on category homogeneity — but when that homogeneity
-/// is the semantic butler actively relocating every file into one new content
-/// group (not the rule cascade computing a stay-put canonical destination),
-/// stripping it would silently eat the highest-confidence proposals. The caller
-/// passes the exact files the butler claimed so those real relocations survive
-/// without exempting unrelated siblings in the same source folder.
+/// Like [`strip_anchor_folder_moves`], but never strips a move whose file ID is in `exempt_file_ids`. A homogeneous source folder routing to one destination classifies Anchor, but when that is the semantic butler relocating every file into a new content group, stripping would eat the highest-confidence proposals; the caller passes the files the butler claimed.
 pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
     moves: Vec<ProposedMove>,
     classified: &[ClassifiedFolder],
@@ -189,19 +152,8 @@ pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
         .collect()
 }
 
-/// Priority-based restructure matching macOS Restructure.swift. First match wins:
-///   1. Named person  → People/<Name>/<Year>/
-///   2. GPS location  → Places/<lat,lon-bucketed>/<Year>/
-///   3. Document      → Documents/<Year>/
-///   4. Image         → Photos/<Year>/<MonthName>/
-///   5. Video         → Videos/<Year>/
-///   6. Audio         → Audio/<Year>/ (flat when no date signal)
-///   7. 3D model      → 3D Models/
-///   8. Fallback      → Misc/
-///
-/// A zero/missing timestamp is not a real date (FAT32 zero-epoch, corrupt mtime):
-/// it yields Ask confidence and a dateless (flat) folder, matching macOS, so a
-/// file is never silently filed into a 1970 bucket.
+/// Priority-based restructure matching macOS Restructure.swift, first match wins: named person → People/<Name>/<Year>/, GPS → Places/<bucket>/<Year>/, Document → Documents/<Year>/, Image → Photos/<Year>/<MonthName>/, Video → Videos/<Year>/, Audio → Audio/<Year>/ (flat without a date), 3D model → 3D Models/, else Misc/.
+/// A zero/missing timestamp is not a real date (FAT32 zero-epoch, corrupt mtime): it yields Ask confidence and a dateless folder, so a file is never filed into a 1970 bucket.
 pub fn classify(
     files: &[FileForClassify],
     library_root: &Path,
@@ -209,9 +161,6 @@ pub fn classify(
     let mut out = Vec::with_capacity(files.len());
     for f in files {
         let ts = f.created_unix.unwrap_or(f.modified_unix);
-        // A zero or negative timestamp is not a real date (FAT32 zero-epoch, corrupt
-        // mtime). Use Ask confidence and skip year folders so the user isn't misled
-        // into accepting 1970 placements silently.
         let date = valid_year_month(ts);
         let ts_valid = date.is_some();
         let (y, m) = date.unwrap_or((1970, 1));
@@ -300,9 +249,7 @@ pub fn classify(
              Confidence::Ask, "No strong signal — left for you to decide".to_string())
         };
 
-        // Filename: keep the original or use the VLM suggestion. The VLM name is
-        // already slug-sanitized; the extension is capped separately from the
-        // stem so a long basename never loses its suffix. (macOS parity)
+        // The VLM name is already slug-sanitized; the extension is capped separately from the stem so a long basename never loses its suffix (macOS parity).
         let name = proposed_filename(f);
         out.push(ProposedMove {
             file_id: f.file_id,
@@ -316,9 +263,6 @@ pub fn classify(
     out
 }
 
-/// The basename the plan will write, byte-faithful with macOS
-/// `ruleClassify`: VLM proposal when present, otherwise the sanitized original
-/// stem with the extension re-attached.
 fn proposed_filename(f: &FileForClassify) -> String {
     let ext = crate::util::path_safety::safe_filename_component_max(
         &f.source
@@ -356,9 +300,7 @@ pub struct FileForClassify {
     pub has_text: bool,
     /// Deep Analyze's smart-name proposal; macOS applies it during restructure, so Windows must too.
     pub vlm_proposed: Option<String>,
-    /// The source identity as it existed when the plan was built. Carried onto
-    /// the emitted move so apply can bind the move to THIS file rather than to
-    /// whatever happens to live at `source` now.
+    /// The source identity when the plan was built, so apply binds the move to THIS file rather than whatever lives at `source` now.
     pub identity: Option<PlannedIdentity>,
 }
 
@@ -390,8 +332,6 @@ pub struct CategorySummary {
     pub count: u32,
 }
 
-/// Aggregate ProposedMoves for the Sankey diagram: source-folder rollup
-/// → category. The macOS implementation does the same on the app side.
 pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
     let mut buckets: HashMap<&str, u32> = HashMap::new();
     for m in moves {
@@ -406,9 +346,7 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
     out
 }
 
-/// Convert a Unix-seconds timestamp to (year, month). Drives the
-/// Photos/{Year}/{Month}/ tree. Uses chrono so daylight-savings doesn't
-/// shift a January-1 photo into the prior December folder.
+/// Unix seconds → (year, month) for the Photos/{Year}/{Month}/ tree; chrono so daylight saving can't shift a January-1 photo into December.
 pub(crate) fn year_month(unix: f64) -> (i32, u32) {
     valid_year_month(unix).unwrap_or((1970, 1))
 }
@@ -458,10 +396,7 @@ mod tests {
 
     #[test]
     fn anchor_folder_moves_are_stripped_from_plan() {
-        // Three same-month photos in one well-named folder => that folder
-        // classifies Anchor (>=80% one category, >2 files, non-generic name).
-        // The macOS reference leaves anchor folders untouched, so their moves
-        // must be dropped before the plan reaches the app.
+        // Three same-month photos in one well-named folder classify Anchor; the macOS reference leaves anchor folders untouched, so their moves must be dropped before the plan reaches the app.
         let ts = 1_710_504_000.0;
         let files = vec![
             img(1, "D:/Library/Vacation2019/a.jpg", ts),
@@ -541,7 +476,6 @@ mod tests {
                 .any(|c| c.classification == FolderClassification::Anchor),
             "homogeneous-destination source folder should classify Anchor: {classified:?}"
         );
-        // Without the exemption it is stripped to nothing (the regressing path).
         let stripped = strip_anchor_folder_moves(moves.clone(), &classified);
         assert!(stripped.is_empty(), "baseline anchor-strip eats the moves");
         let mut exempt = std::collections::HashSet::new();
@@ -594,8 +528,7 @@ mod tests {
 
     #[test]
     fn non_anchor_folder_moves_survive_the_strip() {
-        // A generic-named folder ("Downloads") classifies Junk, not Anchor, so
-        // its moves must survive the strip — guards against over-stripping.
+        // A generic-named folder ("Downloads") classifies Junk, not Anchor, so its moves must survive the strip.
         let ts = 1_710_504_000.0;
         let files = vec![
             img(1, "D:/Library/Downloads/a.jpg", ts),
@@ -699,9 +632,6 @@ mod tests {
 
     #[test]
     fn zero_timestamp_gets_ask_confidence() {
-        // A zero timestamp (FAT32 zero-epoch, corrupt mtime) must produce Ask
-        // confidence and skip the year sub-folder so the user isn't silently
-        // filed under 1970.
         let f = FileForClassify {
             file_id: 1,
             source: PathBuf::from("C:/scan/photo.jpg"),
@@ -774,8 +704,7 @@ mod tests {
         assert_eq!(cats[1].count, 1);
     }
 
-    /// macOS parity: a zero/corrupt timestamp is not a real date (FAT32 zero-epoch).
-    /// It must yield Ask confidence and a dateless folder, never a 1970 bucket.
+    /// macOS parity: a zero/corrupt timestamp must yield Ask confidence and a dateless folder, never a 1970 bucket.
     #[test]
     fn dateless_file_is_ask_and_flat() {
         let m = classify(&[img(1, "C:/scan/mystery.jpg", 0.0)], Path::new("D:/Library"));
@@ -793,7 +722,6 @@ mod tests {
         assert_eq!(m[0].reason.as_deref(), Some("Document — no date signal"));
     }
 
-    /// macOS parity: a dated audio file lands in Audio/<Year>/, not a flat Audio/.
     #[test]
     fn dated_audio_gets_its_year() {
         let mut f = img(1, "C:/scan/podcast.mp3", 1_710_504_000.0);
@@ -814,7 +742,6 @@ mod tests {
         assert_eq!(m[0].destination, Path::new("D:/Library/3D Models/part.stl"));
     }
 
-    /// macOS parity: Deep Analyze's smart name is applied during restructure.
     #[test]
     fn vlm_proposal_renames_the_file() {
         let mut f = img(1, "C:/scan/IMG_1234.jpg", 1_710_504_000.0);
@@ -826,9 +753,7 @@ mod tests {
         );
     }
 
-    /// macOS caps the extension at 16 scalars separately from the 200-scalar stem
-    /// cap; capping the whole `stem.ext` blob cut the suffix off, so the file
-    /// stopped opening by double-click and dropped out of the next scan.
+    /// macOS caps the extension at 16 scalars separately from the 200-scalar stem; capping the whole `stem.ext` cut the suffix off, so the file stopped opening and dropped out of the next scan.
     #[test]
     fn long_extension_is_capped_separately_from_the_stem() {
         let stem = "a".repeat(250);

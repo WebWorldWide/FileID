@@ -1,20 +1,5 @@
-// Face clustering — density-clustering driver over SFace (128-d) embeddings.
-// Source of truth for thresholds: `identity_clustering::Hyperparameters::default()`
-// and the MERGE_SUGGEST_* / AUTOMERGE_* constants in THIS file. Do not
-// re-document numeric thresholds elsewhere — they drift.
-// Pipeline (see `cluster()` + `consolidate()` here, and the DB-side handler in
-// `commands/face_clustering.rs`):
-//   1. Load every `face_prints` row whose `arcface_embedding` (column, not a
-//      table) is non-NULL and `excluded = 0`.
-//   2. `cluster()` runs the 3-pass density algorithm (identity_clustering):
-//      Pass-1 kNN connected components ≥ pass1_cosine, Pass-2 margin-gated
-//      outlier assignment, Pass-3 2-means split of low-cohesion clusters.
-//   3. `consolidate()` folds near-certain duplicate clusters by CENTROID cosine
-//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.75), respecting user "different
-//      people" verdicts. Anchor per cluster = highest-quality member face.
-//   4. The handler persists `persons` + `face_prints.person_id` in one tx and
-//      emits `FaceClusteringResult`. `face_verifications` is only READ here
-//      (same_person = 0, to block auto-merge of user-confirmed splits).
+// Face clustering: density-clustering driver over SFace (128-d) embeddings. Source of truth for thresholds is `identity_clustering::Hyperparameters::default()` and the MERGE_SUGGEST_* / AUTOMERGE_* constants here; don't re-document numbers elsewhere.
+// `cluster()` loads non-NULL, non-excluded `face_prints` and runs the 3-pass density algorithm; `consolidate()` folds near-certain duplicate clusters by centroid cosine, respecting user "different people" verdicts (`face_verifications` is only READ here). The handler in `commands/face_clustering.rs` persists `persons` + `face_prints.person_id` in one tx.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -68,27 +53,16 @@ fn compare_neighbors(
         .then_with(|| a.idx.cmp(&b.idx))
 }
 
-/// Group `faces` into clusters via the 3-pass density algorithm in
-/// `identity_clustering`.
-/// Returns (assignments, anchors). Cluster IDs are 1-based and stable
-/// in first-seen order.
+/// Groups `faces` into clusters via the 3-pass density algorithm in `identity_clustering`. Returns (assignments, anchors); cluster IDs are 1-based and stable in first-seen order.
 pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
     if faces.is_empty() {
         return (Vec::new(), Vec::new());
     }
 
-    // kNN searcher. Below ~5 k faces the brute-force O(n²) all-pairs cosine
-    // beats the HNSW build overhead. Above it, we build an `instant-distance`
-    // HNSW index once and serve each kNN query in O(log n) — turns People-tab
-    // refresh from quadratic into log-linear on big libraries. ArcFace
-    // embeddings are L2-normalized, so squared-L2 distance is monotonic in
-    // `(1 − cosine)` (the index gives the same neighbor ranking as cosine).
+    // kNN searcher: below ~5 k faces brute-force O(n²) cosine beats the HNSW build overhead; above it an `instant-distance` HNSW index serves each query in O(log n). Embeddings are L2-normalized, so squared-L2 ranks neighbors like cosine.
     const HNSW_MIN: usize = 5_000;
     let embeddings: Vec<&[f32]> = faces.iter().map(|f| f.embedding.as_slice()).collect();
-    // Each file contributes one decoded still or one video keyframe, so two
-    // detections in one physical file are negative identity evidence. Key by
-    // file_id rather than content hash so corresponding faces in copied files
-    // can still join.
+    // Each file contributes one decoded still or video keyframe, so two detections in one file are negative identity evidence. Keyed by file_id (not content hash) so corresponding faces in copied files can still join.
     let mut face_indices_by_file: HashMap<i64, Vec<usize>> = HashMap::new();
     for (index, face) in faces.iter().enumerate() {
         face_indices_by_file
@@ -113,10 +87,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         &embeddings,
         |i| {
             let mut hits: Vec<super::identity_clustering::Neighbor> = if let Some(idx) = &hnsw_idx {
-                // Query k+1 so we can drop the self-hit; convert squared-L2 →
-                // cosine (vectors are unit-norm: d = 2(1 − cos)). Reuse one
-                // Search scratch across the whole sweep — a fresh one re-zeros an
-                // n-byte visited set per query, an O(n²) term over the pass.
+                // Query k+1 to drop the self-hit; convert squared-L2 → cosine (d = 2(1 − cos)). One Search scratch is reused across the sweep: a fresh one re-zeros an n-byte visited set per query, an O(n²) term.
                 idx.neighbours(&mut knn_search, &owned, i, k)
                     .into_iter()
                     .map(|(j, d)| super::identity_clustering::Neighbor {
@@ -133,10 +104,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
                     })
                     .collect()
             };
-            // Keep only the top-k by similarity. select_nth_unstable partitions
-            // in O(n), avoiding the O(n log n) full sort of all n-1 brute-force
-            // neighbors when only k are used; then sort just those k for a stable
-            // confidence-ordered result (identical top-k set + order).
+            // select_nth_unstable partitions in O(n) instead of fully sorting all n-1 brute-force neighbors when only k are used; then sort just those k (identical top-k set and order).
             if hits.len() > k {
                 hits.select_nth_unstable_by(k, compare_neighbors);
                 hits.truncate(k);
@@ -158,8 +126,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         "[FACES] identity clustering pass"
     );
 
-    // Remap dense 0-based IDs to 1-based stable IDs in first-seen order
-    // — preserves the on-disk schema and IPC contract that callers expect.
+    // Remap dense 0-based ids to 1-based stable ids in first-seen order, preserving the on-disk schema and IPC contract.
     let n = faces.len();
     let mut dense_to_stable: HashMap<usize, i32> = HashMap::new();
     let mut next_id: i32 = 1;
@@ -177,15 +144,12 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         });
     }
 
-    // Anchors: highest-quality face per cluster.
     let mut by_cluster: HashMap<i32, Vec<usize>> = HashMap::new();
     for (i, a) in assignments.iter().enumerate() {
         by_cluster.entry(a.cluster_id).or_default().push(i);
     }
     let mut anchors = Vec::with_capacity(by_cluster.len());
     for (&cid, members) in &by_cluster {
-        // identity_clustering shouldn't emit empty clusters; skip rather
-        // than panic if it ever does.
         debug_assert!(!members.is_empty(), "empty cluster id {cid}");
         let Some(&best_idx) = members.iter().max_by(|&&a, &&b| {
             faces[a]
@@ -409,9 +373,7 @@ where
 /// Override with FILEID_FACE_AUTOMERGE_COS (clamped to [0.70, 1.0]; 1.0 disables).
 pub const AUTOMERGE_COS_DEFAULT: f32 = 0.75;
 
-/// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
-/// clamped to [0.70, 1.0]. A value ≥ 1.0 disables consolidation (no two
-/// distinct centroids reach cosine 1.0). Unset/unparseable → the default.
+/// Clamped to [0.70, 1.0]; ≥ 1.0 disables consolidation (no two distinct centroids reach cosine 1.0). Unset/unparseable → the default.
 pub fn automerge_threshold() -> f32 {
     std::env::var("FILEID_FACE_AUTOMERGE_COS")
         .ok()
@@ -420,13 +382,10 @@ pub fn automerge_threshold() -> f32 {
         .unwrap_or(AUTOMERGE_COS_DEFAULT)
 }
 
-/// Above this centroid count, consolidate() switches from brute O(C²) all-pairs
-/// to an HNSW candidate sweep. Below it the brute path wins (HNSW build overhead
-/// exceeds the O(C²) saving at small C).
+/// Above this centroid count, consolidate() switches from brute O(C²) to an HNSW candidate sweep; below it the HNSW build overhead exceeds the saving.
 const HNSW_CONSOLIDATE_THRESHOLD: usize = 2_000;
 
-/// Brute O(C²) all-pairs over centroids. Returns merge edges `(cosine, i, j)`
-/// with `i < j` and `cosine >= threshold`.
+/// Brute O(C²) all-pairs over centroids: merge edges `(cosine, i, j)` with `i < j` and `cosine >= threshold`.
 fn edges_brute(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)> {
     let mut edges: Vec<(f32, usize, usize)> = Vec::new();
     for i in 0..centroids.len() {
@@ -440,12 +399,7 @@ fn edges_brute(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize
     edges
 }
 
-/// HNSW candidate sweep over centroids — the large-C path. Builds an index over
-/// the per-cluster centroids, gathers top-k neighbors per centroid, then scores
-/// each candidate with the EXACT cosine on the two centroids (the approximate
-/// HNSW distance is used only to PROPOSE candidates, never as the edge weight).
-/// Edges are deduped as `(min, max)` index pairs so each pair scores once.
-/// Returns the same `(cosine, i, j)` shape as `edges_brute`, i < j.
+/// HNSW candidate sweep over centroids (the large-C path): top-k neighbors per centroid are scored with the EXACT cosine; the approximate HNSW distance only PROPOSES candidates. Edges are deduped as `(min, max)` pairs; same shape as `edges_brute`.
 fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)> {
     const INITIAL_K: usize = 64;
     const MAX_K: usize = 512;
@@ -486,7 +440,6 @@ fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)
             if !seen.insert(pair) {
                 continue;
             }
-            // EXACT cosine on the two centroids — not the approximate distance.
             let s = cosine(&centroids[pair.0], &centroids[pair.1]);
             if s >= threshold {
                 edges.push((s, pair.0, pair.1));
@@ -708,18 +661,9 @@ where
         .collect()
 }
 
-/// Conservatively fold near-certain duplicate clusters that the over-split-safe
-/// 3-pass clusterer left fragmented, using denoised per-cluster CENTROIDS.
-/// Returns the same (assignments, anchors) shape with merged clusters collapsed
-/// onto a single canonical id (the largest fragment, so its name + anchor face
-/// survive; ties broken to the smallest id for determinism) and member counts
-/// summed.
-/// `blocked` holds normalized (min,max) cluster-id pairs the user has marked as
-/// DIFFERENT people. A union is rejected if it would co-locate ANY blocked pair,
-/// checked at every union step — so a blocked pair can never share a person even
-/// transitively (X–Y both high to Z can't sneak a blocked X–Y together).
-/// `threshold` ≥ 1.0 (or < 2 clusters) is a no-op: the inputs pass through
-/// unchanged, preserving the pure over-split behavior.
+/// Conservatively folds near-certain duplicate clusters the over-split-safe 3-pass clusterer left fragmented, using per-cluster CENTROIDS. Merged clusters collapse onto the largest fragment's id (so its name + anchor survive; ties to the smallest id) with member counts summed.
+/// `blocked` holds normalized (min,max) cluster-id pairs the user marked as DIFFERENT people. A union is rejected if it would co-locate ANY blocked pair, checked at every union step, so a blocked pair can never share a person even transitively.
+/// `threshold` ≥ 1.0 (or < 2 clusters) is a no-op.
 #[cfg(test)]
 pub fn consolidate<S: std::hash::BuildHasher>(
     faces: &[FaceRow],
@@ -750,10 +694,7 @@ where
     S1: std::hash::BuildHasher,
     S2: std::hash::BuildHasher,
 {
-    // `>= 1.0` (not `> 1.0`): automerge_threshold() clamps to [0.70, 1.0], so the
-    // documented "set FILEID_FACE_AUTOMERGE_COS=1.0 to disable" must hit this
-    // no-op path. With a strict `>` the disable value still ran the full O(C²)
-    // centroid scan (and could merge float-identical centroids).
+    // `>= 1.0`, not `> 1.0`: automerge_threshold() clamps to [0.70, 1.0], so the documented "FILEID_FACE_AUTOMERGE_COS=1.0 disables" must hit this no-op path; a strict `>` still ran the full O(C²) scan and could merge float-identical centroids.
     if threshold >= 1.0 || anchors.len() < 2 || faces.is_empty() {
         return (assignments, anchors);
     }
@@ -762,12 +703,10 @@ where
         return (assignments, anchors);
     }
 
-    // face_id → cluster_id (assignments are not assumed parallel to `faces`).
     let cluster_of: HashMap<i64, i32> =
         assignments.iter().map(|a| (a.face_id, a.cluster_id)).collect();
 
-    // Per-cluster centroid = normalize(Σ member unit-embeddings). For unit
-    // vectors the count cancels under renormalization, so the sum suffices.
+    // Per-cluster centroid = normalize(Σ member unit-embeddings); for unit vectors the count cancels under renormalization.
     let mut sums: HashMap<i32, Vec<f32>> = HashMap::new();
     for f in faces {
         if f.embedding.len() != dim {
@@ -794,19 +733,13 @@ where
         })
         .collect();
 
-    // Candidate merge edges over CENTROIDS (one vector per cluster, not per
-    // face). Brute O(C²) below the threshold; an HNSW over the centroids above
-    // it so a pathological over-split (tens of thousands of clusters) no longer
-    // burns quadratic time — and, unlike the old 12k hard cap, never silently
-    // skips consolidation. Both paths feed the SAME edge-sort + union-find +
-    // blocked-conflict logic; only the candidate-generation strategy differs.
+    // Candidate merge edges over CENTROIDS (one per cluster, not per face): brute O(C²) below the threshold, HNSW above it, so a pathological over-split never burns quadratic time and never silently skips consolidation. Both feed the same edge-sort + union-find + blocked-conflict logic.
     let idx_of: HashMap<i32, usize> = cids.iter().enumerate().map(|(i, &c)| (c, i)).collect();
     let mut edges: Vec<(f32, usize, usize)> = if cids.len() <= HNSW_CONSOLIDATE_THRESHOLD {
         edges_brute(&centroids, threshold)
     } else {
         edges_hnsw(&centroids, threshold)
     };
-    // Strongest merges first so canonical assignment is stable + greedy-optimal.
     edges.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut blocked_neighbors = vec![HashSet::new(); cids.len()];
@@ -869,8 +802,6 @@ where
         if explicit_conflict || owner_conflict {
             continue;
         }
-        // Keep the component with the larger forbidden set as the root. Every
-        // explicit edge then moves only when it belongs to the smaller set.
         let (keep, drop) = match forbidden[ri].len().cmp(&forbidden[rj].len()) {
             std::cmp::Ordering::Greater => (ri, rj),
             std::cmp::Ordering::Less => (rj, ri),
@@ -900,14 +831,12 @@ where
 
     let count_of: HashMap<i32, u32> =
         anchors.iter().map(|a| (a.cluster_id, a.member_count)).collect();
-    // Group cluster ids by union root, pick the canonical id per group.
     let mut groups: HashMap<usize, Vec<i32>> = HashMap::new();
     for (i, &c) in cids.iter().enumerate() {
         groups.entry(find(&mut parent, i)).or_default().push(c);
     }
     let mut remap: HashMap<i32, i32> = HashMap::new();
     for members in groups.values() {
-        // Canonical = largest fragment (its name + anchor survive); tie → lowest id.
         let canon = *members
             .iter()
             .max_by(|&&a, &&b| {
@@ -929,8 +858,6 @@ where
         })
         .collect();
 
-    // Surviving anchor = the canonical fragment's anchor; member_count summed
-    // across the merged group.
     let anchor_by_cid: HashMap<i32, ClusterAnchor> =
         anchors.into_iter().map(|a| (a.cluster_id, a)).collect();
     let mut summed: HashMap<i32, u32> = HashMap::new();
@@ -1887,7 +1814,6 @@ where
     (new_assignments, new_anchors)
 }
 
-/// Remove only the far tail of an unprotected high-quality cluster. Named, merged, and verdict-backed identities bypass it.
 pub fn outlier_cosine_floor() -> f32 {
     std::env::var("FILEID_FACE_OUTLIER_COSINE")
         .ok()
@@ -2045,9 +1971,7 @@ where
         return (assignments, anchors);
     }
     let face_of: HashMap<i64, &FaceRow> = faces.iter().map(|face| (face.face_id, face)).collect();
-    // Per-cluster distinct captures + best (max) member quality, taken from the FINAL
-    // assignments (post-consolidation cluster ids) — the source of truth for
-    // what would be persisted.
+    // Distinct captures and best member quality come from the FINAL (post-consolidation) assignments, the source of truth for what would be persisted.
     let mut captures: HashMap<i32, HashSet<CaptureKey>> = HashMap::new();
     let mut max_q: HashMap<i32, f32> = HashMap::new();
     for a in &assignments {
@@ -2080,17 +2004,7 @@ where
     (new_assignments, new_anchors)
 }
 
-/// Derive the name-based auto-merge blocked pairs from a face→name snapshot.
-/// `face_name` maps each named face's id to the user-assigned name of the person
-/// it currently belongs to; `cluster_of` maps face ids to their freshly-computed
-/// cluster ids. Each cluster gets a single name by majority vote (ties broken to
-/// the lexicographically smallest name, never HashMap order, for determinism),
-/// then every pair of clusters carrying DIFFERENT names is blocked.
-/// The caller MUST pass the snapshot read under the phase-3 persist lock (not a
-/// pre-clustering phase-1 capture): a rename committed in the lock-free window
-/// would otherwise leave a stale name in the guard and could unblock a
-/// wrong-cluster auto-merge. Same-named fragments and
-/// named+unnamed pairs are intentionally NOT blocked — they still consolidate.
+/// Derives the name-based auto-merge blocked pairs from a face→name snapshot: each cluster gets one name by majority vote (ties to the lexicographically smallest, never HashMap order), and every pair of clusters carrying DIFFERENT names is blocked. The caller MUST pass the snapshot read under the phase-3 persist lock: a rename committed in the lock-free window would leave a stale name and could unblock a wrong-cluster auto-merge. Same-named and named+unnamed pairs are NOT blocked.
 #[cfg(test)]
 pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
     face_name: &HashMap<i64, String, S>,
@@ -2145,7 +2059,6 @@ mod tests {
         coords.iter().map(|&x| x / n).collect()
     }
 
-    /// Past the HNSW threshold the faces of copied photos (identical embeddings) still land in one cluster.
     #[test]
     fn identical_faces_past_the_hnsw_threshold_share_a_cluster() {
         let mut state = 5u64;
@@ -2308,8 +2221,7 @@ mod tests {
         assert!(assignments.iter().all(|assignment| assignment.cluster_id == 7));
     }
 
-    // Helper for property tests: deterministic LCG to spread vectors over
-    // the unit sphere so proptest can shrink to reproducible counterexamples.
+    // Deterministic LCG spreads vectors over the unit sphere so proptest can shrink to reproducible counterexamples.
     fn random_faces(seed: u64, count: usize) -> Vec<FaceRow> {
         let mut state = seed | 1;
         (0..count)
@@ -2326,12 +2238,8 @@ mod tests {
             .collect()
     }
 
-    // Property tests proving bookkeeping invariants on randomized embeddings.
-    // The two-pass density algorithm doesn't guarantee every cluster member
-    // is high-cosine-close to its anchor (clusters can chain transitively).
+    // Property tests for bookkeeping invariants on randomized embeddings. The density algorithm doesn't guarantee every member is close to its anchor (clusters can chain transitively).
     proptest::proptest! {
-        // Invariant: every face_id appears in exactly one cluster
-        // assignment, and the assignment count equals the input count.
         #[test]
         fn each_face_assigned_exactly_once(
             count in 2usize..15,
@@ -2346,9 +2254,7 @@ mod tests {
             proptest::prop_assert_eq!(ids.len(), faces.len());
         }
 
-        // Invariant: clustering is deterministic — the same input set
-        // produces identical output across runs. People tab can't have
-        // clusters that shuffle on every scan.
+        // Clustering is deterministic: the People tab can't have clusters that shuffle on every scan.
         #[test]
         fn clustering_is_deterministic(
             count in 2usize..15,
@@ -2365,8 +2271,6 @@ mod tests {
             proptest::prop_assert_eq!(anchors1.len(), anchors2.len());
         }
 
-        // Invariant: anchor member_count totals equal the input face count.
-        // (Every face goes into exactly one cluster's member count.)
         #[test]
         fn anchor_member_counts_sum_to_input(
             count in 2usize..15,
@@ -2378,7 +2282,6 @@ mod tests {
             proptest::prop_assert_eq!(total as usize, faces.len());
         }
 
-        // Invariant: anchor cluster_ids are unique within the result.
         #[test]
         fn anchor_cluster_ids_are_unique(
             count in 2usize..15,
@@ -2497,17 +2400,13 @@ mod tests {
 
     #[test]
     fn name_guard_is_derived_from_the_passed_snapshot() {
-        // Two clusters of near-identical faces (would auto-merge by centroid).
-        // cluster_of: faces 1,2 → cluster 1; faces 3,4 → cluster 2.
         let mut cluster_of: HashMap<i64, i32> = HashMap::new();
         cluster_of.insert(1, 1);
         cluster_of.insert(2, 1);
         cluster_of.insert(3, 2);
         cluster_of.insert(4, 2);
 
-        // STALE (phase-1) snapshot: both clusters are still named "Alice" — the
-        // user hadn't split them yet. The name guard finds no DIFFERING names, so
-        // nothing is blocked and the two clusters would auto-merge.
+        // STALE (phase-1) snapshot: both clusters still named "Alice", so nothing is blocked and they would auto-merge.
         let mut stale: HashMap<i64, String> = HashMap::new();
         stale.insert(1, "Alice".into());
         stale.insert(2, "Alice".into());
@@ -2520,12 +2419,7 @@ mod tests {
              so a stale snapshot would let the merge through"
         );
 
-        // FRESH (under phase-3 lock) snapshot: a rename committed in the lock-free
-        // window renamed cluster 2's people to "Bob". Re-derived from THIS
-        // snapshot, the guard now blocks the (1,2) pair — the merge can't sneak
-        // through off the stale name. This is exactly the regression: the guard
-        // must reflect whichever snapshot it's handed, and production now hands it
-        // the under-lock one.
+        // FRESH (under phase-3 lock) snapshot: a rename committed in the lock-free window made cluster 2 "Bob", so the guard blocks (1,2). The guard must reflect whichever snapshot it is handed; production hands it the under-lock one.
         let mut fresh: HashMap<i64, String> = HashMap::new();
         fresh.insert(1, "Alice".into());
         fresh.insert(2, "Alice".into());
@@ -2537,7 +2431,6 @@ mod tests {
             "differently-named clusters must be blocked when derived from the fresh snapshot"
         );
 
-        // And the blocked pair, fed to consolidate, actually keeps the two apart.
         let v = unit(&[1.0, 0.0, 0.0]);
         let faces = vec![
             row(1, 1, v.clone(), 0.9),
@@ -2560,8 +2453,6 @@ mod tests {
 
     #[test]
     fn name_guard_ignores_blank_names_and_majority_votes() {
-        // Cluster 1 is majority "Alice" (one stray blank); cluster 2 is "Alice"
-        // too → same name, not blocked. Cluster 3 is "Carol" → blocked vs both.
         let mut cluster_of: HashMap<i64, i32> = HashMap::new();
         for (f, c) in [(1, 1), (2, 1), (3, 1), (10, 2), (20, 3)] {
             cluster_of.insert(f, c);
@@ -2715,25 +2606,14 @@ mod tests {
 
     #[test]
     fn preserved_verdict_endpoint_is_prefiltered_before_validate() {
-        // Regression (blocker): a different-people verdict whose endpoint face is
-        // owned by a PRESERVED identity is dropped from the clustering pool, so
-        // that face is absent from the final partition. The command must
-        // pre-filter any verdict pair touching an excluded face before building
-        // the blocked set or validating; without that filter the absent endpoint
-        // fails the whole clustering run every time, permanently breaking the
-        // People tab (clustering re-fires after every scan).
+        // Regression: a different-people verdict whose endpoint face is owned by a PRESERVED identity is dropped from the pool, so that face is absent from the final partition. The command must pre-filter verdict pairs touching an excluded face; otherwise the absent endpoint fails every clustering run and permanently breaks the People tab.
         let assignments = vec![
             ClusterAssignment { face_id: 10, cluster_id: 1 },
             ClusterAssignment { face_id: 20, cluster_id: 2 },
         ];
         let owner_by_face: HashMap<i64, i64> = [(10, 100), (20, 200)].into_iter().collect();
-        // Face 99 belongs to a preserved owner and left the pool; the verdict
-        // 10≠99 still references it.
         let raw_pairs: HashSet<(i64, i64)> = [(10, 99)].into_iter().collect();
-        // Unfiltered: the absent endpoint 99 makes validation fail closed.
         assert!(validate_protected_clusters(&assignments, &owner_by_face, &raw_pairs).is_err());
-        // The command drops pairs touching excluded faces; the preserved owner is
-        // kept separate wholesale, so the constraint is already satisfied.
         let excluded: HashSet<i64> = [99].into_iter().collect();
         let active: HashSet<(i64, i64)> = raw_pairs
             .into_iter()
@@ -2746,8 +2626,6 @@ mod tests {
     #[test]
     fn consolidate_merges_near_identical_clusters() {
         let v = unit(&[1.0, 0.0, 0.0]);
-        // Cluster 1 (2 faces) + cluster 2 (3 faces), both centered on the same
-        // direction → centroid cosine ≈ 1.0, well above 0.85.
         let faces = vec![
             row(1, 1, v.clone(), 0.9),
             row(2, 2, v.clone(), 0.8),
@@ -2769,7 +2647,6 @@ mod tests {
         let (a, an) =
             consolidate(&faces, assignments, anchors, &std::collections::HashSet::new(), 0.85);
         assert_eq!(an.len(), 1, "the two same-person fragments fold into one");
-        // Larger fragment (cluster 2, 3 members) wins the canonical id + anchor.
         assert_eq!(an[0].cluster_id, 2);
         assert_eq!(an[0].anchor_face_id, 3);
         assert_eq!(an[0].member_count, 5, "member counts sum");
@@ -2797,8 +2674,6 @@ mod tests {
 
     #[test]
     fn consolidate_blocked_pair_is_transitively_safe() {
-        // Three near-identical clusters; 1–2 is blocked. A merge via 3 must not
-        // sneak 1 and 2 into the same person.
         let v = unit(&[1.0, 0.0, 0.0]);
         let faces = vec![
             row(1, 1, v.clone(), 0.9),
@@ -2866,8 +2741,6 @@ mod tests {
             ClusterAssignment { face_id: 2, cluster_id: 2 },
         ];
         let anchors = vec![anchor(1, 1, v.clone(), 1), anchor(2, 2, v.clone(), 1)];
-        // 1.0 is the documented "disable" value (the clamp ceiling) and must
-        // no-op; clone the inputs so we can also re-check at 1.01.
         let (_, an10) = consolidate(
             &faces,
             assignments.clone(),
@@ -3021,8 +2894,7 @@ mod tests {
 
     #[test]
     fn automerge_threshold_clamps_and_defaults() {
-        // Unset → default. (Other env-dependent cases aren't asserted here to
-        // avoid process-global env races with parallel tests.)
+        // Unset → default. Other env-dependent cases aren't asserted here to avoid process-global env races with parallel tests.
         unsafe { std::env::remove_var("FILEID_FACE_AUTOMERGE_COS") };
         assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
     }
@@ -3030,8 +2902,6 @@ mod tests {
     #[test]
     fn suppression_drops_low_quality_micro_clusters() {
         let v = unit(&[1.0, 0.0, 0.0]);
-        // c1: junk pair (q .05/.06) -> drop; c2: good singleton (.40) -> keep;
-        // c3: junk singleton (.05) -> drop; c4: size-3 all-low -> keep (size wins).
         let faces = vec![
             row(1, 1, v.clone(), 0.05),
             row(2, 2, v.clone(), 0.06),
@@ -3261,11 +3131,7 @@ mod tests {
         assert!((solo_quality_floor() - 0.40).abs() < 1e-6);
     }
 
-    // Collapse a set of merge edges into a canonical per-centroid grouping via
-    // the same greedy union-find consolidate() uses downstream, then return a
-    // normalized labeling (each centroid → its group's min index) so two edge
-    // sets can be compared for IDENTICAL final clustering regardless of edge
-    // order or which representative each path happened to pick.
+    // Collapse merge edges into a canonical per-centroid grouping via the same greedy union-find consolidate() uses, labelled by each group's min index so edge sets compare regardless of order.
     fn union_find_labels(n: usize, edges: &[(f32, usize, usize)]) -> Vec<usize> {
         let mut sorted = edges.to_vec();
         sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -3284,7 +3150,6 @@ mod tests {
                 parent[ri] = rj;
             }
         }
-        // Normalize: label each centroid by the minimum index in its group.
         let mut group_min: HashMap<usize, usize> = HashMap::new();
         for x in 0..n {
             let r = find(&mut parent, x);
@@ -3383,13 +3248,7 @@ mod tests {
 
     #[test]
     fn hnsw_and_brute_edge_paths_agree() {
-        // Deterministic fixture: 60 synthetic unit-normalized centroids built as
-        // 12 tight families of 5 near-identical vectors each. Each family's base
-        // direction is a distinct ORTHOGONAL axis (one-hot in 12-d), so
-        // cross-family cosine is ~0 — provably below threshold, no flaky
-        // near-collisions. Within a family, tiny jitter keeps cosine ~0.999, far
-        // above threshold. The final union-find clustering is therefore
-        // unambiguous and both edge paths must reproduce it.
+        // Deterministic fixture: 60 unit centroids as 12 tight families of 5, each family on a distinct orthogonal axis (cross-family cosine ~0, within-family ~0.999), so the final clustering is unambiguous and both edge paths must reproduce it.
         let mut state: u64 = 0x9E3779B97F4A7C15;
         let mut next = || {
             state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -3403,8 +3262,6 @@ mod tests {
             let mut base = [0.0f32; DIM];
             base[fam] = 1.0;
             for _ in 0..PER_FAMILY {
-                // Jitter on the non-axis dims keeps within-family cosine ~0.999
-                // while the one-hot base direction dominates; cross-family stays ~0.
                 let v: Vec<f32> = base.iter().map(|&b| b + 0.01 * next()).collect();
                 centroids.push(unit(&v));
             }
@@ -3422,8 +3279,7 @@ mod tests {
             "HNSW and brute edge paths must yield identical final clustering"
         );
 
-        // Sanity: the fixture really does merge into FAMILIES groups (otherwise
-        // the parity assertion above could pass trivially on all-singletons).
+        // Sanity: the fixture really merges into FAMILIES groups, or the parity assertion could pass trivially on all-singletons.
         let distinct: std::collections::HashSet<usize> = brute_labels.iter().copied().collect();
         assert_eq!(distinct.len(), FAMILIES, "fixture should fold into {FAMILIES} families");
     }

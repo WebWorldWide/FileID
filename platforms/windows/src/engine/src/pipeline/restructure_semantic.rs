@@ -6,10 +6,7 @@ use std::path::{Path, PathBuf};
 use super::identity_clustering::{self, Hyperparameters, Neighbor};
 use super::restructure::{Confidence, ProposedMove};
 
-/// Per-file signals. `clip` is the L2-normalized representative vector for the
-/// pass that built it: the 512-d CLIP image embedding (image pass), the 384-d
-/// BGE text embedding (document pass), or empty for the non-image pass, which
-/// fills it with a bag-of-words signature in `non_image_signatures`.
+/// Per-file signals. `clip` is the L2-normalized representative vector for the pass: 512-d CLIP image embedding (image pass), 384-d BGE text embedding (document pass), or empty for the non-image pass, which fills it with a bag-of-words signature in `non_image_signatures`.
 #[derive(Clone)]
 pub struct SemanticFile {
     pub file_id: i64,
@@ -19,11 +16,7 @@ pub struct SemanticFile {
     pub time_unix: f64,
 }
 
-/// A fusion-weight + confidence-threshold profile. The image pass keeps the
-/// calibrated CLIP values; the non-image pass (filename+tag bag-of-words
-/// representative — a PDF/video has no CLIP image vector) runs a separate,
-/// deliberately tighter profile so a sparser signature can't over-move. Stays
-/// byte-faithful with the Swift engine. (RESTRUCTURE.md §2/R1)
+/// Fusion-weight + confidence-threshold profile. The image pass keeps the calibrated CLIP values; the non-image pass (filename+tag bag-of-words, since a PDF/video has no CLIP vector) runs a deliberately tighter profile so a sparser signature can't over-move. Byte-faithful with the Swift engine (RESTRUCTURE.md §2/R1).
 #[derive(Clone, Copy)]
 pub struct Profile {
     pub w_clip: f32,
@@ -39,8 +32,7 @@ pub struct Profile {
     pub quantized_vectors: bool,
 }
 
-/// Image pass — representative is the L2-normalized 512-d CLIP image embedding.
-/// Thresholds are calibrated for CLIP cosines, which compress high on personal photos (intra-folder cohesion ~0.80); the original 0.55/0.72 routed every photo into one catch-all folder. Byte-faithful with the Swift `imageProfile`; env-overridable.
+/// Representative is the L2-normalized 512-d CLIP image embedding. Thresholds are calibrated for CLIP cosines, which compress high on personal photos (intra-folder cohesion ~0.80); the original 0.55/0.72 routed every photo into one catch-all folder. Byte-faithful with the Swift `imageProfile`; env-overridable.
 pub fn image_profile() -> Profile {
     Profile {
         w_clip: 0.70,
@@ -56,28 +48,20 @@ pub fn image_profile() -> Profile {
     }
 }
 
-/// Cap the tag vocabulary to the most common tags. Frequent tags carry the
-/// grouping signal; rare ones are noise and would bloat the fused vector.
+/// Frequent tags carry the grouping signal; rare ones are noise and would bloat the fused vector.
 const TAG_VOCAB_CAP: usize = 256;
 
-/// Filenames tokenize into many one-off terms, so the non-image bag-of-words
-/// needs a wider vocab than the image tag block.
+/// Filenames tokenize into many one-off terms, so the non-image bag-of-words needs a wider vocab than the image tag block.
 const NON_IMAGE_VOCAB_CAP: usize = 512;
 
-/// Owner kill-switch for the non-image semantic pass
-/// (`FILEID_RESTRUCTURE_NONIMAGE=0` → off, falls back to the rule cascade).
+/// Owner kill-switch: `FILEID_RESTRUCTURE_NONIMAGE=0` turns the non-image semantic pass off (falls back to the rule cascade).
 pub fn non_image_enabled() -> bool {
     std::env::var("FILEID_RESTRUCTURE_NONIMAGE")
         .map(|v| v != "0")
         .unwrap_or(true)
 }
 
-/// Non-image pass profile — representative is a filename+tag bag-of-words
-/// (sparser than CLIP), so demand a cleaner cluster + a tighter folder match.
-/// `w_tags` is 0: tags already live inside the representative and naming reads
-/// them directly, so re-adding the block would double-count. Thresholds are
-/// env-overridable (`FILEID_RESTRUCTURE_NI_*`) for owner calibration on a real
-/// library before the defaults are promoted. (RESTRUCTURE.md R1)
+/// Representative is a filename+tag bag-of-words (sparser than CLIP), so demand a cleaner cluster and a tighter folder match. `w_tags` is 0: tags already live inside the representative and naming reads them directly. Thresholds are env-overridable (`FILEID_RESTRUCTURE_NI_*`) for calibration on a real library (RESTRUCTURE.md R1).
 fn non_image_profile() -> Profile {
     Profile {
         w_clip: 0.74,
@@ -97,44 +81,30 @@ fn env_f32(key: &str, dflt: f32) -> f32 {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(dflt)
 }
 
-/// Folder basenames that must never act as a learn-your-style prototype —
-/// generic dumping grounds the butler should organize files *out of*.
+/// Folder basenames that must never act as a learn-your-style prototype: dumping grounds the butler should organize files out of.
 const JUNK_FOLDER_NAMES: &[&str] = &[
     "downloads", "downloaded", "desktop", "new folder", "untitled", "temp", "tmp",
     "misc", "other", "stuff", "things", "files", "unsorted", "inbox",
 ];
 
-/// Filename tokens that carry no grouping signal: camera/scan boilerplate, common
-/// English connectors (so "boys at the zoo" doesn't name a "Boys The" folder), and
-/// file-extension tokens that leak in on double-extension names like `E14.jpg.lps`
-/// → `E14.jpg` → spurious "jpg". Lowercase.
+/// Filename tokens with no grouping signal: camera/scan boilerplate, English connectors (so "boys at the zoo" doesn't name a "Boys The" folder), and extension tokens leaking from double-extension names like `E14.jpg.lps`. Lowercase.
 const FILENAME_STOPWORDS: &[&str] = &[
-    // camera / scan / boilerplate
     "img", "image", "dsc", "dscn", "dscf", "photo", "pic", "picture", "screenshot",
     "screen", "shot", "untitled", "new", "copy", "final", "draft", "version", "scan",
     "document", "file", "video", "vid", "clip",
-    // English connectors (no grouping signal)
     "the", "and", "for", "with", "from", "was", "are", "this", "that", "your", "our",
     "his", "her", "its", "out", "all", "has",
-    // extension tokens that leak in on double-extension names
     "jpg", "jpeg", "png", "gif", "bmp", "heic", "heif", "tiff", "webp", "pdf", "doc",
     "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "mov", "mp4", "avi", "mkv",
     "mp3", "wav", "zip", "rar", "lps",
 ];
 
-/// Density-clustering hyperparameters for *files* (looser than faces: a
-/// semantic group is broader than one identity).
-/// SOTA single-knob (HDBSCAN `min_cluster_size` philosophy, deep-research 2026-06-16):
-/// one `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose, normal, tight} shifts the cluster
-/// cosines so the owner tunes folder count with ONE lever instead of many opaque
-/// thresholds. Loose = lower cosine bar = broader / fewer folders; tight = higher
-/// bar = narrower / more folders. Applied identically on both engines so the
-/// chosen granularity round-trips cross-platform.
+/// Density-clustering hyperparameters for files (looser than faces: a semantic group is broader than one identity). One `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose, normal, tight} shifts the cluster cosines so the owner tunes folder count with one lever: loose = fewer, broader folders; tight = more, narrower. Applied identically on both engines.
 pub fn granularity_delta() -> f32 {
     match std::env::var("FILEID_RESTRUCTURE_GRANULARITY").as_deref() {
         Ok("loose") => -0.05,
         Ok("tight") => 0.05,
-        _ => 0.0, // "normal" / unset
+        _ => 0.0,
     }
 }
 
@@ -144,7 +114,7 @@ fn file_hyperparams() -> Hyperparameters {
     Hyperparameters {
         pass1_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
         pass2_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P2", 0.76) + d,
-        pass2_margin: 0.08 + d * 0.5,  // delta scales margin proportionally
+        pass2_margin: 0.08 + d * 0.5,
         pass3_variance_threshold: 0.06,
         pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
         pass3_max_splits: 5,
@@ -152,28 +122,31 @@ fn file_hyperparams() -> Hyperparameters {
     }
 }
 
-/// An existing folder learned from the current tree: its path + the mean
-/// (L2-normalized) CLIP embedding of the files currently in it.
+/// An existing folder learned from the current tree: its path + the mean (L2-normalized) CLIP embedding of the files currently in it.
 pub struct FolderPrototype {
     pub path: PathBuf,
     pub centroid: Vec<f32>,
-    /// Distinctive filename/folder-name tokens of this folder + its current
-    /// contents — the Dropbox "Smart Move" signal that names route as well as (or
-    /// better than) content. Used ADDITIVELY: strong name agreement can upgrade a
-    /// thin-margin content match's confidence, never override the content routing.
+    /// Distinctive filename/folder-name tokens of this folder and its contents (the Dropbox "Smart Move" signal). Used additively: strong name agreement can upgrade a thin-margin content match, never override the content routing.
     pub name_tokens: std::collections::HashSet<String>,
 }
 
-/// Name-routing thresholds, overlap coefficient = |a∩b| / min(|a|,|b|). At/above
-/// AUTO, the cluster's filenames agree strongly enough with the target folder to
-/// upgrade a thin-margin content match to Auto; at/above REASON the "filenames fit"
-/// note is added. Tuned against the labeled name-routing scenarios in the tests.
+/// Name-routing thresholds, overlap coefficient =
+/// a∩b
+/// / min(
+/// a
+/// ,
+/// b
+/// ). At/above AUTO the cluster's filenames agree strongly enough with the target folder to upgrade a thin-margin content match to Auto; at/above REASON the "filenames fit" note is added.
 const NAME_AGREE_AUTO: f32 = 0.30;
 const NAME_AGREE_REASON: f32 = 0.20;
 
-/// Overlap coefficient of two token sets: |a∩b| / min(|a|,|b|), 0 when either is
-/// empty. Less penalized by union size than Jaccard — a cluster that shares a
-/// folder's few distinctive tokens scores high even when each side has extra terms.
+/// Overlap coefficient
+/// a∩b
+/// / min(
+/// a
+/// ,
+/// b
+/// ), 0 when either is empty. Less penalized by union size than Jaccard, so a cluster sharing a folder's few distinctive tokens scores high.
 fn overlap_coefficient(
     a: &std::collections::HashSet<String>,
     b: &std::collections::HashSet<String>,
@@ -186,10 +159,7 @@ fn overlap_coefficient(
     inter as f32 / m as f32
 }
 
-/// Build prototypes from the files' *current* locations: each parent folder
-/// with ≥ `min_files` becomes a class whose centroid is the mean CLIP vector of
-/// its contents (Nearest-Class-Mean / Dropbox "Smart Move"). Zero user effort —
-/// the existing tree is the labeled ground truth.
+/// Prototypes from the files' current locations: each parent folder with ≥ `min_files` becomes a class whose centroid is the mean CLIP vector of its contents (Nearest-Class-Mean / Dropbox "Smart Move"); the existing tree is the labeled ground truth.
 pub fn folder_prototypes(files: &[SemanticFile], min_files: usize) -> Vec<FolderPrototype> {
     let mut by_folder: HashMap<PathBuf, Vec<&SemanticFile>> = HashMap::new();
     for f in files {
@@ -204,7 +174,6 @@ pub fn folder_prototypes(files: &[SemanticFile], min_files: usize) -> Vec<Folder
         }
         let clips: Vec<&[f32]> = fs.iter().map(|f| f.clip.as_slice()).collect();
         if let Some(centroid) = mean_unit(&clips) {
-            // Folder's own name tokens + every sibling filename's tokens.
             let mut name_tokens: std::collections::HashSet<String> =
                 filename_tokens(&path).into_iter().collect();
             for f in &fs {
@@ -215,13 +184,11 @@ pub fn folder_prototypes(files: &[SemanticFile], min_files: usize) -> Vec<Folder
             out.push(FolderPrototype { path, centroid, name_tokens });
         }
     }
-    // Deterministic order (path) so proposals are stable across runs.
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
 }
 
-/// Default time-gap threshold: 2 hours between consecutive photos signals a
-/// new event. Configurable via `FILEID_RESTRUCTURE_TIME_GAP` (seconds).
+/// 2 hours between consecutive photos signals a new event; configurable via `FILEID_RESTRUCTURE_TIME_GAP` (seconds).
 fn time_gap_secs() -> f64 {
     std::env::var("FILEID_RESTRUCTURE_TIME_GAP")
         .ok()
@@ -229,11 +196,7 @@ fn time_gap_secs() -> f64 {
         .unwrap_or(7_200.0)
 }
 
-/// Pre-segment photos by capture-time gap. Returns a vec of index groups; each
-/// group should be clustered independently so events separated by more than
-/// `time_gap_secs()` never compete in the same cluster. Files without a valid
-/// timestamp (time_unix <= 0) go in their own trailing group.
-/// (RESTRUCTURE.md §2 — "time-gap event segmentation cascade")
+/// Pre-segments photos by capture-time gap into index groups clustered independently, so events separated by more than `time_gap_secs()` never compete in one cluster. Files without a valid timestamp (time_unix <= 0) form a trailing group (RESTRUCTURE.md §2).
 fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
     let gap = time_gap_secs();
     let (mut timed, untimed): (Vec<usize>, Vec<usize>) =
@@ -262,19 +225,8 @@ fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
     segments
 }
 
-/// Classify `files` into proposed moves: each discovered cluster either extends
-/// the nearest confident existing folder or becomes a new tag-named group under
-/// `library_root`. Density-noise / singleton files are simply not returned — the
-/// caller routes anything left unmoved through its rule-cascade fallback.
-/// The image pass pre-segments files by capture-time gap before clustering so
-/// events separated by > `FILEID_RESTRUCTURE_TIME_GAP` seconds (default 2 h)
-/// never compete in the same cluster. (RESTRUCTURE.md §2)
-/// `used_group_names` is a caller-owned new-folder-name registry. The image /
-/// document / non-image passes all target the same `library_root`, so sharing
-/// one registry across them stops two passes independently minting the SAME new
-/// folder and silently merging unrelated content into it — the same de-collision
-/// the registry already gives clusters within a pass and across time-
-/// segments, extended library-wide.
+/// Classifies `files` into proposed moves: each cluster extends the nearest confident existing folder or becomes a new tag-named group under `library_root`. Noise/singleton files are not returned; the caller's rule cascade handles them. The image pass pre-segments by capture-time gap before clustering.
+/// `used_group_names` is a caller-owned new-folder-name registry shared by the image, document and non-image passes (all target `library_root`) so two passes can't mint the SAME new folder and silently merge unrelated content.
 pub(crate) fn semantic_classify(
     files: &[SemanticFile],
     prototypes: &[FolderPrototype],
@@ -288,8 +240,6 @@ pub(crate) fn semantic_classify(
     if segments.len() <= 1 {
         return semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), prototypes, library_root, profile, hp, used_group_names, settled);
     }
-    // Pre-segmented: cluster each time-gap window independently so content
-    // similarity doesn't merge events that are separated by hours or days.
     let mut all_moves = Vec::new();
     for idxs in &segments {
         let seg: Vec<&SemanticFile> = idxs.iter().map(|&i| &files[i]).collect();
@@ -316,7 +266,6 @@ fn semantic_classify_profiled(
     let fused: Vec<Vec<f32>> = files.iter().map(|f| fuse(f, &vocab, profile)).collect();
     let cluster_ids = cluster(&fused, hp, profile.quantized_vectors);
 
-    // Group file indices by cluster id.
     let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, &cid) in cluster_ids.iter().enumerate() {
         clusters.entry(cid).or_default().push(i);
@@ -324,26 +273,18 @@ fn semantic_classify_profiled(
 
     let mut moves = Vec::new();
 
-    // Prototype lookup by folder path for the stay-put guard below: a file
-    // whose CURRENT folder already fits it at the routing bar is well-placed,
-    // and a butler moves misplaced files — it doesn't reshuffle good ones.
+    // Prototype lookup by folder path for the stay-put guard: a file whose CURRENT folder already fits at the routing bar is well-placed, and a butler moves misplaced files, it doesn't reshuffle good ones.
     let proto_by_path: HashMap<&Path, &FolderPrototype> =
         prototypes.iter().map(|p| (p.path.as_path(), p)).collect();
 
-    // Group names already claimed by a *different* new-group cluster this run
-    // (or a prior time-segment run — the set is shared across all segments so
-    // two segments that both produce "Beach" get distinct folder names).
-    // Consulted ONLY by the new-group branch; the existing-folder branch
-    // legitimately routes many clusters into one user folder.
+    // Group names already claimed by a different new-group cluster this run (shared across time-segments so two segments producing "Beach" get distinct names). Consulted ONLY by the new-group branch; the existing-folder branch legitimately routes many clusters into one folder.
 
-    // Stable cluster iteration (smallest id first) — makes the collision
-    // disambiguation below deterministic across runs.
+    // Smallest cluster id first, so collision disambiguation is deterministic.
     let mut ids: Vec<usize> = clusters.keys().copied().collect();
     ids.sort_unstable();
     for cid in ids {
         let members = &clusters[&cid];
-        // Singletons (the clusterer's outliers) have no group signal — let the
-        // rule cascade place them.
+        // Singletons (the clusterer's outliers) have no group signal: the rule cascade places them.
         if members.len() < 2 {
             continue;
         }
@@ -352,11 +293,7 @@ fn semantic_classify_profiled(
             Some(c) => c,
             None => continue,
         };
-        // How tightly the cluster's members hug their centroid (mean cosine) —
-        // the core "are these really alike?" confidence signal.
         let coh = cohesion(&member_clip, &centroid);
-        // Distinctive filename tokens shared by this cluster — the name-routing
-        // signal matched against each candidate folder's tokens below.
         let cluster_name_tokens: std::collections::HashSet<String> = members
             .iter()
             .flat_map(|&i| filename_tokens(&files[i].source))
@@ -364,23 +301,12 @@ fn semantic_classify_profiled(
 
         let (dest_dir, category, confidence, reason, route_sim) =
             match nearest_two_folders(&centroid, prototypes) {
-                // Learn-your-style: route to the nearest confident existing
-                // folder. Auto-file only when the match is strong *and*
-                // unambiguous (clear margin over the runner-up) on a tight
-                // cluster; otherwise surface for one-click review.
-                // Containment guard: only an in-root prototype is a valid
-                // destination — routing to a folder outside library_root would
-                // be silently rejected by the apply layer (canonicalizes
-                // outside root), so such a match falls through to a new in-root
-                // group instead.
+                // Learn-your-style: route to the nearest confident existing folder. Auto-file only when the match is strong and unambiguous (clear margin over the runner-up) on a tight cluster; otherwise surface for review. Only an in-root prototype is a valid destination: a folder outside library_root would be silently rejected by the apply layer, so such a match falls through to a new in-root group.
                 Some((proto, sim, runner_up))
                     if sim >= profile.folder_match_cos && proto.path.starts_with(library_root) =>
                 {
                     let name = folder_display_name(&proto.path);
-                    // Name-routing (Dropbox Smart Move): how much this cluster's
-                    // filenames overlap the folder's name/sibling tokens. Additive —
-                    // strong agreement upgrades a thin-margin content match to Auto,
-                    // but never overrides the content routing decision itself.
+                    // Name-routing (Dropbox Smart Move): additive, so strong filename overlap upgrades a thin-margin content match to Auto but never overrides the content decision.
                     let name_sim = overlap_coefficient(&cluster_name_tokens, &proto.name_tokens);
                     let content_auto = sim >= profile.auto_folder_cos
                         && coh >= profile.review_cohesion
@@ -403,16 +329,10 @@ fn semantic_classify_profiled(
                     };
                     (proto.path.clone(), name, confidence, reason, Some(sim))
                 }
-                // Otherwise a new group, named from the cluster's most
-                // *distinctive* tags (c-TF-IDF), tiered by how tight + large it is.
                 _ => {
                     let terms = distinctive_terms(members, files, &global_freq);
                     let mut base = group_name_from_terms(&terms);
-                    // No distinctive tags → name the group by when it happened
-                    // ("June 2014") instead of minting "Unsorted N" folders.
-                    // Median capture time keeps one outlier timestamp from
-                    // mislabeling the whole event; undated clusters keep the
-                    // generic name.
+                    // No distinctive tags: name the group by when it happened ("June 2014") instead of minting "Unsorted N" folders. The median capture time keeps one outlier from mislabeling the event; undated clusters keep the generic name.
                     if terms.is_empty() {
                         let mut times: Vec<f64> = members
                             .iter()
@@ -426,30 +346,18 @@ fn semantic_classify_profiled(
                             base = format!("{} {}", super::restructure::month_name(month), year);
                         }
                     }
-                    // Disambiguate a name already claimed by another new-group
-                    // cluster so distinct clusters get distinct folders:
-                    // prefer the next distinctive term, then a numeric suffix.
                     let mut pretty = base.clone();
                     let safe_base = crate::util::path_safety::safe_filename_component(&pretty);
                     let mut safe = safe_base.clone();
-                    // Disambiguate in the SANITIZED namespace that actually backs
-                    // the folder. Two pretty names that differ only in chars
-                    // safe_filename_component maps to '_' (e.g. "16:9" and "16/9" →
-                    // "16_9") would otherwise collide into one physical directory.
-                    // Prefer the next distinctive term first.
+                    // Disambiguate in the SANITIZED namespace that backs the folder: names differing only in chars safe_filename_component maps to '_' ("16:9" vs "16/9") would otherwise collide into one directory. Prefer the next distinctive term first.
                     if used_group_names.contains(&safe)
                         && let Some(extra) = terms.get(2) {
                             pretty = format!("{} {}", base, title_case(extra));
                             safe = crate::util::path_safety::safe_filename_component(&pretty);
                         }
-                    // Numeric-suffix fallback. Build each candidate so the suffix
-                    // ALWAYS survives the 200-scalar filename cap: a base that
-                    // already sanitizes to ~200 chars would otherwise truncate every
-                    // "{base} {n}" to the SAME string, so the uniqueness check never
-                    // clears and the loop spins forever (hanging plan generation).
-                    // Reserve room on the (already-sanitized) base and append the
-                    // suffix directly — distinct n ⇒ distinct candidate ⇒ guaranteed
-                    // termination within |used_group_names|+1 iterations.
+                    // Numeric-suffix fallback: build each candidate so the suffix ALWAYS survives the 200-scalar filename cap. A base that already sanitizes to ~200 chars would otherwise truncate every "{base} {n}" to the same string, the uniqueness check would never clear and plan generation would hang. Distinct n ⇒ distinct candidate ⇒ termination within
+                    // used_group_names
+                    // +1 iterations.
                     const SAFE_NAME_MAX: usize = 200; // mirrors safe_filename_component MAX_LEN
                     let mut n = 2usize;
                     while used_group_names.contains(&safe) {
@@ -476,12 +384,7 @@ fn semantic_classify_profiled(
                         let shown: Vec<String> = terms.iter().take(3).map(|t| title_case(t)).collect();
                         format!("{} files sharing {}", members.len(), shown.join(", "))
                     };
-                    // Path-safe directory name (mirrors the person route):
-                    // illegal/separator chars in tag-derived names ("16:9",
-                    // "dog/cat") would mis-route or fail the move and break
-                    // cross-platform name parity. `safe` was computed during
-                    // dedup above so the uniqueness check ran in this same folder
-                    // namespace. Keep `pretty` for the human-facing category/reason.
+                    // Path-safe directory name (mirrors the person route): illegal/separator chars in tag-derived names ("16:9", "dog/cat") would mis-route or fail the move. `safe` was computed during dedup so uniqueness ran in the same namespace; `pretty` stays for the human-facing category/reason.
                     (library_root.join(&safe), pretty, confidence, reason, None)
                 }
             };
@@ -490,19 +393,12 @@ fn semantic_classify_profiled(
             let file = &files[i];
             let Some(name) = file.source.file_name() else { continue };
             let parent = file.source.parent();
-            // Already home: a move whose destination folder is the file's
-            // current folder is pure churn — never emit it. Record it as
-            // settled so the rule cascade can't re-propose a date-tree move
-            // for a file the semantic pass deliberately left in place.
+            // Already home: a move into the file's current folder is pure churn. Record it as settled so the rule cascade can't re-propose a date-tree move for a file the semantic pass deliberately left in place.
             if parent == Some(dest_dir.as_path()) {
                 settled.insert(file.file_id);
                 continue;
             }
-            // Stay-put guard: if the file's current folder is itself a valid
-            // style prototype and the file fits it at the routing bar, moving
-            // it is reshuffling, not organizing. Only a destination that fits
-            // decisively better (clears the routing margin) may pull it out;
-            // a freshly minted group never outranks a good existing home.
+            // Stay-put guard: if the file's current folder is itself a valid prototype and the file fits it at the routing bar, moving it is reshuffling. Only a destination that clears the routing margin may pull it out; a freshly minted group never outranks a good existing home.
             if !file.clip.is_empty()
                 && let Some(cur) = parent.and_then(|p| proto_by_path.get(p)) {
                     let fit = dot(&file.clip, &cur.centroid);
@@ -528,16 +424,8 @@ fn semantic_classify_profiled(
 }
 
 
-/// Cluster non-image files (documents, video, audio — anything without a CLIP
-/// image embedding) by a filename-token + content-tag bag-of-words signature, so
-/// a mixed library groups invoices/manuals/clips by *content* instead of dumping
-/// them all into `Documents/<Year>`. Additive: the image pass claims its files
-/// first, this handles the remainder, and the rule cascade still catches whatever
-/// neither clusters. The bag-of-words IS the representative vector (there is no
-/// image embedding), so the same density clusterer + learn-your-style folder
-/// matching apply unchanged under the tighter non-image profile.
-/// `used_group_names` is the caller-owned registry shared with the image and
-/// document passes so this pass can't mint a new folder name they already used.
+/// Clusters non-image files (documents, video, audio: no CLIP image embedding) by a filename-token + content-tag bag-of-words signature, so a mixed library groups by content instead of dumping into `Documents/<Year>`. Additive: the image pass claims its files first and the rule cascade catches the rest. The bag-of-words IS the representative vector, so the same clusterer and folder matching apply under the tighter non-image profile.
+/// `used_group_names` is the registry shared with the image and document passes.
 pub(crate) fn classify_non_image(
     files: &[SemanticFile],
     library_root: &Path,
@@ -548,10 +436,7 @@ pub(crate) fn classify_non_image(
     if sigs.len() < 2 {
         return Vec::new();
     }
-    // Learn-your-style targets, but NEVER generic dumping grounds (Downloads,
-    // Desktop, Temp, …): the whole point is to organize files OUT of those, so
-    // they must not become a prototype that routes everything back where it
-    // already is. Real user folders ("Taxes", "Invoices") still anchor.
+    // Learn-your-style targets, but NEVER generic dumping grounds (Downloads, Desktop, Temp, …): the point is to organize files out of those. Real user folders ("Taxes", "Invoices") still anchor.
     let protos: Vec<FolderPrototype> = folder_prototypes(&sigs, 4)
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
@@ -559,15 +444,8 @@ pub(crate) fn classify_non_image(
     semantic_classify_profiled(&sigs.iter().collect::<Vec<_>>(), &protos, library_root, non_image_profile(), file_hyperparams(), used_group_names, settled)
 }
 
-/// Document-content pass — cluster documents by their BGE text embedding (read from
-/// `text_embeddings`, stored in each file's `clip`), which reads the *content* rather
-/// than the filename. Far stronger than the filename-token bag-of-words fallback (an
-/// owner A/B on a real 533-doc corpus: nearest-neighbour-same-folder 49%→57%). Each
-/// `file.clip` MUST be the BGE vector; docs without an extractable-text embedding are
-/// excluded by the caller and fall through to `classify_non_image`. Uses doc-specific
-/// thresholds because BGE cosines sit lower than CLIP-image cosines. (RESTRUCTURE.md R3)
-/// `used_group_names` is the caller-owned registry shared with the image and
-/// non-image passes so this pass can't mint a new folder name they already used.
+/// Document-content pass: clusters documents by their BGE text embedding (from `text_embeddings`, stored in each file's `clip`), which reads content rather than filename (owner A/B on 533 real docs: nearest-neighbour-same-folder 49%→57%). Each `file.clip` MUST be the BGE vector; docs without one are excluded by the caller and fall through to `classify_non_image`. Doc-specific thresholds because BGE cosines sit lower than CLIP's (RESTRUCTURE.md R3).
+/// `used_group_names` is the registry shared with the image and non-image passes.
 pub(crate) fn classify_documents(
     files: &[SemanticFile],
     library_root: &Path,
@@ -584,13 +462,7 @@ pub(crate) fn classify_documents(
     semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), &protos, library_root, doc_profile(), doc_hyperparams(), used_group_names, settled)
 }
 
-/// Document content-embedding profile. The representative IS the 384-d BGE vector (so
-/// `w_clip` dominates; `w_tags`/`w_time` are tiny — a document has no meaningful capture
-/// time). Thresholds CALIBRATED 2026-06-17 on the owner's real ~1.4k-doc corpus: the
-/// engine MEAN-pools BGE, whose cosines compress high (within-folder cohesion ≈ 0.786,
-/// inter-folder centroid p90 ≈ 0.80), so the bars sit there — NOT at the lower CLS-pooled
-/// A/B values, which collapsed every doc into one folder. Validated: doc folder-agreement
-/// 46% (filenames) → 53%. Env-overridable. (RESTRUCTURE.md R3)
+/// Document content-embedding profile. The representative IS the 384-d BGE vector, so `w_clip` dominates and `w_tags`/`w_time` are tiny (a document has no meaningful capture time). Calibrated on the owner's ~1.4k-doc corpus: the engine MEAN-pools BGE, whose cosines compress high (within-folder cohesion ≈ 0.786, inter-folder centroid p90 ≈ 0.80), so the bars sit there, not at the lower CLS-pooled values that collapsed every doc into one folder. Env-overridable (RESTRUCTURE.md R3).
 fn doc_profile() -> Profile {
     Profile {
         w_clip: 0.92,
@@ -606,8 +478,7 @@ fn doc_profile() -> Profile {
     }
 }
 
-/// Cluster-merge cosines for the MEAN-pooled BGE document space (compresses high, like the
-/// image space — within-folder ≈ 0.786). Env-overridable; GRANULARITY still shifts all three.
+/// Cluster-merge cosines for the MEAN-pooled BGE document space (compresses high, within-folder ≈ 0.786). Env-overridable; GRANULARITY still shifts all three.
 fn doc_hyperparams() -> Hyperparameters {
     let d = granularity_delta();
     Hyperparameters {
@@ -621,13 +492,7 @@ fn doc_hyperparams() -> Hyperparameters {
     }
 }
 
-/// A folder that must never act as a learn-your-style prototype — a generic
-/// dumping ground the butler should organize files *out of*, not route them back
-/// into. Matches the exact junk names AND any folder whose first word is a
-/// dumping-ground word, so versioned/suffixed variants ("Desktop 1.0",
-/// "Downloads (2)", "Temp files") are caught too. All-digit names that are not a
-/// plausible year (export/DB artifacts like "332699") are machine noise, not a
-/// place a butler files things; year folders ("2019") stay valid targets.
+/// A folder that must never act as a learn-your-style prototype: matches the exact junk names AND any folder whose first word is a dumping-ground word ("Desktop 1.0", "Downloads (2)", "Temp files"). All-digit names that aren't a plausible year (export/DB artifacts like "332699") are machine noise; year folders ("2019") stay valid targets.
 pub(crate) fn is_junk_prototype_folder(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -652,14 +517,8 @@ pub(crate) fn is_junk_prototype_folder(path: &Path) -> bool {
     )
 }
 
-/// Build bag-of-words representatives for the non-image pass. Each file's `clip`
-/// slot becomes an L2-normalized multi-hot over a shared, frequency-capped vocab
-/// of (filename tokens ∪ content tags); `tags` keeps the same token set so the
-/// distinctive-term namer can still label the group. The input `clip` is ignored
-/// (non-image files have none). A file with no in-vocab token is dropped (no
-/// grouping signal) and falls through to the rule cascade.
+/// Bag-of-words representatives for the non-image pass: each file's `clip` becomes an L2-normalized multi-hot over a shared, frequency-capped vocab of (filename tokens ∪ content tags); `tags` keeps the token set so the namer can label the group. A file with no in-vocab token is dropped and falls through to the rule cascade.
 fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
-    // BTreeSet → deterministic sorted token order across runs.
     let token_sets: Vec<Vec<String>> = files
         .iter()
         .map(|f| {
@@ -688,14 +547,7 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
 
     let mut out = Vec::with_capacity(files.len());
     for (i, f) in files.iter().enumerate() {
-        // A file whose every token is unique to it (each token freq 1) shares NO
-        // signal with any other file, so it's orthogonal to all of them and can
-        // never cluster — leave it for the rule cascade. Excluding it up front
-        // (instead of trusting the density clusterer to noise-reject an orthogonal
-        // point) keeps the result deterministic across architectures: with
-        // k_nn >= n and all-tied zero similarities, the clusterer's kNN tie order
-        // is arch-sensitive, which made a degenerate lone file group-or-not by
-        // luck.
+        // A file whose every token is unique to it shares NO signal with any other file and can never cluster: exclude it up front rather than trusting the clusterer to noise-reject an orthogonal point, because with k_nn >= n and all-tied zero similarities the kNN tie order is arch-sensitive and a lone file would group-or-not by luck.
         if !token_sets[i].iter().any(|t| freq.get(t).copied().unwrap_or(0) >= 2) {
             continue;
         }
@@ -721,10 +573,7 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
     out
 }
 
-/// Lowercase alphanumeric filename tokens, extension dropped, split on any
-/// non-alphanumeric. Drops pure-numeric, very short, and generic camera/scan
-/// tokens — so `IMG_4821.heic` yields nothing while `acme_invoice_2023.pdf`
-/// yields `acme` + `invoice`.
+/// Lowercase alphanumeric filename tokens, extension dropped; drops pure-numeric, very short and generic camera/scan tokens, so `IMG_4821.heic` yields nothing while `acme_invoice_2023.pdf` yields `acme` + `invoice`.
 pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
     let stem = path
         .file_stem()
@@ -742,8 +591,7 @@ pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
 }
 
 
-/// Global tag frequency across all files — drives both the vocab cap and the
-/// c-TF-IDF inverse-document weighting in [`distinctive_terms`].
+/// Global tag frequency across all files: drives the vocab cap and the c-TF-IDF weighting in [`distinctive_terms`].
 fn tag_frequencies(files: &[&SemanticFile]) -> HashMap<String, usize> {
     let mut freq: HashMap<String, usize> = HashMap::new();
     for f in files {
@@ -754,10 +602,8 @@ fn tag_frequencies(files: &[&SemanticFile]) -> HashMap<String, usize> {
     freq
 }
 
-/// Top-`cap` tags by frequency → index map. Common tags carry grouping signal.
 fn vocab_from_freq(freq: &HashMap<String, usize>, cap: usize) -> HashMap<String, usize> {
     let mut ranked: Vec<(&String, &usize)> = freq.iter().collect();
-    // Frequency desc, then name for determinism.
     ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     ranked
         .into_iter()
@@ -772,16 +618,13 @@ fn build_tag_vocab(files: &[SemanticFile], cap: usize) -> HashMap<String, usize>
     vocab_from_freq(&tag_frequencies(&files.iter().collect::<Vec<_>>()), cap)
 }
 
-/// Fuse one file: per-block L2-normalize, scale by weight, concatenate, then
-/// L2-normalize the whole so the clusterer's cosine is meaningful.
+/// Per-block L2-normalize, scale by weight, concatenate, then L2-normalize the whole so the clusterer's cosine is meaningful.
 fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>, profile: Profile) -> Vec<f32> {
     let mut out = Vec::with_capacity(file.clip.len() + vocab.len() + 5);
 
-    // CLIP block (already unit; re-normalize defensively).
     let clip = l2_normalized(&file.clip);
     out.extend(clip.iter().map(|x| x * profile.w_clip));
 
-    // Tag multi-hot block.
     let mut tags = vec![0f32; vocab.len()];
     for t in &file.tags {
         if let Some(&idx) = vocab.get(t) {
@@ -791,7 +634,6 @@ fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>, profile: Profile) -
     let tags = l2_normalized(&tags);
     out.extend(tags.iter().map(|x| x * profile.w_tags));
 
-    // Time block: 5 features (see time_features). Byte-faithful with Swift engine.
     for v in time_features(file.time_unix) {
         out.push(v * profile.w_time);
     }
@@ -799,13 +641,7 @@ fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>, profile: Profile) -
     l2_normalized(&out)
 }
 
-/// Five time features: day-of-year cyclical (2), time-of-day cyclical (2),
-/// log-compressed absolute year (1). Together they separate:
-/// - events in different seasons (day-of-year)
-/// - morning vs evening sessions (time-of-day)
-/// - same calendar day in different years (log-year, monotonic)
-///
-/// Byte-faithful with the Swift engine. (RESTRUCTURE.md §2)
+/// Five time features: day-of-year cyclical (2), time-of-day cyclical (2), log-compressed absolute year (1). They separate seasons, morning vs evening, and the same calendar day in different years. Byte-faithful with the Swift engine (RESTRUCTURE.md §2).
 fn time_features(time_unix: f64) -> [f32; 5] {
     if time_unix <= 0.0 {
         return [0.0; 5];
@@ -815,8 +651,6 @@ fn time_features(time_unix: f64) -> [f32; 5] {
     let day_angle = std::f64::consts::TAU * (day as f64) / 365.0;
     let second_of_day = secs % 86_400;
     let tod_angle = std::f64::consts::TAU * (second_of_day as f64) / 86_400.0;
-    // log1p(years) / log1p(100): monotonic 0→1 over a 100-year range;
-    // separates same-calendar-day events in different years.
     let years = (time_unix / (365.25 * 86_400.0)).clamp(0.0, 100.0);
     let log_year = years.ln_1p() / 100.0_f64.ln_1p();
     [
@@ -829,19 +663,16 @@ fn time_features(time_unix: f64) -> [f32; 5] {
 }
 
 
-/// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
-/// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
+/// Two-pass density clustering: brute-force cosine kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
 fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec<usize> {
     const HNSW_MIN: usize = 5_000;
     let n = fused.len();
-    // Can't request more neighbors than other points exist; k_nn >= n made the kNN
-    // over an all-tied set arch-sensitive (see non_image_signatures).
+    // Can't request more neighbors than other points exist; k_nn >= n made the kNN over an all-tied set arch-sensitive (see non_image_signatures).
     let k = params.k_nn.min(n.saturating_sub(1).max(1));
 
     let hnsw = (n >= HNSW_MIN && !exact_only).then(|| crate::util::hnsw_index::DedupIndex::build(fused));
 
-    // Bounded top-k: O(n) partition instead of an O(n log n) full sort of all n-1
-    // neighbors when only k are used; sort just the k kept.
+    // Bounded top-k: O(n) partition instead of an O(n log n) sort of all n-1 neighbors when only k are used.
     let top_k = |mut hits: Vec<Neighbor>| {
         let cmp = |a: &Neighbor, b: &Neighbor| {
             b.similarity
@@ -855,10 +686,7 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
         hits.sort_by(cmp);
         hits
     };
-    // Below HNSW_MIN every list is computed once, in parallel, before clustering:
-    // the clusterer asks for each file's neighbours up to three times, and the
-    // per-query scalar scan was most of a plan's time (1.1 s of 1.9 s on 3,400
-    // photos). The Swift engine does the same with one Accelerate matrix multiply.
+    // Below HNSW_MIN every list is computed once, in parallel, up front: the clusterer asks for each file's neighbours up to three times, and the per-query scalar scan was most of a plan's time (1.1 s of 1.9 s on 3,400 photos).
     let exact: Option<Vec<Vec<Neighbor>>> = hnsw.is_none().then(|| {
         use rayon::prelude::*;
         (0..n)
@@ -879,8 +707,7 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
         fused,
         |i| match (&exact, &hnsw) {
             (Some(lists), _) => lists[i].clone(),
-            // Reuse one Search scratch across the sweep (a fresh one re-zeros an
-            // n-byte visited set per query — an O(n²) term over the pass).
+            // Reuse one Search scratch across the sweep: a fresh one re-zeros an n-byte visited set per query, an O(n²) term over the pass.
             (None, Some(idx)) => top_k(
                 idx.neighbours(&mut knn_search, fused, i, k)
                     .into_iter()
@@ -895,8 +722,7 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
 }
 
 
-/// Mean cosine of a cluster's members to its centroid — cluster tightness.
-/// Members and `centroid` are unit vectors, so dot == cosine.
+/// Mean cosine of a cluster's members to its centroid (unit vectors, so dot == cosine).
 fn cohesion(member_clip: &[&[f32]], centroid: &[f32]) -> f32 {
     if member_clip.is_empty() {
         return 0.0;
@@ -905,9 +731,7 @@ fn cohesion(member_clip: &[&[f32]], centroid: &[f32]) -> f32 {
     sum / member_clip.len() as f32
 }
 
-/// Nearest folder prototype to `centroid`, plus the runner-up similarity so the
-/// caller can gate on the top-1−top-2 margin (abstain when two folders fit
-/// almost equally — RESTRUCTURE.md §4).
+/// Nearest folder prototype to `centroid` plus the runner-up similarity, so the caller can gate on the top-1−top-2 margin and abstain when two folders fit almost equally (RESTRUCTURE.md §4).
 fn nearest_two_folders<'a>(
     centroid: &[f32],
     prototypes: &'a [FolderPrototype],
@@ -935,11 +759,7 @@ fn folder_display_name(path: &Path) -> String {
         .to_string()
 }
 
-/// A cluster's most *distinctive* tags by c-TF-IDF: frequent inside the cluster
-/// but rare across the whole library. This makes a name specific ("Beach Trip")
-/// instead of bland ("Photos") — RESTRUCTURE.md §5 calls distinctive terms the
-/// single highest-impact naming input. Ubiquitous tags (in every file → idf 0)
-/// drop out on their own.
+/// A cluster's most distinctive tags by c-TF-IDF (frequent inside the cluster, rare across the library), so a name is specific ("Beach Trip") not bland ("Photos"). Ubiquitous tags (idf 0) drop out on their own.
 fn distinctive_terms<'a>(
     members: &[usize],
     files: &'a [&SemanticFile],
@@ -958,15 +778,10 @@ fn distinctive_terms<'a>(
         .map(|(t, c)| {
             let tf = c as f32 / size;
             let df = *global_freq.get(t).unwrap_or(&1) as f32;
-            // Compute the idf's ln in f64 then narrow — f32 `logf` is libm-dependent
-            // (can differ Windows↔macOS by ~1 ULP), which could flip the tie order of
-            // two near-equal-score terms and pick a DIFFERENT group folder name across
-            // platforms. f64 `ln` is consistently correctly-rounded, matching the macOS
-            // engine's `Float(log(Double(...)))`.
+            // Compute idf's ln in f64 then narrow: f32 `logf` is libm-dependent (can differ Windows↔macOS by ~1 ULP), which could flip the tie order of near-equal terms and pick a different group folder name across platforms. f64 `ln` is consistently correctly rounded, matching the macOS `Float(log(Double(...)))`.
             (t, tf * (((total / df) as f64).ln().max(0.0) as f32))
         })
         .collect();
-    // Score desc, then name for determinism; drop zero-score (ubiquitous) tags.
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -979,7 +794,6 @@ fn distinctive_terms<'a>(
         .collect()
 }
 
-/// Title-case the top 1-2 distinctive terms into a folder name.
 fn group_name_from_terms(terms: &[&str]) -> String {
     let parts: Vec<String> = terms.iter().take(2).map(|t| title_case(t)).collect();
     if parts.is_empty() {
@@ -1047,7 +861,6 @@ mod tests {
         ((*state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
     }
 
-    /// Past the HNSW threshold, byte-identical vectors (copies of one file) must cluster together.
     #[test]
     fn identical_vectors_past_the_hnsw_threshold_share_a_cluster() {
         let _counting = crate::util::hnsw_index::tests::COUNTING.lock().unwrap_or_else(|e| e.into_inner());
@@ -1061,9 +874,7 @@ mod tests {
         assert!(ids[..40].iter().zip(&ids[3_500..3_540]).all(|(a, b)| a == b), "identical vectors share a cluster");
     }
 
-    /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold
-    /// they must not build a graph at all: counts HNSW distance evaluations (not time, so a loaded machine
-    /// cannot flip it). Building the graph for this shape took about 7 evaluations per pair of vectors.
+    /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold they must not build a graph at all: counts HNSW distance evaluations (not time, so load can't flip it); building the graph for this shape took about 7 evaluations per pair.
     #[test]
     fn quantized_vectors_past_the_hnsw_threshold_build_no_graph() {
         use crate::util::hnsw_index::tests::{COUNTED_DIM, COUNTING, EVALUATIONS};
@@ -1118,9 +929,7 @@ mod tests {
 
     #[test]
     fn well_placed_members_stay_put_instead_of_reshuffling() {
-        // Two folders that are equally good homes for the same content: every
-        // file already fits where it is, so the butler proposes NOTHING. Before
-        // the stay-put guard this reshuffled one whole folder into the other.
+        // Two folders that are equally good homes for the same content: every file already fits where it is, so the butler proposes NOTHING (the stay-put guard).
         let mut files = Vec::new();
         for i in 0..4 {
             files.push(file(i, &format!("/lib/A/a{i}.jpg"), vec![1.0, 0.0, 0.0, 0.0], &["dog"]));
@@ -1142,9 +951,7 @@ mod tests {
 
     #[test]
     fn misplaced_members_still_route_to_the_matching_folder() {
-        // Four files establish the "Beach" prototype; two identical strays live
-        // in an un-prototyped folder. Only the strays move, and no move ever
-        // targets the folder a file already sits in.
+        // Four files establish the "Beach" prototype; two identical strays sit in an un-prototyped folder. Only the strays move, and no move targets the folder a file already sits in.
         let mut files = Vec::new();
         for i in 0..4 {
             files.push(file(i, &format!("/lib/Beach/a{i}.jpg"), vec![1.0, 0.0, 0.0, 0.0], &["beach"]));
@@ -1170,9 +977,7 @@ mod tests {
 
     #[test]
     fn labelled_tree_moves_only_the_strays() {
-        // Labelled check shared with Swift: 44 well-placed files (four 8-file topic
-        // folders plus two identical-content twin folders of 6) and 6 labelled strays.
-        // A plan is better when it moves fewer well-placed files yet routes the strays.
+        // Labelled check shared with Swift: 44 well-placed files (four 8-file topic folders plus two identical-content twin folders of 6) and 6 labelled strays. A plan is better when it moves fewer well-placed files yet routes the strays.
         let vec = |cls: usize, i: usize| {
             let mut v = vec![0.0f32; 8];
             v[cls] = 1.0;
@@ -1225,7 +1030,6 @@ mod tests {
 
     #[test]
     fn tagless_dated_cluster_is_named_by_month_year_not_unsorted() {
-        // 2014-06-11 UTC.
         let june_2014 = 1_402_444_800.0;
         let mut files = Vec::new();
         for i in 0..6 {
@@ -1257,7 +1061,6 @@ mod tests {
 
     #[test]
     fn two_content_groups_separate_and_get_distinct_categories() {
-        // Two tight content clusters (orthogonal CLIP directions + distinct tags).
         let mut files = Vec::new();
         for i in 0..6 {
             files.push(file(i, &format!("src/dog{i}.jpg"), vec![1.0, 0.0, 0.0, 0.0], &["dog", "park"]));
@@ -1272,11 +1075,7 @@ mod tests {
 
     #[test]
     fn sanitization_colliding_group_names_get_distinct_folders() {
-        // Two distinct content clusters whose distinctive tags differ ONLY in
-        // chars safe_filename_component maps to '_' ("16:9" vs "16/9" → "16_9").
-        // The dedup must back them with DISTINCT physical directories, not
-        // collapse both into one folder — and the numeric-suffix loop must
-        // terminate.
+        // Two clusters whose distinctive tags differ ONLY in chars safe_filename_component maps to '_' ("16:9" vs "16/9"): dedup must back them with DISTINCT directories and the numeric-suffix loop must terminate.
         let mut files = Vec::new();
         for i in 0..6 {
             files.push(file(i, &format!("a/r{i}.jpg"), vec![1.0, 0.0, 0.0, 0.0], &["16:9"]));
@@ -1299,7 +1098,6 @@ mod tests {
 
     #[test]
     fn cluster_routes_to_matching_existing_folder() {
-        // A cluster of "dog" photos; an existing folder whose prototype matches.
         let files: Vec<SemanticFile> = (0..5)
             .map(|i| file(i, &format!("inbox/d{i}.jpg"), vec![1.0, 0.0, 0.0], &["dog"]))
             .collect();
@@ -1331,7 +1129,6 @@ mod tests {
 
     #[test]
     fn distinctive_naming_drops_ubiquitous_tags() {
-        // "photo" tags every file (idf → 0, dropped); the rarer tags name groups.
         let mut files = Vec::new();
         for i in 0..6 {
             files.push(file(i, &format!("a/t{i}.jpg"), vec![1.0, 0.0, 0.0], &["photo", "tree"]));
@@ -1363,9 +1160,7 @@ mod tests {
         assert!(moves.iter().all(|m| m.reason.as_deref().unwrap_or("").contains("Dogs")));
     }
 
-    // Labeled ground truth: filename agreement with a target folder is a strong
-    // routing signal that can decide a thin-margin content match. These encode the
-    // expert call on what SHOULD happen and pin the additive behavior.
+    // Labeled ground truth: filename agreement with a target folder is a strong routing signal that can decide a thin-margin content match; these pin the additive behavior.
 
     #[test]
     fn folder_prototypes_collect_name_tokens() {
@@ -1381,9 +1176,7 @@ mod tests {
 
     #[test]
     fn name_agreement_upgrades_a_thin_content_match_to_auto() {
-        // CONTENT only weakly matches (cosine ~0.82, between the calibrated 0.80 match bar
-        // and the 0.86 content-auto bar) but the FILENAMES clearly belong in the folder →
-        // auto-file on the name evidence.
+        // CONTENT only weakly matches (cosine ~0.82, between the 0.80 match bar and the 0.86 content-auto bar) but the FILENAMES clearly belong in the folder: auto-file on the name evidence.
         let files: Vec<SemanticFile> = (0..3)
             .map(|i| file(i, &format!("inbox/acme_invoice_part{i}.pdf"), vec![0.82, 0.5724, 0.0], &[]))
             .collect();
@@ -1410,8 +1203,7 @@ mod tests {
 
     #[test]
     fn thin_content_match_without_name_agreement_stays_review() {
-        // The control: same thin content match, filenames carry NO signal → the
-        // confidence must stay Review. Name-routing is additive, never fabricated.
+        // Control: the same thin content match with filenames carrying NO signal stays Review; name-routing is additive, never fabricated.
         let files: Vec<SemanticFile> = (0..3)
             .map(|i| file(i, &format!("inbox/d{i}.jpg"), vec![0.6, 0.8, 0.0], &[]))
             .collect();
@@ -1439,10 +1231,7 @@ mod tests {
         assert!(filename_tokens(Path::new("/a/Screenshot 2024-01-02.png")).is_empty());
     }
 
-    /// The R1 fix: non-image files (no CLIP embedding — `clip` is empty) cluster
-    /// by their filename+tag bag-of-words, so a mixed download dir groups invoices
-    /// and trip clips into two content folders instead of one Documents/<Year>
-    /// dump. A filename sharing no token (singleton) is left for the rule cascade.
+    /// Non-image files (empty `clip`) cluster by filename+tag bag-of-words, so a mixed download dir groups invoices and trip clips into two content folders instead of one Documents/<Year> dump; a filename sharing no token (singleton) is left for the rule cascade.
     #[test]
     fn non_image_pass_groups_by_filename_content() {
         let mut files = Vec::new();
