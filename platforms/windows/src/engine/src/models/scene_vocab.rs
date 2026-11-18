@@ -1,22 +1,4 @@
-// CLIP zero-shot scene-tagging vocabulary + scorer.
-//
-// macOS produces scan-time scene tags from Apple's Vision classifier — a
-// *scene* taxonomy ("beach", "kitchen", "document"). Windows has no
-// OS-native classifier of comparable quality, so the port previously used a
-// MobileNetV3 ImageNet-1k classifier: an *object* classifier whose argmax
-// labels ("breakwater", "radio telescope") are the wrong taxonomy for
-// "what's in this photo" tags, and which the user reported as "horrible".
-//
-// This module replaces it with CLIP zero-shot classification. The scan
-// pipeline already computes a CLIP ViT-B/32 image embedding per file (for
-// dedup + semantic search); we score that embedding against a curated
-// vocabulary of scene/content labels embedded with the matching CLIP text
-// encoder, so both share one 512-d space. The label matrix is generated
-// offline by `examples/gen_scene_matrix.rs` and compiled into the binary, so
-// scene tagging needs no text model at scan time.
-//
-// Cost: the per-file marginal work is a tiny [N×512] mat-vec, much cheaper
-// than the ONNX classifier inference it replaces.
+// CLIP zero-shot scene tags. The image embedding (already computed for dedup and search) is scored against a label matrix precomputed by `examples/gen_scene_matrix.rs`, so scene tagging needs no text model at scan time. Replaces an ImageNet object classifier, whose labels are the wrong taxonomy for scene tags.
 
 use std::sync::{Arc, OnceLock};
 
@@ -36,53 +18,37 @@ mod scene_embeddings {
 pub use scene_embeddings::SCENE_EMBEDDINGS;
 
 
-/// Curated 1-2 word scene/content labels scored by CLIP zero-shot. Chosen to
-/// cover the common contents of a personal file library — outdoor/indoor
-/// scenes, people, animals, food, documents, and graphic types — and to read
-/// well as a one-word chip after `TagChip.FormatTag` title-cases them. This
-/// is the primary accuracy lever: edit here, force a re-scan, inspect the
-/// persisted `tags.score`, and adjust. Keep entries lowercase and natural so
-/// the prompt templates ("a photo of a {}") read like real captions.
+/// Curated 1-2 word scene/content labels scored by CLIP zero-shot. Keep entries lowercase and natural: they fill the "a photo of a {}" prompt templates and are title-cased by `TagChip.FormatTag`.
 pub static SCENE_LABELS: &[&str] = &[
-    // ── Outdoor scenes
     "beach", "ocean", "lake", "river", "waterfall", "mountain", "hill",
     "forest", "jungle", "desert", "field", "meadow", "garden", "park",
     "snow", "glacier", "canyon", "cave", "volcano", "island", "harbor",
     "sunset", "sunrise", "night sky", "rainbow", "storm", "fog",
     "city street", "city skyline", "bridge", "road", "highway", "alley",
     "countryside", "farm", "vineyard", "ruins", "cemetery",
-    // ── Indoor scenes
     "kitchen", "bedroom", "living room", "bathroom", "dining room",
     "office", "classroom", "library", "restaurant", "cafe", "bar",
     "store", "shopping mall", "gym", "hospital", "church", "temple",
     "museum", "theater", "stage", "concert", "warehouse", "garage",
     "hallway", "staircase", "rooftop", "balcony", "swimming pool",
-    // ── People
     "portrait", "selfie", "group photo", "crowd", "baby", "child",
     "wedding", "graduation", "birthday party", "dancing", "sports game",
     "running", "hiking", "skiing", "surfing", "fishing",
-    // ── Animals
     "dog", "cat", "bird", "horse", "fish", "wildlife", "insect",
     "butterfly", "farm animal", "zoo animal", "reptile", "pet",
-    // ── Food & drink
     "food", "meal", "dessert", "cake", "pizza", "fruit", "vegetables",
     "coffee", "cocktail", "barbecue", "breakfast",
-    // ── Plants
     "flower", "tree", "houseplant", "leaves", "mushroom",
-    // ── Vehicles & objects
     "car", "motorcycle", "bicycle", "boat", "ship", "airplane", "train",
     "bus", "truck", "furniture", "jewelry", "clothing", "shoes",
     "electronics", "machinery", "tools", "books", "toys", "artwork",
     "statue", "fireworks",
-    // ── Documents & text
     "document", "handwriting", "screenshot", "receipt", "invoice",
     "spreadsheet", "presentation slide", "menu", "business card", "form",
     "certificate", "book page", "newspaper", "sign", "poster", "ticket",
     "map", "chart", "diagram", "user interface",
-    // ── Graphic / art types
     "painting", "drawing", "sketch", "illustration", "comic", "logo",
     "meme", "infographic", "pattern", "texture",
-    // ── Built environment
     "architecture", "building interior", "construction site",
 ];
 
@@ -98,25 +64,8 @@ pub static PROMPT_TEMPLATES: &[&str] = &[
     "a {}.",
 ];
 
-/// Minimum **cosine similarity** (NOT a softmax probability) for a label to be
-/// emitted as a tag. Both the image embedding and each label embedding are
-/// L2-normalized, so their dot product is the cosine in [-1, 1]. Thresholding
-/// the raw cosine is the correct CLIP zero-shot deployment: it emits only
-/// genuine matches and emits NOTHING when the image matches no label.
-///
-/// The prior code softmaxed cosine×100 over the whole vocabulary and
-/// thresholded the *probability*, which is razor-peaky — the single top label
-/// scored ~0.99 even when its true cosine was mediocre, so every file got a
-/// confident WRONG tag. That was the "10% accurate / worthless" report.
-///
-/// 0.15 is the tuned floor for MobileCLIP-S2; this is the primary accuracy
-/// lever. History: 0.24 filtered out almost everything → 0.18 surfaced some
-/// chips but many images still came back with no scene tag (year-only).
-/// 0.15 biases harder toward recall — CLIP scene tags are now the canonical
-/// auto-tagger (no VLM auto-tag pass behind them), so an approximate chip
-/// beats a blank chip. Force a re-tag and inspect persisted `tags.score`
-/// (the raw cosine) to tune: raise to drop weak/wrong tags, lower for more
-/// recall.
+/// Minimum cosine similarity (not a softmax probability) for a label to be emitted as a tag. Both embeddings are L2-normalized, so the dot product is the cosine, and an image matching no label emits nothing. A softmax over cosine×100 made the top label look confident even at a mediocre cosine.
+/// Tuned against the shipped CLIP model: raise to drop weak tags, lower for more recall. Tune against the persisted tags.score (the raw cosine).
 pub const SCENE_COSINE_THRESHOLD: f32 = 0.15;
 
 /// Max scene tags emitted per file. macOS Vision surfaces a handful of
@@ -163,14 +112,7 @@ impl SceneLabeler {
         }
 
         let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(prompts.len());
-        // Fast path: one ONNX run per BUILD_BATCH prompts, assuming the text
-        // export has a dynamic batch axis. If it instead pins batch=1 (some
-        // Xenova exports do), the batched run errors on a shape mismatch. Don't
-        // let that bubble up and disable scene tagging entirely (labeler =
-        // None → every file silently gets zero scene tags) — fall back to a
-        // per-prompt embed(), which uses a (1,77) input and works against a
-        // batch-pinned model. Once batched fails we stay sequential for the
-        // remaining chunks rather than re-failing (and re-logging) each batch.
+        // Fast path: one batched ONNX run per BUILD_BATCH prompts. Exports that pin batch=1 fail the batched run; fall back to per-prompt embed() rather than disabling scene tagging, and stay sequential afterwards.
         let mut use_sequential = false;
         for chunk in prompts.chunks(BUILD_BATCH) {
             if !use_sequential {

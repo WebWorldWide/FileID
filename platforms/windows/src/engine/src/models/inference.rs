@@ -18,7 +18,6 @@ use tract_onnx::prelude::{
 };
 use tract_onnx::tract_hir::infer::Factoid;
 
-/// The backend label tract sessions report.
 pub const TRACT_CPU: &str = "tract-cpu";
 
 /// Threads one matmul may use: `FILEID_TRACT_THREADS` when set (`1` keeps tract
@@ -40,7 +39,6 @@ pub fn matmul_threads() -> usize {
     })
 }
 
-/// One dimension of a model input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dim {
     Fixed(usize),

@@ -62,7 +62,6 @@ const YELLOW: [u8; 3] = [240, 210, 20];
 const WHITE: [u8; 3] = [255, 255, 255];
 const GRAY: [u8; 3] = [200, 200, 200];
 
-/// Renders the deterministic probe set into `directory`.
 pub fn write_probes(directory: &Path) -> Result<Vec<Probe>> {
     std::fs::create_dir_all(directory)?;
     let canvas = |background: [u8; 3]| RgbImage::from_pixel(448, 448, Rgb(background));
@@ -150,7 +149,6 @@ fn record(measurement: &mut Measurement, timings: Option<Timings>) {
     }
 }
 
-/// Samples a process's resident memory until finished.
 struct PeakSampler {
     pid: Option<u32>,
     peak: Arc<AtomicU64>,
@@ -394,7 +392,6 @@ fn load_all(path: &Path, hardware: &str) -> Store {
     serde_json::from_slice(&bytes).ok().or_else(|| import_legacy(path, &bytes, hardware)).unwrap_or_default()
 }
 
-/// Benchmarks recorded for `hardware`, keyed by model id.
 pub fn load_in(path: &Path, hardware: &str) -> BTreeMap<String, ModelBenchmark> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect()
@@ -409,7 +406,6 @@ pub fn save_in(path: &Path, model: &str, benchmark: ModelBenchmark, hardware: &s
     write_store(path, &store)
 }
 
-/// Benchmarks recorded on this machine, keyed by model id.
 pub fn local_results() -> std::collections::HashMap<String, ModelBenchmark> {
     store_path().map(|p| load_in(&p, &hardware())).unwrap_or_default().into_iter().collect()
 }

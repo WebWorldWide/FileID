@@ -1,16 +1,5 @@
-// RAM++ (Recognize Anything Plus) image tagger — the universal FileID tagger.
-//
-// WHY this and not a VLM: tagging must run on every machine and be
-// license-clean. RAM++ (Apache-2.0, Swin-Large @ 384px, 4585-tag English
-// vocabulary with frozen tag embeddings) is a single forward pass that runs on
-// tract (CPU) like the other ONNX models. The VLM is reserved for opt-in Deep
-// Analyze.
-//
-// Inference order: decode → bilinear resize to 384×384 → ImageNet mean/std
-// normalize → CHW f32 → tract session run → sigmoid → threshold + top-k → map tag
-// indices to strings. The ONNX is produced by shared/scripts/export_ram_plus_onnx.py;
-// the contract (input "image" [1,3,384,384] f32, output "logits" [1,4585]) and
-// the ImageNet constants below MUST stay in sync with that script.
+// RAM++ (Apache-2.0) image tagger: the universal tagger, since tagging must run on every machine and stay license-clean. A single tract (CPU) forward pass; the VLM is reserved for opt-in Deep Analyze.
+// The ONNX comes from shared/scripts/export_ram_plus_onnx.py. Its contract (input "image" [1,3,384,384] f32, output "logits" [1,4585]) and the ImageNet constants below must stay in sync with that script.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -25,47 +14,20 @@ const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 pub const INPUT_SIZE: u32 = 384;
 const INV_255: f32 = 1.0 / 255.0;
 
-/// Default sigmoid-probability cutoff. RAM++ is calibrated with per-class
-/// thresholds (~0.68 mean); a single global cutoff is the v1 approximation,
-/// overridable via FILEID_RAMPLUS_THRESHOLD. WS4 adds a per-class
-/// `ram_plus_thresholds.txt` sidecar (model.class_threshold) that supersedes
-/// this when present.
+/// Default sigmoid cutoff, used when no per-class sidecar (`ram_plus_thresholds.txt`) is present. Overridable via FILEID_RAMPLUS_THRESHOLD.
 const DEFAULT_THRESHOLD: f32 = 0.68;
-/// Cap RAM++'s own emissions well below the scan pipeline's 16-tag total cap.
-/// Biased to precision (8, not 12): only the most-confident content tags survive,
-/// so Library cards read clean and Year/camera/OCR extras keep slots. Lowered
-/// from 12 — users reported tag sets feeling "loose" (too many weak labels).
+/// Cap RAM++'s own emissions below the scan pipeline's 16-tag total cap, biased to precision so Year/camera/OCR extras keep slots.
 const DEFAULT_MAX_TAGS: usize = 8;
 
-/// Hard precision floor under the per-class thresholds. RAM++'s exported
-/// `class_threshold`s are F1-balanced; a few common classes calibrate quite low,
-/// which surfaces weak tags. Clamping the effective cutoff up to this floor
-/// trades a little recall for noticeably cleaner, higher-confidence tags.
-/// Raised from 0.5 → users reported generic/wrong tags ("catch", dog→bear);
-/// overridable per-run via FILEID_RAMPLUS_PRECISION_FLOOR for threshold sweeps.
+/// Hard precision floor under the per-class thresholds: F1-balanced thresholds calibrate some common classes low and surface weak tags. Overridable via FILEID_RAMPLUS_PRECISION_FLOOR for threshold sweeps.
 const DEFAULT_PRECISION_FLOOR: f32 = 0.62;
 
-/// RAM++ vocab tags that read as noise on a Library card and get filtered from
-/// the emitted set. Three families:
-///   - medium words (`image`/`photo`/…): the file already *is* a photo.
-///   - `face`: faces are surfaced by the People tab (the underlying signal still
-///     lives in `has_faces`).
-///   - `catch` + posture/clothing-state fillers (`stand`/`sit`/`lay`/`pose`/
-///     `wear`): content-free labels that fire on nearly every human photo and
-///     add no search/organization value. "catch" was also a frequent
-///     false-positive (it fired on dogs, bears, and sports shots alike); the
-///     posture fillers were the dominant "tags feel too generic" offenders on a
-///     real 100-photo family-library sample (stand 47×, pose 20×, …).
-///
-/// Extend WITHOUT a rebuild via the `ram_plus_suppress.txt` sidecar (one tag per
-/// line, next to the tag list), merged case-insensitively.
+/// RAM++ vocab tags that read as noise on a Library card and are filtered from the emitted set: medium words (`image`/`photo`), `face` (surfaced by the People tab), and `catch` plus posture/clothing fillers (`stand`/`sit`/`lay`/`pose`/`wear`).
+/// Extend without a rebuild via the `ram_plus_suppress.txt` sidecar (one tag per line, merged case-insensitively).
 const SUPPRESSED_TAGS: &[&str] = &[
     "image", "photo", "photograph", "photography", "picture", "face", "catch",
     "stand", "sit", "lay", "pose", "wear",
-    // Measured on the Mac (2026-10-21, 100 owner photos): colours, body parts and
-    // "person/play/game" were 93 of 790 tags and never helped search. On the
-    // private 499-photo set (2026-11-12) dropping them, with `refine_tags`,
-    // moved held-out subject F1 0.537 -> 0.548 by freeing slots.
+// Dropping these frees tag slots without hurting held-out subject F1.
     "person", "people", "hair", "head", "hand", "play", "game", "make", "fill", "dark",
     "blue", "red", "white", "black", "green", "brown", "yellow", "pink", "gray", "grey", "purple",
 ];
@@ -83,7 +45,6 @@ fn is_suppressed_builtin(tag: &str) -> bool {
     SUPPRESSED_TAGS.iter().any(|s| s.eq_ignore_ascii_case(tag))
 }
 
-/// Suppressed = built-in set OR the sidecar set, both case-insensitive.
 fn is_suppressed(tag: &str, extra: &HashSet<String>) -> bool {
     is_suppressed_builtin(tag) || (!extra.is_empty() && extra.contains(&tag.to_ascii_lowercase()))
 }
@@ -206,10 +167,7 @@ impl RamPlusTagger {
             .filter(|t| (0.0..=1.0).contains(t))
             .unwrap_or(DEFAULT_PRECISION_FLOOR);
 
-        // `select_tags` clamps the global cut UP to the precision floor, so a
-        // FILEID_RAMPLUS_THRESHOLD sweep below the floor (default 0.62) is a
-        // silent no-op. Warn once so the operator lowers the floor in lockstep
-        // rather than chasing a knob that does nothing (#14).
+// `select_tags` clamps the global cut UP to the precision floor, so a FILEID_RAMPLUS_THRESHOLD sweep below the floor is a silent no-op. Warn once so the operator lowers the floor in lockstep.
         if let Some(t) = env_threshold
             && t < precision_floor {
                 tracing::warn!(
@@ -294,7 +252,6 @@ impl RamPlusTagger {
         Ok(self.select_tags(&logits))
     }
 
-    /// The model's raw per-tag logits for one pre-normalized input tensor.
     fn logits(&mut self, chw: Array4<f32>) -> Result<Vec<f32>> {
         let input_name = self.input_name.clone();
         let logits = self
@@ -315,14 +272,7 @@ impl RamPlusTagger {
         Ok(logits)
     }
 
-    /// Batched [`tag`]: preprocess N images into ONE (N,3,384,384) tensor and run
-    /// a single forward. A lone 384² image leaves a ~52-TFLOPS GPU <1% utilized —
-    /// RAM++ at batch=1 is launch/latency-bound, not compute-bound (measured
-    /// 670 ms/img on an RTX 2060; adding concurrent sessions regressed) — so
-    /// batching fills the kernels and is the throughput fix (HW-4). REQUIRES an
-    /// ONNX exported with a dynamic batch axis (export_ram_plus_onnx.py
-    /// --dynamic-batch); a fixed-batch=1 model errors at run. Returns one tag
-    /// list per input, in order.
+/// Batched [`tag`]: one (N,3,384,384) forward over N images, returning one tag list per input in order. Batch=1 leaves some GPUs launch-bound, so batching is the throughput fix there. Requires an ONNX exported with a dynamic batch axis (`export_ram_plus_onnx.py --dynamic-batch`); a fixed-batch=1 model errors at run.
     pub fn tag_batch(&mut self, imgs: &[(&[u8], u32, u32)]) -> Result<Vec<Vec<(String, f32)>>> {
         use ndarray::s;
         if imgs.is_empty() {
@@ -513,7 +463,6 @@ mod tests {
         for (tag, masked) in tags.iter().zip(&mask) {
             assert_eq!(*masked, is_suppressed(tag, &extra));
         }
-        // Every logit is confident; only unsuppressed tags come back, best first.
         let logits = [3.0, 9.0, 5.0, 8.0, 7.0, 4.0];
         let picked = select_tags_from(&logits, &tags, &mask, None, 0.5, 0.0, 16);
         assert_eq!(picked.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["beach", "ball", "dog"]);
@@ -597,25 +546,20 @@ mod tests {
 
     #[test]
     fn generic_medium_tags_are_suppressed() {
-        // Image-medium words + the People-redundant "face" + the noisy "catch"
-        // are filtered (case-insensitively); real content tags pass through.
         assert!(is_suppressed_builtin("photo"));
         assert!(is_suppressed_builtin("image"));
         assert!(is_suppressed_builtin("face"));
         assert!(is_suppressed_builtin("catch"));
         assert!(is_suppressed_builtin("Photo"));
         assert!(is_suppressed_builtin("CATCH"));
-        // Posture / clothing-state fillers (the "too generic" offenders).
         assert!(is_suppressed_builtin("stand"));
         assert!(is_suppressed_builtin("sit"));
         assert!(is_suppressed_builtin("lay"));
         assert!(is_suppressed_builtin("pose"));
         assert!(is_suppressed_builtin("wear"));
-        // Generic people words, body parts and colours (Mac parity).
         assert!(is_suppressed_builtin("person"));
         assert!(is_suppressed_builtin("play"));
         assert!(is_suppressed_builtin("Blue"));
-        // Content words + emotion tags survive.
         assert!(!is_suppressed_builtin("graduation"));
         assert!(!is_suppressed_builtin("mountain"));
         assert!(!is_suppressed_builtin("smile"));

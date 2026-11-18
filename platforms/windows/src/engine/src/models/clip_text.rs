@@ -1,8 +1,4 @@
-// CLIP text encoder — query-time semantic search. Tokenize a string
-// via `ClipTokenizer`, run the ONNX session, L2-normalize, return 512
-// floats. Held inside a process-static `OnceLock` in main.rs so
-// back-to-back queries reuse the session (avoids recompiling
-// the model on every keystroke).
+// Query-time CLIP text encoder. Held in a process-static OnceLock so back-to-back keystroke queries reuse one session.
 
 use std::path::{Path, PathBuf};
 
@@ -41,11 +37,7 @@ impl ClipText {
         for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
             padded[i] = *t as i64;
         }
-        // ENG-65: CLIP pools the sentence embedding at the EOT token (the
-        // highest-id token). A query longer than the 77-token context had EOT
-        // truncated off the end, so the model pooled at a content token → a
-        // wrong embedding. Force the original EOT into the last slot when
-        // truncated so the pooling position is correct.
+        // CLIP pools at the EOT token: when truncating an over-length query, keep EOT in the last slot.
         if tokens.len() > CONTEXT_LEN
             && let Some(&eot) = tokens.last() {
                 padded[CONTEXT_LEN - 1] = eot as i64;
@@ -91,7 +83,6 @@ impl ClipText {
             for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
                 flat[qi * CONTEXT_LEN + i] = *t as i64;
             }
-            // ENG-65: preserve EOT for an over-length query (see embed()).
             if tokens.len() > CONTEXT_LEN
                 && let Some(&eot) = tokens.last() {
                     flat[qi * CONTEXT_LEN + (CONTEXT_LEN - 1)] = eot as i64;

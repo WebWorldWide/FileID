@@ -1,13 +1,5 @@
-// BGE-small-en-v1.5 text embedding wrapper. Maps a string to a 384-d
-// L2-normalized float32 embedding via the BERT-family WordPiece tokenizer
-// (`models::wordpiece_tokenizer`) + ONNX inference. Used for semantic search
-// over document text. It is a different vector space from CLIP, so the
-// dbwriter persists these into a parallel `text_embeddings` table keyed by
-// model.
-//
-// Input names are read from the session so a re-export with different
-// names still binds; token_type_ids is passed only when the session
-// actually advertises it (some BGE exports drop it).
+// BGE-small-en-v1.5 document embeddings: 384-d, L2-normalized, stored in the parallel text_embeddings table (a different vector space from CLIP).
+// Input names come from the session: some exports drop token_type_ids, so it is bound only when advertised.
 
 use std::path::{Path, PathBuf};
 
@@ -38,11 +30,7 @@ impl BgeText {
         let tokenizer = WordPieceTokenizer::from_vocab_file(vocab_txt.as_ref(), true)
             .context("loading BGE vocab.txt")?;
 
-        // BGE is a tiny 384-d text encoder over short document strings, off the
-        // GPU-bound image hot path, so it always runs on the CPU: on a small-VRAM
-        // card it must not consume VRAM or contend on the accelerator queue at
-        // scan start. Semantic doc-search is unchanged (same weights, same
-        // output) — only where it runs differs.
+        // Always CPU: a tiny encoder over short strings must not take VRAM or contend on the accelerator queue at scan start.
         let sequence = [Dim::Fixed(1), Dim::Symbol("S")];
         let session = InferenceSession::load(
             "BGE",
@@ -112,8 +100,6 @@ impl BgeText {
             );
         }
 
-        // Mean-pool over the sequence dim using the attention mask, then
-        // L2-normalize. Matches BGE-small's canonical pooling.
         let mut emb = vec![0f32; HIDDEN];
         let mut total: f32 = 0.0;
         for t in 0..seq {

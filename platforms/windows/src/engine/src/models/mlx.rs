@@ -386,9 +386,6 @@ pub fn license_name(repo: &Repo) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Verified-install records (`VLMDownloader.VerifiedSentinel` / `IdentitySentinel`)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VerifiedFile {
@@ -621,9 +618,6 @@ pub fn mark_installed(repo: &Repo) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Repo listing and install plan
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoFile {

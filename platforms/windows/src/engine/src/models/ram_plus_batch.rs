@@ -1,30 +1,6 @@
-// Batched RAM++ inference coordinator — OPT-IN, OFF by default.
-//
-// One Session, batched inputs. A dedicated OS thread owns the `RamPlusTagger`;
-// tagging workers submit (rgb, w, h, oneshot) requests through a crossbeam
-// channel. The coordinator drains up to BATCH_SIZE requests (or
-// BATCH_TIMEOUT_MS, whichever first), runs `tag_batch` ONCE, and fans the
-// per-image tag lists back through the oneshots — one GPU dispatch instead of N.
-//
-// MEASURED CAVEAT (2026-06-01, RTX 2060): batching does NOT help and in fact
-// REGRESSES on this card. A single-path scan profiled GPU util at p50=87% /
-// p90=97% with VRAM 90% full (5348/5955 MB) — Swin-L @384 already saturates the
-// SMs at batch=1, and the single-image *pool* overlaps inference for free. With
-// no idle compute to fill and no spare VRAM to grow into, an A/B (same ONNX,
-// same corpus) measured batched=4 at 1.6 files/s vs single-pool 2.1 files/s
-// (~23% slower); the pool also beats it on the production fp16 model (6.2 f/s).
-// So RAM++ is compute/VRAM-bound here, NOT latency-bound — see DECISIONS.md.
-//
-// This path is retained as an opt-in tuning knob for GPUs that do NOT saturate
-// at batch=1 (high-SM-count / high-VRAM cards) per the all-vendor HW-accel
-// roadmap — RE-VALIDATE per card before enabling. It REQUIRES a RAM++ ONNX
-// exported with a dynamic batch axis (`export_ram_plus_onnx.py --dynamic-batch`)
-// and is only spawned when `FILEID_RAMPLUS_BATCH_SIZE > 1` (see
-// `ModelStack::load_default`); otherwise the single-image pool path is used.
-//
-// Failure mode: if `tag_batch` errors, every request in that batch receives the
-// error — the caller logs + skips the file's tags. The coordinator never panics
-// on a single bad input.
+// Batched RAM++ coordinator, opt-in (FILEID_RAMPLUS_BATCH_SIZE > 1). One dedicated thread owns the RamPlusTagger; tagging workers submit frames through a channel, and up to BATCH_SIZE requests (or BATCH_TIMEOUT_MS) run as one tag_batch. Requires an ONNX exported with `--dynamic-batch`.
+// Measured slower than the single-image pool on RTX 2060, where Swin-L @384 already saturates the SMs at batch=1: enable only on cards that do not saturate at batch=1, and re-validate per card.
+// A tag_batch error fails every request in that batch; the coordinator never panics on one bad input.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -160,7 +136,6 @@ fn run_coordinator(
         let mut batch: Vec<RamPlusRequest> = Vec::with_capacity(batch_size);
         batch.push(first);
 
-        // Greedy: pull any already-pending requests without waiting.
         while batch.len() < batch_size {
             match receiver.try_recv() {
                 Ok(r) => batch.push(r),
@@ -168,7 +143,6 @@ fn run_coordinator(
                 Err(TryRecvError::Disconnected) => break,
             }
         }
-        // Under cap → wait up to the timeout for more to arrive.
         if batch.len() < batch_size && batch_timeout_ms > 0 {
             let deadline = Instant::now() + Duration::from_millis(batch_timeout_ms);
             while batch.len() < batch_size {

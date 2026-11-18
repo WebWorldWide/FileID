@@ -6,9 +6,6 @@
 // Inference order: resize → CLIP mean/std normalize → CHW float32
 // → tract session run → L2 normalize. Persisted as raw little-endian bytes
 // in `clip_embeddings.embedding`.
-//
-// File was originally MobileCLIP-S2 (256×256, research-only license); now
-// loads the Apache-2.0 / commercial-clean ViT-B/32 export at 224×224.
 
 use std::path::{Path, PathBuf};
 
@@ -17,12 +14,7 @@ use ndarray::Array4;
 
 use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
-/// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
-/// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
-/// with a mismatched registry SHA) and must be rejected, not L2-normalized and
-/// persisted as an off-dimension `clip_embeddings` blob — that silently poisons
-/// scene-tag dot products (`scene_vocab::dot` folds over `min(len)`) and
-/// semantic search. Mirrors the SFace (`sface.rs` ENG-69), RAM++, and BGE guards.
+/// Expected image-embedding width (ViT-B/32: 512). A model with another width is substituted or corrupt; rejecting it keeps an off-dimension blob out of clip_embeddings, where it would poison scene-tag dot products (`scene_vocab::dot` folds over min(len)) and semantic search.
 pub(crate) const CLIP_EMBED_DIM: usize = 512;
 
 // OpenAI CLIP normalization (ViT-B/32) — differs from ImageNet; using ImageNet

@@ -58,7 +58,6 @@ fn test_repo(revision: &str, catalog: Option<&'static CatalogModel>) -> &'static
     }))
 }
 
-/// Writes the fixture's files into the repo folder and returns that folder.
 fn write_fixture_files(repo: &Repo) -> PathBuf {
     let dir = model_dir(repo).unwrap();
     for file in fixture()["files"].as_array().unwrap() {
