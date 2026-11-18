@@ -1,6 +1,3 @@
-// Extended model catalog: browse curated and catalog models for this machine,
-// install a pinned model on request, and benchmark it locally.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 

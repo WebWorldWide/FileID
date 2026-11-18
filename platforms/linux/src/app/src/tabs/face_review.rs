@@ -1,6 +1,5 @@
-// Face review queue on the People tab: suggestions the engine made for new
-// faces instead of assigning them (IPC 1.23 listFaceReview / resolveFaceReview /
-// undoFaceReview). Wording matches the macOS and WinUI apps.
+// Face review queue on the People tab: engine suggestions for new faces instead of assignments
+// (IPC listFaceReview / resolveFaceReview / undoFaceReview).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

@@ -1,7 +1,5 @@
-// Library bulk rename and bulk tag, the parts that aren't widgets (macOS
-// `BulkRenameSheet`, `BulkTagSheet` and `CatalogWrites.planRenames`): the
-// collision-free rename plan, the undo journals kept on disk, why a recorded
-// rename can no longer be put back, and the status lines.
+// Library bulk rename and tag: the collision-free rename plan, the undo journals kept on disk,
+// why a recorded rename can no longer be put back, and the status lines.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -222,7 +220,6 @@ pub(super) fn tag_title(count: usize) -> String {
     )
 }
 
-// ── Undo journals ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RenameOutcome {

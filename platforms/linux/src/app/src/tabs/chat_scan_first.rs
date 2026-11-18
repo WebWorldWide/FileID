@@ -1,6 +1,4 @@
-// What Chat shows before there is a library to talk to (macOS Chat
-// "scan-first" state): an invitation to scan instead of an empty composer,
-// then the composer once the first files are read.
+// Chat before the first files are read: an invitation to scan instead of an empty composer.
 
 const SUMMARY: &str = "Chat answers questions about the files FileID has scanned.";
 const NOTHING_MOVED: &str = "Nothing is moved or changed.";

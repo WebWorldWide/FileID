@@ -1,5 +1,4 @@
-// Describe Files page (tab id "deep-analyze"): on-device VLM descriptions and
-// suggested names, the port of macOS `DeepAnalyzeViews.swift`.
+// Describe Files page (tab id "deep-analyze"): on-device VLM descriptions and suggested names.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -25,11 +24,9 @@ mod deep_scope;
 const PROPOSED_LIMIT: i64 = 200;
 const APPLY_TAGS_TIMEOUT_SECS: u64 = 15;
 
-// ─── VLM registry (Linux mirror of macOS `AIModelKind`) ──────────────────────
-// `model_kind` keys are the exact strings the engine accepts (see the shared
-// engine `models::registry::lookup_full`). RAM / seconds-per-image are display
-// estimates; until the engine's `listModels` catalog arrives the picker shows
-// the ones that fit this machine.
+// model_kind keys are the exact strings the engine accepts (models::registry::lookup_full). RAM and
+// seconds-per-image are display estimates; the picker shows only models that fit this machine
+// until the engine's listModels catalog arrives.
 struct VlmKind {
     key: &'static str,
     display: &'static str,
@@ -142,7 +139,6 @@ pub(super) fn host_recommended_vlm_kind() -> &'static str {
     recommended_vlm_kind(total, available, free)
 }
 
-// ─── Tab entrypoint ──────────────────────────────────────────────────────────
 
 pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let default_kind = host_recommended_vlm_kind();
@@ -412,7 +408,6 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     wire_actions(&ui, &folder_btn);
     sync_run_state(&ui);
 
-    // ── Live engine events → cards ───────────────────────────────────────────
     let rx = ui.engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -435,7 +430,6 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     overlay.upcast()
 }
 
-// ─── Shared UI state ─────────────────────────────────────────────────────────
 
 struct PickRow {
     key: &'static str,
@@ -504,7 +498,6 @@ struct DeepUi {
     apply_all: gtk::Button,
 }
 
-// ─── Command routing ─────────────────────────────────────────────────────────
 
 fn send_cmd(ui: &Rc<DeepUi>, payload: CommandPayload) -> bool {
     let payload = match deep_scope::prepare(payload) {
@@ -920,8 +913,7 @@ fn begin_run(ui: &Rc<DeepUi>) {
     sync_run_state(ui);
 }
 
-/// Tear down the live cards (crash / cancel / clean exit). Mirrors macOS
-/// A crash mid-run removes the live cards at once.
+/// Tears down the live cards on crash, cancel or clean exit.
 fn end_run(ui: &Rc<DeepUi>) {
     ui.in_flight.set(false);
     ui.starting_card.set_visible(false);
@@ -930,7 +922,6 @@ fn end_run(ui: &Rc<DeepUi>) {
     sync_run_state(ui);
 }
 
-// ─── Event handling ──────────────────────────────────────────────────────────
 
 fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
     match ev {
@@ -1044,7 +1035,6 @@ pub(crate) fn error_ends_deep_run(kind: &str) -> bool {
     !matches!(kind, "deep_analyze_already_running" | "vlm_server_payload_rejected")
 }
 
-// ─── DB-backed refresh (mirror of macOS ReadStore counts) ────────────────────
 
 fn refresh(ui: &Rc<DeepUi>) {
     let active = ui.active_kind.get().to_string();
@@ -1202,7 +1192,6 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
     hbox
 }
 
-// ─── Model picker ────────────────────────────────────────────────────────────
 
 pub fn vlm_runtime_available() -> bool {
     fileid_engine::models::llama_server_available()
@@ -1431,7 +1420,6 @@ fn model_install_info(key: &str) -> (bool, f64) {
     }
 }
 
-// ─── DB queries (fresh read-only connection, WAL-safe) ───────────────────────
 
 #[derive(Clone, Copy, Default)]
 struct StatusCounts {
@@ -1605,7 +1593,6 @@ fn person_tag_name(parts: &[String], legacy: &str) -> String {
     }
 }
 
-// ─── Static card builders ────────────────────────────────────────────────────
 
 const STARTING_SUBTITLE: &str =
     "Loading the model on this computer. The first description usually appears within 15 seconds.";
@@ -1874,7 +1861,6 @@ fn build_last_card(desc: &gtk::Label, inherited: &gtk::Label, name: &gtk::Label)
     card
 }
 
-// ─── Small widget helpers ────────────────────────────────────────────────────
 
 fn heading(text: &str) -> gtk::Label {
     gtk::Label::builder()
@@ -1909,8 +1895,6 @@ fn value_label(text: &str) -> gtk::Label {
         .build()
 }
 
-/// Show a card with the shared brand spring fading it in (mirrors the macOS
-/// `.spring(response: 0.35–0.4)` reveals).
 fn reveal(card: &gtk::Box) {
     if card.is_visible() {
         return;

@@ -1,8 +1,3 @@
-// Library-wide related tries (macOS RelatedTriesSection): Find related tries
-// queues the takeGrouping job, its row shows progress with pause/resume/cancel,
-// and the stored proposals open in the same review page as possible groups,
-// with a relation chip, the evidence and Save as group.
-
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;

@@ -1,8 +1,3 @@
-// Search & Moments timeline (DESIGN_V3_PORT "Search & Moments", Timeline):
-// Examined / Chapters / Speech lanes with a gold playhead and a ruler; a
-// click on a lane seeks to x / width × duration. Coverage and speech come
-// from the catalog tables read-only; chapters from the engine's detail.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 

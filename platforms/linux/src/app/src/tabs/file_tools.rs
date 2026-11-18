@@ -1,6 +1,4 @@
-// File Tools (DESIGN_V3_PORT "File Tools"): 01 · Pick files (kind, file
-// checklist), 02 · Output (format, size, frame, folder) and a 380 px
-// 03 · Preview pane with the gold-framed preview, outputs and actions.
+// File Tools: pick files, set the output (format, size, frame, folder), and preview with outputs and actions.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -567,7 +565,6 @@ impl ToolsUi {
             .collect()
     }
 
-    /// Shows the rows for the chosen kind and video tool.
     fn sync_rows(&self) {
         let choice = self.choice.borrow().clone();
         let kind = KINDS[choice.kind.min(2)];
@@ -912,7 +909,6 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let left = v3::vbox(16);
     left.add_css_class("v3-page-pad");
 
-    // ── 01 · Pick files ────────────────────────────────────────────────────────
     let recipe_panel = v3::panel("01 · Pick files");
     let kind = v3::Segmented::new(&["Photo", "Video", "Chapters"], 0);
     recipe_panel.trailing.append(&kind.root);
@@ -944,7 +940,6 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     recipe_footer.append(&select_none);
     left.append(&recipe_panel.root);
 
-    // ── 02 · Output ────────────────────────────────────────────────────────
     let output_panel = v3::panel("02 · Output");
     let output_body = v3::vbox(10);
     output_body.add_css_class("v3-panel-pad");
@@ -1072,7 +1067,6 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         .child(&left)
         .build();
 
-    // ── 03 · Preview ───────────────────────────────────────────────────────
     let pane = v3::vbox(0);
     pane.add_css_class("v3-pane");
     pane.set_size_request(380, -1);

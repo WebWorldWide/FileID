@@ -1,28 +1,8 @@
-// Cleanup tab — duplicate groups, the 1:1 GTK port of macOS `CleanupView.swift`
-// (and Windows `CleanupViewModel.cs` / `PerceptualGrouping.cs`).
-//
-// Two modes, mirroring the reference:
-//   * "Exact"   — same-size candidates are re-read and grouped by full-file
-//                 SHA-256. The indexed sampled hash is only a ranking hint.
-//   * "Similar" — visually near-identical images grouped by the Hamming distance
-//                 of their 64-bit dHash (`files.phash`) into transitive clusters
-//                 (default threshold 8 of 64 bits; `FILEID_NEARDUP_HAMMING`
-//                 overrides, clamped 0..16). Pure byte-exact clusters are dropped
-//                 (they already appear under Exact).
-//
-// Both groupings come from the shared engine (`read::dupes`), the same code the
-// CLI and TUI use.
-//
-// Each group is a glass card. The keeper (rank 0 — aesthetic ⇣, size ⇣, created
-// ⇡, shortest path ⇡, path ordinal) wears a gold KEEPER badge. Tiles toggle a
-// per-copy selection; the user can mass-select non-keepers (Exact only), trash a
-// whole group, or trash everything selected (with a confirmation). Similar mode
-// pre-selects NOTHING and shows the "review before deleting — NOT byte-identical"
-// warning, because those copies are not byte-for-byte equal.
-//
-// Reads the DB directly (the engine is the single writer; we open a fresh
-// read-only connection per query, exactly like the Library tab + macOS/Windows
-// `ReadStore`). Deletion is the engine's `trashFiles` IPC command.
+// Cleanup tab: duplicate groups. Exact mode groups same-size files by full-file SHA-256 (the indexed
+// sampled hash is only a ranking hint). Similar mode groups near-identical images by dHash Hamming
+// distance (FILEID_NEARDUP_HAMMING, 0..16, default 8) and never pre-selects anything.
+// Reads use a fresh read-only DB connection per query (the engine is the only writer); deletion
+// goes through the engine's trashFiles IPC command.
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
@@ -55,12 +35,10 @@ const GROUPS_PER_PAGE: usize = 20;
 const TILES_PER_PAGE: usize = 24;
 const LOAD_MORE_WITHIN_PX: f64 = 800.0;
 
-/// How many items the next page adds, given how many are built already.
 fn next_page(shown: usize, total: usize, page: usize) -> usize {
     total.saturating_sub(shown).min(page)
 }
 
-// ─── Data model (app-side mirror of DuplicateGroup / DuplicateMember) ─────────
 
 #[derive(Clone)]
 struct Member {
@@ -164,7 +142,6 @@ fn tagged_summary(tagged: usize) -> String {
     }
 }
 
-// ─── The tab ──────────────────────────────────────────────────────────────────
 
 struct Cleanup {
     engine: Rc<RefCell<EngineClient>>,
@@ -207,7 +184,6 @@ struct Cleanup {
 }
 
 pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
-    // ── Header ──────────────────────────────────────────────────────────────
     let subtitle = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
@@ -288,7 +264,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     header_row.append(&auto_tag_row);
     header_row.append(&actions_box);
 
-    // ── Status bar (shown after a trash) ────────────────────────────────────
     let status_icon = gtk::Image::from_icon_name("user-trash-symbolic");
     let status_label = gtk::Label::builder().xalign(0.0).wrap(true).build();
     let status_filler = gtk::Box::builder().hexpand(true).build();
@@ -318,7 +293,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     status_bar.append(&open_trash);
     status_bar.append(&status_dismiss);
 
-    // ── Content (empty state ↔ group list) ──────────────────────────────────
     let empty_page = adw::StatusPage::builder()
         .icon_name("user-trash-symbolic")
         .title("No files yet")
@@ -358,7 +332,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&content_stack);
 
-    // ── Shared state ─────────────────────────────────────────────────────────
     let this = Rc::new(Cleanup {
         engine,
         mode: RefCell::new("exact".to_string()),
@@ -398,7 +371,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         list_box,
     });
 
-    // ── Mode pills ───────────────────────────────────────────────────────────
     {
         let this = this.clone();
         let pe = pill_exact.clone();
@@ -412,7 +384,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         pill_similar.connect_clicked(move |_| this.switch_mode("similar", &pe, &ps));
     }
 
-    // ── Header actions ───────────────────────────────────────────────────────
     {
         let this = this.clone();
         select_nonkeepers_btn.connect_clicked(move |_| this.select_extra_copies());
@@ -448,7 +419,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    // ── Live-scan reloads: throttle on batches, final reload on completion. ──
     let ev_rx = this.engine.borrow_mut().subscribe();
     {
         let this = this.clone();
@@ -582,7 +552,6 @@ impl Cleanup {
         }
     }
 
-    // ── Reload (DB read + grouping off the main loop) ────────────────────────
 
     fn reload(self: &Rc<Self>) {
         self.gate.loaded();
@@ -649,7 +618,6 @@ impl Cleanup {
             this.last_refresh_error.borrow_mut().take();
             this.last_candidates.set(res.candidate_count);
             *this.last_warning.borrow_mut() = res.warning;
-            // Prune any selection that no longer maps to a visible copy.
             {
                 let visible_ids: HashSet<i64> = res
                     .groups
@@ -666,7 +634,6 @@ impl Cleanup {
         });
     }
 
-    // ── Rebuild the visible card list ────────────────────────────────────────
 
     /// Rebuilds as many cards as were showing and puts the scroll back where
     /// it was, so a refresh or a selection change never jumps to the top.
@@ -735,7 +702,6 @@ impl Cleanup {
         }
     }
 
-    /// Builds the next `count` group cards, then a "show more" row if any remain.
     fn append_groups(self: &Rc<Self>, count: usize) {
         if let Some(button) = self.more_groups.take() {
             self.list_box.remove(&button);
@@ -837,7 +803,6 @@ impl Cleanup {
         self.content_stack.set_visible_child_name("empty");
     }
 
-    // ── A single group card ──────────────────────────────────────────────────
 
     fn build_group_card(self: &Rc<Self>, group: &DupGroup) -> gtk::Widget {
         let card = gtk::Box::builder()
@@ -850,7 +815,6 @@ impl Cleanup {
             .css_classes(["glass-card"])
             .build();
 
-        // Header: count badge + caution badge + size info + (live) selected count.
         let head = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
@@ -916,7 +880,6 @@ impl Cleanup {
         head.append(&sel_lbl);
         card.append(&head);
 
-        // Controls: select menu + per-group delete + skip.
         let member_ids: Rc<Vec<i64>> = Rc::new(group.members.iter().map(|m| m.id).collect());
         let del_btn = gtk::Button::builder()
             .label("Move to Trash")
@@ -939,7 +902,6 @@ impl Cleanup {
         controls.append(&skip_btn);
         card.append(&controls);
 
-        // Tiles.
         let tiles = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(12)
@@ -956,7 +918,6 @@ impl Cleanup {
         tiles_scroll.add_css_class("fileid-tab");
         card.append(&tiles_scroll);
 
-        // Initial per-group selected state.
         update_group_selection_widgets(&self.selection.borrow(), &group_sizes, &sel_lbl, &del_btn);
 
         {
@@ -970,7 +931,6 @@ impl Cleanup {
                 this.confirm_trash(to_trash, button);
             });
         }
-        // Skip group.
         {
             let this = self.clone();
             let key = group.key.clone();
@@ -984,8 +944,6 @@ impl Cleanup {
         card.upcast()
     }
 
-    /// Builds one page of a group's tiles from `from`, then a "show more"
-    /// tile when the group has more.
     fn append_tiles(
         self: &Rc<Self>,
         tiles: &gtk::Box,
@@ -1146,8 +1104,6 @@ impl Cleanup {
         }
         outer.append(&meta);
 
-        // Thumbnail (images decode client-side, videos get an ffmpeg keyframe;
-        // everything else gets an icon).
         if member.kind == "image" || member.kind == "video" {
             let dim = decode_px(&pic, TILE_THUMB_PX);
             // A tile destroyed by a rebuild takes its queued decode with it.
@@ -1215,7 +1171,6 @@ impl Cleanup {
         toggle.upcast()
     }
 
-    // ── Header summary ───────────────────────────────────────────────────────
 
     fn update_global_summary(self: &Rc<Self>) {
         let mode_similar = self.mode.borrow().as_str() == "similar";
@@ -1300,7 +1255,6 @@ impl Cleanup {
             .set_visible(has_groups && !mode_similar);
     }
 
-    // ── Trash (engine `trashFiles` IPC) ──────────────────────────────────────
 
     fn select_extra_copies(self: &Rc<Self>) {
         {
@@ -2008,7 +1962,6 @@ fn build_banner(mode_similar: bool) -> gtk::Widget {
     row.upcast()
 }
 
-// ─── DB read + grouping (off the main loop) ──────────────────────────────────
 
 fn load_until(mode_similar: bool, should_cancel: impl Fn() -> bool) -> LoadOutcome {
     let db_path = fileid_engine::paths::db_path()
@@ -2053,7 +2006,6 @@ fn count_active(conn: &rusqlite::Connection, filter: &str) -> rusqlite::Result<u
     .map(|count| count.max(0) as usize)
 }
 
-/// Display metadata for the grouped ids, in `ids` order.
 fn load_rows(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<RawRow>, String> {
     let mut by_id = HashMap::with_capacity(ids.len());
     for chunk in ids.chunks(500) {
@@ -2305,7 +2257,6 @@ fn near_dup_threshold() -> u32 {
     DEFAULT_SIMILAR_THRESHOLD
 }
 
-// ─── Small helpers (mirrors of library.rs) ───────────────────────────────────
 
 fn checkbox_icon(selected: bool) -> &'static str {
     if selected {

@@ -33,8 +33,6 @@ pub(super) fn glass_card() -> gtk::Box {
         .build()
 }
 
-/// The most pixels a thumbnail or preview decodes on its long side, however
-/// dense the display.
 const MAX_DECODE_PX: i32 = 4096;
 const MAX_SCALE: i32 = 4;
 

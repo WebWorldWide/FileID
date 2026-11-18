@@ -1,7 +1,3 @@
-// Search & Moments (DESIGN_V3_PORT "Search & Moments"): a 300 px results
-// pane, then a player panel with the Examined / Chapters / Speech timeline,
-// the chapter editor, people seen in the file and the analysis queue.
-
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
@@ -792,7 +788,6 @@ fn is_image(path: &str) -> bool {
         .is_some_and(|ext| matches!(FileKind::from_extension(ext), FileKind::Image))
 }
 
-/// Result meta wording from the macOS list; true for an unverified frame.
 pub(super) fn hit_kind(hit: &CatalogHit) -> (&'static str, bool) {
     match hit.kind.as_str() {
         "chapter" => ("Chapter", false),
@@ -839,7 +834,6 @@ pub fn catalog(engine: Engine) -> gtk::Widget {
 }
 
 pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
-    // ── Results pane ───────────────────────────────────────────────────────
     let pane = v3::vbox(0);
     pane.add_css_class("v3-pane");
     pane.set_size_request(300, -1);
@@ -885,7 +879,6 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let hits_scroll = v3::scroller(&hits);
     pane.append(&hits_scroll);
 
-    // ── Detail ─────────────────────────────────────────────────────────────
     let detail = v3::vbox(16);
     detail.add_css_class("v3-page-pad");
     let status = v3::wrapped("", &["v3-meta"]);
