@@ -78,6 +78,10 @@ public actor Discovery {
     /// to tell them from rows of files that are gone.
     private(set) var presentUnchanged: Set<PathFingerprint> = []
 
+    /// How many of `presentUnchanged` are files the catalog already holds as current; iCloud-only
+    /// files left out are present too, but they are not "unchanged" for the rescan notice.
+    private(set) var currentUnchangedCount = 0
+
     /// Plain-language notice (kind `rescan_no_changes`, as the shared engine's) when a walk found
     /// files the catalog already holds and nothing else to do; nil when anything was kept or the
     /// walk fell short (that notice says more).
@@ -98,6 +102,10 @@ public actor Discovery {
         simulatedFailures = directories
         simulatedFailuresKeepYielding = keepYielding
     }
+
+    /// Test seam: file names treated as iCloud-only (SF_DATALESS cannot be set without root).
+    var simulatedCloudOnlyNames: Set<String> = []
+    func simulateCloudOnly(names: Set<String>) { simulatedCloudOnlyNames = names }
 
     public struct Progress: Sendable {
         public let discovered: Int
@@ -349,6 +357,7 @@ public actor Discovery {
         var oversizedCount = 0
         let record = EnumerationRecord()
         let simulatedFailures = self.simulatedFailures
+        let simulatedCloudOnlyNames = self.simulatedCloudOnlyNames
         let simulatedFailuresKeepYielding = self.simulatedFailuresKeepYielding
         var failedSimulatedParents = Set<String>()
         guard let enumerator = FileManager.default.enumerator(
@@ -373,6 +382,7 @@ public actor Discovery {
         // must not take their untouched rows for deletions; it reads them from here.
         var present = Set<PathFingerprint>()
         var cloudOnlyCount = 0
+        var currentCount = 0
         var movedCount = 0
         let libraryHasRows = skip?.isEmpty == false
 
@@ -416,11 +426,12 @@ public actor Discovery {
                    currentModified: identity.modified,
                    currentSize: size) {
                 present.insert(fingerprint)
+                currentCount += 1
                 return .other
             }
             // Reading a cloud-only file makes macOS download it. Leave it out
             // (keeping any row it already has) until it is on this Mac.
-            if identity.cloudOnly {
+            if identity.cloudOnly || simulatedCloudOnlyNames.contains(url.lastPathComponent) {
                 cloudOnlyCount += 1
                 present.insert(fingerprint)
                 return .other
@@ -492,6 +503,7 @@ public actor Discovery {
             }
         }
         presentUnchanged = present
+        currentUnchangedCount = currentCount
         // Non-fatal partial-discovery summary: some entries under `root` couldn't be
         // read this walk (counted by the enumerator's errorHandler above). Logged so
         // the app (Settings → Logs) can tell the user the library may be incomplete
