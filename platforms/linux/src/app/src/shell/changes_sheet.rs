@@ -1,6 +1,3 @@
-// "Changes this session": every change FileID made since launch, newest first,
-// with Undo while it can still be put back (Windows `SessionChangesSheet`).
-
 use adw::prelude::*;
 use gtk::glib;
 use std::rc::Rc;
