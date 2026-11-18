@@ -511,9 +511,11 @@ pub struct ModelStack {
 }
 
 /// Sessions per pooled model. Every session of a model shares one compiled
-/// graph, so a pool costs scratch buffers, not another copy of the weights.
+/// graph, so a pool costs scratch buffers (about 1.5 GB for RAM++), not another
+/// copy of the weights. Two keep a second worker busy while the first is inside
+/// a forward pass; measured in DECISIONS (2026-11-18, tract everywhere).
 /// `FILEID_MODEL_POOL_SIZE` overrides it.
-const MODEL_POOL_SIZE: usize = 1;
+const MODEL_POOL_SIZE: usize = 2;
 
 /// ENG-71: ceiling on the pre-allocation HINT for the per-file read buffer.
 /// `file.size_bytes` comes from a filesystem stat; a bogus/huge value (sparse
@@ -1329,12 +1331,12 @@ fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
     // between load and here (loading the sessions consumes the RAM the
     // probe measures) and silently issue 1 permit against a 4-session pool.
     let pool_size = models.pool_size.max(1);
-    // When the pool clamps to a SINGLE session, every vision permit-holder
-    // serializes on that one parking_lot Mutex across the forward pass, so the
-    // extra permits just park OS threads instead of running. Issue exactly 1
-    // permit so excess workers await the ASYNC semaphore (yielding the tokio
-    // thread) rather than blocking on the mutex.
-    let vision_cap = if pool_size == 1 { 1 } else { VISION_CONCURRENCY };
+    // Permit-holders beyond the pool size serialize on a session's
+    // parking_lot Mutex across the forward pass, so extra permits just park OS
+    // threads instead of running. One permit per session lets excess workers
+    // await the ASYNC semaphore (yielding the tokio thread) rather than
+    // blocking on the mutex.
+    let vision_cap = pool_size.min(VISION_CONCURRENCY);
     let clip_cap = CLIP_CONCURRENCY;
     tracing::info!(
         backend = crate::models::runtime::inference_backend(),
@@ -4368,6 +4370,12 @@ mod tests {
             crop_rgb_112: None,
         };
         assert!(f.crop_rgb_112.is_none());
+    }
+
+    #[test]
+    fn model_pool_never_exceeds_the_default_or_the_worker_count() {
+        assert_eq!(resolve_pool_size(1), 1);
+        assert!((1..=MODEL_POOL_SIZE).contains(&resolve_pool_size(16)));
     }
 
     #[test]
