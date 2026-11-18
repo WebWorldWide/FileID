@@ -66,5 +66,10 @@ struct SelfShotPlanTests {
         let views = SelfShotView.parse("big=Library?query=huge&preview=huge%206500.jpg", available: all)
         #expect(views.first?.preview == "huge 6500.jpg" && views.first?.query == "huge")
     }
+
+    @Test func views_parse_action() {
+        let views = SelfShotView.parse("pane=Library?act=select:C0030T01.JPG;picked=Library?act=checks:3;plain=Library", available: all)
+        #expect(views.map(\.action) == ["select:C0030T01.JPG", "checks:3", nil])
+    }
 }
 #endif

@@ -319,11 +319,8 @@ struct SankeyFlowView: View {
                     .foregroundStyle(node.tint)
             }
             VStack(alignment: .leading, spacing: 0) {
-                Text(node.label)
-                    .font(Theme.Font.body(12.5, .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                    .foregroundStyle(isRollup ? Theme.text2 : Theme.text1)
+                PathLabel(path: node.label, font: Theme.Font.body(12.5, .semibold),
+                          color: isRollup ? Theme.text2 : Theme.text1)
                 Text("\(node.count) file\(node.count == 1 ? "" : "s")")
                     .font(Theme.Font.body(11.5, .medium).monospacedDigit())
                     .foregroundStyle(Theme.text3)
@@ -932,7 +929,8 @@ struct SankeyFlowView: View {
     }
 
     private var sankeyHeight: CGFloat {
-        let maxNodes = max(layout.sources.count, layout.destinations.count, 4)
+        let maxNodes = max(layout.sources.count, layout.destinations.count, 1)
+        if maxNodes < 4 { return 160 + CGFloat(maxNodes) * 40 }
         return min(580, max(320, CGFloat(maxNodes) * 56))
     }
 

@@ -11,6 +11,9 @@ struct DeepAnalyzeModelPickerCard: View {
     let engine: EngineClient
     @State private var settings = DeepAnalyzeSettings.shared
     @State private var catalogPresented = false
+    #if DEBUG
+    @Environment(\.pageActive) private var pageActive
+    #endif
     @State private var requested: String?
     @State private var failure: (text: String, detail: String)?
     @State private var removeTarget: AIModelKind?
@@ -64,6 +67,12 @@ struct DeepAnalyzeModelPickerCard: View {
         .sheet(isPresented: $catalogPresented) {
             ModelCatalogBrowser(engine: engine, visionOnly: true, initialSelection: settings.activeKind) { settings.activeKind = $0 }
         }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+            guard pageActive, let action = note.object as? String else { return }
+            if action == "models" { catalogPresented = true } else if action == "close" { catalogPresented = false }
+        }
+        #endif
         .task(id: "\(settings.activeKind.rawValue)|\(ModelInstallStatus.isInstalled(kind: settings.activeKind))|\(diskRefresh)") {
             let kind = settings.activeKind
             onDiskBytes = await Task.detached(priority: .utility) { DescriptionModelStore.sizeOnDisk(kind) }.value
@@ -936,7 +945,7 @@ struct DeepAnalyzeView: View {
                 .foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Tip: name people first").font(Theme.Font.body(13.5, .semibold))
-                Text("With names, descriptions read \"Mia playing piano\" instead of \"a person playing piano\". You can also describe now and again later.")
+                Text("With names, descriptions read “Mia playing piano” instead of “a person playing piano”. You can also describe now and again later.")
                     .font(Theme.Font.body(12.5))
                     .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)

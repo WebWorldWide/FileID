@@ -130,7 +130,7 @@ struct TitleBar: View {
                         scopeCheck(current == root.id)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(root.display).font(Theme.ChromeFont.body(13.5, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
-                            Text(root.path).font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+                            PathLabel(path: root.path, font: Theme.ChromeFont.mono(11), color: Theme.text3)
                         }
                         Spacer(minLength: 8)
                         if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
@@ -217,7 +217,6 @@ struct TitleBar: View {
             .help(chatPresented ? "Close chat (⌘⇧K)" : "Open chat beside this page (⌘⇧K)")
             .accessibilityLabel(chatPresented ? "Close chat" : "Open chat beside this page")
             .accessibilityAddTraits(chatPresented ? .isSelected : [])
-            .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(activeTab == .chat)
             Button { activeTab = .settings } label: {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
@@ -230,7 +229,6 @@ struct TitleBar: View {
             .help("Settings (⌘,)")
             .accessibilityLabel("Settings")
             .accessibilityAddTraits(activeTab == .settings ? .isSelected : [])
-            .keyboardShortcut(",", modifiers: .command)
         }
     }
 
@@ -257,8 +255,8 @@ struct TitleBar: View {
         .frame(height: Theme.Metrics.controlLarge)
         .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
-        .background {
-            Button("") { userOpened = true; searchFocused = true; searchOpen = true }.keyboardShortcut("k", modifiers: .command).opacity(0).frame(width: 0, height: 0)
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFocusSearch)) { _ in
+            userOpened = true; searchFocused = true; searchOpen = true
         }
         .popover(isPresented: $searchOpen, arrowEdge: .bottom) { searchPopover.chromeTextSize() }
     }

@@ -16,6 +16,12 @@ struct DisplayLabelTests {
         #expect(TagLabel.unique(["grass", "Grass", "Year_2026", "land"]) == ["Grass", "2026", "Land"])
     }
 
+    @Test func detailRowDoesNotRepeatTheKind() {
+        #expect(FileKindLabel.detail(kind: "image", fileExtension: "jpg") == "Image · JPG")
+        #expect(FileKindLabel.detail(kind: "pdf", fileExtension: "pdf") == "PDF")
+        #expect(FileKindLabel.detail(kind: "audio", fileExtension: "") == "Audio")
+    }
+
     @Test func pdfIsUppercase() {
         #expect(FileKindLabel.title("pdf") == "PDF")
         #expect(FileKindLabel.title("image") == "Image")
@@ -27,6 +33,23 @@ struct DisplayLabelTests {
         #expect(PathText.abbreviated(home) == "~")
         #expect(PathText.abbreviated("/Volumes/Adlon/Camera") == "/Volumes/Adlon/Camera")
         #expect(PathText.abbreviated(home + "other/x") == home + "other/x", "a sibling sharing the prefix is not home")
+    }
+}
+
+@Suite("Path shortenings")
+struct PathShorteningTests {
+    @Test func cutsAtFolderBoundaries() {
+        #expect(PathText.shortenings("/Volumes/Adlon/Camera/Eckerts 10-4-26/Photos") == [
+            "/Volumes/Adlon/Camera/Eckerts 10-4-26/Photos",
+            "…/Camera/Eckerts 10-4-26/Photos",
+            "…/Eckerts 10-4-26/Photos",
+            "…/Photos"])
+    }
+
+    @Test func shortPathsHaveNothingToDrop() {
+        #expect(PathText.shortenings("/Volumes/Adlon") == ["/Volumes/Adlon", "…/Adlon"])
+        #expect(PathText.shortenings("/Photos") == ["/Photos"])
+        #expect(PathText.shortenings("~") == ["~"])
     }
 }
 

@@ -62,6 +62,11 @@ struct FileIDApp: App {
                     WelcomeSheet(engine: engine)
                         .onDisappear { welcomeSheetSeen = true }
                 }
+                #if DEBUG
+                .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+                    if let action = note.object as? String, action == "welcome" || action == "close" { showWelcome = action == "welcome" }
+                }
+                #endif
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -69,6 +74,24 @@ struct FileIDApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Choose Folder…") { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
                     .keyboardShortcut("o", modifiers: .command)
+            }
+            CommandGroup(after: .sidebar) {
+                Button("Show Chat Beside Page") { NotificationCenter.default.post(name: .fileIDToggleChat, object: nil) }
+                    .keyboardShortcut("k", modifiers: [.command, .shift])
+                Button("Pause or Resume Background Motion") { NotificationCenter.default.post(name: .fileIDToggleMotion, object: nil) }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+            }
+            CommandMenu("Go") {
+                Button("Search or Ask…") { NotificationCenter.default.post(name: .fileIDFocusSearch, object: nil) }
+                    .keyboardShortcut("k", modifiers: .command)
+                Divider()
+                ForEach(Array(MainWindow.Tab.order.enumerated()), id: \.offset) { index, tab in
+                    Button(tab.title) { NotificationCenter.default.post(name: .fileIDGoToTab, object: tab.rawValue) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                }
+                Divider()
+                Button(MainWindow.Tab.settings.title) { NotificationCenter.default.post(name: .fileIDGoToTab, object: MainWindow.Tab.settings.rawValue) }
+                    .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(replacing: .help) {
                 Button("FileID Help") { NSWorkspace.shared.open(URL(string: "https://github.com/WebWorldWide/FileID#readme")!) }
@@ -137,4 +160,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     /// File ▸ Choose Folder… (⌘O): the main window opens its folder picker.
     static let fileIDChooseFolder = Notification.Name("FileID.chooseFolder")
+    static let fileIDGoToTab = Notification.Name("FileID.goToTab")
+    static let fileIDToggleChat = Notification.Name("FileID.toggleChat")
+    static let fileIDToggleMotion = Notification.Name("FileID.toggleMotion")
+    static let fileIDFocusSearch = Notification.Name("FileID.focusSearch")
 }

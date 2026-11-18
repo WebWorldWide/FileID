@@ -388,7 +388,7 @@ struct ToolsWorkbench: View {
                 if session.kind == "photo" {
                     optionRow("Longest side") {
                         DSNumberField(placeholder: "Longest side in pixels", value: $session.maxDimension, format: .number.grouping(.never), width: 90)
-                        MetaText("pixels wide (up to 8192)", size: 12)
+                        MetaText("pixels (up to 8192)", size: 12)
                             .help("The longer edge of the picture, in pixels (px)")
                     }
                 }

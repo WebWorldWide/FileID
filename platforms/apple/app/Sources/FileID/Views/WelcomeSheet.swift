@@ -276,6 +276,7 @@ struct WelcomeSheet: View {
                     if !bgeInstalled, !bgeInProgress { bge.install() }
                 }
                 .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                .fixedSize()
                 .disabled(installAllRequested)
                 .help("Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
             }

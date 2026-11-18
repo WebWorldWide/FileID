@@ -223,6 +223,7 @@ struct CleanupView: View {
     }
 
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
+        if store.totalFiles == 0 { return "Nothing scanned yet" }
         let g = visible.count
         let skipped = skippedGroups.count
         let base: String
@@ -852,10 +853,7 @@ private struct CopyTile: View {
                 .lineLimit(1).truncationMode(.middle)
                 .frame(width: CopyStrip.tile, alignment: .leading)
                 .padding(.top, 2)
-            Text(folder)
-                .font(Theme.Font.body(11.5))
-                .foregroundStyle(Theme.text2)
-                .lineLimit(1).truncationMode(.head)
+            PathLabel(path: folder, font: Theme.Font.body(11.5), color: Theme.text2)
                 .frame(width: CopyStrip.tile, alignment: .leading)
                 .help(fullFolder)
             HStack(spacing: 4) {

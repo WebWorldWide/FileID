@@ -25,8 +25,8 @@ enum FaceReviewText {
 
     static func scoreHelp(_ score: Double) -> String { "Match strength: \(percent(score))%" }
 
-    static func reason(_ item: FaceReviewItem) -> String {
-        let person = name(item.personName)
+    static func reason(_ item: FaceReviewItem, personLabel: String? = nil) -> String {
+        let person = personLabel ?? name(item.personName)
         switch item.reason {
         case "uncertain":
             return "This might be \(person), but it's hard to tell."

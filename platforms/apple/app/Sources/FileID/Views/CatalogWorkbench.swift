@@ -247,8 +247,7 @@ struct CatalogWorkbench: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(url.lastPathComponent).font(Theme.Font.mono(13, .medium)).foregroundStyle(Theme.text1)
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    Text(url.deletingLastPathComponent().path).font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
-                        .lineLimit(1).truncationMode(.head)
+                    PathLabel(path: url.deletingLastPathComponent().path, font: Theme.Font.mono(11), color: Theme.text3)
                 }
                 if let player {
                     NativeVideoPlayer(player: player)

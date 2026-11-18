@@ -11,7 +11,9 @@
 //   FILEID_SELF_SHOT_SCAN_SETTLE=1 seconds into a scan before the "-scanning" capture (at most SETTLE)
 //   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
-//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
+//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>&act=<action>[:<argument>]];...   extra captures after the pages
+//        actions: select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested, review (People sheets),
+//        models (Chat/Describe model sheets), welcome; each is closed again after the capture
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
 //   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
 //   FILEID_SELF_SHOT_DESCRIBE=<n>  after the pages, describe the first n photos with the active model (the Library selection button's call) and capture the Describe Files page and the status pill while it runs and when it ends
@@ -35,6 +37,7 @@ struct SelfShotView: Equatable {
     var scrollOffset: Double?
     var preview: String?
     var focusSteps = 0
+    var action: String?
 
     /// "docs=Library?kind=doc;found=Library?query=invoice%20total;lower=Settings?scroll=bottom"
     static func parse(_ raw: String?, available: [String]) -> [SelfShotView] {
@@ -55,6 +58,7 @@ struct SelfShotView: Equatable {
                     case "query": view.query = value.isEmpty ? nil : value
                     case "focus": view.focusSteps = max(0, min(20, Int(value) ?? 0))
                     case "preview": view.preview = value.isEmpty ? nil : value
+                    case "act": view.action = value.isEmpty ? nil : value
                     case "scroll": view.scrollToBottom = value == "bottom"; view.scrollOffset = Double(value)
                     default: break
                     }
@@ -130,6 +134,7 @@ extension Notification.Name {
     static let selfShotClosePreview = Notification.Name("FileID.selfShotClosePreview")
     static let selfShotSendChat = Notification.Name("FileID.selfShotSendChat")
     static let selfShotFindMoments = Notification.Name("FileID.selfShotFindMoments")
+    static let selfShotAction = Notification.Name("FileID.selfShotAction")
 }
 
 @MainActor
@@ -151,6 +156,7 @@ enum SelfShot {
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: plan.dir, withIntermediateDirectories: true)
             if let size = plan.windowSize { window()?.setContentSize(size) }
+            noteMenuShortcuts()
             await waitUntil(timeout: 90) { if case .ready = engine.state { return true } else { return false } }
             if let folder = plan.folder {
                 await waitUntil(timeout: 3) { store.totalFiles > 0 }
@@ -208,6 +214,15 @@ enum SelfShot {
                     try? await Task.sleep(for: .seconds(0.8))
                     if let main = window(), let sheet = main.attachedSheet { main.endSheet(sheet) }
                     try? await Task.sleep(for: .seconds(0.5))
+                } else if let action = view.action {
+                    NotificationCenter.default.post(name: .selfShotAction, object: action)
+                    try? await Task.sleep(for: .seconds(plan.settle))
+                    let sheet = window()?.attachedSheet != nil
+                    write(name: view.name, plan: plan, sheet: sheet)
+                    NotificationCenter.default.post(name: .selfShotAction, object: "close")
+                    try? await Task.sleep(for: .seconds(0.8))
+                    if let main = window(), let attached = main.attachedSheet { main.endSheet(attached) }
+                    try? await Task.sleep(for: .seconds(0.5))
                 } else {
                     if view.focusSteps > 0 { focusControl(steps: view.focusSteps, in: window()); try? await Task.sleep(for: .seconds(0.6)) }
                     write(name: view.name, plan: plan)
@@ -218,6 +233,22 @@ enum SelfShot {
             try? await Task.sleep(for: .seconds(3))
             exit(0)
         }
+    }
+
+    /// Writes every main-menu item that carries a key equivalent, so the menu bar's shortcut list is on record.
+    private static func noteMenuShortcuts() {
+        func visit(_ menu: NSMenu, path: String) {
+            for item in menu.items where !item.isSeparatorItem {
+                let name = path.isEmpty ? item.title : path + " > " + item.title
+                if let submenu = item.submenu { visit(submenu, path: name); continue }
+                guard !item.keyEquivalent.isEmpty else { continue }
+                let flags = item.keyEquivalentModifierMask
+                let keys = (flags.contains(.control) ? "⌃" : "") + (flags.contains(.option) ? "⌥" : "")
+                    + (flags.contains(.shift) ? "⇧" : "") + (flags.contains(.command) ? "⌘" : "") + item.keyEquivalent.uppercased()
+                note("menu: \(name) \(keys)")
+            }
+        }
+        if let main = NSApp.mainMenu { visit(main, path: "") }
     }
 
     private static func env(_ key: String) -> String? {

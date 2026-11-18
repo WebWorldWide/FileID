@@ -70,6 +70,10 @@ struct ChatWorkbench: View {
         .onDisappear { player?.pause() }
         #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: .selfShotSendChat)) { _ in if isPage { send() } }
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+            guard isPage, let action = note.object as? String else { return }
+            if action == "models" { modelsPresented = true } else if action == "close" { modelsPresented = false }
+        }
         #endif
         // After the page stack has released the old page's focus.
         .onPageVisibility(shown: { DispatchQueue.main.async { inputFocused = true } },
@@ -345,10 +349,14 @@ struct ChatWorkbench: View {
 
     private var sourcesPane: some View {
         VStack(spacing: 0) {
-            HStack {
-                SectionLabel("Sources")
-                Spacer()
-                MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    SectionLabel("Sources")
+                    Spacer()
+                    MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
+                }
+                // Same height as the chip row beside it, so both section labels sit on one line.
+                TagChip(text: "Names").hidden()
             }
             .padding(.horizontal, 14)
             .frame(height: Theme.Metrics.paneHeaderHeight)

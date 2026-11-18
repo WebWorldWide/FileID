@@ -516,6 +516,10 @@ struct TakeReview: View {
         Date(timeIntervalSince1970: seconds).formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
     }
 
+    static func shortDateText(_ seconds: Double) -> String {
+        Date(timeIntervalSince1970: seconds).formatted(.dateTime.day().month(.abbreviated).hour().minute())
+    }
+
     static func scoreWord(_ score: Double) -> String {
         score >= 0.8 ? "Great" : (score >= 0.6 ? "Good" : (score >= 0.4 ? "Fair" : "Weak"))
     }

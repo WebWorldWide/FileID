@@ -5,6 +5,13 @@ enum FileKindLabel {
     static func title(_ kind: String) -> String {
         kind.lowercased() == "pdf" ? "PDF" : kind.capitalized
     }
+
+    /// Kind and extension for a details row ("Image · JPG"); a PDF is not shown as "PDF · PDF".
+    static func detail(kind: String, fileExtension: String) -> String {
+        let title = title(kind)
+        let ext = fileExtension.uppercased()
+        return ext.isEmpty || ext == title.uppercased() ? title : title + " · " + ext
+    }
 }
 
 enum TagLabel {
@@ -31,6 +38,17 @@ enum PathText {
         let names = folder.split(separator: "/").map(String.init)
         guard names.count > parts else { return folder == "/" ? "/" : names.joined(separator: "/") }
         return names.suffix(parts).joined(separator: "/")
+    }
+
+    /// The ways to show a path in less room, longest first, each cut at a folder boundary:
+    /// the whole path, then "…/" plus its last three, two and one folders.
+    static func shortenings(_ path: String) -> [String] {
+        let names = path.split(separator: "/").map(String.init)
+        var options = [path]
+        for keep in [3, 2, 1] where names.count > keep {
+            options.append("…/" + names.suffix(keep).joined(separator: "/"))
+        }
+        return options
     }
 
     /// A path for display: the home folder reads as "~" so the account name doesn't fill

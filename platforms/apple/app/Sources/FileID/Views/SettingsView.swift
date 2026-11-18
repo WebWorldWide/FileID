@@ -104,11 +104,11 @@ struct SettingsTab: View {
                             // Storage
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
-                                infoRow("Total files",   "\(store.totalFiles)")
-                                infoRow("Photos tagged", "\(store.totalImages)")
-                                infoRow("Sets of duplicates", "\(store.totalDuplicateGroups)")
-                                infoRow("Space duplicates use", String(format: "%.1f MB", store.totalReclaimableMB))
-                                infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path))
+                                infoRow("Total files",   store.totalFiles.formatted())
+                                infoRow("Photos tagged", store.totalImages.formatted())
+                                infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
+                                infoRow("Space duplicates use", ByteCountFormatter.string(fromByteCount: Int64(store.totalReclaimableMB * 1_000_000), countStyle: .file))
+                                infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
                                     .help(ReadStore.defaultDBURL.path)
                                 Button("Show library file in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
@@ -136,7 +136,7 @@ struct SettingsTab: View {
                             // Logs
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Logs").font(Theme.Font.body(12.5, .semibold))
-                                Text("Detailed scan + app logs for troubleshooting.")
+                                Text("Detailed scan and app logs for troubleshooting.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 HStack(spacing: 8) {
                                     Button("Show scan log in Finder") {
@@ -152,15 +152,15 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
-                            // Danger Zone
+                            // Danger zone
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Danger Zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
+                                Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
                                 Text("Permanently erase FileID's library, local models, settings, and caches.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 Button(role: .destructive) {
                                     confirmFactoryReset = true
                                 } label: {
-                                    Text("Factory Reset & Quit")
+                                    Text("Factory reset and quit")
                                 }
                                 .buttonStyle(.dsDanger)
                                 .confirmationDialog(
@@ -168,7 +168,7 @@ struct SettingsTab: View {
                                     isPresented: $confirmFactoryReset,
                                     titleVisibility: .visible
                                 ) {
-                                    Button("Erase Everything and Quit", role: .destructive) {
+                                    Button("Erase everything and quit", role: .destructive) {
                                         engine.factoryResetAndQuit()
                                     }
                                     Button("Cancel", role: .cancel) { }
@@ -190,7 +190,9 @@ struct SettingsTab: View {
                     }
                 }
             }
+            .frame(maxWidth: 960, alignment: .leading)
             .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear {
             Task { sessions = store.recentSessions() }
@@ -215,10 +217,10 @@ struct SettingsTab: View {
                 Text(PathText.abbreviated(s.rootPath)).font(Theme.Font.mono(11.5)).lineLimit(1).truncationMode(.middle).help(s.rootPath)
                 HStack(spacing: 12) {
                     Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    Text(s.status)
-                    if let n = s.lastFileIndex { Text("\(n) files") }
+                    Text(s.status.capitalized)
+                    if let n = s.lastFileIndex { Text(n == 1 ? "1 file" : "\(n.formatted()) files") }
                 }
-                .font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
+                .font(Theme.Font.body(12)).monospacedDigit().foregroundStyle(Theme.text3)
             }
             Spacer()
         }
@@ -242,10 +244,10 @@ struct SettingsTab: View {
     }
 
     @ViewBuilder
-    private func infoRow(_ k: String, _ v: String) -> some View {
+    private func infoRow(_ k: String, _ v: String, isPath: Bool = false) -> some View {
         HStack(alignment: .top) {
             Text(k).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(160), alignment: .leading)
-            Text(v).font(Theme.Font.mono(12.5)).textSelection(.enabled)
+            Text(v).font(isPath ? Theme.Font.mono(12.5) : Theme.Font.body(13.5)).monospacedDigit().textSelection(.enabled)
             Spacer()
         }
         .font(Theme.Font.body(13.5))
