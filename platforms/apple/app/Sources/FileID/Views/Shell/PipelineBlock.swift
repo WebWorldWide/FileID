@@ -21,7 +21,7 @@ struct PipelineBlock: View {
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
     }
     private var captionsRunning: Bool { engine.deepAnalyzeInFlight }
-    private var helperDown: Bool { if case .crashed = engine.state { return true } else { return false } }
+    private var helperDown: Bool { HelperGate.isDown(engine.state) }
 
     private var stage: Stage {
         if let p = progress {
@@ -202,13 +202,13 @@ struct PipelineBlock: View {
                 Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
-                    .disabled(startRequested || captionsRunning || engine.faceClusteringInFlight || helperDown)
+                    .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown))
                     .help(helperDown ? "FileID's helper isn't running. Restart it, then scan again." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
                 Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
-                    .disabled(startRequested || helperDown)
+                    .disabled(HelperGate.scanDisabled(startRequested: startRequested, helperDown: helperDown))
                     .help(helperDown ? "FileID's helper isn't running. Restart it, then scan." : "Read every file in this folder (⌘R). Nothing is moved or changed.")
             }
         }

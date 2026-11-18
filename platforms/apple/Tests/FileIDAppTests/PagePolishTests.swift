@@ -20,6 +20,17 @@ struct PagePolishTests {
         #expect(TakeProposals.showsRelationChip("alternateViews", among: ["alternateViews", "repeatedAttempts"]))
     }
 
+    @Test func relationChipSetIsComputedFromTheWholeSection() {
+        #expect(TakeProposals.relationsShowingChip(among: ["repeatedAttempts", "repeatedAttempts", "uncertain"]) == ["uncertain"])
+        #expect(TakeProposals.relationsShowingChip(among: ["alternateViews", "repeatedAttempts"]) == ["alternateViews", "repeatedAttempts"])
+        #expect(TakeProposals.relationsShowingChip(among: ["repeatedAttempts"]) == ["repeatedAttempts"])
+    }
+
+    @Test func menuLabelDimsWhenDisabled() {
+        #expect(DSMenuLabel.opacity(isEnabled: true) == 1)
+        #expect(DSMenuLabel.opacity(isEnabled: false) == Theme.disabledOpacity)
+    }
+
     @Test func startFailureCopyNeverCallsTheHelperAnEngine() {
         let causes: [EngineStartFailure.Cause] = [.missing, .signatureMismatch, .couldNotLaunch, .exitsAtStart, .keepsStopping]
         for cause in causes {
