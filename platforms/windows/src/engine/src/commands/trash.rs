@@ -392,7 +392,24 @@ fn already_restored_outcome(
     })
 }
 
+/// One item's catalog changes are all-or-nothing, so a bad snapshot row can't leave a
+/// half-restored file behind while the rest of the batch commits.
 fn reconcile_restored_catalog(
+    tx: &rusqlite::Transaction<'_>,
+    item: &trash_log::TrashLogItem,
+    identity: crate::platform::FileIdentity,
+) -> anyhow::Result<()> {
+    tx.execute_batch("SAVEPOINT restore_item")?;
+    match reconcile_restored_catalog_rows(tx, item, identity) {
+        Ok(()) => Ok(tx.execute_batch("RELEASE restore_item")?),
+        Err(error) => {
+            tx.execute_batch("ROLLBACK TO restore_item; RELEASE restore_item")?;
+            Err(error)
+        }
+    }
+}
+
+fn reconcile_restored_catalog_rows(
     tx: &rusqlite::Transaction<'_>,
     item: &trash_log::TrashLogItem,
     identity: crate::platform::FileIdentity,
@@ -1621,6 +1638,64 @@ mod tests {
         };
         assert!(reconcile_restored_catalog(&tx, &conflicting, identity).is_err());
         tx.commit().unwrap();
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_corrupt_snapshot_row_rolls_back_only_its_own_item() {
+        use trash_log::{SnapshotRow, SnapshotValue};
+        let base = std::env::temp_dir().join(format!(
+            "fileid-restore-savepoint-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
+        let snapshot = |path: &std::path::Path, id: i64, corrupt: bool| {
+            crate::db::test_support::insert_file(&conn, id, &path.to_string_lossy(), "image");
+            let mut rows = trash_log::snapshot_rows(&conn, id).unwrap();
+            conn.execute("DELETE FROM files WHERE id = ?1", [id]).unwrap();
+            if corrupt {
+                let mut columns = std::collections::BTreeMap::new();
+                columns.insert("file_id".to_string(), SnapshotValue { int: Some(id), ..Default::default() });
+                columns.insert("print_data".to_string(), SnapshotValue { blob: Some("not base64!".into()), ..Default::default() });
+                columns.insert("bbox".to_string(), SnapshotValue { text: Some("[0,0,1,1]".into()), ..Default::default() });
+                rows.push(SnapshotRow { table: "face_prints".into(), columns });
+            }
+            rows
+        };
+        let bad_path = base.join("bad.jpg");
+        let good_path = base.join("good.jpg");
+        std::fs::write(&bad_path, b"bad").unwrap();
+        std::fs::write(&good_path, b"good").unwrap();
+        let bad = trash_log::TrashLogItem {
+            file_id: 1,
+            original_path: bad_path.to_string_lossy().into_owned(),
+            rows: snapshot(&bad_path, 1, true),
+            ..Default::default()
+        };
+        let good = trash_log::TrashLogItem {
+            file_id: 2,
+            original_path: good_path.to_string_lossy().into_owned(),
+            rows: snapshot(&good_path, 2, false),
+            ..Default::default()
+        };
+
+        let tx = conn.transaction().unwrap();
+        let bad_identity = crate::platform::file_identity(&bad_path).unwrap();
+        let good_identity = crate::platform::file_identity(&good_path).unwrap();
+        assert!(reconcile_restored_catalog(&tx, &bad, bad_identity).is_err());
+        reconcile_restored_catalog(&tx, &good, good_identity).unwrap();
+        tx.commit().unwrap();
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(ids, vec![2]);
         std::fs::remove_dir_all(base).ok();
     }
 

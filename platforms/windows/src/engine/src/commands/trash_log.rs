@@ -232,6 +232,14 @@ pub(crate) fn restore_snapshot(
             restored_persons.push(person);
         }
     }
+    if !rows.iter().any(|row| row.table == "face_prints") {
+        // A journal from before face rows were snapshotted: a NULL `modified_at`
+        // keeps the file out of the next scan's skip set, which detects its faces again.
+        conn.execute(
+            "UPDATE files SET has_faces = 0, modified_at = NULL WHERE id = ?1 AND has_faces <> 0",
+            [file_id],
+        )?;
+    }
     restored_persons.sort_unstable();
     restored_persons.dedup();
     crate::db::person_counts::reconcile(conn, &restored_persons)?;
@@ -827,5 +835,40 @@ mod tests {
         assert_eq!(face_rows(&conn).len(), 1);
         let restored: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(restored, 1);
+    }
+
+    #[test]
+    fn a_journal_from_before_faces_were_snapshotted_leaves_the_file_for_the_next_scan_to_detect() {
+        let conn = trashed_faces_catalog();
+        conn.execute("UPDATE files SET modified_at = 5.0", []).unwrap();
+        let rows: Vec<SnapshotRow> =
+            snapshot_rows(&conn, 1).unwrap().into_iter().filter(|row| row.table != "face_prints").collect();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        let (has_faces, modified): (i64, Option<f64>) = conn
+            .query_row("SELECT has_faces, modified_at FROM files WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((has_faces, modified), (0, None));
+        let untouched: (i64, Option<f64>) = conn
+            .query_row("SELECT has_faces, modified_at FROM files WHERE id = 2", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(untouched, (1, Some(5.0)));
+    }
+
+    #[test]
+    fn a_snapshot_with_faces_keeps_its_has_faces_and_modified_at() {
+        let conn = trashed_faces_catalog();
+        conn.execute("UPDATE files SET modified_at = 5.0", []).unwrap();
+        let rows = snapshot_rows(&conn, 1).unwrap();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        let restored: (i64, Option<f64>) = conn
+            .query_row("SELECT has_faces, modified_at FROM files WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(restored, (1, Some(5.0)));
     }
 }
