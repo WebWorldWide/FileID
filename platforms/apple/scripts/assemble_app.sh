@@ -7,7 +7,7 @@
 #   bash scripts/assemble_app.sh <output-bundle-path> [version] [build-number]
 #
 # Expects .build/release/FileID to exist (caller builds). Copies the cached
-# mlx.metallib when present; warns when absent (Deep Analyze needs it at runtime).
+# mlx.metallib beside libFileIDAppleKit when present; warns when absent (Deep Analyze needs it at runtime).
 #
 # The one engine is the shared Rust engine: the script builds FileIDAppleKit and
 # the Rust engine with --features apple-adapters and bundles them as
@@ -84,14 +84,6 @@ if ! otool -l "$CONTENTS/MacOS/FileID" | grep -F 'path @executable_path/../Frame
 fi
 strip_foreign_rpaths "$CONTENTS/MacOS/FileID"
 
-# MLX first loads a colocated mlx.metallib beside the engine binary (fileidd).
-if [ -f "$METALLIB_CACHE" ]; then
-    cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
-else
-    echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
-    echo "   Run bash run.sh once on a Mac with Xcode + Metal Toolchain to build it."
-fi
-
 SWIFT_SCRATCH="$(dirname "$BUILD_DIR")"
 APPLE_KIT="$BUILD_DIR/libFileIDAppleKit.dylib"
 read -r -a SWIFT_EXTRA_ARGS <<< "${FILEID_SWIFT_BUILD_ARGS:-}"
@@ -127,18 +119,19 @@ xcrun swift-stdlib-tool --copy --platform macosx \
 strip_foreign_rpaths "$CONTENTS/Frameworks/libFileIDAppleKit.dylib"
 strip_foreign_rpaths "$CONTENTS/MacOS/fileidd"
 # MLX looks for mlx.metallib beside the binary that contains it, which for
-# fileidd is libFileIDAppleKit.dylib (Stage 7 VLM sessions).
+# fileidd is libFileIDAppleKit.dylib; the only copy lives there.
 if [ -f "$METALLIB_CACHE" ]; then
     cp "$METALLIB_CACHE" "$CONTENTS/Frameworks/mlx.metallib"
 else
     echo "⚠️  $METALLIB_CACHE missing — fileidd's MLX models will fail at runtime."
+    echo "   Run bash run.sh once on a Mac with Xcode + Metal Toolchain to build it."
 fi
 if ! otool -l "$CONTENTS/MacOS/fileidd" | grep -F 'path @executable_path/../Frameworks' >/dev/null; then
     install_name_tool -add_rpath '@executable_path/../Frameworks' "$CONTENTS/MacOS/fileidd"
 fi
 # Ad-hoc signatures keep dev bundles launchable after install_name_tool;
 # release.sh re-signs everything with the Developer ID.
-for code in "$CONTENTS/MacOS/mlx.metallib" "$CONTENTS/Frameworks/mlx.metallib" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/MacOS/fileidd" "$CONTENTS/MacOS/FileID"; do
+for code in "$CONTENTS/Frameworks/mlx.metallib" "$CONTENTS/Frameworks/libFileIDAppleKit.dylib" "$CONTENTS/MacOS/fileidd" "$CONTENTS/MacOS/FileID"; do
     [ -f "$code" ] && codesign --force --sign - "$code" >/dev/null
 done
 echo "🦀 Bundled the shared Rust engine as Contents/MacOS/fileidd"

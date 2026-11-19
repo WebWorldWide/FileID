@@ -6,12 +6,15 @@ import Foundation
 import FileIDImaging
 
 enum ScanGPU {
-    /// `DeepAnalyzeCapability.metallibPresent`: MLX aborts the process without
-    /// its Metal library, which it loads from beside the executable.
+    /// MLX aborts the process without its Metal library, which it loads from
+    /// beside the binary that contains it: this library, not the host
+    /// executable.
     static func metallibPresent() -> Bool {
-        let dir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
+        var info = Dl_info()
+        guard dladdr(#dsohandle, &info) != 0, let name = info.dli_fname else { return false }
+        let folder = URL(fileURLWithPath: String(cString: name)).deletingLastPathComponent()
         return ["mlx.metallib", "default.metallib"].contains {
-            FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path)
+            FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path)
         }
     }
 

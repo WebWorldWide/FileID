@@ -82,17 +82,16 @@ FILEID_APP_STORE=1 FILEID_BUILD_CONFIGURATION=release \
     bash scripts/assemble_app.sh "$APP" "$VERSION" "$BUILD_NUM"
 [ -x "$APP/Contents/MacOS/fileidd" ] || { echo "fileidd is missing from the App Store bundle." >&2; exit 1; }
 [ ! -e "$APP/Contents/MacOS/FileIDEngine" ] || { echo "A Swift engine binary is in the App Store bundle; only fileidd ships." >&2; exit 1; }
-[ -s "$APP/Contents/MacOS/mlx.metallib" ] || {
+[ -s "$APP/Contents/Frameworks/mlx.metallib" ] || {
     echo "The required MLX Metal library is missing from the app bundle." >&2
     exit 1
 }
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 chmod -R a+rX "$APP"
 
-# Nested code first (inside-out, no --deep): the metallibs beside the app and
-# beside libFileIDAppleKit, the bundled dylibs, then fileidd with the inherited
+# Nested code first (inside-out, no --deep): the metallib beside libFileIDAppleKit, the bundled dylibs, then fileidd with the inherited
 # sandbox entitlements.
-for lib in "$APP/Contents/MacOS/"*.metallib "$APP/Contents/Frameworks/"*.metallib; do
+for lib in "$APP/Contents/Frameworks/"*.metallib; do
     [ -f "$lib" ] || continue
     codesign --force --sign "$APP_IDENTITY" --timestamp "$lib"
 done
