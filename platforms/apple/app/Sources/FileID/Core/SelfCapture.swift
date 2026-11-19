@@ -213,7 +213,11 @@ enum SelfShot {
                 try? await Task.sleep(for: .seconds(0.4))
                 if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
                 try? await Task.sleep(for: .seconds(plan.settle))
-                if view.scrollToBottom || view.scrollOffset != nil { scrollContent(to: view.scrollOffset); try? await Task.sleep(for: .seconds(0.6)) }
+                if view.scrollToBottom || view.scrollOffset != nil {
+                    scrollContent(to: view.scrollOffset)
+                    try? await Task.sleep(for: .seconds(0.6))
+                    await waitForLibraryThumbnails()
+                }
                 if let name = view.preview {
                     NotificationCenter.default.post(name: .selfShotOpenPreview, object: name)
                     try? await Task.sleep(for: .seconds(plan.settle))
@@ -399,6 +403,27 @@ enum SelfShot {
         let y = document.isFlipped ? min(end, offset ?? end) : max(0, end - (offset ?? end))
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    /// A grid scrolled to cold rows loads about one screenful of thumbnails per second; capture once the tiles on screen have theirs (at most 8 s), and say how long that took.
+    private static func waitForLibraryThumbnails() async {
+        guard let root = window()?.contentView, let collection = firstCollectionView(in: root) else { return }
+        let started = Date()
+        while Date().timeIntervalSince(started) < 8 {
+            let tiles = collection.visibleItems().compactMap { $0 as? LibraryTileItem }
+            if !tiles.isEmpty, tiles.allSatisfy(\.isFinishedLoading) {
+                FileHandle.standardError.write(Data("self-shot: \(tiles.count) tiles on screen showed their thumbnails \(Int(Date().timeIntervalSince(started) * 1000)) ms after the scroll settled\n".utf8))
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        FileHandle.standardError.write(Data("self-shot: thumbnails still loading after 8 s\n".utf8))
+    }
+
+    private static func firstCollectionView(in view: NSView) -> NSCollectionView? {
+        if let collection = view as? NSCollectionView { return collection }
+        for sub in view.subviews { if let found = firstCollectionView(in: sub) { return found } }
+        return nil
     }
 
     /// A kept-alive page that is faded out is still in the view tree; only the page on screen answers a hit test at its centre.
