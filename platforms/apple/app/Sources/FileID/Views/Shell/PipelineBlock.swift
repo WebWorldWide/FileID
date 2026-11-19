@@ -89,6 +89,9 @@ struct PipelineBlock: View {
         if store.totalFiles > 0 || progress?.phase == .completed {
             return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(store.totalFiles.formatted()) files ready to browse")
         }
+        if !store.countersAvailable {
+            return Status(title: "Opening your library…", fraction: 0, tone: .gold, color: Theme.text2, sub: "Counting the files FileID has already read.")
+        }
         return Status(title: startRequested ? "Starting…" : "Ready to scan", fraction: 0, tone: .gold, color: Theme.text2, sub: "Reads every file in it. Nothing is moved or changed.")
     }
 

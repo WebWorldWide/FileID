@@ -927,7 +927,10 @@ struct LibraryView: View {
     @ViewBuilder
     private var empty: some View {
         if store.scopedTotalFiles == 0 {
-            if scanActive {
+            if !store.countersAvailable {
+                EmptyStateView(icon: "hourglass", title: "Opening your library",
+                               message: "FileID is counting the files it has already read.")
+            } else if scanActive {
                 EmptyStateView(icon: "hourglass", title: "Reading your files",
                                message: "Files appear here as the scan reads them.")
             } else if store.totalFiles > 0 {

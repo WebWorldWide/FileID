@@ -225,7 +225,12 @@ struct MainWindow: View {
                 store.openIfPossible()
                 store.notifyChanged()
             }
-            .onChange(of: engineReady, initial: true) { _, ready in if ready { engine.refreshLibraryRoots() } }
+            .onChange(of: engineReady, initial: true) { _, ready in
+                guard ready else { return }
+                store.openIfPossible()
+                store.notifyChanged()
+                engine.refreshLibraryRoots()
+            }
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
             .task(id: Self.jobsNeedRefresh(engine.catalogJobs)) {
