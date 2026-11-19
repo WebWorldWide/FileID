@@ -132,7 +132,11 @@ fn action(context: &Context<'_>, kind: &str, title: String, detail: String) -> C
 }
 
 fn finish(mut action: ChatAction, hits: Vec<CatalogHit>) -> Resolution {
-    let message = action.detail.clone();
+    let message = if action.requires_confirmation {
+        format!("{}? It needs your OK first; nothing changes until you confirm.", action.title)
+    } else {
+        format!("{}.", action.title)
+    };
     if action.examples.as_ref().is_some_and(Vec::is_empty) {
         action.examples = None;
     }

@@ -173,7 +173,7 @@ impl SearchPlan {
             "of", "my", "files", "file", "with", "in", "all", "only", "just", "now", "these", "those", "instead",
             "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were", "do", "does", "did", "have", "has",
             "there", "any", "about", "that", "i", "mentioning", "mention", "mentions", "named", "called", "titled",
-            "regarding", "one", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
+            "regarding", "every", "one", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
             "similar", "closest", "nearest", "lookalike", "lookalikes", "resemble", "resembles", "resembling",
         ];
         let refinement = follow_up

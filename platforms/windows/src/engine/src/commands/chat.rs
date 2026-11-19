@@ -1024,6 +1024,7 @@ fn prepare_turn(
         && let Some(name) = asked_inside(&text)
         && let Some((message, hits)) = chat_facts::folder_answer(conn, &name, root.as_ref())?
     {
+        let message = with_same_named_folders_note(conn, &format!("named:{name}"), root.as_ref(), message)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
     if let Some(reference) = reference_ask(&text) {
@@ -1060,6 +1061,10 @@ fn prepare_turn(
         }
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
         let message = with_unnamed_people_note(conn, &text, &plan, root.as_ref(), message)?;
+        let message = match &question.folder {
+            Some(folder) => with_same_named_folders_note(conn, folder, root.as_ref(), message)?,
+            None => message,
+        };
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
     let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds, root.as_ref());
@@ -1172,6 +1177,13 @@ fn prepare_turn(
     };
     let explanation = with_unnamed_people_note(conn, &text, &plan, root.as_ref(), explanation)?;
     Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true })
+}
+
+fn with_same_named_folders_note(conn: &Connection, folder: &str, root: Option<&super::roots::RootScope>, message: String) -> Result<String> {
+    Ok(match chat_facts::same_named_folders_note(conn, folder, root)? {
+        Some(note) => format!("{message} {note}"),
+        None => message,
+    })
 }
 
 const UNNAMED_PEOPLE_NOTE: &str = "People aren't named yet — name them in People to search by person.";
@@ -2012,6 +2024,45 @@ mod tests {
         let actions = response.actions.unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!((actions[0].kind.as_str(), actions[0].file_count, actions[0].requires_confirmation), ("moveDuplicatesToTrash", Some(1), true));
+    }
+
+    #[test]
+    fn an_action_answer_neither_prints_paths_nor_repeats_its_card() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,content_hash) VALUES
+             (1,'/lib/Eckerts 10-4-26/a.jpg',1,10,1688472000,0,'image','jpg','h'),
+             (2,'/lib/Eckerts 10-4-26/copy of a.jpg',2,10,1688472000,0,'image','jpg','h');",
+        )
+        .unwrap();
+        for text in ["Organize my Eckerts 10-4-26 folder", "Move the extra copies to the trash"] {
+            let request = ChatRequest { request_id: "r".into(), conversation_id: uuid::Uuid::new_v4().to_string(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            let response = execute(&mut conn, &request).unwrap();
+            let actions = response.actions.expect(text);
+            assert_ne!(response.message, actions[0].detail, "{text}");
+            assert!(!response.message.contains("/lib"), "{text}: {}", response.message);
+            assert!(response.message.starts_with(&actions[0].title), "{text}: {}", response.message);
+        }
+    }
+
+    #[test]
+    fn same_named_folders_are_called_out_instead_of_merged_silently() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (1,'/lib/Eckerts/Photos/a.jpg',1,10,1688472000,0,'image','jpg'),
+             (2,'/lib/Eckerts/Photos/b.jpg',2,10,1688472000,0,'image','jpg'),
+             (3,'/lib/Ryan/2012/Photos/c.jpg',3,10,1688472000,0,'image','jpg'),
+             (4,'/lib/Only/Single/d.jpg',4,10,1688472000,0,'image','jpg');",
+        )
+        .unwrap();
+        let mut ask = |text: &str| {
+            let request = ChatRequest { request_id: "r".into(), conversation_id: uuid::Uuid::new_v4().to_string(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            execute(&mut conn, &request).unwrap().message
+        };
+        let message = ask("What's in the Photos folder?");
+        assert!(message.contains("2 folders are called “Photos” and their files are counted together: Eckerts/Photos (2 files), 2012/Photos (1 file)."), "{message}");
+        assert!(!ask("What's in the Single folder?").contains("folders are called"));
     }
 
     #[test]

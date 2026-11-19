@@ -560,6 +560,36 @@ pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootSco
     Ok(Some((format!("“{name}” holds {} {files} ({}): {}.", count_label(count), bytes_label(bytes), kinds.join(", ")), hits)))
 }
 
+/// "Photos" can name several folders (one per scanned location); say so instead of silently merging their files.
+pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Option<&RootScope>) -> Result<Option<String>> {
+    let Some(name) = folder.strip_prefix("named:") else { return Ok(None) };
+    let filter = Filter { folder: Some(folder.to_owned()), root: root.cloned(), ..Filter::default() };
+    let mut args = vec![Value::Text(format!("/{name}/")), Value::Text(format!("/{name}/"))];
+    let clause = filter.clause(&mut args);
+    let mut statement = conn.prepare(&format!(
+        "SELECT substr(f.path_text,1,instr(lower(replace(f.path_text,char(92),'/')),lower(?))+length(?)-2) AS folder,COUNT(*) AS c FROM files f WHERE {clause} GROUP BY folder ORDER BY c DESC,folder ASC LIMIT 6"
+    ))?;
+    let found = statement
+        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if found.len() < 2 {
+        return Ok(None);
+    }
+    let places: Vec<String> = found
+        .iter()
+        .map(|(path, count)| {
+            let parts: Vec<&str> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+            let shown = parts[parts.len().saturating_sub(2)..].join("/");
+            format!("{shown} ({})", plural_files(*count))
+        })
+        .collect();
+    Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
+}
+
+fn plural_files(count: i64) -> String {
+    format!("{} {}", count_label(count), if count == 1 { "file" } else { "files" })
+}
+
 pub(crate) fn reference_answer(reference: &super::chat_intent::Reference, hits: Vec<CatalogHit>) -> (String, Vec<CatalogHit>) {
     use super::chat_intent::Reference;
     if hits.is_empty() {
