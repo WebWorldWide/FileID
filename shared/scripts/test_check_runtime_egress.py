@@ -330,8 +330,6 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/commands/bulk.rs",
             "platforms/windows/src/engine/src/commands/video_export.rs",
             "platforms/windows/src/engine/src/server.rs",
-            "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-            "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
             "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
             "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
             "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
@@ -386,7 +384,6 @@ class RuntimeEgressTests(unittest.TestCase):
         self.assertEqual(SAFE_NETWORK_CALLER_FILES, {
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
-            "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
         })
 
     def test_string_decoys_cannot_replace_live_downloader_contracts(self) -> None:
@@ -446,6 +443,11 @@ class RuntimeEgressTests(unittest.TestCase):
             (
                 "platforms/windows/src/engine/src/alias.rs",
                 'use reqwest as web; fn go() { web::Client::new(); }',
+                "raw network API",
+            ),
+            (
+                "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
+                'func go(_ remote: URL) { URLSession.shared.downloadTask(with: remote).resume() }',
                 "raw network API",
             ),
             (
@@ -594,16 +596,6 @@ class RuntimeEgressTests(unittest.TestCase):
                 "platforms/windows/src/engine/src/commands/prewarm.rs",
                 "\nasync fn beacon(http_client: reqwest::Client) { let transport = http_client.clone(); transport.execute(todo!()).await; }\n",
                 "HTTP client plumbing",
-            ),
-            (
-                "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-                "\nfunc beacon(session: URLSession) { session.streamTask(withHostName: \"evil.invalid\", port: 443).resume() }\n",
-                "raw session/request inventory",
-            ),
-            (
-                "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
-                "\nfunc beacon(session: URLSession, request: URLRequest) { session.dataTask(with: request) }\n",
-                "must not construct sessions or requests",
             ),
             (
                 "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",

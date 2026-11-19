@@ -36,4 +36,33 @@ struct HelperGateTests {
         #expect(!LibraryCounters.needsRefresh(isSimilaritySeed: false, kind: "image", query: "", listedRows: 120, scopedTotalFiles: 100))
         #expect(!LibraryCounters.needsRefresh(isSimilaritySeed: false, kind: nil, query: "beach", listedRows: 120, scopedTotalFiles: 100))
     }
+
+    @Test func modelDownloadsStayOffWhileTheHelperIsDownAndSayWhy() {
+        #expect(HelperGate.downloadsUnavailableNote.contains("helper isn't running"))
+        #expect(HelperGate.downloadsUnavailableNote.contains("Restart the helper"))
+    }
+
+    @Test func aMissingDescriptionModelIsAFailureTheDescribePageShows() {
+        let error = EngineError(kind: "vlm_model_missing", message: "The qwen3_vl_2b model isn't installed yet.", modelKind: "qwen3_vl_2b")
+        #expect(ModelFailureText.isModelFailure(error))
+        #expect(ModelFailureText.plain(error) == "This AI model isn't downloaded yet. Try again to download it first.")
+    }
+
+    @MainActor
+    @Test func photoExportsOfferOnlyJPEGAndPNGAndRAWCanNotBeChosen() {
+        let session = ToolsSession()
+        session.kind = "photo"
+        func hit(_ id: Int64, _ path: String) -> CatalogHit { CatalogHit(fileID: id, path: path, kind: "image", text: "") }
+        let raw = hit(1, "/p/DSC01776.ARW"), jpeg = hit(2, "/p/DSC01776.JPG"), png = hit(3, "/p/a.png"), heic = hit(4, "/p/b.heic")
+        session.allHits = [raw, jpeg, png, heic]
+        session.applyKindFilter()
+        #expect(session.hits.map(\.fileID) == [1, 2, 3, 4])
+        #expect(session.chooseableHits.map(\.fileID) == [2, 3])
+        #expect(!session.canChoose(raw) && !session.canChoose(heic))
+        session.selection = [1, 2]
+        session.applyKindFilter()
+        #expect(session.selection == [2])
+        session.kind = "video"
+        #expect(session.canChoose(hit(5, "/p/c.mov")))
+    }
 }

@@ -342,7 +342,7 @@ enum SelfShot {
             await waitUntil(timeout: 30) { !session.allHits.isEmpty }
             try? await Task.sleep(for: .seconds(1))
             let n = env("FILEID_SELF_SHOT_TOOLS_N").flatMap(Int.init) ?? 2
-            session.selection = Set(session.hits.prefix(n).map(\.fileID))
+            session.selection = Set(session.chooseableHits.prefix(n).map(\.fileID))
             session.destination = env("FILEID_SELF_SHOT_TOOLS_DEST") ?? ""
             try? await Task.sleep(for: .seconds(1))
             write(name: "tools-selected", plan: plan)

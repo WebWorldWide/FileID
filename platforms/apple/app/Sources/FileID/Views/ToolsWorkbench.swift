@@ -135,9 +135,18 @@ final class ToolsSession {
         return kind == "photo" ? FileTypes.images.contains(ext) : FileTypes.videos.contains(ext)
     }
 
+    static let exportablePhotoExtensions: Set<String> = ["jpg", "jpeg", "png"]
+
+    /// Photo exports take JPEG and PNG only, so a RAW or HEIC hit is listed but cannot be chosen.
+    func canChoose(_ hit: CatalogHit) -> Bool {
+        kind != "photo" || Self.exportablePhotoExtensions.contains(URL(fileURLWithPath: hit.path).pathExtension.lowercased())
+    }
+
+    var chooseableHits: [CatalogHit] { hits.filter(canChoose) }
+
     func applyKindFilter() {
         hits = allHits.filter(fitsKind)
-        selection.formIntersection(hits.map(\.fileID))
+        selection.formIntersection(chooseableHits.map(\.fileID))
     }
 
     /// A successful preview says what Export will do in plain words; the engine's sentence ("new file(s)",
@@ -323,6 +332,7 @@ struct ToolsWorkbench: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(session.hits, id: \.fileID) { hit in
                         let url = URL(fileURLWithPath: hit.path)
+                        let chooseable = session.canChoose(hit)
                         Toggle(isOn: Binding(get: { session.selection.contains(hit.fileID) }, set: { value in
                             if value { session.selection.insert(hit.fileID) } else { session.selection.remove(hit.fileID) }
                             invalidate()
@@ -331,11 +341,12 @@ struct ToolsWorkbench: View {
                                 Text(url.lastPathComponent).font(Theme.Font.mono(12)).foregroundStyle(Theme.text1)
                                     .lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 8)
-                                Text(url.deletingLastPathComponent().lastPathComponent).font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                                Text(chooseable ? url.deletingLastPathComponent().lastPathComponent : "Can't be exported here. Choose the JPEG.").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                                     .lineLimit(1).truncationMode(.head)
                             }
                         }
                         .toggleStyle(DSCheckboxToggleStyle())
+                        .disabled(!chooseable)
                         .padding(.horizontal, 14)
                         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
                         .help(hit.path)
@@ -343,10 +354,10 @@ struct ToolsWorkbench: View {
                 }
                 .disabled(busy)
                 PanelFooter {
-                    MetaText("\(session.selection.count) of \(session.hits.count) chosen", size: 12)
+                    MetaText("\(session.selection.count) of \(session.chooseableHits.count) chosen", size: 12)
                     Spacer()
-                    Button(session.selection.count == session.hits.count ? "Select none" : "Select all") {
-                        session.selection = session.selection.count == session.hits.count ? [] : Set(session.hits.map(\.fileID))
+                    Button(session.selection.count == session.chooseableHits.count ? "Select none" : "Select all") {
+                        session.selection = session.selection.count == session.chooseableHits.count ? [] : Set(session.chooseableHits.map(\.fileID))
                         invalidate()
                     }
                     .buttonStyle(.dsGhost)

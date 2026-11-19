@@ -35,6 +35,8 @@ public final class ReadStore: @unchecked Sendable {
     @ObservationIgnored private var retryAttempts = 0
     private let dbURL: URL
     public private(set) var version: Int = 0
+    /// Bumps each time the read connection opens. A launch before the engine has created the catalog's -wal/-shm files cannot open it read-only, so the first listing reads nothing; views reload on this.
+    public private(set) var readerEpoch: Int = 0
     public private(set) var totalFiles: Int = 0
     /// False until the first counters read lands, and again while the reader cannot open or the counters read fails;
     /// `totalFiles` is then a placeholder, not a count of an empty library.
@@ -48,7 +50,7 @@ public final class ReadStore: @unchecked Sendable {
     /// Files cataloged by name, size and dates only (archives, installers, unknown types).
     public private(set) var otherFiles: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
-    public private(set) var totalReclaimableMB: Double = 0
+    public private(set) var totalReclaimableBytes: Int64 = 0
     public private(set) var hasFacePrints = false
     public private(set) var hasNamedPerson = false
     public private(set) var hasCaptions = false
@@ -112,7 +114,7 @@ public final class ReadStore: @unchecked Sendable {
             self.unreadableFiles = 0
             self.otherFiles = 0
             self.totalDuplicateGroups = 0
-            self.totalReclaimableMB = 0
+            self.totalReclaimableBytes = 0
             self.hasFacePrints = false
             self.hasNamedPerson = false
             self.hasCaptions = false
@@ -122,6 +124,7 @@ public final class ReadStore: @unchecked Sendable {
             do {
                 try ReadOnlyLocations.requireWritable(dbURL)
                 self.queue = try Self.openReader(at: dbURL)
+                Task { @MainActor in self.readerEpoch &+= 1 }
             } catch {
                 reportError("Could not open DB: \(error)")
                 self.countersAvailable = false
@@ -181,7 +184,7 @@ public final class ReadStore: @unchecked Sendable {
         let scopedUnreadableFiles: Int
         let scopedOtherFiles: Int
         let totalDuplicateGroups: Int
-        let totalReclaimableMB: Double
+        let totalReclaimableBytes: Int64
         let hasFacePrints: Bool
         let hasNamedPerson: Bool
         let hasCaptions: Bool
@@ -310,7 +313,7 @@ public final class ReadStore: @unchecked Sendable {
                     scopedUnreadableFiles: scoped.unreadable,
                     scopedOtherFiles: scoped.other,
                     totalDuplicateGroups: groups,
-                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
+                    totalReclaimableBytes: reclaimableBytes,
                     hasFacePrints: hasFacePrints,
                     hasNamedPerson: hasNamedPerson,
                     hasCaptions: hasCaptions
@@ -334,7 +337,7 @@ public final class ReadStore: @unchecked Sendable {
         if self.scopedUnreadableFiles != snapshot.scopedUnreadableFiles { self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles }
         if self.scopedOtherFiles != snapshot.scopedOtherFiles { self.scopedOtherFiles = snapshot.scopedOtherFiles }
         if self.totalDuplicateGroups != snapshot.totalDuplicateGroups { self.totalDuplicateGroups = snapshot.totalDuplicateGroups }
-        if self.totalReclaimableMB != snapshot.totalReclaimableMB { self.totalReclaimableMB = snapshot.totalReclaimableMB }
+        if self.totalReclaimableBytes != snapshot.totalReclaimableBytes { self.totalReclaimableBytes = snapshot.totalReclaimableBytes }
         if self.hasFacePrints != snapshot.hasFacePrints { self.hasFacePrints = snapshot.hasFacePrints }
         if self.hasNamedPerson != snapshot.hasNamedPerson { self.hasNamedPerson = snapshot.hasNamedPerson }
         if self.hasCaptions != snapshot.hasCaptions { self.hasCaptions = snapshot.hasCaptions }
