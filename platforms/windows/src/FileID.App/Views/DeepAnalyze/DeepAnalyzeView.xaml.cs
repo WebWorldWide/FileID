@@ -83,7 +83,11 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             var catalog = await EngineClient.Instance.ListModelsAsync("vision");
             if (_unloaded) return;
-            foreach (var model in catalog.Models) s_modelFit[model.Id] = model;
+            foreach (var model in catalog.Models)
+            {
+                s_modelFit[model.Id] = model;
+                RememberCatalogName(model);
+            }
             s_recommendedKind = catalog.RecommendedId;
             // A model that can never run here is not the default: follow the engine's pick until the user chooses one that runs.
             if (!Fits(_activeModel) && !VlmWeightsPresent(_activeModel)

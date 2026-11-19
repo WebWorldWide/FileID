@@ -13,6 +13,11 @@ impl std::fmt::Display for MemoryShortfall {
 
 impl std::error::Error for MemoryShortfall {}
 
+/// True when `error`, or anything it wraps (admission wrappers keep the cause as their source), is a memory shortfall.
+pub(crate) fn is_memory_shortfall(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<MemoryShortfall>())
+}
+
 pub(crate) fn reserve_mb(total_mb: u64) -> u64 {
     (total_mb / 4).clamp(2048, 8192)
 }
@@ -61,11 +66,15 @@ pub(crate) async fn require_model_headroom(gguf: &Path, projection: &Path) -> Re
     let weights = tokio::fs::metadata(gguf).await?;
     let vision = tokio::fs::metadata(projection).await?;
     if !weights.is_file() || !vision.is_file() || weights.len() == 0 || vision.len() == 0 { bail!("Model weights must be nonempty regular files") }
-    let requested = estimate_mb(weights.len(),vision.len())?;
-    let total = (crate::platform::physical_memory_gb() * 1024.0) as u64;
-    let available = crate::platform::available_memory_mb();
-    if let Some(reason) = rejection(total,available,requested) { bail!("{reason}") }
-    Ok(requested)
+    admit(weights.len(), vision.len(), (crate::platform::physical_memory_gb() * 1024.0) as u64, crate::platform::available_memory_mb())
+}
+
+fn admit(weights: u64, projection: u64, total_mb: u64, available_mb: u64) -> Result<u64> {
+    let requested = estimate_mb(weights, projection)?;
+    match rejection(total_mb, available_mb, requested) {
+        Some(reason) => Err(MemoryShortfall(reason).into()),
+        None => Ok(requested),
+    }
 }
 
 fn estimate_mb(weights: u64, projection: u64) -> Result<u64> {
@@ -96,6 +105,15 @@ mod tests {
         for fixture in fixtures { assert_eq!(rejection(fixture.total_mb,fixture.available_mb,fixture.requested_mb).is_none(),fixture.accepted); }
         assert_eq!(estimate_mb(4*1_048_576,4*1_048_576).unwrap(),1034);
         assert!(estimate_mb(u64::MAX,1).is_err());
+    }
+
+    #[test]
+    fn a_load_refused_for_memory_is_a_shortfall_other_models_may_answer() {
+        let gib = 1_073_741_824;
+        let busy = admit(2 * gib, 0, 8192, 3000).unwrap_err();
+        assert!(is_memory_shortfall(&busy), "{busy}");
+        assert!(admit(gib, 0, 8192, 3600).is_ok());
+        assert!(!is_memory_shortfall(&admit(u64::MAX, 1, 8192, 3000).unwrap_err()));
     }
 
     #[test]

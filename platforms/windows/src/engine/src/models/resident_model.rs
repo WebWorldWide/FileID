@@ -22,8 +22,10 @@ fn installed_requests() -> Vec<(String, u64)> {
     }
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     {
-        ["qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2"]
-            .into_iter()
+        crate::commands::models::default_ladder()
+            .iter()
+            .copied()
+            .chain(["gemma_3_4b", "mistral_small_3_2"])
             .filter_map(|kind| {
                 let (weights, projector) = super::vlm::find_weights(kind)?;
                 let bytes = std::fs::metadata(weights).ok()?.len().checked_add(std::fs::metadata(projector).ok()?.len())?;
@@ -34,17 +36,39 @@ fn installed_requests() -> Vec<(String, u64)> {
 }
 
 /// Installed models smaller than `requested`, largest first: what to try when `requested` is refused for memory.
-#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) fn smaller_installed(requested: &str) -> Vec<String> {
     smaller_than(requested, &installed_requests())
 }
 
-#[cfg(any(all(target_os = "macos", feature = "apple-adapters"), test))]
 fn smaller_than(requested: &str, installed: &[(String, u64)]) -> Vec<String> {
     let Some((_, wanted)) = installed.iter().find(|(kind, _)| kind == requested) else { return Vec::new() };
     let mut smaller: Vec<&(String, u64)> = installed.iter().filter(|(_, mb)| mb < wanted).collect();
     smaller.sort_by_key(|(_, mb)| std::cmp::Reverse(*mb));
     smaller.into_iter().map(|(kind, _)| kind.clone()).collect()
+}
+
+/// Loads `kinds[0]`, and while a load is refused for memory alone, the next one (smaller each time), saying so through `announce(refused, next)`. Returns the index of the kind that was tried last and its result; any other failure ends the walk.
+pub(crate) async fn load_until_one_fits<T, Attempt, Loading, Announce, Announced>(
+    kinds: &[String],
+    mut attempt: Attempt,
+    mut announce: Announce,
+) -> (usize, anyhow::Result<T>)
+where
+    Attempt: FnMut(String) -> Loading,
+    Loading: std::future::Future<Output = anyhow::Result<T>>,
+    Announce: FnMut(String, String) -> Announced,
+    Announced: std::future::Future<Output = ()>,
+{
+    let mut index = 0;
+    loop {
+        match attempt(kinds[index].clone()).await {
+            Err(error) if index + 1 < kinds.len() && crate::util::model_memory::is_memory_shortfall(&error) => {
+                announce(kinds[index].clone(), kinds[index + 1].clone()).await;
+                index += 1;
+            }
+            result => return (index, result),
+        }
+    }
 }
 
 fn pick_runnable(requested: &str, installed: &[(String, u64)], total_mb: u64, available_mb: u64) -> String {
@@ -80,7 +104,9 @@ fn is_resident(_kind: &str) -> std::future::Ready<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_runnable;
+    use super::{load_until_one_fits, pick_runnable};
+    use crate::models::native_admission::HostAdmissionError;
+    use crate::util::model_memory::MemoryShortfall;
 
     fn installed(kinds: &[(&str, u64)]) -> Vec<(String, u64)> {
         kinds.iter().map(|(kind, mb)| ((*kind).to_owned(), *mb)).collect()
@@ -114,5 +140,67 @@ mod tests {
     fn a_smaller_request_never_grows_into_a_bigger_model() {
         let all = installed(&[("qwen3_vl_8b", 8704), ("qwen3_vl_4b", 5120)]);
         assert_eq!(pick_runnable("qwen3_vl_4b", &all, 16384, 3000), "qwen3_vl_4b");
+    }
+
+    fn kinds(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn short_of_memory() -> anyhow::Error {
+        HostAdmissionError(MemoryShortfall("Available memory is too low".into()).into()).into()
+    }
+
+    #[tokio::test]
+    async fn a_load_refused_for_memory_walks_down_to_the_model_that_loads() {
+        let tried = std::sync::Mutex::new(Vec::new());
+        let said = std::sync::Mutex::new(Vec::new());
+        let (index, result) = load_until_one_fits(
+            &kinds(&["qwen3_vl_4b", "qwen3_vl_2b_instruct_gguf_q8_0"]),
+            |kind| {
+                tried.lock().unwrap().push(kind.clone());
+                let loads = kind == "qwen3_vl_2b_instruct_gguf_q8_0";
+                async move { if loads { Ok(7) } else { Err(short_of_memory()) } }
+            },
+            |refused, next| {
+                said.lock().unwrap().push(format!("{refused}->{next}"));
+                async {}
+            },
+        )
+        .await;
+        assert_eq!((index, result.unwrap()), (1, 7));
+        assert_eq!(*tried.lock().unwrap(), ["qwen3_vl_4b", "qwen3_vl_2b_instruct_gguf_q8_0"]);
+        assert_eq!(*said.lock().unwrap(), ["qwen3_vl_4b->qwen3_vl_2b_instruct_gguf_q8_0"]);
+    }
+
+    #[tokio::test]
+    async fn the_smallest_model_refused_for_memory_reports_that_refusal() {
+        let (index, result) = load_until_one_fits(&kinds(&["a", "b"]), |_| async { Err::<(), _>(short_of_memory()) }, |_, _| async {}).await;
+        assert_eq!(index, 1);
+        let error = result.unwrap_err();
+        assert!(crate::util::model_memory::is_memory_shortfall(&error));
+        assert!(format!("{error:#}").contains("Available memory is too low"));
+    }
+
+    #[tokio::test]
+    async fn only_a_memory_refusal_moves_on_to_a_smaller_model() {
+        let tried = std::sync::Mutex::new(0);
+        let (index, result) = load_until_one_fits(
+            &kinds(&["a", "b"]),
+            |_| {
+                *tried.lock().unwrap() += 1;
+                async { Err::<(), _>(HostAdmissionError(anyhow::anyhow!("Resident checkout cancelled")).into()) }
+            },
+            |_, _| async { panic!("no smaller model is announced for a non-memory failure") },
+        )
+        .await;
+        assert_eq!((index, *tried.lock().unwrap()), (0, 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn memory_shortfall_is_found_through_the_admission_wrapper() {
+        assert!(crate::util::model_memory::is_memory_shortfall(&short_of_memory()));
+        assert!(crate::util::model_memory::is_memory_shortfall(&anyhow::Error::new(MemoryShortfall("x".into()))));
+        assert!(!crate::util::model_memory::is_memory_shortfall(&anyhow::anyhow!("Available memory is too low")));
     }
 }
