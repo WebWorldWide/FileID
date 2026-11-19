@@ -390,8 +390,12 @@ final class ChatActionRunner {
         }
         if outcome.engineUnavailable { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
         if outcome.timedOut { phases[action.id] = .failed("Moving to Trash didn't finish. Check the Trash before trying again."); return }
-        let freed = ByteCountFormatter.string(fromByteCount: outcome.trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
         let changed = outcome.verificationFailed + missing
+        if outcome.trashed.isEmpty {
+            phases[action.id] = .failed(ExactDuplicateVerifier.nothingMovedSummary(outcome, skippedAsChanged: changed))
+            return
+        }
+        let freed = ByteCountFormatter.string(fromByteCount: outcome.trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
         var summary = "Moved \(outcome.trashed.count.formatted()) \(outcome.trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
         if changed > 0 { summary += " · \(changed.formatted()) skipped because the file changed since the scan" }
         if outcome.protectedLocation > 0 { summary += " · \(outcome.protectedLocation.formatted()) left alone in a protected location, such as a Photos library" }
