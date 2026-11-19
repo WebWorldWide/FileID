@@ -99,7 +99,7 @@ def database_path(state: Path) -> Path:
 
 class Engine:
     """One engine process; events are read from stdout and stderr because the
-    the Mac app-hosted engine writes its event stream to stderr."""
+    Mac app-hosted engine writes its event stream to stderr."""
 
     def __init__(self, binary: Path, state: Path, env: dict | None = None, log: Path | None = None,
                  home: Path | None = None):

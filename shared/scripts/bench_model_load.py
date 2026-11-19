@@ -6,9 +6,7 @@ command that first needs the model and times it. The first round uses model
 files copied without the OS file cache (cold); later rounds restart the engine
 on the same copies (warm, file cache populated). Prints one table row per
 model and round with time to ready, time to the first result, the second
-(model already loaded) result, the engine's peak physical footprint and how
-many ONNX Runtime CoreML compilations the run left in the temporary folder
-(approximate when other processes use ONNX Runtime at the same time).
+(model already loaded) result and the engine's peak physical footprint.
 
 Installed weights are only read: each run copies the files it needs into the
 scratch folder (`--scratch`), and the engine's catalog, logs, caches and model
@@ -34,7 +32,6 @@ import sqlite3
 import statistics
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -182,19 +179,6 @@ def cluster(engine):
     return done - sent, value
 
 
-def chat(engine, kind, text):
-    request = str(uuid.uuid4())
-    sent = engine.send({"chatRequest": {"request": {"requestID": request, "conversationID": str(uuid.uuid4()), "action": "send",
-                                                    "text": text, "useModel": True, "modelKind": kind}}})
-    first = None
-    while True:
-        stamp, value = engine.wait(lambda n, v: n == "chatResponse" and v.get("requestID") == request, 900)
-        if first is None and value.get("status") == "streaming":
-            first = stamp - sent
-        if value.get("status") in ("completed", "error", "cancelled"):
-            return first, stamp - sent, value.get("status"), value.get("message", "")
-
-
 def seed_faces(binary, state, photos):
     """Scan the face photos once without models so later runs only time clustering."""
     engine = Engine(binary, engine_env(state))
@@ -208,15 +192,8 @@ def seed_faces(binary, state, photos):
     return faces
 
 
-def leaked_runtime_files():
-    """CoreML compilations ONNX Runtime leaves in the per-user temporary folder
-    (Foundation ignores TMPDIR there, so a run cannot be confined)."""
-    return sum(1 for name in os.listdir(tempfile.gettempdir()) if name.startswith("onnxruntime-"))
-
-
 def run_once(binary, model, state, photos, round_index):
     env = engine_env(state)
-    leaked_before = leaked_runtime_files()
     engine = Engine(binary, env)
     row = {"model": model, "round": round_index}
     try:
@@ -231,14 +208,10 @@ def run_once(binary, model, state, photos, round_index):
         elif model in ("sface", "cluster_none"):
             row["first"], value = cluster(engine)
             row["note"] = f"{value.get('faceCount', '?')} faces, {value.get('personCount', '?')} people"
-            ttft, total, status, message = chat(engine, kind, "grass photos")
-            row["second"], row["total"] = ttft, total
-            row["note"] = f"chat {status}: {message[:60]!r}"
         current, peak = footprint_mb(engine.process.pid)
         row["peak_mb"] = peak
     finally:
         engine.close()
-    row["tmp_left"] = leaked_runtime_files() - leaked_before
     return row
 
 
@@ -302,13 +275,13 @@ def main():
             print(json.dumps(row), file=sys.stderr)
         shutil.rmtree(state / "hf", ignore_errors=True)
     print(f"\n{flavor} engine {args.engine}")
-    print(f"{'model':<11} {'cache':<5} {'ready s':>8} {'first s':>8} {'next s':>8} {'total s':>8} {'base MB':>8} {'peak MB':>8} {'tmp':>5}  note")
+    print(f"{'model':<11} {'cache':<5} {'ready s':>8} {'first s':>8} {'next s':>8} {'total s':>8} {'base MB':>8} {'peak MB':>8} note")
     for row in rows:
         def cell(key):
             value = row.get(key)
             return f"{value:8.2f}" if isinstance(value, float) else f"{'-':>8}"
         print(f"{row['model']:<11} {row['cache']:<5} {cell('ready')} {cell('first')} {cell('second')} {cell('total')} "
-              f"{row['base_mb'] or 0:8.0f} {row['peak_mb'] or 0:8.0f} {row['tmp_left']:5d}  {row.get('note', '')}")
+              f"{row['base_mb'] or 0:8.0f} {row['peak_mb'] or 0:8.0f} {row.get('note', '')}")
     by_model = {}
     for row in rows:
         by_model.setdefault((row["model"], row["cache"]), []).append(row["first"])

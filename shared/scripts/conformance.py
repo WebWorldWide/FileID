@@ -48,7 +48,7 @@ A case with "fixture": "<name>" starts from state the retired Swift engine wrote
 times, removed files, saved step values and chat conversation), laid out in the fixed folder
 /private/tmp/fileid-conformance-fixture/<case name> it was captured in, so the paths
 inside the catalog stay true; the file identities the Swift run recorded are
-refreshed to the replayed files). Such cases are macOS-only ("os": ["darwin"]) and
+refreshed to the replayed files. Such cases are macOS-only ("os": ["darwin"]) and
 must not run alongside another conformance run.
 A case with "model": {"repo": "<org>/<name>"} needs that MLX model installed
 ($FILEID_CONFORMANCE_MODELS, else ~/Documents/huggingface, read only) and is skipped

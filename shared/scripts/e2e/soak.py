@@ -1149,7 +1149,7 @@ class Soak:
             rows = self.db_rows(v.db, self.victim_lib)
             disk = {os.path.join(self.victim_lib, r) for r in self.victim_model}
             stale = {p for p, x in rows.items() if not self.tombstone(x)} - disk
-            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
             if stale or uncovered:
                 fail(rnd, f"victim catalog equals its files after the {phase} kill", (len(stale), len(uncovered)))
             with ro(v.db) as c:
@@ -1280,7 +1280,7 @@ class Soak:
             stale = {p for p, v in rows.items() if not self.tombstone(v)} - disk
             if stale:
                 fail(rnd, "victim catalog has no rows for missing files", sorted(stale)[:3])
-            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
             if uncovered:
                 fail(rnd, "victim catalog covers its files", len(uncovered))
             k, res = v.scan(self.victim_lib)
