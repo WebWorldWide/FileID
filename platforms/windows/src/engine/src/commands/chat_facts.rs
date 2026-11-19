@@ -552,6 +552,37 @@ pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootSco
     Ok(Some((format!("“{name}” holds {} {files} ({}): {}.", count_label(count), bytes_label(bytes), kinds.join(", ")), hits)))
 }
 
+pub(crate) fn reference_answer(reference: &super::chat_intent::Reference, hits: Vec<CatalogHit>) -> (String, Vec<CatalogHit>) {
+    use super::chat_intent::Reference;
+    if hits.is_empty() {
+        return ("There is no earlier list to pick from yet. Ask a question first, then say “the second one”.".into(), vec![]);
+    }
+    let count = hits.len();
+    let describe = |hit: &CatalogHit| format!("{} ({})", file_name(&hit.path), hit.text);
+    let pick = match reference {
+        Reference::Nth(n) => hits.get(n - 1).cloned().ok_or_else(|| format!("The last answer showed {} {}, so there is no number {n}.", count_label(count as i64), if count == 1 { "file" } else { "files" })),
+        Reference::Last => Ok(hits[count - 1].clone()),
+        Reference::Single if count == 1 => Ok(hits[0].clone()),
+        Reference::Single => Err(format!("The last answer showed {} files. Say which one, like “the first one” or “the biggest one”.", count_label(count as i64))),
+    };
+    match pick {
+        Ok(hit) => {
+            let which = match reference {
+                Reference::Nth(n) => format!("The {} one", ordinal_label(*n)),
+                Reference::Last => "The last one".into(),
+                Reference::Single => "That".into(),
+            };
+            (format!("{which} is {}.", describe(&hit)), vec![hit])
+        }
+        Err(message) => (message, vec![]),
+    }
+}
+
+fn ordinal_label(n: usize) -> String {
+    const NAMES: [&str; 10] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+    NAMES.get(n - 1).map_or_else(|| format!("{n}th"), |name| (*name).to_owned())
+}
+
 /// The library records positions, not place names, so say how many files carry one (Swift `ChatFacts.placesAnswer`).
 pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&RootScope>) -> Result<String> {
     let filter = Filter { kinds: kinds.to_vec(), root: root.cloned(), ..Filter::default() };

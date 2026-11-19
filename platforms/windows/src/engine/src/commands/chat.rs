@@ -1,6 +1,6 @@
 use super::chat_actions::{self, Context, Resolution};
 use super::chat_facts::{self, Filter};
-use super::chat_intent::{asked_inside, parse_intent, parse_question, place_ask, spoken_name};
+use super::chat_intent::{asked_inside, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
 use super::chat_search::SearchPlan;
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
@@ -886,30 +886,83 @@ struct Prepared {
     summarize: bool,
 }
 
+struct Earlier {
+    question: super::chat_intent::Question,
+    plan: SearchPlan,
+}
+
 fn plan_for(
     text: &str,
-    previous: Option<&SearchPlan>,
+    previous: Option<&Earlier>,
     people: &super::catalog_retrieval::KnownPeople,
     events: &super::catalog_retrieval::KnownEvents,
 ) -> (super::chat_intent::Question, SearchPlan) {
-    let question = parse_question(text);
-    let plan = SearchPlan::resolve_known(&question.reduced, previous, people, events, false);
+    let mut question = parse_question(text);
+    let previous_plan = previous.map(|earlier| &earlier.plan);
+    let plan = SearchPlan::resolve_known(&question.reduced, previous_plan, people, events, false);
     let bare = plan.query.is_empty() && plan.kinds.is_empty() && plan.person_ids.is_empty() && plan.event_ids.is_empty() && plan.excluded_person_ids.is_empty();
     let library_wide = ["files", "file", "library", "everything", "all", "total", "overall", "collection"];
-    let lower = text.to_lowercase();
-    let words: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).collect();
-    let points_back = words.iter().any(|word| ["those", "these", "them", "they", "ones"].contains(word));
+    let words: Vec<String> = text.to_lowercase().split(|c: char| !c.is_alphabetic()).map(str::to_owned).collect();
+    let points_back = super::chat_intent::points_back(&words);
+    if let Some(earlier) = previous
+        && points_back
+    {
+        let before = &earlier.question;
+        question.date = question.date.take().or_else(|| before.date.clone());
+        question.folder = question.folder.take().or_else(|| before.folder.clone());
+        question.formats = question.formats.take().or_else(|| before.formats.clone());
+        question.min_bytes = question.min_bytes.or(before.min_bytes);
+        question.max_bytes = question.max_bytes.or(before.max_bytes);
+        question.undescribed |= before.undescribed;
+    }
     if previous.is_some()
         && bare
         && question.structured()
         && !["overview", "folders", "formats"].contains(&question.measure.as_str())
         && (!question.duplicates || points_back)
         && (question.formats.is_none() || points_back)
-        && !words.iter().any(|word| library_wide.contains(word))
+        && !words.iter().any(|word| library_wide.contains(&word.as_str()))
     {
-        return (question.clone(), SearchPlan::resolve_known(&question.reduced, previous, people, events, true));
+        let plan = SearchPlan::resolve_known(&question.reduced, previous_plan, people, events, true);
+        return (question, plan);
     }
     (question, plan)
+}
+
+fn answers_without_search(conn: &Connection, text: &str, root: Option<&super::roots::RootScope>) -> Result<bool> {
+    let question = parse_question(text);
+    if question.people.is_some() || place_ask(text).is_some() || reference_ask(text).is_some() {
+        return Ok(true);
+    }
+    if question.folder.is_none()
+        && let Some(name) = asked_inside(text)
+    {
+        return Ok(chat_facts::folder_answer(conn, &name, root)?.is_some());
+    }
+    Ok(false)
+}
+
+fn earlier_turn(
+    conn: &Connection,
+    history: &[String],
+    people: &super::catalog_retrieval::KnownPeople,
+    events: &super::catalog_retrieval::KnownEvents,
+    root: Option<&super::roots::RootScope>,
+) -> Result<Option<Earlier>> {
+    let mut earlier: Option<Earlier> = None;
+    for text in history.iter().filter(|text| parse_intent(text).is_none()) {
+        if !answers_without_search(conn, text, root)? {
+            let (question, plan) = plan_for(text, earlier.as_ref(), people, events);
+            earlier = Some(Earlier { question, plan });
+        }
+    }
+    Ok(earlier)
+}
+
+fn user_history(conn: &Connection, conversation_id: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=?1 AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid")?;
+    let messages = statement.query_map([conversation_id], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(messages)
 }
 
 fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -> Result<Prepared> {
@@ -919,6 +972,39 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     }
     let (people, events) = super::catalog_retrieval::known(conn)?;
     let root = super::roots::RootScope::load(conn, request.context.as_ref().and_then(|chat| chat.root_id))?;
+    let history = user_history(conn, &request.conversation_id)?;
+    prepare_turn(conn, request, semantic, text, &history, &people, &events, root.as_ref())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn earlier_hits(
+    conn: &Connection,
+    request: &ChatRequest,
+    semantic: &Semantic,
+    history: &[String],
+    people: &super::catalog_retrieval::KnownPeople,
+    events: &super::catalog_retrieval::KnownEvents,
+    root: Option<&super::roots::RootScope>,
+) -> Result<Vec<CatalogHit>> {
+    let Some((last, before)) = history.split_last() else { return Ok(vec![]) };
+    let mut earlier = request.clone();
+    earlier.query_vector = None;
+    earlier.embedding_model = None;
+    Ok(prepare_turn(conn, &earlier, semantic, last.clone(), before, people, events, root)?.hits)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_turn(
+    conn: &Connection,
+    request: &ChatRequest,
+    semantic: &Semantic,
+    text: String,
+    history: &[String],
+    people: &super::catalog_retrieval::KnownPeople,
+    events: &super::catalog_retrieval::KnownEvents,
+    root: Option<&super::roots::RootScope>,
+) -> Result<Prepared> {
+    let root = root.cloned();
     if let Some(intent) = parse_intent(&text) {
         let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), root: root.as_ref(), people: &people, events: &events, source: "parser" };
         let Resolution { message, hits, actions } = chat_actions::resolve(conn, &intent, &context)?;
@@ -939,17 +1025,13 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     {
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
-    let previous = {
-        let mut statement = conn.prepare("SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=?1 AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid")?;
-        let messages = statement
-            .query_map([&request.conversation_id], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        messages
-            .iter()
-            .filter(|text| parse_intent(text).is_none())
-            .fold(None, |previous, text| Some(plan_for(text, previous.as_ref(), &people, &events).1))
-    };
-    let (question, plan) = plan_for(&text, previous.as_ref(), &people, &events);
+    if let Some(reference) = reference_ask(&text) {
+        let hits = earlier_hits(conn, request, semantic, history, people, events, root.as_ref())?;
+        let (message, hits) = chat_facts::reference_answer(&reference, hits);
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+    }
+    let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
+    let (question, plan) = plan_for(&text, previous.as_ref(), people, events);
     let mut structured = Filter {
         kinds: plan.kinds.clone(),
         person_ids: plan.person_ids.clone(),
@@ -1850,6 +1932,45 @@ mod tests {
         assert_eq!(ask("j", "what's taking up the most space?").0, "Files use 2.5 GB (254 files). Largest: surf.mov (2.5 GB), c.arw (9.0 KB), b.jpg (5.0 KB).");
         ask("g", "dog photos");
         assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
+    }
+
+    #[test]
+    fn follow_ups_keep_the_new_subject_and_resolve_pronouns_against_the_last_answer() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (1,'/lib/Eckerts 10-4-26/a.mov',1,300,1688472000,0,'video','mov'),
+             (2,'/lib/Eckerts 10-4-26/b.jpg',2,10,1688472000,0,'image','jpg'),
+             (3,'/lib/2012/c.mov',3,900,1341100000,0,'video','mov'),
+             (4,'/lib/2012/d.mov',4,100,1341200000,0,'video','mov'),
+             (5,'/lib/2012/e.mov',5,500,1341300000,0,'video','mov');",
+        )
+        .unwrap();
+        let mut ask = |conversation: &str, text: &str| {
+            let request = ChatRequest { request_id: uuid::Uuid::new_v4().to_string(), conversation_id: conversation.into(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            let response = execute(&mut conn, &request).unwrap();
+            (response.message, response.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>())
+        };
+        assert!(ask("folders", "What's in the Eckerts 10-4-26 folder?").0.starts_with("“Eckerts 10-4-26” holds 2 files"));
+        assert_eq!(ask("folders", "What's in the 2012 folder?").0, "Found 3 files in 2012.");
+
+        ask("pronouns", "show me my videos");
+        assert_eq!(ask("pronouns", "Show me the biggest one"), ("The largest video: c.mov (900 bytes · 2012-06-30).".into(), vec![3]));
+        assert_eq!(ask("pronouns", "show me those").1.len(), 4);
+        let (message, hits) = ask("pronouns", "How many are from 2012?");
+        assert_eq!((message.as_str(), hits.len()), ("Found 3 videos from 2012, using 1.5 KB.", 3));
+        let second = ask("pronouns", "the second one");
+        assert_eq!(second.1.len(), 1);
+        assert!(second.0.starts_with("The second one is "), "{}", second.0);
+        let listed = ask("pronouns", "show me those").1;
+        assert_eq!(listed.len(), 3);
+        assert_eq!(ask("pronouns", "the last one").1, vec![*listed.last().unwrap()]);
+        assert!(ask("pronouns", "the 9th one").0.contains("no number 9"));
+        assert!(ask("empty", "Tell me about it").0.starts_with("There is no earlier list"));
+
+        ask("constraints", "show me my videos from 2012");
+        let (message, hits) = ask("constraints", "How many of those are bigger than 200 B?");
+        assert_eq!((message.as_str(), hits.len()), ("Found 2 videos over 200 bytes from 2012, using 1.4 KB.", 2));
     }
 
     #[test]

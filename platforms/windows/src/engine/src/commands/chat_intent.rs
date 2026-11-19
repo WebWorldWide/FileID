@@ -656,6 +656,11 @@ pub fn parse_question(text: &str) -> Question {
                 used.insert(index);
             }
         }
+        for (index, pair) in words.windows(2).enumerate() {
+            if pair[1] == "one" && points_back(pair) {
+                used.insert(index + 1);
+            }
+        }
         question.reduced = raw.iter().enumerate().filter(|(index, _)| !used.contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" ");
     } else {
         text.clone_into(&mut question.reduced);
@@ -663,7 +668,7 @@ pub fn parse_question(text: &str) -> Question {
     question
 }
 
-const SINGULAR_FILE_WORDS: &[&str] = &["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording"];
+const SINGULAR_FILE_WORDS: &[&str] = &["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording", "one"];
 
 const PLACE_WORDS: &[&str] = &["photos", "pictures", "images", "library", "collection", "files"];
 const COUNT_PEOPLE_TAIL: &[&str] = &[
@@ -1235,6 +1240,69 @@ pub fn spoken_name(text: &str) -> Option<String> {
     let run: Vec<&str> = words[lead + 1..].iter().copied().take_while(|word| capitalised_word(word)).collect();
     let first = run.first()?.to_lowercase();
     ((1..=2).contains(&run.len()) && !NOT_NAMES.contains(&first.as_str())).then(|| run.join(" "))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reference {
+    Nth(usize),
+    Last,
+    Single,
+}
+
+const ORDINALS: [(&str, usize); 10] = [
+    ("first", 1), ("second", 2), ("third", 3), ("fourth", 4), ("fifth", 5), ("sixth", 6), ("seventh", 7), ("eighth", 8), ("ninth", 9), ("tenth", 10),
+];
+const REFERENCE_FILLER: [&str; 36] = [
+    "show", "me", "tell", "about", "what", "whats", "is", "are", "was", "how", "the", "a", "an", "that", "this", "it", "one", "of", "details", "detail",
+    "info", "more", "please", "give", "which", "and", "then", "just", "result", "file", "item", "photo", "video", "picture", "image", "clip",
+];
+
+fn ordinal(word: &str) -> Option<usize> {
+    if let Some((_, n)) = ORDINALS.iter().find(|(name, _)| *name == word) {
+        return Some(*n);
+    }
+    let digits = word.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &word[digits.len()..];
+    (["st", "nd", "rd", "th"].contains(&suffix))
+        .then(|| digits.parse::<usize>().ok())
+        .flatten()
+        .filter(|n| (1..=50).contains(n))
+}
+
+/// "the second one", "tell me about it": a message that only points at something the previous answer listed.
+pub fn reference_ask(text: &str) -> Option<Reference> {
+    let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).filter(|word| !word.is_empty()).collect();
+    if words.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for word in &words {
+        if let Some(n) = ordinal(word) {
+            found = Some(Reference::Nth(n));
+        } else if word == "last" || word == "final" {
+            found = Some(Reference::Last);
+        } else if !REFERENCE_FILLER.contains(&word.as_str()) {
+            return None;
+        }
+    }
+    if found.is_some() {
+        return found;
+    }
+    let single = has(&words, &["it"]) || words.windows(2).any(|pair| matches!(pair, [a, b] if ["that", "this", "the"].contains(&a.as_str()) && b == "one"));
+    single.then_some(Reference::Single)
+}
+
+const ORDER_WORDS: [&str; 12] = [
+    "biggest", "largest", "heaviest", "smallest", "tiniest", "newest", "latest", "oldest", "earliest", "recent", "first", "last",
+];
+
+/// The message refers back to the previous answer ("those", "the biggest one") instead of naming a new subject.
+pub fn points_back(words: &[String]) -> bool {
+    has(words, &["those", "these", "them", "they", "ones"])
+        || words.windows(2).any(|pair| {
+            pair[1] == "one"
+                && (["the", "this", "that", "which"].contains(&pair[0].as_str()) || ORDER_WORDS.contains(&pair[0].as_str()) || ordinal(&pair[0]).is_some())
+        })
 }
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
