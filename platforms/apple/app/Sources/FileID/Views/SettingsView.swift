@@ -48,9 +48,8 @@ struct SettingsTab: View {
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
-                            .font(Theme.Font.body(11))
-                            .foregroundStyle(Theme.text3)
+                        MetaText("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
+                            .fixedSize(horizontal: false, vertical: true)
                         restartHelperRow
                     }
                 }
@@ -245,8 +244,8 @@ struct SettingsTab: View {
     private var restartHelperRow: some View {
         HStack(spacing: 8) {
             Button("Restart helper now") { engine.restart() }
-                .buttonStyle(DSSecondaryButtonStyle(height: 24))
-            MetaText("Applies the change right away. Stops a scan that is running.", size: 11)
+                .buttonStyle(.dsSecondary)
+            MetaText("Applies the change right away. Stops a scan that is running.")
         }
     }
 
@@ -259,11 +258,11 @@ struct SettingsTab: View {
         }
         .font(Theme.Font.body(13.5))
     }
+
     static func duplicateSpaceLabel(reclaimableMB: Double) -> String {
         let bytes = Int64(reclaimableMB * 1_000_000)
         return bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
-
 
     static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
     static var appLogURL: URL {
@@ -311,7 +310,7 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            DSIconButton("Describe \(folder) again", systemImage: "xmark", tint: Theme.text3) {
+                            DSIconButton("Stop skipping \(URL(fileURLWithPath: folder).lastPathComponent)", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
                             }
                         }
@@ -395,6 +394,7 @@ struct ModelInstallCard: View {
     private func rowView(_ row: Row) -> some View {
         HStack(alignment: .top, spacing: 8) {
             rowIcon(present: installer.presentFilePaths.contains(row.path.path)).padding(.top, 2)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.name).font(Theme.Font.body(13.5, .semibold))
                 if let detail = row.detail {
@@ -422,12 +422,13 @@ struct ModelInstallCard: View {
         case .unknown:
             ProgressView().controlSize(.small)
         case .missing(let reason):
-            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11)
+            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11.5)
             HStack(spacing: 8) {
                 Button { installer.install() } label: {
                     Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
+                .accessibilityLabel("Download \(title), about \(sizeLabel)")
                 Spacer()
             }
         case .downloading(let fraction, let message, _, _):
@@ -443,6 +444,7 @@ struct ModelInstallCard: View {
                     Spacer()
                     Button("Cancel") { installer.cancel() }
                         .buttonStyle(.borderless).controlSize(.small)
+                        .accessibilityLabel("Cancel downloading \(title)")
                 }
             }
         case .extracting:
@@ -453,11 +455,12 @@ struct ModelInstallCard: View {
             }
         case .installed(let bytes):
             HStack(spacing: 8) {
-                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11)
+                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11.5)
                 Spacer()
                 Button("Remove") { confirmRemove = true }
                     .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                     .padding(.trailing, -6)
+                    .accessibilityLabel("Remove \(title)")
             }
         case .installFailed(let why):
             VStack(alignment: .leading, spacing: 6) {
@@ -465,6 +468,7 @@ struct ModelInstallCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Try again") { installer.install() }.buttonStyle(.dsSecondary)
+                        .accessibilityLabel("Try again to download \(title)")
                     Spacer()
                 }
             }

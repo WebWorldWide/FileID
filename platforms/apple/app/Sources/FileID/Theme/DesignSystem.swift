@@ -910,7 +910,9 @@ struct LabeledSegment<Content: View>: View {
     var body: some View {
         HStack(spacing: 10) {
             Text(label).font(Theme.Font.body(12.5, .medium, fixed: fixed)).foregroundStyle(Theme.text2)
+                .accessibilityHidden(true)
             content
+                .accessibilityLabel(label)
         }
     }
 }
