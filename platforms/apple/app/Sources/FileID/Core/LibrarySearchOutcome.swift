@@ -8,6 +8,9 @@ enum LibrarySearchOutcome {
         let weaker: Int
         let text: String
 
+        /// The weaker count, with a "+" when the engine's result limit cut the list short.
+        var weakerLabel: String { good + weaker >= LibrarySearchOutcome.resultLimit ? "\(weaker)+" : "\(weaker)" }
+
         /// The engine's sentence, with "+" on a count the request limit cut short.
         var displayText: String {
             guard good + weaker >= LibrarySearchOutcome.resultLimit else { return text }

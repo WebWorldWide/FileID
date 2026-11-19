@@ -65,4 +65,12 @@ struct LibrarySearchOutcomeTests {
                                                    keywordCount: 0, showWeaker: false)
         #expect(filtered.label == "No matches" && filtered.hiddenWeaker == 0)
     }
+
+    @Test("the Moments header names the weaker look-alikes it left out, with a plus when the limit cut the list")
+    func weakerLabelMarksATruncatedCount() {
+        #expect(LibrarySearchOutcome.Strength(message: "3 good matches, 1 weaker.")?.weakerLabel == "1")
+        let limit = LibrarySearchOutcome.resultLimit
+        let cut = LibrarySearchOutcome.Strength(message: "10 good matches, \(limit - 10) weaker.")
+        #expect(cut?.weakerLabel == "\(limit - 10)+")
+    }
 }

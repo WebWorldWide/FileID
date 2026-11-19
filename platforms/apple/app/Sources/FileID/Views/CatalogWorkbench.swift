@@ -13,6 +13,7 @@ struct CatalogWorkbench: View {
     @State private var hits: [CatalogHit] = []
     @State private var resultRows: [MomentResultRow] = []
     @State private var hitFileCount = 0
+    @State private var weakerLeftOut = ""
     @State private var chapters: [CatalogChapter] = []
     @State private var cast: [CatalogHit] = []
     @State private var selected: CatalogHit?
@@ -229,7 +230,8 @@ struct CatalogWorkbench: View {
 
     private var resultsMeta: String {
         if hits.isEmpty { return query.isEmpty ? "Type and press Return" : (captureWindow.isActive ? "No results in these dates" : "No results") }
-        return "\(hits.count.formatted()) result\(hits.count == 1 ? "" : "s")"
+        let count = "\(hits.count.formatted()) result\(hits.count == 1 ? "" : "s")"
+        return weakerLeftOut.isEmpty ? count : "\(count) · \(weakerLeftOut) weaker look-alikes left out"
     }
 
     private func hitMeta(_ hit: CatalogHit) -> String { MomentResultRow.meta(for: hit) }
@@ -628,6 +630,7 @@ struct CatalogWorkbench: View {
             checkedRows = []
             resultRows = hits.enumerated().map { MomentResultRow(index: $0.offset, hit: $0.element) }
             hitFileCount = Set(hits.map(\.fileID)).count
+            weakerLeftOut = strength.flatMap { $0.weaker > 0 ? $0.weakerLabel : nil } ?? ""
             selectedIndex = nil
             if hits.isEmpty {
                 message = captureWindow.isActive
