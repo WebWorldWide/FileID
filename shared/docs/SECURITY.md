@@ -38,7 +38,7 @@ FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) an
 SHA256 + the MLX VLM repos pinned by immutable HuggingFace revision (per-file LFS `oid`
 verification). The shared Rust engine embeds the manifest (`models/manifest.rs`, rejected whole
 if malformed) and `registry.rs` holds only install paths; macOS compiles a table generated from
-the manifest (`ModelManifest.swift`, `gen_model_manifest.py --check`) and `StreamingDownload`
+the manifest (`ModelManifest.swift`, `gen_model_manifest.py --check`) and the Rust downloader
 hashes incrementally, deleting the
 artifact and failing with a distinct checksum error *before* the atomic move. Small embedders
 (CLIP/ArcFace) re-verify on load at preWarm; multi-GB VLMs are install-time-verified with a
@@ -51,8 +51,7 @@ changed (rationale in `DECISIONS.md`).
 CA-allowlist pinning (root SPKI set + backups, NOT leaf pins) for the model-download hosts.
 Pins live in `shared/security/tls-pins.json` + `pinned-roots/*.pem` (11 roots covering
 huggingface.co, its CDNs, and GitHub releases); `shared/scripts/check_tls_pins.sh` asserts the
-two representations match in CI. macOS: `TLSPinning.swift` challenge handler (system trust
-first, then chain∩pin-set). Windows: `reqwest` built with `.tls_built_in_root_certs(false)` +
+two representations match in CI. macOS: the shared Rust engine's `reqwest` client does the downloading, the Swift app opens no connection. Windows: `reqwest` built with `.tls_built_in_root_certs(false)` +
 only the embedded roots; the fail-closed fallback client has no roots at all. Escape hatch
 `FILEID_DISABLE_TLS_PINNING=1` logs loudly and changes no egress. SHA256 above remains the
 primary integrity control; pinning is defense-in-depth.

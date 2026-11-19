@@ -76,8 +76,6 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/commands/bulk.rs",
     "platforms/windows/src/engine/src/commands/video_export.rs",
     "platforms/windows/src/engine/src/server.rs",
-    "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-    "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
     "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
     "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
     "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
@@ -129,8 +127,6 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "e6886afc9abe3caffbf1de191eb3e48975b53f6ae67a056f60d17387af4ad961",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
-  "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "c937536bd5342569378b3dfc42a3b7e47f9cdf522ea73ed7e5add0a6d8e2d8d8",
-  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "f7943366e057912438df28e7c24f49a41b701c8d2a343b9b0315c74e4b9e5abd",
   "platforms/linux/src/app/src/engine_client.rs": "e69c06e2ad17b937cc8339b367e21d71af8b757332becb718873d80f7f3be8a9",
   "platforms/linux/src/app/src/tabs/settings.rs": "ee11c615f69816907ad1191b8ea7277654a82b46e675233e1f7c9bf56ab24ebb",
   "platforms/windows/src/FileID.App/App.xaml.cs": "b55546f371f14d937f929b613779dfef29eb5a84d094bdf43c7f931d9aeefd77",
@@ -169,7 +165,6 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
-    "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
 }
 RAW_NETWORK_PATTERNS = {
     ".rs": re.compile(
@@ -426,60 +421,6 @@ def _rust_external_transport_violations(root: Path) -> list[str]:
     return []
 
 
-def _swift_transport_violations(root: Path) -> list[str]:
-    failures: list[str] = []
-    streaming_path = root / "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift"
-    pinning_path = root / "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift"
-    if not all(path.is_file() for path in (streaming_path, pinning_path)):
-        return ["Apple reviewed network transport files are missing"]
-    streaming_text = streaming_path.read_text(encoding="utf-8")
-    streaming = _without_comments(streaming_text)
-    streaming_code = _mask_comments_and_strings(streaming_text)
-    expected_inventory = {
-        r"URLSession\s*\(": 3,
-        r"URLRequest\s*\(": 2,
-        r"\.downloadTask\s*\(": 2,
-        r"\.data\s*\(": 1,
-    }
-    if re.search(r"\.(?:dataTask|uploadTask|streamTask|webSocketTask|bytes)\s*\(", streaming_code) \
-            or "URLSession.shared" in streaming_code or any(
-                len(re.findall(pattern, streaming_code)) != count
-                for pattern, count in expected_inventory.items()
-            ):
-        failures.append(f"{streaming_path}: raw session/request inventory changed")
-    guard = "guard TLSPinning.allowsExternalRequest(to: remote) else"
-    for marker in ("public func streamingDownload", "public func parallelStreamingDownload"):
-        function = _braced_expression(streaming, marker)
-        if function is None:
-            failures.append(f"{streaming_path}: {marker} not found")
-            continue
-        if function.count(guard) != 1 or function.index(guard) > function.index("URLSession"):
-            failures.append(f"{streaming_path}: {marker} must reject the initial URL before session creation")
-
-    pinning_text = pinning_path.read_text(encoding="utf-8")
-    pinning = _without_comments(pinning_text)
-    pinning_code = _mask_comments_and_strings(pinning_text)
-    if re.search(
-        r"URLSession\s*\(|URLSession\.shared|URLRequest\s*\(|"
-        r"\.(?:dataTask|downloadTask|uploadTask|streamTask|webSocketTask|data|bytes)\s*\(",
-        pinning_code,
-    ):
-        failures.append(f"{pinning_path}: policy module must not construct sessions or requests")
-    host_match = re.search(
-        r"public static let externalDownloadHosts:\s*\[String\]\s*=\s*\[(.*?)\]",
-        pinning,
-        re.DOTALL,
-    )
-    hosts = set(STRING_RE.findall(host_match.group(1))) if host_match else set()
-    expected_hosts = {"huggingface.co", "*.huggingface.co", "*.hf.co"}
-    if hosts != expected_hosts:
-        failures.append(f"{pinning_path}: external transport hosts must be exactly {sorted(expected_hosts)}")
-    redirect = _braced_expression(pinning, "public static func allowsRedirect")
-    if redirect is None or "allowsExternalRequest(to: url)" not in redirect:
-        failures.append(f"{pinning_path}: redirects must reuse the initial external URL policy")
-    return failures
-
-
 def _rust_loopback_violations(root: Path) -> list[str]:
     path = root / "platforms/windows/src/engine/src/models/vlm_server.rs"
     if not path.is_file():
@@ -570,7 +511,6 @@ def source_boundary_violations(root: Path) -> list[str]:
         if _swift_url_loader_sites(code) != expected_count or other_raw:
             failures.append(f"{relative}: local Foundation URL-loader inventory changed")
     failures.extend(_rust_external_transport_violations(root))
-    failures.extend(_swift_transport_violations(root))
     failures.extend(_rust_loopback_violations(root))
     for relative in (
         "platforms/windows/src/engine/src/commands/prewarm.rs",
