@@ -520,7 +520,11 @@ struct ToolsWorkbench: View {
                 .frame(width: Theme.Font.scaled(92), alignment: .leading)
                 .padding(.top, alignment == .top ? 6 : 0)
                 .accessibilityHidden(label.isEmpty)
-            content()
+            let row = HStack(alignment: alignment, spacing: 12) { content() }
+            ViewThatFits(in: .horizontal) {
+                row
+                ScrollView(.horizontal, showsIndicators: false) { row }
+            }
             Spacer(minLength: 0)
         }
     }
