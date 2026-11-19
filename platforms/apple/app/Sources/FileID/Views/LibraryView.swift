@@ -1518,7 +1518,11 @@ private struct FileDetailRows: View {
     let people: [String]
     var body: some View {
         DetailRow("Kind", FileKindLabel.detail(kind: file.kind, fileExtension: file.extension))
-        if file.failed { DetailRow("Status", "Couldn't be read, so it has no tags, faces or text. It may be damaged.") }
+        if file.failed {
+                    DetailRow("Status", ReadStore.isTimedOut(errorMessage: file.errorMessage)
+                        ? "FileID ran out of time reading this file, so it has no tags, faces or text yet. It isn't damaged."
+                        : "Couldn't be read, so it has no tags, faces or text. It may be damaged.")
+                }
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
         if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }
