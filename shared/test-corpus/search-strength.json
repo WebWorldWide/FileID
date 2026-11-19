@@ -136,28 +136,51 @@
  "summaries": [
   {
    "good": 3,
+   "strong": 3,
    "weak": 40,
-   "text": "3 good matches, 40 weaker."
+   "text": "3 matches (3 strong visual), 40 weaker."
   },
   {
    "good": 1,
+   "strong": 1,
    "weak": 0,
-   "text": "1 good match."
+   "text": "1 match (1 strong visual)."
   },
   {
    "good": 0,
+   "strong": 0,
    "weak": 12,
    "text": "No good matches, 12 weaker."
   },
   {
    "good": 0,
+   "strong": 0,
    "weak": 0,
    "text": "No matches."
   },
   {
    "good": 1,
+   "strong": 1,
    "weak": 1,
-   "text": "1 good match, 1 weaker."
+   "text": "1 match (1 strong visual), 1 weaker."
+  },
+  {
+   "good": 60,
+   "strong": 7,
+   "weak": 0,
+   "text": "60 matches (7 strong visual)."
+  },
+  {
+   "good": 5,
+   "strong": 0,
+   "weak": 2,
+   "text": "5 matches (0 strong visual), 2 weaker."
+  },
+  {
+   "good": 4,
+   "strong": 2,
+   "weak": 3,
+   "text": "4 matches (2 strong visual), 3 weaker."
   }
  ],
  "similar": [
@@ -189,14 +212,16 @@
  "chat": [
   {
    "found": 3,
+   "strong": 3,
    "weak": 40,
    "similar": false,
    "subject": "dog",
    "qualifiers": "",
-   "text": "Found 3 good matches for “dog”; 40 weaker look-alikes left out."
+   "text": "Found 3 matches (3 strong visual) for “dog”; 40 weaker look-alikes left out."
   },
   {
    "found": 0,
+   "strong": 0,
    "weak": 1,
    "similar": false,
    "subject": "dog",
@@ -205,14 +230,16 @@
   },
   {
    "found": 43,
+   "strong": 3,
    "weak": 40,
    "similar": true,
    "subject": "dog",
    "qualifiers": "",
-   "text": "Found 43 matches for “dog”: 3 good, 40 weaker."
+   "text": "Found 43 matches for “dog”: 3 strong visual, 40 weaker."
   },
   {
    "found": 20,
+   "strong": 0,
    "weak": 20,
    "similar": true,
    "subject": "horse",
@@ -221,11 +248,39 @@
   },
   {
    "found": 1,
+   "strong": 1,
    "weak": 2,
    "similar": false,
    "subject": "cake",
    "qualifiers": "",
-   "text": "Found 1 good match for “cake”; 2 weaker look-alikes left out."
+   "text": "Found 1 match (1 strong visual) for “cake”; 2 weaker look-alikes left out."
+  },
+  {
+   "found": 8,
+   "strong": 2,
+   "weak": 5,
+   "similar": false,
+   "subject": "pumpkin",
+   "qualifiers": "",
+   "text": "Found 8 matches (2 strong visual) for “pumpkin”; 5 weaker look-alikes left out."
+  },
+  {
+   "found": 9,
+   "strong": 0,
+   "weak": 4,
+   "similar": false,
+   "subject": "pumpkin",
+   "qualifiers": "",
+   "text": "Found 9 matches (0 strong visual) for “pumpkin”; 4 weaker look-alikes left out."
+  },
+  {
+   "found": 12,
+   "strong": 2,
+   "weak": 4,
+   "similar": true,
+   "subject": "pumpkin",
+   "qualifiers": "",
+   "text": "Found 12 matches for “pumpkin”: 2 strong visual, 6 by name, tag or text, 4 weaker."
   }
  ]
 }

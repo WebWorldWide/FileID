@@ -132,12 +132,10 @@ fn action(context: &Context<'_>, kind: &str, title: String, detail: String) -> C
 }
 
 fn finish(mut action: ChatAction, hits: Vec<CatalogHit>) -> Resolution {
-    let message = match action.path.as_deref() {
-        Some(path) if action.detail.contains(path) && action.requires_confirmation => {
-            format!("{}? It needs your OK first; nothing changes until you confirm.", action.title)
-        }
-        Some(path) if action.detail.contains(path) => format!("{}.", action.title),
-        _ => action.detail.clone(),
+    let message = match action.path {
+        Some(_) if action.requires_confirmation => format!("{}? It needs your OK first; nothing changes until you confirm.", action.title),
+        Some(_) => format!("{}.", action.title),
+        None => action.detail.clone(),
     };
     if action.examples.as_ref().is_some_and(Vec::is_empty) {
         action.examples = None;
@@ -230,7 +228,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let Some(path) = folder(intent.folder.as_ref())?.filter(|path| Path::new(path).is_absolute() && Path::new(path).is_dir()) else {
                 return Ok(Resolution::say("I couldn't find that folder. Choose it in Library to scan it."));
             };
-            let mut proposed = action(context, "scanFolder", format!("Scan {}", display(&path)), format!("Adds the files in {path} to the library. Nothing is moved or changed."));
+            let mut proposed = action(context, "scanFolder", format!("Scan {}", display(&path)), format!("Adds the files in {} to the library. Nothing is moved or changed.", display(&path)));
             proposed.path = Some(path);
             finish(proposed, vec![])
         }
@@ -238,7 +236,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let Some(path) = folder(intent.folder.as_ref())?.filter(|path| Path::new(path).is_absolute() && Path::new(path).is_dir()) else {
                 return Ok(Resolution::say("I couldn't find that folder. Choose it in Library to rescan it."));
             };
-            let mut proposed = action(context, "rescan", format!("Rescan {}", display(&path)), format!("Checks {path} for new and changed files. Nothing is moved or changed."));
+            let mut proposed = action(context, "rescan", format!("Rescan {}", display(&path)), format!("Checks {} for new and changed files. Nothing is moved or changed.", display(&path)));
             proposed.path = Some(path);
             finish(proposed, vec![])
         }
@@ -246,7 +244,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let Some(root) = library_root(conn, context)? else {
                 return Ok(Resolution::say("Scan a folder first; there is no library to rescan yet."));
             };
-            let mut proposed = action(context, "rescan", "Rescan the library".into(), format!("Checks {root} for new and changed files. Nothing is moved or changed."));
+            let mut proposed = action(context, "rescan", "Rescan the library".into(), format!("Checks {} for new and changed files. Nothing is moved or changed.", display(&root)));
             proposed.path = Some(root);
             finish(proposed, vec![])
         }
@@ -254,20 +252,23 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let Some(path) = folder(intent.folder.as_ref())? else {
                 return Ok(Resolution::say("Scan a folder first; there is nothing to organize yet."));
             };
+            if intent.kind == "undoLastMove" && !crate::pipeline::restructure_apply::undo_pending(Path::new(&path)) {
+                return Ok(Resolution::say("There's no applied layout to undo."));
+            }
             let (title, detail, undo) = match intent.kind.as_str() {
                 "suggestFolderLayout" => (
                     format!("Suggest a layout for {}", display(&path)),
-                    format!("Plans a tidier folder layout for {path}. Nothing moves until you review and apply it."),
+                    format!("Plans a tidier folder layout for {}. Nothing moves until you review and apply it.", display(&path)),
                     None,
                 ),
                 "applyFolderLayout" => (
                     "Apply the suggested layout".to_owned(),
-                    format!("Moves files in {path} into the suggested layout. The next step shows how many files move before anything happens."),
+                    format!("Moves files in {} into the suggested layout. The next step shows how many files move before anything happens.", display(&path)),
                     Some("Undo moves every file back."),
                 ),
                 _ => (
                     "Undo the last layout".to_owned(),
-                    format!("Moves the files from the last applied layout in {path} back to where they were."),
+                    format!("Moves the files from the last applied layout in {} back to where they were.", display(&path)),
                     Some("You can apply a layout again later."),
                 ),
             };
@@ -746,6 +747,22 @@ mod tests {
         for (typed, resolved) in [("D:\\", "D:\\"), ("D:\\Photos\\", "D:\\Photos"), ("/", "/"), ("/lib/Photos/", "/lib/Photos")] {
             assert_eq!(folder_path(&conn, typed, &context).unwrap().as_deref(), Some(resolved), "{typed}");
         }
+    }
+
+    #[test]
+    fn undo_with_nothing_applied_proposes_nothing_and_cards_show_names_not_paths() {
+        let conn = crate::db::test_support::memory_db();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let chat = ChatContext { library_root: Some("/nowhere/Photos".into()), ..ChatContext::default() };
+        let context = context(Some(&chat), &people, &events, "undo the last move");
+        let intent = Intent { kind: "undoLastMove".into(), folder: Some("library".into()), ..Intent::default() };
+        let resolved = resolve(&conn, &intent, &context).unwrap();
+        assert!(resolved.actions.is_empty());
+        assert_eq!(resolved.message, "There's no applied layout to undo.");
+        let suggest = Intent { kind: "suggestFolderLayout".into(), folder: Some("library".into()), ..Intent::default() };
+        let card = resolve(&conn, &suggest, &context).unwrap().actions.remove(0);
+        assert!(!card.detail.contains("/nowhere") && card.detail.contains("Photos"), "{}", card.detail);
+        assert_eq!(card.path.as_deref(), Some("/nowhere/Photos"));
     }
 
     #[test]

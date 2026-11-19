@@ -63,13 +63,14 @@ pub fn is_strong(margin: f32) -> bool {
     margin >= baseline().strong_margin
 }
 
-pub fn summary(good: usize, weak: usize) -> String {
+/// Good matches list first: files with a strong picture score (`strong`) and files found by name, tag or text.
+pub fn summary(good: usize, strong: usize, weak: usize) -> String {
     let noun = if good == 1 { "match" } else { "matches" };
     match (good, weak) {
         (0, 0) => "No matches.".into(),
         (0, _) => format!("No good matches, {weak} weaker."),
-        (_, 0) => format!("{good} good {noun}."),
-        _ => format!("{good} good {noun}, {weak} weaker."),
+        (_, 0) => format!("{good} {noun} ({strong} strong visual)."),
+        _ => format!("{good} {noun} ({strong} strong visual), {weak} weaker."),
     }
 }
 
@@ -106,6 +107,7 @@ mod tests {
     #[derive(Deserialize)]
     struct SummaryCase {
         good: usize,
+        strong: usize,
         weak: usize,
         text: String,
     }
@@ -158,7 +160,7 @@ mod tests {
     fn shared_summaries_and_similar_wording() {
         let fixture = fixture();
         for case in fixture.summaries {
-            assert_eq!(summary(case.good, case.weak), case.text);
+            assert_eq!(summary(case.good, case.strong, case.weak), case.text);
         }
         for case in fixture.similar {
             assert_eq!(wants_similar(&case.text), case.similar, "{}", case.text);

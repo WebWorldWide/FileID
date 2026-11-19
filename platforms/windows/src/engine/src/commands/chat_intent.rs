@@ -1285,9 +1285,10 @@ pub enum Reference {
 const ORDINALS: [(&str, usize); 10] = [
     ("first", 1), ("second", 2), ("third", 3), ("fourth", 4), ("fifth", 5), ("sixth", 6), ("seventh", 7), ("eighth", 8), ("ninth", 9), ("tenth", 10),
 ];
-const REFERENCE_FILLER: [&str; 36] = [
+const REFERENCE_FILLER: [&str; 46] = [
     "show", "me", "tell", "about", "what", "whats", "is", "are", "was", "how", "the", "a", "an", "that", "this", "it", "one", "of", "details", "detail",
-    "info", "more", "please", "give", "which", "and", "then", "just", "result", "file", "item", "photo", "video", "picture", "image", "clip",
+    "info", "more", "please", "give", "which", "and", "then", "just", "result", "file", "item", "photo", "video", "picture", "image", "clip", "open",
+    "play", "view", "display", "watch", "preview", "launch", "see", "select", "pick",
 ];
 
 fn ordinal(word: &str) -> Option<usize> {
@@ -1302,7 +1303,7 @@ fn ordinal(word: &str) -> Option<usize> {
         .filter(|n| (1..=50).contains(n))
 }
 
-/// "the second one", "tell me about it": a message that only points at something the previous answer listed.
+/// "the second one", "tell me about it", "open the third one", "play it": a message that only points at something the previous answer listed.
 pub fn reference_ask(text: &str) -> Option<Reference> {
     let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).filter(|word| !word.is_empty()).collect();
     if words.is_empty() {
@@ -1333,9 +1334,39 @@ const ORDER_WORDS: [&str; 12] = [
 pub fn points_back(words: &[String]) -> bool {
     has(words, &["those", "these", "them", "they", "ones"])
         || words.windows(2).any(|pair| {
-            pair[1] == "one"
-                && (["the", "this", "that", "which"].contains(&pair[0].as_str()) || ORDER_WORDS.contains(&pair[0].as_str()) || ordinal(&pair[0]).is_some())
+            (pair[1] == "one"
+                && (["the", "this", "that", "which"].contains(&pair[0].as_str()) || ORDER_WORDS.contains(&pair[0].as_str()) || ordinal(&pair[0]).is_some()))
+                || (["in", "inside", "within"].contains(&pair[0].as_str()) && ["it", "there"].contains(&pair[1].as_str()))
         })
+}
+
+/// "And photos?", "What about videos?": what follows a short follow-up that swaps one part of the previous question and
+/// keeps its folder and dates.
+pub fn follow_up_rest(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let lead = |at: usize| words.get(at).map(|word| clean(word));
+    let skip = match lead(0).as_deref() {
+        Some("and") => 1,
+        Some("what" | "how") if lead(1).as_deref() == Some("about") => 2,
+        _ => return None,
+    };
+    let rest = &words[skip..];
+    (!rest.is_empty() && rest.len() <= 4).then(|| rest.join(" ").trim_end_matches(['?', '!', '.']).to_owned())
+}
+
+const OFF_TOPIC_WORDS: [&str; 12] = ["weather", "forecast", "joke", "jokes", "news", "horoscope", "recipe", "recipes", "lyrics", "stocks", "translate", "translation"];
+const OFF_TOPIC_PHRASES: [&str; 4] = ["who won", "what time is it", "tell me a story", "capital of"];
+const FILE_WORDS: [&str; 20] = [
+    "file", "files", "photo", "photos", "picture", "pictures", "image", "images", "video", "videos", "clip", "clips", "document", "documents", "pdf", "pdfs",
+    "folder", "folders", "library", "screenshots",
+];
+
+/// A general-assistant question ("what's the weather", "tell me a joke") that names nothing in the library.
+pub fn off_topic(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<String> = lower.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect();
+    let asks = words.iter().any(|word| OFF_TOPIC_WORDS.contains(&word.as_str())) || OFF_TOPIC_PHRASES.iter().any(|phrase| lower.contains(phrase));
+    asks && !words.iter().any(|word| FILE_WORDS.contains(&word.as_str()))
 }
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
@@ -1510,6 +1541,47 @@ mod tests {
         assert_eq!(noun(&["doc".into(), "pdf".into()], 2), "documents");
         assert_eq!(noun(&["image".into(), "video".into()], 2), "photos and videos");
         assert_eq!(noun(&[], 1), "file");
+    }
+
+    #[test]
+    fn verbs_before_an_ordinal_or_pronoun_still_point_at_the_previous_answer() {
+        for (text, want) in [
+            ("Open the third one", Some(Reference::Nth(3))),
+            ("Open third one", Some(Reference::Nth(3))),
+            ("Play the second one", Some(Reference::Nth(2))),
+            ("please show me the 4th one", Some(Reference::Nth(4))),
+            ("open the last one", Some(Reference::Last)),
+            ("open it", Some(Reference::Single)),
+            ("play that one", Some(Reference::Single)),
+            ("open my taxes", None),
+            ("Open third folder", None),
+            ("open settings", None),
+        ] {
+            assert_eq!(reference_ask(text), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn short_follow_ups_and_inside_it_keep_the_previous_scope() {
+        assert_eq!(follow_up_rest("And photos?").as_deref(), Some("photos"));
+        assert_eq!(follow_up_rest("What about 2012?").as_deref(), Some("2012"));
+        assert_eq!(follow_up_rest("how about November 2012").as_deref(), Some("November 2012"));
+        assert_eq!(follow_up_rest("And show me the photos from the trip to Spain last summer"), None);
+        assert_eq!(follow_up_rest("How many photos?"), None);
+        let words = |text: &str| -> Vec<String> { text.to_lowercase().split(|c: char| !c.is_alphabetic()).map(str::to_owned).collect() };
+        assert!(points_back(&words("How many videos in it?")));
+        assert!(points_back(&words("and what is inside there")));
+        assert!(!points_back(&words("How many videos in Italy?")));
+    }
+
+    #[test]
+    fn general_assistant_questions_are_off_topic_unless_they_name_files() {
+        for text in ["What's the weather?", "What's the weather today?", "Who won the game last night?", "Tell me a joke", "give me a recipe for soup"] {
+            assert!(off_topic(text), "{text}");
+        }
+        for text in ["photos of the weather vane", "Find the weather report PDF", "How many photos do I have?", "videos from the news segment", "scooter"] {
+            assert!(!off_topic(text), "{text}");
+        }
     }
 
     #[test]
