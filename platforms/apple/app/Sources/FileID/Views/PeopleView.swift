@@ -1333,12 +1333,7 @@ private struct PersonDetailSheet: View {
     }
 
     private var headerTitle: String {
-        if isUnknown { return "Unknown person" }
-        let preview = [title, firstName, middleName, lastName, suffix]
-            .compactMap { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        return preview.isEmpty ? "Unnamed person" : preview
+        PersonCardText.sheetTitle(isUnknown: isUnknown, nameParts: [title, firstName, middleName, lastName, suffix], personID: person.id)
     }
 
     /// `[Title] [First]`, else first, else title, else "a person".
@@ -1881,5 +1876,14 @@ private struct FaceQueueObservers: ViewModifier {
                 if jobs.contains(where: { $0.kind == "faceRefresh" }) { Task { await refresh?.reload() } }
             }
             .onChange(of: changes) { _, _ in onChange() }
+    }
+}
+
+enum PersonCardText {
+    /// The person card's title as the name fields are edited; an unnamed person keeps the "Person N" the grid tile shows.
+    static func sheetTitle(isUnknown: Bool, nameParts: [String], personID: Int64) -> String {
+        if isUnknown { return "Unknown person" }
+        let preview = nameParts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
+        return preview.isEmpty ? "Person \(personID)" : preview
     }
 }
