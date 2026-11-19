@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-11-19 — Acceptance iteration 2, engine lane FE (`agent/fix2-engine`)
+
+- **E1 (S3/D-01):** the one retry pass did run, but straight after the first pass and under the same load, so it failed again (CPU hogs plus the Vision timeout hook on 18 Adlon RAW/JPEG copies: iter-2 engine left 12, 9 and 1 of 18 failed at hooks 0.15 s, 0.25 s and 0.35 s). Timed-out files are now read again in up to three further rounds, each after a longer wait (3, 8, 15 s) and with half the workers of the round before (`scan_session::TIMEOUT_RETRY_ROUNDS`, `commands/scan.rs`); the same runs left 4, 1 and 0. Chat answers add "N files couldn't be read yet — they're not in these results" while failed rows exist (`chat_facts::unreadable_files_note`); the Cleanup header says the same from `store.unreadableFiles`.
+- **E2:** a face-grouping pass the runtime cancelled reports `face_clustering_cancelled` ("will finish after the scan"), which the Mac app settles quietly. The cause of the cancellation was not found and could not be reproduced (a second scan queues behind the pass).
+- **E3:** a JPEG that ends before its end-of-image marker is stored failed ("The image file is cut off…") on the Mac scan (`util/jpeg_complete.rs`); no false positives on 1049 real Adlon JPEGs.
+- **E4:** the Mac-hosted engine accepts a hash-verified model copy in the Rust layout as well as the Swift layout (`paths::installed_model_file` works both ways).
+- **E5:** a remembered face-grouping summary reports the people the People page shows now, not the count an older engine stored.
+- **E6:** the Mac engine reports `apple` / `apple-metal (MLX), tract-cpu fallback` in its hardware info; a scan that lost the graphics chip emits `scan_slower_path`; reassigning a face away and back keeps the person's representative face. `deleteEvent` on an already-deleted event was not changed (the code answers "Event no longer available" every time; the one `ok` seen in iteration 2 was not reproduced).
+
 ## 2026-11-19 — Mac acceptance iteration 1: real-data pass, 5 fixer lanes merged (`agent/prod-integrate`, PR #345)
 
 Six tester lanes ran every Mac feature on the Rust engine against real folders (Eckerts, Adlon, a scanned 463-file library); about 60 defects, roughly 14 major, no data-safety issue. Five fixer lanes, each on its own branch with regression tests, were merged as `7a8cf9bd`.

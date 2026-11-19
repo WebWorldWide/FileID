@@ -209,6 +209,14 @@ struct CleanupView: View {
         return "\(extraCopies.formatted()) extra cop\(extraCopies == 1 ? "y" : "ies") in \(groups.formatted()) group\(groups == 1 ? "" : "s") · \(freed) can be freed"
     }
 
+    /// Files that failed to read are in no group; Library's Unreadable chip counts the same rows.
+    static func unreadableNote(_ count: Int) -> String? {
+        guard count > 0 else { return nil }
+        return count == 1
+            ? "1 file couldn't be read yet — it's not in these results"
+            : "\(count.formatted()) files couldn't be read yet — they're not in these results"
+    }
+
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
         if store.totalFiles == 0 { return "Nothing scanned yet" }
         let g = visible.count
@@ -224,6 +232,7 @@ struct CleanupView: View {
             base = Self.exactSummary(groups: g, extraCopies: extraCopies, bytes: bytes)
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
+        if let note = Self.unreadableNote(store.unreadableFiles) { result += " · \(note)" }
         if !isSimilar && exactPreviewPartial {
             if exactCapped { result += " · more may exist" }
             if exactSkipped > 0 { result += " · \(exactSkipped) couldn't be checked" }

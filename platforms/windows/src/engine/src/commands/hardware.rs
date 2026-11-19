@@ -9,8 +9,16 @@ use crate::platform;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The Mac-hosted engine runs picture search and tagging on the graphics chip through MLX (Metal), with the tract CPU copies as the
+/// fallback, so reporting "no GPU, tract-cpu" would tell diagnostics the opposite.
+fn mac_graphics() -> Option<(&'static str, &'static str, &'static str)> {
+    (crate::paths::APP_HOSTED && crate::pipeline::tagging::apple_scan_enabled())
+        .then_some(("apple", "Apple silicon GPU (Metal)", "apple-metal (MLX), tract-cpu fallback"))
+}
+
 pub(crate) fn build_hardware_info() -> HardwareInfo {
     let probe = RuntimeProbe::detect();
+    let mac = mac_graphics();
     let vendor_str = match probe.vendor {
         GpuVendor::Nvidia => "nvidia",
         GpuVendor::Amd => "amd",
@@ -27,9 +35,9 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
     let vram_mb = platform::dedicated_vram_mb().unwrap_or(0);
     let (power_src, battery_pct) = platform::power_status();
     HardwareInfo {
-        gpu_vendor: vendor_str.into(),
-        adapter_name: probe.adapter_name.clone(),
-        execution_provider: crate::models::runtime::inference_backend().into(),
+        gpu_vendor: mac.map_or(vendor_str, |(vendor, ..)| vendor).into(),
+        adapter_name: mac.map(|(_, adapter, _)| adapter.to_owned()).or_else(|| probe.adapter_name.clone()),
+        execution_provider: mac.map_or(crate::models::runtime::inference_backend(), |(.., provider)| provider).into(),
         physical_cpu_cores: num_cpus::get_physical().max(1) as u32,
         cuda_pack_present: false,
         openvino_pack_present: false,
@@ -77,4 +85,14 @@ pub(crate) async fn handle_verify_cuda_pack(sink: &Sink) {
         },
     ))))
     .await;
+}
+
+#[cfg(all(test, target_os = "macos", feature = "apple-adapters"))]
+mod tests {
+    #[test]
+    fn the_mac_hosted_engine_reports_the_graphics_chip_it_runs_on() {
+        let hardware = super::build_hardware_info();
+        assert_eq!(hardware.gpu_vendor, "apple");
+        assert!(hardware.execution_provider.starts_with("apple-metal"));
+    }
 }

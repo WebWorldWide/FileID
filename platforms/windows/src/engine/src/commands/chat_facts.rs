@@ -586,6 +586,34 @@ pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Opt
     Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
 }
 
+/// Said after an answer when files failed to read (a busy machine timed them out, say): they are in none of the answers.
+/// Counts what the apps' Unreadable filter counts, inside the asked-about location.
+pub(crate) fn unreadable_files_note(conn: &Connection, root: Option<&RootScope>) -> Result<Option<String>> {
+    let mut args = vec![
+        Value::Text(crate::scan_session::HIDDEN_ROW_MESSAGE.to_owned()),
+        Value::Text(crate::db::zero_byte::ZERO_BYTE_REASON.to_owned()),
+    ];
+    let within = match root {
+        Some(root) => {
+            args.push(Value::Text(root.param().to_owned()));
+            format!(" AND {}", super::roots::clause("f.path_text", "?3"))
+        }
+        None => String::new(),
+    };
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM files f WHERE f.failed=1 AND COALESCE(f.error_message,'') NOT LIKE '%will retry%' \
+             AND COALESCE(f.error_message,'') NOT IN (?1,?2){within}"
+        ),
+        rusqlite::params_from_iter(args),
+        |row| row.get(0),
+    )?;
+    Ok((count > 0).then(|| {
+        let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
+        format!("{} {noun} couldn't be read yet — {pronoun} not in these results.", count_label(count))
+    }))
+}
+
 fn plural_files(count: i64) -> String {
     format!("{} {}", count_label(count), if count == 1 { "file" } else { "files" })
 }

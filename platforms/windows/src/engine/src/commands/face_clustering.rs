@@ -1372,6 +1372,16 @@ fn embedder_problem(db: &parking_lot::Mutex<rusqlite::Connection>) -> Option<(&'
     }
 }
 
+/// A pass the runtime cancelled (another scan took over) is not a failure: the scan that follows groups the faces again.
+fn task_did_not_complete(error: &tokio::task::JoinError) -> IpcEvent {
+    if error.is_cancelled() {
+        tracing::info!("face clustering was cancelled; it runs again after the next scan");
+        return EngineError::event("face_clustering_cancelled", "FileID will finish grouping faces after the scan.");
+    }
+    tracing::warn!(?error, "face clustering task did not complete");
+    EngineError::event("face_clustering_failed", "FileID couldn't finish grouping faces. Try again.")
+}
+
 pub(crate) async fn handle_run_face_clustering(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1419,8 +1429,7 @@ pub(crate) async fn handle_run_face_clustering(
         }
         Err(err) => {
             release_active_before_terminal(&active);
-            tracing::warn!(?err, "face clustering task did not complete");
-            sink.send(EngineError::event("face_clustering_failed", "FileID couldn't finish grouping faces. Try again.")).await;
+            sink.send(task_did_not_complete(&err)).await;
             return;
         }
     }
@@ -1451,14 +1460,9 @@ pub(crate) async fn handle_run_face_clustering(
             .await;
         }
         Err(err) => {
-            tracing::warn!(?err, "face clustering spawn failed");
             // Emit an error so the app's auto-trigger gate is released even if the closure panics; a JoinError
             // otherwise fires no completion and auto-clustering sticks for the session.
-            sink.send(EngineError::event(
-                "face_clustering_failed",
-                "FileID couldn't finish grouping faces. Try again.",
-            ))
-            .await;
+            sink.send(task_did_not_complete(&err)).await;
         }
     }
 }
@@ -2363,6 +2367,19 @@ mod tests {
         let name: Option<String> = db.lock().query_row("SELECT name FROM persons WHERE id=?1", [before[0].1], |row| row.get(0)).unwrap();
         assert_eq!(name.as_deref(), Some("Ann"));
         assert!(writes(&db) <= 1, "only the new face can be written");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_pass_is_not_reported_as_a_failure() {
+        let kind = |event: IpcEvent| match event.payload {
+            EventPayload::Error(Wrap { inner }) => inner.kind,
+            _ => panic!("expected an error event"),
+        };
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        assert_eq!(kind(task_did_not_complete(&task.await.unwrap_err())), "face_clustering_cancelled");
+        let panicked = tokio::spawn(async { panic!("boom") }).await.unwrap_err();
+        assert_eq!(kind(task_did_not_complete(&panicked)), "face_clustering_failed");
     }
 
     #[test]

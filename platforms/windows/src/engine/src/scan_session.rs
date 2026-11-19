@@ -74,6 +74,8 @@ pub struct ScanSession {
     allow_follow_up: bool,
     /// The follow-up reads timed-out files again, which a busy machine failed the first time.
     retrying_timeouts: bool,
+    /// 0 for the scan's first pass; each pass that re-reads timed-out files counts one more, up to `TIMEOUT_RETRY_ROUNDS`.
+    retry_round: u32,
     /// The label the app gave the folder (`startScan.rootDisplay`); Locations shows it instead of the folder's name.
     root_display: Option<String>,
     /// Counts from the pass this one follows up, added to its final totals.
@@ -113,6 +115,7 @@ impl ScanSession {
             excluded_paths,
             allow_follow_up: true,
             retrying_timeouts: false,
+            retry_round: 0,
             root_display: None,
             carried: (0, 0, 0.0),
             capture_dates_current: None,
@@ -130,10 +133,12 @@ impl ScanSession {
         self
     }
 
-    /// The incremental pass that follows a pass during which files changed.
-    pub fn follow_up(mut self, previous: &SessionResult) -> Self {
+    /// The incremental pass that follows a pass during which files changed or timed out. `round` is 1 for the first
+    /// follow-up; every further round of timed-out reads runs with half the workers of the one before.
+    pub fn follow_up(mut self, previous: &SessionResult, round: u32) -> Self {
         self.rescan = false;
         self.allow_follow_up = false;
+        self.retry_round = round;
         self.carried = (
             previous.processed.saturating_sub(previous.timed_out),
             previous.failed.saturating_sub(previous.timed_out),
@@ -141,7 +146,7 @@ impl ScanSession {
         );
         if previous.timed_out > 0 {
             self.retrying_timeouts = true;
-            self.worker_count = (self.worker_count / 2).max(1);
+            self.worker_count = (self.worker_count >> round.min(16)).max(1);
         }
         self.capture_dates_current = Some(previous.capture_dates_current);
         self
@@ -760,7 +765,7 @@ impl ScanSession {
             mark_heal_done(&CRASH_HEALED_ROOTS, &root_descendant_prefix(root));
         }
         // Files a busy machine timed out are read again once, with fewer workers, before the scan reports its totals.
-        let timed_out = if self.allow_follow_up && !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+        let timed_out = if self.retry_round < TIMEOUT_RETRY_ROUNDS && !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
             count_retryable_timeouts(&self.db_conn.lock(), root, started_unix)
         } else {
             0
@@ -778,9 +783,9 @@ impl ScanSession {
                 .execute("DELETE FROM scan_sessions WHERE id = ?1", rusqlite::params![session_id]);
             tracing::info!(processed = total, files_changed, timed_out, "[SCAN] running a follow-up pass");
             return Ok(SessionResult {
-                processed: total,
-                failed,
-                elapsed_seconds: started.elapsed().as_secs_f64(),
+                processed: total + self.carried.0,
+                failed: failed + self.carried.1,
+                elapsed_seconds: started.elapsed().as_secs_f64() + self.carried.2,
                 needs_follow_up: true,
                 timed_out,
                 capture_dates_current,
@@ -1040,6 +1045,19 @@ impl ScanSession {
             capture_dates_current,
         })
     }
+}
+
+/// Passes that read timed-out files again after the first one. A busy machine that failed a file once often fails it again straight away,
+/// so each pass waits longer (`timeout_retry_backoff`) and runs with fewer workers.
+pub const TIMEOUT_RETRY_ROUNDS: u32 = 3;
+
+/// How long to let the machine settle before retry round `round` (1-based).
+pub fn timeout_retry_backoff(round: u32) -> Duration {
+    Duration::from_secs(match round {
+        0 | 1 => 3,
+        2 => 8,
+        _ => 15,
+    })
 }
 
 /// Rows under `root` this scan (written at or after `since`) stored as failed because a read timed out and whose retries are not used up.
@@ -2172,6 +2190,13 @@ mod tests {
         assert_eq!(count_retryable_timeouts(&conn, Path::new(&format!("{sep}lib")), 400.0), 3);
     }
 
+    #[test]
+    fn each_timed_out_retry_round_waits_longer_and_there_are_three() {
+        let waits: Vec<_> = (1..=TIMEOUT_RETRY_ROUNDS).map(timeout_retry_backoff).collect();
+        assert_eq!(TIMEOUT_RETRY_ROUNDS, 3);
+        assert!(waits.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
     #[tokio::test]
     async fn the_follow_up_replaces_the_timed_out_files_counts_and_uses_fewer_workers() {
         let first = SessionResult {
@@ -2192,10 +2217,11 @@ mod tests {
             true,
             Vec::new(),
         )
-        .follow_up(&first);
+        .follow_up(&first, 2);
         assert_eq!((session.carried.0, session.carried.1), (28, 2));
-        assert_eq!(session.worker_count, 4);
+        assert_eq!(session.worker_count, 2);
         assert!(session.retrying_timeouts && !session.allow_follow_up && !session.rescan);
+        assert_eq!(session.retry_round, 2);
     }
 
     #[test]

@@ -90,6 +90,7 @@ async fn load_scan_models(
     worker_count: usize,
     missing_models: Vec<&'static str>,
     late_loader: LateLoader,
+    sink: Sink,
 ) -> Result<Arc<ModelStack>, ModelLoadFailure> {
     if let Some(stack) = scan_models::resident(&key) {
         tracing::info!("[SCAN] models are still loaded from the last scan");
@@ -157,7 +158,22 @@ async fn load_scan_models(
         ));
     }
     scan_models::keep(key, models.clone());
+    if let Some(notice) = slower_path_notice(&models, &missing_models) {
+        sink.send(notice).await;
+    }
     Ok(models)
+}
+
+/// On the Mac, picture search runs on the graphics chip through MLX. When that cannot start (its Metal library is
+/// missing or unloadable) the scan falls back to the CPU and takes about eleven times as long, which should not be silent.
+fn slower_path_notice(models: &ModelStack, missing_models: &[&str]) -> Option<IpcEvent> {
+    (models.apple_scan && !models.apple_clip && !missing_models.contains(&"mobileclip_s2")).then(|| {
+        EngineError::event(
+            "scan_slower_path",
+            "Picture search can't use this Mac's graphics chip, so this scan will take much longer than usual. \
+             Reinstalling FileID usually fixes it.",
+        )
+    })
 }
 
 fn models_that_failed_to_load(models: &ModelStack, missing_models: &[&str]) -> Vec<&'static str> {
@@ -320,10 +336,10 @@ pub(crate) async fn handle_start_scan(
     let evictions_before = scan_models::evictions();
     let late_loader: LateLoader = Arc::new(Mutex::new(None));
     let models = ModelSource::lazy({
-        let (coord, key, late) = (coord.clone(), stack_key.clone(), late_loader.clone());
+        let (coord, key, late, sink) = (coord.clone(), stack_key.clone(), late_loader.clone(), sink.clone());
         let missing: Vec<&'static str> = missing_models.clone();
         move || -> scan_models::LoadFuture {
-            Box::pin(load_scan_models(coord, key, models_worker_count, missing, late))
+            Box::pin(load_scan_models(coord, key, models_worker_count, missing, late, sink))
         }
     });
 
@@ -348,25 +364,34 @@ pub(crate) async fn handle_start_scan(
     let root = PathBuf::from(payload.root_path.clone());
 
     let models_for_keep = models.clone();
-    let outcome = match session.run(&root, |_| {}).await {
-        Ok(first) if first.needs_follow_up => {
-            ScanSession::new(
-                coord,
-                db,
-                worker_count,
-                sink.clone(),
-                models,
-                false,
-                payload.excluded_paths.clone().unwrap_or_default(),
-            )
-            .with_session_id(session_id)
-            .with_root_display(payload.root_display.clone())
-            .follow_up(&first)
-            .run(&root, |_| {})
-            .await
+    let mut outcome = session.run(&root, |_| {}).await;
+    let mut round = 0;
+    while let Ok(previous) = &outcome
+        && previous.needs_follow_up
+    {
+        round += 1;
+        if previous.timed_out > 0 {
+            // Files a busy machine timed out fail again straight away; let it settle first.
+            let deadline = tokio::time::Instant::now() + crate::scan_session::timeout_retry_backoff(round);
+            while tokio::time::Instant::now() < deadline && !coord.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         }
-        other => other,
-    };
+        outcome = ScanSession::new(
+            coord.clone(),
+            db.clone(),
+            worker_count,
+            sink.clone(),
+            models.clone(),
+            false,
+            payload.excluded_paths.clone().unwrap_or_default(),
+        )
+        .with_session_id(session_id.clone())
+        .with_root_display(payload.root_display.clone())
+        .follow_up(previous, round)
+        .run(&root, |_| {})
+        .await;
+    }
     let result = match outcome {
         Ok(result) => result,
         Err(err) if err.downcast_ref::<ModelLoadFailure>().is_some() => {
@@ -437,6 +462,17 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn only_the_mac_scan_that_lost_the_graphics_chip_says_it_is_slower() {
+        let mut stack = ModelStack::empty();
+        assert!(slower_path_notice(&stack, &[]).is_none(), "not the Mac scan path");
+        stack.apple_scan = true;
+        assert!(slower_path_notice(&stack, &[]).is_some());
+        assert!(slower_path_notice(&stack, &["mobileclip_s2"]).is_none(), "no picture model to run at all");
+        stack.apple_clip = true;
+        assert!(slower_path_notice(&stack, &[]).is_none());
+    }
 
     #[test]
     fn a_scan_root_must_be_absolute_and_free_of_nul() {

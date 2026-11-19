@@ -620,6 +620,11 @@ public final class EngineClient {
                 Self.debug("engine bounce (benign): \(e.kind)")
                 return
             }
+            // A grouping pass another scan took over runs again after that scan; the in-flight flag is the only thing to settle.
+            if e.kind == "face_clustering_cancelled" {
+                faceClusteringInFlight = false
+                return
+            }
             // The user's own Cancel, a repeated click and a declined license aren't failures; the request already told them.
             if Self.isQuietNotice(e.kind) {
                 Self.debug("engine notice (user-initiated): \(e.kind)")
