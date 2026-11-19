@@ -1234,18 +1234,16 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Deep Analyze queries
 
-    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int) {
-        guard let q = queue else { return (0, 0) }
+    /// `pending`: files the chosen model has not described (a run with "only files not described yet" does these). `undescribed`: files no model has described.
+    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int, undescribed: Int) {
+        guard let q = queue else { return (0, 0, 0) }
         return (try? q.read { db in
-            let total = try Int.fetchOne(db, sql:
-                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0") ?? 0
-            let pending = try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM files
-                WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
-                  AND (vlm_full_model IS NULL OR vlm_full_model != ?)
-                """, arguments: [modelKey]) ?? 0
-            return (total, pending)
-        }) ?? (0, 0)
+            let describable = "kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0"
+            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable)") ?? 0
+            let pending = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND (vlm_full_model IS NULL OR vlm_full_model != ?)", arguments: [modelKey]) ?? 0
+            let undescribed = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND vlm_full_model IS NULL") ?? 0
+            return (total, pending, undescribed)
+        }) ?? (0, 0, 0)
     }
 
     /// All non-failed image files that have a non-empty

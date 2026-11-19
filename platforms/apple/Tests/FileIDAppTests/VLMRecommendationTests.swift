@@ -30,3 +30,17 @@ struct VLMRecommendationTests {
         #expect(unanswered.reason == nil)
     }
 }
+
+@Suite("Describe run summary")
+struct DescribeRunSummaryTests {
+    @Test("a run on the chosen model reads as before")
+    func sameModel() {
+        #expect(DescribeRunSummary.toast(processed: 8, ran: "qwen3_vl_8b", chosen: .qwen3VL8B) == "Descriptions ready for 8 files")
+    }
+
+    @Test("a run that fell back names the model that ran and why")
+    func fallback() {
+        let toast = DescribeRunSummary.toast(processed: 8, ran: "qwen3_vl_4b", chosen: .qwen3VL8B)
+        #expect(toast == "Descriptions ready for 8 files, written with \(AIModelKind.qwen3VL4B.displayName), because not enough memory was free for \(AIModelKind.qwen3VL8B.displayName)")
+    }
+}

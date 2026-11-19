@@ -20,6 +20,21 @@ struct VLMRecommendation: Equatable {
     }
 }
 
+/// Which description model a finished run used, spoken when the engine loaded a smaller one than the chosen model.
+enum DescribeRunSummary {
+    static func modelNote(ran: String, chosen: AIModelKind) -> String {
+        let ranName = AIModelKind(rawValue: ran)?.displayName ?? ran
+        guard ran != chosen.rawValue else { return "with \(ranName)" }
+        return "with \(ranName), because not enough memory was free for \(chosen.displayName)"
+    }
+
+    static func toast(processed: Int, ran: String, chosen: AIModelKind) -> String {
+        let files = "\(processed.formatted()) file\(processed == 1 ? "" : "s")"
+        guard ran != chosen.rawValue else { return "Descriptions ready for \(files)" }
+        return "Descriptions ready for \(files), written \(modelNote(ran: ran, chosen: chosen))"
+    }
+}
+
 extension AIModelKind {
     var shortName: String {
         displayName.replacingOccurrences(of: #"\s*\([^)]*bit\)$"#, with: "", options: .regularExpression)

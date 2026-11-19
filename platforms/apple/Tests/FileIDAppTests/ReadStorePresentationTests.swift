@@ -182,7 +182,8 @@ struct ReadStorePresentationTests {
 
         #expect(fixture.store.totalAnalyzableFiles() == 6)
         #expect(fixture.store.filesAnalysisStats() == (analyzable: 6, captioned: 2))
-        #expect(fixture.store.deepAnalyzePending(modelKey: "model") == (total: 6, pending: 4))
+        #expect(fixture.store.deepAnalyzePending(modelKey: "model") == (total: 6, pending: 4, undescribed: 3))
+        #expect(fixture.store.deepAnalyzePending(modelKey: "older") == (total: 6, pending: 5, undescribed: 3))
     }
 
     @Test("all active clusters remain visible regardless of size")

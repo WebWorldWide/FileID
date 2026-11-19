@@ -255,7 +255,7 @@ struct MainWindow: View {
             }
             .task(id: engine.deepAnalyzeComplete?.processed ?? -1) {
                 guard let done = engine.deepAnalyzeComplete, done.processed > 0 else { return }
-                toasts.show("Descriptions ready for \(done.processed.formatted()) files", actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
+                toasts.show(DescribeRunSummary.toast(processed: done.processed, ran: done.modelKind, chosen: DeepAnalyzeSettings.shared.activeKind), actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
                     activeTabBinding.wrappedValue = .library
                 }
             }
