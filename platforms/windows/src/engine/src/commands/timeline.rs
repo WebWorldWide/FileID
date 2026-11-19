@@ -33,7 +33,7 @@ const VLM_PREFERENCE: [&str; 5] = [
     "mistral_small_3_2",
 ];
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Recipe {
     model_kind: String,
@@ -332,9 +332,13 @@ pub(crate) fn schedule(job_id: String, sink: Sink, database: Arc<Mutex<Connectio
 }
 
 async fn publish(job_id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) {
+    publish_with_note(job_id, sink, database, None).await;
+}
+
+async fn publish_with_note(job_id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>, note: Option<String>) {
     let jobs = with_db(database, |conn| super::catalog::jobs(conn)).await;
     if let Ok(jobs) = jobs {
-        let mut response = super::catalog::response(job_id, "ok", None);
+        let mut response = super::catalog::response(job_id, "ok", note);
         response.jobs = jobs;
         sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response))))
             .await;
@@ -345,6 +349,57 @@ struct Job {
     ids: Vec<i64>,
     recipe: Recipe,
     index: usize,
+}
+
+impl Job {
+    fn model_candidates(&self) -> Vec<String> {
+        let mut candidates = vec![self.recipe.model_kind.clone()];
+        candidates.extend(crate::models::resident_model::smaller_installed(&self.recipe.model_kind));
+        candidates
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn model_label(kind: &str) -> String {
+    super::deep_analyze_mlx::display_name(kind)
+}
+
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+fn model_label(kind: &str) -> String {
+    kind.to_owned()
+}
+
+/// A model refused for memory gives way to a smaller installed one; the job keeps the model that actually ran so
+/// evidence is versioned by it and a resume stays on it. Returns the sentence that says so.
+fn adopt_smaller_model(conn: &Connection, id: &str, recipe: &mut Recipe, used: &str) -> Result<String> {
+    let requested = std::mem::replace(&mut recipe.model_kind, used.to_owned());
+    recipe.model_version = frame_model_version(used);
+    conn.execute(
+        "UPDATE catalog_jobs SET recipe_json=?1,updated_at=?2 WHERE id=?3",
+        params![serde_json::to_string(recipe)?, now(), id],
+    )?;
+    Ok(format!(
+        "Not enough memory is free for {}, so FileID is looking for moments with {} instead.",
+        model_label(&requested),
+        model_label(used)
+    ))
+}
+
+async fn use_loaded_model_if_smaller(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>, job: &mut Job, candidates: &[String], loaded: usize) -> Result<()> {
+    if loaded == 0 {
+        return Ok(());
+    }
+    let used = candidates[loaded].clone();
+    let (owned, mut recipe) = (id.to_owned(), job.recipe.clone());
+    let (note, recipe) = with_db(database, move |conn| {
+        let note = adopt_smaller_model(conn, &owned, &mut recipe, &used)?;
+        Ok((note, recipe))
+    })
+    .await?;
+    job.recipe = recipe;
+    tracing::warn!(%note, "timeline model refused for memory; running a smaller installed one");
+    publish_with_note(id, sink, database, Some(note)).await;
+    Ok(())
 }
 
 fn start(conn: &Connection, id: &str) -> Result<Option<Job>> {
@@ -384,7 +439,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     let frames = frames_root().join(id);
     let outcome = async {
         let owned = id.to_owned();
-        let Some(job) = with_db(database, move |conn| start(conn, &owned)).await? else {
+        let Some(mut job) = with_db(database, move |conn| start(conn, &owned)).await? else {
             return Ok(());
         };
         publish(id, sink, database).await;
@@ -394,7 +449,18 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
             // the lease released before speech so other model users can run.
             let apple_speech = apple_speech::enabled();
             let visual_share = if apple_speech { 0.8 } else { 1.0 };
-            let lease = crate::apple::vlm::Resident::shared().acquire(&job.recipe.model_kind, &cancel, |_| {}).await?;
+            let candidates = job.model_candidates();
+            let (loaded, lease) = crate::models::resident_model::load_until_one_fits(
+                &candidates,
+                |kind| {
+                    let cancel = cancel.clone();
+                    async move { crate::apple::vlm::Resident::shared().acquire(&kind, &cancel, |_| {}).await }
+                },
+                |refused, next| async move { tracing::warn!(%refused, %next, "timeline model refused for memory; trying a smaller installed one") },
+            )
+            .await;
+            let lease = lease?;
+            use_loaded_model_if_smaller(id, sink, database, &mut job, &candidates, loaded).await?;
             let model = MlxFrames(tokio::sync::Mutex::new(lease));
             process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
             drop(model);
@@ -406,9 +472,18 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         let speech = installed_speech_model();
         let apple_speech = apple_speech::enabled();
         let visual_share = if speech.is_some() || apple_speech { 0.8 } else { 1.0 };
-        let lease = ResidentService::shared()
-            .acquire(&job.recipe.model_kind, cancel.clone())
-            .await?;
+        let candidates = job.model_candidates();
+        let (loaded, lease) = crate::models::resident_model::load_until_one_fits(
+            &candidates,
+            |kind| {
+                let cancel = cancel.clone();
+                async move { ResidentService::shared().acquire(&kind, cancel).await }
+            },
+            |refused, next| async move { tracing::warn!(%refused, %next, "timeline model refused for memory; trying a smaller installed one") },
+        )
+        .await;
+        let lease = lease?;
+        use_loaded_model_if_smaller(id, sink, database, &mut job, &candidates, loaded).await?;
         let result = process(id, &job, &lease, &frames, &cancel, sink, database, visual_share).await;
         let cleanup = lease.finish(result.is_ok()).await;
         result.and(cleanup)?;
