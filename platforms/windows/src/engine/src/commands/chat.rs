@@ -1999,6 +1999,22 @@ mod tests {
     }
 
     #[test]
+    fn find_duplicates_and_trash_them_proposes_the_trash_card() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,content_hash) VALUES
+             (1,'/lib/a.jpg',1,10,1688472000,0,'image','jpg','h'),
+             (2,'/lib/copy of a.jpg',2,10,1688472000,0,'image','jpg','h');",
+        )
+        .unwrap();
+        let request = ChatRequest { request_id: "r".into(), conversation_id: "c".into(), action: "send".into(), text: Some("Find duplicates and move them to Trash".into()), use_model: Some(false), ..Default::default() };
+        let response = execute(&mut conn, &request).unwrap();
+        let actions = response.actions.unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!((actions[0].kind.as_str(), actions[0].file_count, actions[0].requires_confirmation), ("moveDuplicatesToTrash", Some(1), true));
+    }
+
+    #[test]
     fn invalid_requests_cannot_write_history_or_change_files() {
         let mut conn = crate::db::test_support::memory_db();
         for text in [String::new(), "x".repeat(2001)] {

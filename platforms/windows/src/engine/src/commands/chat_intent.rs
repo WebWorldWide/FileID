@@ -333,7 +333,15 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         });
     }
     if ["find", "show", "list", "check", "look", "any", "search", "detect"].contains(&verb) && duplicates {
-        return Some(Intent { scope: rest_text(&words, 1), ..Intent::new("findDuplicates") });
+        let removes = (0..rest.len()).find(|&at| {
+            let after = rest[at + 1..].iter().find(|word| word.as_str() != "then");
+            ["and", "then"].contains(&rest[at].as_str())
+                && after.is_some_and(|word| ["move", "delete", "remove", "trash", "put", "send", "throw", "erase", "discard"].contains(&word.as_str()))
+        });
+        return Some(match removes {
+            Some(at) => Intent { scope: rest_text(&words[..=at], 1), ..Intent::new("moveDuplicatesToTrash") },
+            None => Intent { scope: rest_text(&words, 1), ..Intent::new("findDuplicates") },
+        });
     }
     if ["open", "go", "switch", "take", "view", "show"].contains(&verb)
         && let Some(page) = page_for(rest) {
