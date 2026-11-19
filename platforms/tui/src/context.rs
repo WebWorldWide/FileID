@@ -1,6 +1,4 @@
-//! Run context: resolve the library SQLite path the same way the CLI does, and
-//! a tiny hand-rolled argv parser (`--db`, `--help`, `--version`) so the TUI
-//! adds no CLI-parsing dependency.
+//! Library path resolution and a hand-rolled argv parser, so the TUI adds no CLI-parsing dependency.
 
 use std::path::PathBuf;
 
@@ -10,26 +8,12 @@ use anyhow::{Context as _, Result};
 pub struct Ctx {
     /// Absolute path to the library SQLite file the TUI reads.
     pub db: PathBuf,
-    /// SCRATCH mode (no `--db` / env override): the directory handed to the
-    /// spawned engine as `XDG_DATA_HOME` / `%LOCALAPPDATA%` so a scan writes the
-    /// SAME library the TUI reads (its `<dir>/FileID/fileid.sqlite`). `None` for
-    /// an explicit `--db` / env library; the child receives that path through
-    /// the engine's `FILEID_DB` override.
+    /// Scratch mode only: the data home handed to the spawned engine as `XDG_DATA_HOME` / `%LOCALAPPDATA%`, so a scan writes the library the TUI reads. `None` for an explicit library, which reaches the engine via `FILEID_DB`.
     pub engine_data_home: Option<PathBuf>,
 }
 
 impl Ctx {
-    /// Resolve the library the TUI opens. Precedence:
-    ///   1. `--db <path>`
-    ///   2. `$FILEID_DB`
-    ///   3. `$CFFIXED_USER_HOME/fileid.sqlite` (parity with the macOS app's
-    ///      sandbox-root env var; convenient for isolating a test library)
-    ///   4. **default: a persistent SCRATCH library** so the TUI opens EMPTY —
-    ///      `<scratch_base>/FileID/fileid.sqlite`, never the desktop app's
-    ///      library at the engine's canonical `…/FileID/fileid.sqlite`.
-    ///
-    /// 1–3 set `engine_data_home = None` (explicit library; the spawned engine
-    /// receives `FILEID_DB`). Only the default arm is scratch.
+    /// Resolve the library: `--db`, `$FILEID_DB`, `$CFFIXED_USER_HOME/fileid.sqlite`, else a persistent scratch library, so the TUI never opens the desktop app's library. Only the scratch arm sets `engine_data_home`.
     pub fn resolve(db_flag: Option<PathBuf>) -> Result<Self> {
         let t = resolve_target(
             db_flag,
@@ -104,11 +88,7 @@ fn resolve_target(
     })
 }
 
-/// The persistent scratch data-dir base used when no `--db`/env is given. Placed
-/// as a *sibling* of the real FileID data dir (clearly named, easy to find or
-/// delete) so the scratch library never collides with the desktop library at
-/// `<data>/FileID/fileid.sqlite` — this base is `<data>/FileID-TUI-Scratch`.
-/// Falls back to a temp dir when the platform data dir can't be resolved.
+/// Scratch data-dir base when no `--db`/env is given: a sibling of the desktop FileID dir so the two libraries never collide. Falls back to a temp dir when the platform data dir is unresolvable.
 fn default_scratch_home() -> Result<PathBuf> {
     if let Ok(root) = fileid_engine::paths::root() {
         if let Some(parent) = root.parent() {
@@ -125,10 +105,7 @@ pub fn collapse_home(p: &str) -> String {
         if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
             let home = home.to_string_lossy();
             if let Some(rest) = p.strip_prefix(home.as_ref()) {
-                // Only collapse at a path boundary so a `HOME` of `/home/alice`
-                // doesn't swallow the `2` in `/home/alice2/...` (→ a bogus
-                // `~2/...`): the char after the prefix must be a separator or
-                // the end of the string.
+                // Collapse only at a path boundary: `/home/alice` must not turn `/home/alice2` into `~2`.
                 if rest.is_empty() || rest.starts_with(['/', '\\']) {
                     return format!("~{rest}");
                 }

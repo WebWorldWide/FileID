@@ -1,8 +1,5 @@
 ﻿namespace FileID.Services;
 
-/// <summary>File and download sizes in Finder's decimal units (macOS
-/// ByteCountFormatter .file): KB whole numbers, MB up to one decimal, GB and TB
-/// up to two decimals, trailing zeros dropped. Memory sizes stay binary.</summary>
 internal static class ByteFormat
 {
     private static readonly (double Size, string Unit, int Decimals)[] Units =

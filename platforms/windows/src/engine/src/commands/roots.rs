@@ -1,6 +1,5 @@
-//! `listRoots`: the library locations the catalog has scanned, with whether each is
-//! reachable right now and how many files it holds (a nested location's files count only
-//! there). Read-only; never scans.
+//! `listRoots`: library locations the catalog has scanned, with current reachability and file count (a nested
+//! location's files count only there). Read-only.
 
 use std::sync::Arc;
 
@@ -10,15 +9,13 @@ use rusqlite::Connection;
 use crate::ipc::sink::Sink;
 use crate::ipc::{EngineError, EventPayload, IpcEvent, LibraryRoot, ListRootsPayload, RootsList, Wrap};
 
-/// A folder counts as online when it exists, is a directory and has an entry. An unplugged
-/// drive often leaves an empty mount folder behind, which must not read as online.
+/// An unplugged drive often leaves an empty mount folder behind, which must not read as online.
 pub(crate) fn is_online(path: &str) -> bool {
     let path = std::path::Path::new(path);
     path.is_dir() && std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }
 
-/// Half-open range matching every stored path under `root`: `root/` up to `root0`
-/// (`0` is the character after `/`; `]` follows `\`).
+/// Half-open range matching every stored path under `root`: `root/` up to `root0` (`0` follows `/`; `]` follows `\`).
 /// Scans record the full path as the display name; show the folder's own name instead.
 fn display_name(path: &str, stored: String) -> String {
     if stored != path {
@@ -37,8 +34,8 @@ fn subtree_bounds(root: &str) -> (String, String, String) {
     (trimmed.to_owned(), format!("{trimmed}{separator}"), format!("{trimmed}{next}"))
 }
 
-/// The files one library location holds: its path and everything under it, minus any deeper
-/// location, because the most specific location owns a file (the apps' `OfflineRoots` rule).
+/// Its path and everything under it minus any deeper location: the most specific location owns a file (the apps'
+/// `OfflineRoots` rule).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RootScope {
     bounds: (String, String, String),
@@ -65,7 +62,6 @@ impl RootScope {
         Self { bounds, deeper, param }
     }
 
-    /// `None` without an id; an error for an id the catalog doesn't know.
     pub fn load(conn: &Connection, id: Option<i64>) -> anyhow::Result<Option<Self>> {
         let Some(id) = id else { return Ok(None) };
         anyhow::ensure!(id > 0, "Invalid library location");
@@ -86,14 +82,11 @@ impl RootScope {
         within(&self.bounds, path) && !self.deeper.iter().any(|deeper| within(deeper, path))
     }
 
-    /// The JSON bound to [`clause`]'s parameter.
     pub fn param(&self) -> &str {
         &self.param
     }
 }
 
-/// SQL that is true when `column` lies in the scope bound to `param` (a [`RootScope::param`]),
-/// or when `param` is NULL. Binds the parameter once.
 pub fn clause(column: &str, param: &str) -> String {
     let inside = |bounds: &str| {
         format!("({column}=json_extract({bounds},'$[0]') OR ({column}>=json_extract({bounds},'$[1]') AND {column}<json_extract({bounds},'$[2]')))")

@@ -1,12 +1,4 @@
-﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the
-// "FileID" title and routes the "Choose a folder to scan" button to the same
-// FolderPickerService the sidebar uses.
-//
-// Animation is a 1:1 port of macOS Detail.swift:171-177 — `shimmer` driven
-// from 0 to 1 over 12 s linear, repeating forever. We animate the
-// LinearGradientBrush's EndPoint instead of a State<Double> bound to a
-// UnitPoint expression, since WinUI doesn't have SwiftUI's reactive
-// gradient endpoint pattern.
+﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the "FileID" title and routes the "Choose a folder to scan" button to the same FolderPickerService the sidebar uses.
 
 using System;
 using System.ComponentModel;
@@ -58,11 +50,6 @@ public sealed partial class OnboardingSplash : UserControl
             return;
         }
 
-        // Mirror macOS Detail.swift's startPoint=(shimmer,0) + endPoint=(shimmer+1,1)
-        // with `shimmer` linear-driven 0→1 over 12 s. Both points slide together
-        // on the X axis; Y stays fixed (0 on start, 1 on end) so the gradient
-        // direction is constant 45° and only the gradient origin translates.
-        // Result is a single smooth drift of the rainbow across the title.
         var startAnim = new PointAnimation
         {
             From = new Point(0, 0),
@@ -108,11 +95,7 @@ public sealed partial class OnboardingSplash : UserControl
             var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
             if (result.FailureReason is not null)
             {
-                // The picker opened but the selected folder couldn't be used
-                // (permission denied, offline share, broken redirect). On
-                // first-run the user is stranded on this splash with no other
-                // affordance, so surface the actionable reason and offer to
-                // re-open the picker — never swallow it to a log line.
+                // On first-run the user is stranded on this splash with no other affordance, so surface the actionable reason and offer to re-open the picker — never swallow it to a log line.
                 var retry = await ShowPickFailureAsync(result.FailureReason);
                 if (retry)
                 {
@@ -138,8 +121,6 @@ public sealed partial class OnboardingSplash : UserControl
         }
     }
 
-    // Surface a folder-pick failure with a Try Again path. Returns true when
-    // the user chose to re-open the picker.
     private async Task<bool> ShowPickFailureAsync(string reason)
     {
         try
@@ -169,9 +150,7 @@ public sealed partial class OnboardingSplash : UserControl
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // ContentDialog.ShowAsync can throw on a broken XamlRoot
-        // (mid-shutdown). Catch + log so a failed alert never escalates to
-        // App.UnhandledException. Mirrors SidebarProcessingControl.ShowAlertAsync.
+        // Catch + log so a failed alert never escalates to App.UnhandledException.
         try
         {
             if (XamlRoot is null)

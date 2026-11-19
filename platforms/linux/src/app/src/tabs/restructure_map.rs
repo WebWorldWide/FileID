@@ -84,7 +84,6 @@ impl MapView {
         let hint = v3::meta("Hover a folder or ribbon to trace its files. Click to see the exact list.");
         body.append(&hint);
 
-        // ── Map ────────────────────────────────────────────────────────────
         let map = v3::vbox(8);
         let header = v3::hbox(8);
         let from_count = v3::label("", &["v3-map-head"]);
@@ -105,7 +104,6 @@ impl MapView {
         overlay.add_overlay(&nodes);
         map.append(&overlay);
 
-        // ── Tree ───────────────────────────────────────────────────────────
         let tree = v3::vbox(10);
         let tree_head = v3::hbox(8);
         tree_head.append(&v3::label("Show", &["v3-output-label"]));

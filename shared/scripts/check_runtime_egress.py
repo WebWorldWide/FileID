@@ -70,8 +70,6 @@ EXCLUDED_SOURCE_PARTS = {
 }
 RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/client.rs",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift",
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/models/vlm_server.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
@@ -80,16 +78,12 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/server.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
     "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
     "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
     "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
     "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift",
     "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift",
     "platforms/apple/app/Sources/FileID/EngineClient.swift",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
     "platforms/linux/src/app/src/engine_client.rs",
     "platforms/linux/src/app/src/tabs/settings.rs",
     "platforms/windows/src/engine/src/commands/trash.rs",
@@ -124,65 +118,58 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/apple/ffi.rs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
-  "platforms/windows/src/engine/src/client.rs": "7fd2ec8192f167c89322230f17a3e304802a7133f445c5b8bc2ec0985e8a08f4",
-  "platforms/windows/src/engine/src/shell/thumbnail.rs": "b45ae1e8953defb4d2dbc73687f61fb942d77758666824f3493cc5c7fcff6b4f",
-  "platforms/windows/src/engine/src/models/native_process.rs": "3ad2cf599df1884712dd6630c53347ce219ecad0c6c68fe5636d472cc2f7e98d",
+  "platforms/windows/src/engine/src/client.rs": "e583675cc6fcbab385f66f75d2b512b392e11215a9a735ff268ab634a2eeec65",
+  "platforms/windows/src/engine/src/shell/thumbnail.rs": "1ccb84569bdd7fc385bcec10d27f5631330edee8694bcf42b8ea5d5070ee784b",
+  "platforms/windows/src/engine/src/models/native_process.rs": "c7edc0355b3039a6d09a8951d75454519042f7a6423f4bfc97b26bc526f9d159",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "49ab265bda91f9c72bdff23211af0fa190a2fa6ffefb92a3807a37b43e067785",
-  "platforms/windows/src/engine/src/commands/video_export.rs": "fae5c04d0f4bf1c2e73c48ebe472b2ea0097cee481e37843939c07bb32813e01",
-  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "61224908a917f143a8113c1fe8c1b6ac127e5d752737105d4cf69bc3b28d16a3",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "ef9d4332f43baeb402418fd4fea068231ceafc5261f2bfbeb9b77d4e47cf0ccf",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "7376ca71ed759b10938d9efda6d90fc6753357275367e379ba93b9c176b830fe",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "a7ab323a099d54623748affe3e90cf789403017e87b1ed9d123a9891905f870b",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "c769f501be2a2cb043e24ff951e5f3d0262bd72999faa56a2489de7123e344d7",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "3c43035bdd25ba43ea5ef9b2d4a4421c9f7f914ad26adc8ebe195bdd34c38d7b",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "a2cab1b4f247198dc5493d60813aa0e32617cefba91938fa6b1b879fa353d456",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "00fecf9ed22732df4b5410313007970bb655849f0d6c8bd3910f92f0c0aedf2a",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "50d1cf6ff252fc696895b64d683994170e551a6df40d846436997d3943fb22dc",
+  "platforms/windows/src/engine/src/commands/video_export.rs": "95b83f52ddf1ac261daabe0157a4ba4cece7e53a814bb8398929efc07b190c3d",
+  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "eff38092668e6886b61f1956479ae6bb43f15b8cf80ee7d8f6a9ab7896ec2346",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "dbafbf68cfcc101f9750a24e9f165f56f00908d5b982e58c93f84e1b1c4f37d9",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f551ebd6a8a17a39619436c62d7e3b463a9527cd37060b7b1c4e1058707db541",
+  "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "4e4010f0331c6471ffd0fa9ddb118cd8ab3dbb351e17b52fb464e78ffb11f7c9",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "c937536bd5342569378b3dfc42a3b7e47f9cdf522ea73ed7e5add0a6d8e2d8d8",
-  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
-  "platforms/linux/src/app/src/engine_client.rs": "15830c04297f81c826aa31394617d65fc111fa8ce40bb3f13ce63e546b20de53",
-  "platforms/linux/src/app/src/tabs/settings.rs": "b1823039110538935868a76e936b1a4544d5f842b32e4c1ce1dbfc70c06ddbe2",
-  "platforms/windows/src/FileID.App/App.xaml.cs": "17cfc8195819bddab21c1470ae9f54f2b9b496d4a4ab73977f2a6db4d50304b1",
-  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "f9234d41069e084bc149ce7f4d98132722d61230e7f183628ad27277b194799a",
-  "platforms/windows/src/FileID.App/Program.cs": "e013f7f02ad596093072b50200555b1c63ce89f6e41dddd28a2f57e01dc28e47",
-  "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "b23698d76e9f5bf37117477b9d541fb8577e54c1e1bb59a709225064ce78c7c0",
-  "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "48373698174ed4c43575b05e85a563fd7485207819d9737c4fed9f92e0b2dd44",
-  "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "3193b3308a99d19f10479ae9d1485c088a55880b6862161213ec8d1415c86731",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "630a85060ab28c0691f9c3e5b5c64be9865864817c3d9520c64a307fc2f90695",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "9b264a34ac14bb157b623a1ad370506562fd8596a8973386e181d04dc505c34f",
-  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "2f19e7de486a85fb5defb54f400b9c5f8853103271ed6227a0191bcfdfd17a4c",
-  "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "5307b5245828c47a0da594390f9bcac4f9469db41f3d2129304d4e8a65e77901",
-  "platforms/windows/src/engine/src/commands/bulk.rs": "6277cb3af0309ef26da44df85dc7a43be5d43a93a91b09ed37e2d3968384f9b8",
-  "platforms/windows/src/engine/src/commands/prewarm.rs": "a47edf2f9cfde366358a90cf1c5809c69bed5055d558d2e0925af350e1f2144a",
-  "platforms/windows/src/engine/src/commands/restructure.rs": "04a4cb4553be1b8216cefb0d031fbd7cbb0cac1c5a7c5986b66519cb3e45c523",
-  "platforms/windows/src/engine/src/commands/trash.rs": "f0abd39e72da9da6e80b3388c924b17d50fc0fd032cc48b67a99982b03f918b5",
-  "platforms/windows/src/engine/src/downloader.rs": "63413e145852f77bdf3acb036d0368ba29278139f0386e0ec07fdf644d23ef70",
-  "platforms/windows/src/engine/src/server.rs": "0a37e254ab1a3409cd708a00f622c66aef64ca2514ea9fd11d86657e06a1e397",
-  "platforms/windows/src/engine/src/models/runtime.rs": "e06f075622288cc3468443ee19ef342436ed07bee32c2a9824a4480e5b487d97",
-  "platforms/windows/src/engine/src/models/vlm.rs": "b16c116bbd35ed38e6e3cf72674ce44670045f9e7c17752d93b9e1a5060bf5b9",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "c2f9540850b3a9f61031baac4d44c0f47353c2154de2bca49b1a379dce4a192f",
-  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "fb83d73f21312ed331000d7f999db0cdf0ccd4ef11cbf795c093b755bc97e2b6",
-  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "be3c426f5411a60ca7a91cc9387e578432aef5e9b9d932978fd12f1be46a41bd",
-  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "1a70f493e8139f275c4a0e966ccd0b9c881b72c5c21ca0aaa75d45269622651e",
-  "platforms/windows/src/engine/src/platform.rs": "58994016630e741ac84ee52aba5e4c4d3784969d0fbe280cb5b8b5d44a6e589e",
-  "platforms/windows/src/engine/src/shell/heic.rs": "890bce8f247d2da9ddd21d544efd5b34f39ec12370c6b420cd5e579f42f00862",
-  "platforms/windows/src/engine/src/shell/mod.rs": "f762df3c2ebcf08884235ef89ba05a6c84db969e31af4f1c2fe9df71b6574553",
-  "platforms/windows/src/engine/src/shell/ocr.rs": "30e431e99cfd34a81ba7af52d5d07712d8fce52e113c25790e12bc022bb29395",
-  "platforms/windows/src/engine/src/shell/tags.rs": "5ab33e5ca6ed86bf8a7c719568443c502347ff093cb1e7d3374b7719a778fe39",
-  "platforms/windows/src/engine/src/shell/trash.rs": "959c0063983706ee8503970196a2748648b3ce8176887c6aa0fe73302d797caa",
-  "platforms/windows/src/engine/src/shell/video.rs": "555ab67e480a936e8f1aed95e6c1fc463405ac99626f618c01240d064d759214",
-  "platforms/windows/src/engine/src/util/content_hash.rs": "bf6e988aab84643529fe0d0bf5f0b2e3a014a4b6635ef3e37f33ff26a22ccaad",
-  "platforms/windows/src/engine/src/util/path_safety.rs": "92ead87b750e0725dda4c997a8988cb43831d05542f97bcd0f6d9d1e099ad9a1",
-  "platforms/windows/src/engine/src/apple/ffi.rs": "15dfe29cc3e019448c866bca1dccb1f8f58714e110bbf48fc66958601fe6b6ef",
+  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "f7943366e057912438df28e7c24f49a41b701c8d2a343b9b0315c74e4b9e5abd",
+  "platforms/linux/src/app/src/engine_client.rs": "e69c06e2ad17b937cc8339b367e21d71af8b757332becb718873d80f7f3be8a9",
+  "platforms/linux/src/app/src/tabs/settings.rs": "ee11c615f69816907ad1191b8ea7277654a82b46e675233e1f7c9bf56ab24ebb",
+  "platforms/windows/src/FileID.App/App.xaml.cs": "b55546f371f14d937f929b613779dfef29eb5a84d094bdf43c7f931d9aeefd77",
+  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "e32485ef2deb0f80eb647a649d0aaaf36cb4a4786a0d6483e165595b89c6065f",
+  "platforms/windows/src/FileID.App/Program.cs": "5db35a6fce127071e4b7741dbe6f785196fb3ee651ce8043ca5542f269710dee",
+  "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "a5323c99a0ce6de9c26f69eedc62b516a814fefb9c52c8e4e5ec48e12b3365cf",
+  "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "789465f21348bb6af9e1e3f35e132d007e9e8506200961eb75e4e693f999682a",
+  "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "6c94e76ce8fa5f41349b415e05ea1c49c8726c3c7f986f2d808beaef9de065df",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "76018241aed653d1746360dd303150793ac58071eed60a23a4195be8acd39b48",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "3ac6d13b920f43738ece9fd3e46a0d5a883548a0026d4afc9caeb7d078b53589",
+  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "109ccb62623af139267a925cac3de559dd1291a51a0dc67ab851848018bb5ac8",
+  "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "a83ca357f422a3f9bf7e8519618839de899a4a0d20d31cb641e504cd7a2b88e9",
+  "platforms/windows/src/engine/src/commands/bulk.rs": "16240a9ee663b29ccad083b8566c5b04dcf505524ba70cc7f0e24d2702ab2855",
+  "platforms/windows/src/engine/src/commands/prewarm.rs": "ece1a4dcb57e00adb721aa193681a812a00b98990cf8c298a6632ff511dd6cf9",
+  "platforms/windows/src/engine/src/commands/restructure.rs": "a7ab2625cc1bd040f288e7696f66dc32e199c6029967d5eee495c1852e9cfc5b",
+  "platforms/windows/src/engine/src/commands/trash.rs": "2d4c5bef33fee0d4b960e4cfdf58463d8338859d2654fe441766c9631cc971ae",
+  "platforms/windows/src/engine/src/downloader.rs": "6f31f9957d42c63bf4f9e625a51cbc78f78008865c5825923295dedea99446b0",
+  "platforms/windows/src/engine/src/server.rs": "2ee7dcb074c432d6305e882ba021e7277fdee859145b05cb69f111538d26202c",
+  "platforms/windows/src/engine/src/models/runtime.rs": "fbe9ba8ea0bf70a9853bb86adae1ca365d7e25481e2d8e9674d7ac49c0765dc9",
+  "platforms/windows/src/engine/src/models/vlm.rs": "b54cceff68b1d31b3d5eb102ac7654f511c2a08e02d8faa8f94871aac46b706f",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "859f765ca9a0c795c2158a05fdcada14116a73e53365594eb21f779cd0dbc7a1",
+  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "a5e0f2e939dc670ff3b53559b22c5df9768d7617071837f4bd420e60c8140cc9",
+  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "b615a018b7a432860437f1a31e0c18f92a69d4ec70d00cb3de0e7821077838f2",
+  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "e2667ccfc3416fe31d6adc5f1298037337605392a20dc1a054c45a812d775731",
+  "platforms/windows/src/engine/src/platform.rs": "2be8129c33d2790767c25409cfab5c38103a49fa10bb827fc53ade35272b9884",
+  "platforms/windows/src/engine/src/shell/heic.rs": "747e17bbfd709aa20558018bfa3b13c42107902837229826f79fc01695c961bb",
+  "platforms/windows/src/engine/src/shell/mod.rs": "9764c853e6b3c7181bd2cfaac7b1752849d0a75cb83889390459c9acf21697f2",
+  "platforms/windows/src/engine/src/shell/ocr.rs": "8360b4a7d6ca7f4bbc676be053647f42004f499f135fe0eabadac2f22d38fc84",
+  "platforms/windows/src/engine/src/shell/tags.rs": "4073edaa1b335d19f83151601eff9bcc1c4c3a6f212f1a3956663259729ce0a5",
+  "platforms/windows/src/engine/src/shell/trash.rs": "497e9a340919d2c3c0ad6a2bd24dcdc6d34f35ae982efc160e2dab55bc028164",
+  "platforms/windows/src/engine/src/shell/video.rs": "a6bae8aaa005092408935c6bb66931fe73cd2830b84e601dac743682f63a5db1",
+  "platforms/windows/src/engine/src/util/content_hash.rs": "b35c2305bb50eb24fc08fa79b45291a52c49d39ebf9326be9d96cd92942c0000",
+  "platforms/windows/src/engine/src/util/path_safety.rs": "3f07d8b8f3694d5d40032b545c935ef9b18468b874cede7dbcd05151c92c9b45",
+  "platforms/windows/src/engine/src/apple/ffi.rs": "b457cf17557bdefb4423f3a3ee33fe96c84850dcc7d0c08c5a853fb2b970cc56",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
     "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
 }
@@ -445,8 +432,7 @@ def _swift_transport_violations(root: Path) -> list[str]:
     failures: list[str] = []
     streaming_path = root / "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift"
     pinning_path = root / "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift"
-    vlm_path = root / "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift"
-    if not all(path.is_file() for path in (streaming_path, pinning_path, vlm_path)):
+    if not all(path.is_file() for path in (streaming_path, pinning_path)):
         return ["Apple reviewed network transport files are missing"]
     streaming_text = streaming_path.read_text(encoding="utf-8")
     streaming = _without_comments(streaming_text)
@@ -493,29 +479,6 @@ def _swift_transport_violations(root: Path) -> list[str]:
     redirect = _braced_expression(pinning, "public static func allowsRedirect")
     if redirect is None or "allowsExternalRequest(to: url)" not in redirect:
         failures.append(f"{pinning_path}: redirects must reuse the initial external URL policy")
-    delegate_redirect = _braced_expression(pinning, "willPerformHTTPRedirection")
-    if delegate_redirect is None or not all(
-        value in delegate_redirect
-        for value in ("TLSPinning.maxRedirects", "TLSPinning.allowsRedirect(to: request.url)")
-    ):
-        failures.append(f"{pinning_path}: tree-listing delegate lacks reviewed redirect enforcement")
-
-    vlm_text = vlm_path.read_text(encoding="utf-8")
-    vlm = _without_comments(vlm_text)
-    vlm_code = _mask_comments_and_strings(vlm_text)
-    if re.search(r"\.(?:dataTask|downloadTask|uploadTask|streamTask|webSocketTask|bytes)\s*\(", vlm_code) \
-            or "URLSession.shared" in vlm_code \
-            or len(re.findall(r"URLSession\s*\(", vlm_code)) != 1 \
-            or len(re.findall(r"URLRequest\s*\(", vlm_code)) != 1 \
-            or len(re.findall(r"\.data\s*\(", vlm_code)) != 1 \
-            or _swift_url_loader_sites(vlm_code) != 1:
-        failures.append(f"{vlm_path}: raw tree-listing request inventory changed")
-    listing = _braced_expression(vlm, "private func listRepoFiles")
-    vlm_guard = "guard TLSPinning.allowsExternalRequest(to: url) else"
-    if listing is None or vlm_guard not in listing or listing.index(vlm_guard) > listing.index("URLSession"):
-        failures.append(f"{vlm_path}: tree listing must reject its initial URL before session creation")
-    if listing is None or "pinDelegate.redirectRejected" not in listing:
-        failures.append(f"{vlm_path}: tree listing must surface blocked redirects")
     return failures
 
 
@@ -595,8 +558,6 @@ def source_boundary_violations(root: Path) -> list[str]:
         "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": 2,
         "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": 2,
         "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": 1,
-        "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": 1,
-        "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": 3,
     }
     for relative, expected_count in local_data_inventory.items():
         path = root / relative

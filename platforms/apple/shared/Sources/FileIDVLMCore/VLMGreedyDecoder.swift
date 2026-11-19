@@ -158,13 +158,9 @@ enum VLMGreedyDecoder {
         var fedDraft: [Int] = []
         asyncEval([pending] + cache.flatMap { $0.state })
         var emittedText = ""
-        // Decoding the whole reply after every token cost ~6 ms per token on a 2B
-        // model (the library's loop was 20% faster); the streaming detokenizer
-        // decodes only the current line. The final text is one full decode.
+        // Decoding the whole reply per token cost ~6 ms on a 2B model, so the streaming detokenizer decodes only the current line.
         var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
-        // Text callbacks (progress events to the app) run on their own task, in
-        // order: awaiting them inline held up queueing the next step, which made
-        // this loop ~15% slower per token than the library's stream.
+        // Text callbacks run on their own task so awaiting them doesn't hold up the next step.
         let (chunks, chunkSink) = AsyncStream.makeStream(of: String.self)
         let delivery: Task<Void, Never>? = onText.map { onText in
             Task { for await chunk in chunks { await onText(chunk) } }
@@ -185,12 +181,10 @@ enum VLMGreedyDecoder {
 
         decoding: while true {
             var lookahead: MLXArray?
-            // Each forward pass leaves hundreds of autoreleased MLX wrappers; drain
-            // them every step as TokenIterator does, or they pile up for the reply.
+            // Drain autoreleased MLX wrappers every step, as TokenIterator does, or they pile up for the reply.
             let predictions: [Int] = autoreleasepool {
                 if draftLength == 0 {
-                    // Queue the next step on the unevaluated token so the GPU never waits
-                    // for the CPU to build the graph, as TokenIterator does.
+                    // Queue the next step before the CPU finishes the graph, so the GPU never waits on it, as TokenIterator does.
                     let output = model(LMInput.Text(tokens: pending.reshaped([1, 1])), cache: cache, state: state)
                     state = output.state ?? state
                     let next = argMax(output.logits[0..., -1, 0...], axis: -1)

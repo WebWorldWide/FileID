@@ -273,13 +273,7 @@ struct BulkRenameSheet: View {
     }
 
     // MARK: - Person tag history
-    //
-    // Track which Finder tag we last applied per person so that when
-    // the user renames a cluster ("Alex" → "Alex Doe") we can offer
-    // to retag previously-tagged photos. Stored as a tiny JSON dict in
-    // UserDefaults — `[Int64-as-string : last-tag]`. Engineering-wise
-    // this lives next to the rename journal because both are "remembering
-    // something about an irreversible mutation we just made."
+    // Last Finder tag applied per person (UserDefaults `[person id: tag]`), so renaming a cluster can offer to retag its photos.
 
     nonisolated static let personTagHistoryKey = "personTagHistory.v1"
 

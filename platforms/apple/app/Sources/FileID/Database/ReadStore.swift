@@ -165,14 +165,7 @@ public final class ReadStore: @unchecked Sendable {
         case noDatabase
     }
 
-    /// Schedule a counters refresh off the main thread. The duplicate-group
-    /// window query is O(N log N) over the whole `files` table; run inline it
-    /// pegged the UI because a live scan calls `notifyChanged` up to once a
-    /// second from `@MainActor` views. A single background worker coalesces
-    /// bursts (one in-flight run, re-run once if more requests arrived while
-    /// it ran) and throttles successive heavy queries, so the main thread
-    /// never pays for scan ticks and the table is scanned at most ~once a
-    /// second during a burst. Property writes still land on the main actor.
+    /// Schedules a counters refresh off the main thread. The duplicate-group window query is O(N log N) and a live scan calls notifyChanged up to once a second, so one background worker coalesces bursts and throttles the heavy query.
     func refreshCounters() {
         countersLock.lock()
         countersDirty = true
@@ -185,11 +178,7 @@ public final class ReadStore: @unchecked Sendable {
 
         Task.detached(priority: .utility) { [weak self] in
             while let self {
-                // `withLock` (synchronous critical section) instead of bare
-                // lock()/unlock(): NSLock's lock() is unavailable in an async
-                // context under Swift 6 (it must never be held across a
-                // suspension point — it isn't here, but the scoped form makes
-                // that guarantee explicit and silences the diagnostic).
+                // `withLock` instead of lock()/unlock(): NSLock's lock() is unavailable in async contexts under Swift 6.
                 // nil: stop. Otherwise how long to wait first, which is non-zero
                 // only when the sole work left is a deferred duplicate total.
                 let wait = self.countersLock.withLock { () -> TimeInterval? in
@@ -374,10 +363,6 @@ public final class ReadStore: @unchecked Sendable {
                 .replacingOccurrences(of: "_", with: "\\_")
             let like = "%\(escapedSearch)%"
             let ftsQuery = FTSQuery.quoted(trimmedSearch)
-            // Keyword search across filename, OCR text, extracted
-            // document text, vision tags, smart names, VLM captions,
-            // and person names. CLIP semantic search runs separately
-            // when the encoder is installed.
             sql += """
                  AND (
                       id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
@@ -414,11 +399,7 @@ public final class ReadStore: @unchecked Sendable {
         return rows.map { Self.toFileRow($0) }
     }
 
-    /// Off-main twin of `files(...)`. The keyword search runs a
-    /// multi-table FTS + LIKE + face-join query; on a live scan the view
-    /// reloaded it on the MainActor on every throttled batch event,
-    /// stuttering the UI. Callers debounce and await this so the query
-    /// runs on a background task and only the assignment lands on main.
+    /// Off-main twin of `files(...)`: the keyword search is a multi-table FTS + LIKE + face-join query that would stutter the UI on every throttled scan batch.
     public func filesAsync(offset: Int = 0, limit: Int = 200,
                            search: String = "",
                            kindFilter: String? = nil) async -> [FileRow] {
@@ -606,20 +587,7 @@ public final class ReadStore: @unchecked Sendable {
         }
         do {
             return try q.read { db in
-                // Candidate SELECTION stays recipe-agnostic: membership is the
-                // whole same-size class (stored hashes are NEVER byte-proof —
-                // legacy BLAKE3/current SHA-256 rows and stale hashes must still
-                // meet in one class so verify()'s live read can pair them). The
-                // stored content_hash is used purely as a RANKING hint: classes
-                // whose members share a stored (hash, size) — near-certain real
-                // duplicates — load first, and each class is capped at
-                // memberCap files (same-hash twins ranked adjacently so the cap
-                // can't split a pair). Together those stop one dominant class of
-                // NON-duplicates (zero-byte files, fixed-size sidecars) from
-                // starving genuine groups out of the candidateCap file budget.
-                // `candidateCount` is the uncapped total membership so the
-                // partial-preview disclosure fires whenever any backstop drops
-                // real candidates.
+                // Candidate selection is recipe-agnostic: membership is the whole same-size class, since stored hashes are never byte-proof (legacy BLAKE3 and current SHA-256 rows and stale hashes must still meet in one class so verify()'s live read can pair them). The stored hash only ranks classes so near-certain duplicates load first, with same-hash twins ranked adjacently so memberCap can't split a pair; memberCap stops a dominant non-duplicate class from starving real groups out of candidateCap. candidateCount is uncapped so the partial-preview disclosure fires whenever a backstop drops candidates.
                 let candidateCount = try Int.fetchOne(db, sql: """
                     WITH candidate_sizes AS (
                         SELECT COUNT(*) AS n FROM files
@@ -732,21 +700,12 @@ public final class ReadStore: @unchecked Sendable {
     /// library would be ~1.25B comparisons.
     public static let nearDupImageCap = 20_000
 
-    /// Display caps for the perceptual (similar) grouping below. Restored here
-    /// after the exact-duplicate rewrite removed the shared constant block while
-    /// this similar path still references them: at most 200 groups, 5,000 total
-    /// visible members across all groups, 500 members per group.
+    /// Display caps for similar-image grouping: at most 200 groups, 5,000 members in total, 500 per group.
     private static let cleanupMaxGroups = 200
     private static let cleanupMaxVisibleMembers = 5_000
     private static let cleanupMaxVisibleMembersPerGroup = 500
 
-    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within
-    /// `maxHamming` (Hamming distance) of one another, transitively unioned. Same
-    /// keeper ranking as exact dupes (aesthetic ↓, size ↓, createdAt ↑, path len ↑).
-    /// Pure byte-exact groups (every member shares one content_hash) are dropped —
-    /// they already appear in the Exact view, so this surfaces genuinely-perceptual
-    /// matches. Returns groups of size >= 2. Heavy CPU work runs outside the read
-    /// transaction; call via `similarImageGroupsAsync` to keep it off the MainActor.
+    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within `maxHamming` of one another, transitively unioned. Byte-exact groups are dropped because the Exact view shows them. Heavy work runs outside the read transaction; use `similarImageGroupsAsync` to keep it off the MainActor.
     public func similarImageGroups(maxHamming: Int) -> [DuplicateGroup] {
         guard let q = queue else { return [] }
         let rows: [Row]
@@ -838,9 +797,7 @@ public final class ReadStore: @unchecked Sendable {
         return Array(groups.prefix(Self.cleanupMaxGroups))
     }
 
-    /// Off-main twin of `similarImageGroups`. The O(N²) Hamming scan + per-group
-    /// sort run on a background task; only the assignment lands on main. (mirrors
-    /// `duplicateGroupsAsync`)
+    /// Off-main twin of `similarImageGroups`; only the assignment lands on main.
     public func similarImageGroupsAsync(maxHamming: Int = ReadStore.defaultNearDupHamming) async -> [DuplicateGroup] {
         await Task.detached(priority: .userInitiated) { [self] in
             similarImageGroups(maxHamming: maxHamming)
@@ -1154,12 +1111,10 @@ public final class ReadStore: @unchecked Sendable {
             return a < b ? a : b
         }
 
-        // Union-find over every person id touched.
         var parent: [Int64: Int64] = [:]
         func find(_ x: Int64) -> Int64 {
             var r = x
             while let p = parent[r], p != r { r = p }
-            // Path compression.
             var cur = x
             while let p = parent[cur], p != r {
                 parent[cur] = r
@@ -1170,11 +1125,7 @@ public final class ReadStore: @unchecked Sendable {
         func union(target: Int64, source: Int64) {
             let rt = find(target), rs = find(source)
             if rt == rs { return }
-            // Keep the higher-priority root (named > larger file_count >
-            // lower id) so a typed name is never deleted when a chain of
-            // borderline pairs links a named and an unnamed cluster — per-pair
-            // preferredTarget does not compose transitively, so union order alone
-            // would pick the wrong (possibly unnamed) root.
+            // Keep the higher-priority root so a typed name is never deleted by a chain of borderline pairs (see the note above).
             let keep = preferredRoot(rt, rs)
             parent[keep == rt ? rs : rt] = keep
         }
@@ -1184,7 +1135,6 @@ public final class ReadStore: @unchecked Sendable {
             union(target: t, source: s)
         }
 
-        // Collect: per-final-target → list of source ids being absorbed.
         var byTarget: [Int64: [Int64]] = [:]
         for id in parent.keys {
             let root = find(id)

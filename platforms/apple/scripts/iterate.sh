@@ -1,8 +1,9 @@
 #!/bin/bash
 # FileID — automated regression test.
 #
-# Builds engine + app, refreshes the test corpus, wipes the DB, drives
-# the engine through a full scan + face clustering, then runs assertions.
+# Builds the Rust engine as the Mac app hosts it (fileidd: apple-adapters +
+# FileIDAppleKit), refreshes the test corpus, wipes the DB, drives the engine
+# through a full scan + face clustering, then runs assertions.
 #
 # Exit codes:
 #   0  — all assertions passed
@@ -28,10 +29,16 @@ warn() { printf "  ${YELLOW}!${RESET} %s\n" "$1"; }
 fail() { printf "  ${RED}✗${RESET} %s\n" "$1"; }
 
 # ─── 1. Build ─────────────────────────────────────────────────────────
-step "Building FileIDEngine"
+step "Building FileIDAppleKit and the Rust engine"
+KIT_DIR="$PROJECT_DIR/.build/debug"
+ENGINE_TARGET="$PROJECT_DIR/.build/rust-engine"
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-    swift build --product FileIDEngine 2>&1 | tail -3
-if [ ! -x "$PROJECT_DIR/.build/debug/FileIDEngine" ]; then
+    swift build --product FileIDAppleKit 2>&1 | tail -3
+(cd "$PROJECT_DIR/../windows/src/engine" &&
+    LIBRARY_PATH="$KIT_DIR" CARGO_TARGET_DIR="$ENGINE_TARGET" \
+        cargo build --locked --features apple-adapters 2>&1 | tail -3)
+ENGINE="$ENGINE_TARGET/debug/FileIDEngine"
+if [ ! -x "$ENGINE" ]; then
     fail "engine binary not found after build"
     exit 2
 fi
@@ -79,7 +86,7 @@ EVENT_LOG="$PIPE_DIR/events.jsonl"
 mkfifo "$CMD_FIFO"
 
 # Start engine with stdin from FIFO; engine writes events on stderr.
-"$PROJECT_DIR/.build/debug/FileIDEngine" < "$CMD_FIFO" 2> "$EVENT_LOG" &
+DYLD_LIBRARY_PATH="$KIT_DIR" "$ENGINE" < "$CMD_FIFO" 2> "$EVENT_LOG" &
 ENGINE_PID=$!
 # Hold the FIFO open for writing so it doesn't EOF.
 exec 3> "$CMD_FIFO"
@@ -136,15 +143,13 @@ if ! wait_for_event "scanComplete" 240; then
 fi
 ok "scanComplete"
 
-# Engine auto-enqueues face clustering after scan finishes — no need to
-# send `runFaceClustering` manually. We just wait for the completion
-# event.
+ipc_send '{"runFaceClustering":{}}'
 if ! wait_for_event "faceClusteringComplete" 180; then
     fail "face clustering didn't complete within 180s"
     tail -30 "$EVENT_LOG"
     exit 2
 fi
-ok "faceClusteringComplete (auto-triggered)"
+ok "faceClusteringComplete"
 
 # Clean shutdown
 ipc_send "\"shutdown\""

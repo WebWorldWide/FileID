@@ -8,7 +8,7 @@ TRASH_COMMANDS = ('"trashFiles"', '"restoreFromTrash"', '"emptyTrash"')
 
 
 def guarded_on_windows(case):
-    if "swift" in case.get("requires", []) or "windows" not in case.get("os", ["windows"]):
+    if "windows" not in case.get("os", ["windows"]):
         return True
     return any(
         item.get("engine") == "rust" and item.get("run") is False and "windows" in item.get("os", [])
@@ -33,7 +33,7 @@ class TrashCasesStayOffTheRecycleBin(unittest.TestCase):
     def test_guard_detects_a_missing_block(self):
         self.assertFalse(guarded_on_windows({"name": "x"}))
         self.assertTrue(guarded_on_windows({"knownDivergences": [{"engine": "rust", "os": ["windows"], "run": False}]}))
-        self.assertTrue(guarded_on_windows({"requires": ["swift", "rust"]}))
+        self.assertTrue(guarded_on_windows({"os": ["darwin"]}))
 
 
 if __name__ == "__main__":

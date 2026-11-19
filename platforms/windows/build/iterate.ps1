@@ -19,7 +19,7 @@ param(
     [int]$ThroughputTarget = 100,    # files/sec; tier-default = 100, RTX-class = 140
     [int]$MemoryCapMB = 1500,        # 1.2 GB ceiling per macOS, +25% slack
     [switch]$SkipBuild,
-    [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
+    [switch]$SkipWipe,               # skip DB wipe so incremental rescan kicks in
     [switch]$Verbose
 )
 
@@ -44,7 +44,6 @@ function Assert($name, [bool]$cond, $detail = "") {
     }
 }
 
-# --- 1. Build ---------------------------------------------------------
 if (-not $SkipBuild) {
     Step "Building engine + app"
     Push-Location $EngineDir
@@ -60,7 +59,6 @@ if (-not (Test-Path $EnginePath)) {
     exit 2
 }
 
-# Ensure the runtime DLLs (pdfium.dll) sit beside FileIDEngine.exe.
 $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
 if (Test-Path $fetchScript) {
     Step "Ensuring runtime DLLs are colocated with engine"
@@ -76,9 +74,7 @@ if (Test-Path $fetchScript) {
     OK "runtime DLLs colocated"
 }
 
-# --- 2. Resolve corpus ------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($Corpus)) {
-    # Default: tests/corpus folder if present.
     $defaultCorpus = Join-Path $RepoRoot "shared\test-corpus"
     if (Test-Path $defaultCorpus) { $Corpus = $defaultCorpus }
     else {
@@ -94,7 +90,6 @@ if ($corpusFiles -lt 10) {
 }
 OK "corpus has $corpusFiles files"
 
-# --- 3. Wipe DB -------------------------------------------------------
 $AppDataRoot = Join-Path $env:LOCALAPPDATA "FileID"
 if ($SkipWipe) {
     Step "Skipping DB wipe (-SkipWipe set; testing incremental rescan)"
@@ -109,12 +104,10 @@ if ($SkipWipe) {
     OK "DB wiped"
 }
 
-# --- 4. Drive engine --------------------------------------------------
 Step "Driving engine (scan + cluster)"
 $tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_.FullName }
 $eventLog = Join-Path $tempDir "events.jsonl"
 
-# Spawn engine with redirected stdio.
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $EnginePath
 $psi.UseShellExecute = $false
@@ -125,9 +118,7 @@ $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
 # Do not set FILEID_MODEL_POOL_SIZE here: the engine sizes the model pool
 # from installed and available memory (2 sessions, 1 on a low-memory box).
-# V14.9-X: propagate FILEID_TEST_FILE_CAP from parent shell so a bounded
-# validation run (e.g. N=100) can stop Discovery early without editing
-# this script. Unset/0 = full scan.
+# FILEID_TEST_FILE_CAP is propagated so a bounded run can stop Discovery early; unset/0 = full scan.
 if ($env:FILEID_TEST_FILE_CAP) {
     $psi.Environment["FILEID_TEST_FILE_CAP"] = $env:FILEID_TEST_FILE_CAP
 }
@@ -148,7 +139,6 @@ $stdoutSub = Register-ObjectEvent -InputObject $engineProc -EventName 'OutputDat
 $engineProc.BeginOutputReadLine()
 $engineProc.BeginErrorReadLine()
 
-# Send commands as JSON over stdin.
 function Send-Cmd($cmd) {
     $json = $cmd | ConvertTo-Json -Compress -Depth 10
     if ($Verbose) { Write-Host "  -> $json" -ForegroundColor DarkGray }
@@ -156,7 +146,6 @@ function Send-Cmd($cmd) {
     $engineProc.StandardInput.Flush()
 }
 
-# Wait for engine to emit "ready".
 $ready = $false
 $deadline = (Get-Date).AddSeconds(30)
 while (-not $ready -and (Get-Date) -lt $deadline) {
@@ -176,10 +165,7 @@ OK "engine ready"
 Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null } } }
 
 $scanStart = Get-Date
-# Wait up to 15 minutes for scanComplete. V14.9-W: bumped 5→15 because a
-# 15K-file corpus at ~40 files/sec takes ~6 minutes wall clock with the
-# current pipeline. iterate harness should reflect the realistic scan
-# floor rather than time out on healthy long runs.
+# Wait up to 15 minutes for scanComplete: a 15K-file corpus takes ~6 minutes at ~40 files/s.
 $scanComplete = $false
 $peakResidentMB = 0
 $totalProcessed = 0
@@ -208,16 +194,13 @@ if (-not $scanComplete) {
 }
 OK "scan completed in $([int]$scanElapsed.TotalSeconds)s"
 
-# Trigger face clustering.
 Send-Cmd @{ id = "cluster-1"; payload = @{ runFaceClustering = @{} } }
 Start-Sleep -Seconds 5
 
-# Send shutdown.
 Send-Cmd @{ id = "shutdown-1"; payload = @{ shutdown = @{} } }
 $engineProc.WaitForExit(10000) | Out-Null
 if (-not $engineProc.HasExited) { $engineProc.Kill() }
 
-# --- 5. Assertions ----------------------------------------------------
 Step "Running assertions"
 
 # A1: scan completed without crash.
@@ -287,7 +270,6 @@ else {
     Warn "python not found on PATH; skipping [A12] DB content assertions"
 }
 
-# --- 6. Summary -------------------------------------------------------
 Write-Host ""
 if ($failures -eq 0) {
     Write-Host "All assertions PASSED" -ForegroundColor Green

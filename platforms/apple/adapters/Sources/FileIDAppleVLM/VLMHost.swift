@@ -1,8 +1,5 @@
-// Request/reply surface the C exports in FileIDAppleKit/VLMExports.swift call.
-// Each request is one JSON object; it runs on its own task against the Swift
-// engine's DeepAnalyze actor (Engine/DeepAnalyze.swift) and ends with exactly
-// one `done` or `failed` event. The host decides what to run; this file only
-// maps requests onto the engine's MLX code.
+// Request/reply surface the C exports in FileIDAppleKit/VLMExports.swift call. Each request is one JSON object, runs on its own task,
+// and ends with exactly one `done` or `failed` event. The host decides what to run; this file maps requests onto the engine's MLX code.
 import AVFoundation
 import CoreImage
 import FileIDImaging
@@ -229,9 +226,7 @@ public final class VLMHost: @unchecked Sendable {
         }
     }
 
-    /// MLX loads `mlx.metallib` from the folder of the binary that contains
-    /// it (this library), as `DeepAnalyzeCapability.metallibPresent` checks
-    /// for the Swift engine.
+    /// MLX loads `mlx.metallib` from the folder of the binary that contains it (this library), as `DeepAnalyzeCapability.metallibPresent` checks.
     static func metallibPresent() -> Bool {
         var info = Dl_info()
         guard dladdr(#dsohandle, &info) != 0, let name = info.dli_fname else { return false }

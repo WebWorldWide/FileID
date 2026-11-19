@@ -7,7 +7,6 @@ fn fixture() -> serde_json::Value {
     serde_json::from_str(FIXTURE).unwrap()
 }
 
-/// A temporary home and Hugging Face root; restores the environment on drop.
 struct Scratch {
     dir: PathBuf,
     saved: Vec<(&'static str, Option<OsString>)>,
@@ -58,7 +57,6 @@ fn test_repo(revision: &str, catalog: Option<&'static CatalogModel>) -> &'static
     }))
 }
 
-/// Writes the fixture's files into the repo folder and returns that folder.
 fn write_fixture_files(repo: &Repo) -> PathBuf {
     let dir = model_dir(repo).unwrap();
     for file in fixture()["files"].as_array().unwrap() {
@@ -230,8 +228,7 @@ fn listing_reads_the_hugging_face_tree() {
     assert!(parse_listing(b"{\"error\":\"nope\"}").is_err());
 }
 
-/// Unix only: the Swift record format proves files by device, inode and
-/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+/// Unix only: the Swift record format proves files by device, inode and change time.
 #[cfg(unix)]
 #[test]
 fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
@@ -262,8 +259,7 @@ fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
     assert!(installed(repo));
 }
 
-/// Unix only: the Swift record format proves files by device, inode and
-/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+/// Unix only: the Swift record format proves files by device, inode and change time.
 #[cfg(unix)]
 #[test]
 fn swift_record_is_accepted_and_gains_an_identity_record() {
@@ -307,8 +303,7 @@ fn wrong_revision_or_missing_file_is_not_installed() {
     assert!(!installed(repo));
 }
 
-/// Unix only: the Swift record format proves files by device, inode and
-/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+/// Unix only: the Swift record format proves files by device, inode and change time.
 #[cfg(unix)]
 #[test]
 fn catalog_models_must_carry_the_audited_weights() {

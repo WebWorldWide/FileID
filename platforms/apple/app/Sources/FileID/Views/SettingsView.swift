@@ -1,4 +1,3 @@
-// Settings tab. (Review tab folded into Settings → Advanced.)
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -23,8 +22,6 @@ struct SettingsTab: View {
                 PrivacyCard()
 
                 LocationsCard(engine: engine)
-
-                // ─── User-facing settings (always visible) ───────────────
 
                 Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 10) {
@@ -60,8 +57,6 @@ struct SettingsTab: View {
 
                 DeepAnalyzeExclusionsCard()
 
-                // AI Models — visible because users genuinely care about
-                // which models are installed and download status.
                 EssentialModelsCard()
                 ModelInstallCard.clip
                 ModelInstallCard.ramPlus
@@ -71,17 +66,11 @@ struct SettingsTab: View {
                 ModelInstallCard.face
                 ModelInstallCard.faceMesh
 
-                // ─── Advanced (collapsed by default) ─────────────────────
-                // Engine PIDs, DB paths, log files. Power-user info that
-                // doesn't help a casual user choose anything; hiding it
-                // declutters the page.
-
                 Panel(padding: 16) {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
                             Divider().opacity(0.3)
 
-                            // Engine
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("FileID's helper").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Status", connectionLabel)
@@ -100,7 +89,6 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
-                            // Storage
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Total files",   store.totalFiles.formatted())
@@ -117,7 +105,6 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
-                            // Recent scans (folded in from former Review tab)
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Recent scans").font(Theme.Font.body(12.5, .semibold))
                                 if sessions.isEmpty {
@@ -132,7 +119,6 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
-                            // Open-source licenses
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Acknowledgements").font(Theme.Font.body(12.5, .semibold))
                                 Text("FileID is open source under the Apache License 2.0. These are the licenses of the open-source software and models it uses.")
@@ -156,7 +142,6 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
-                            // Logs
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Logs").font(Theme.Font.body(12.5, .semibold))
                                 Text("Detailed scan and app logs for troubleshooting.")
@@ -175,7 +160,6 @@ struct SettingsTab: View {
 
                             Divider().opacity(0.3)
 
-                            // Danger zone
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
                                 Text("Permanently erase FileID's library, local models, settings, and caches.")
@@ -276,7 +260,6 @@ struct SettingsTab: View {
         .font(Theme.Font.body(13.5))
     }
 
-    static var modelsFolderURL: URL { AppSupportPath.models }
     static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
     static var appLogURL: URL {
         AppSupportPath.fileID.appendingPathComponent("logs/app.log")
@@ -285,12 +268,7 @@ struct SettingsTab: View {
 
 // MARK: - Deep Analyze exclusions card
 
-/// Folders to skip during a whole-library Deep Analyze pass — separate from
-/// the (currently unsurfaced) scan-exclusion list: a folder can be fine to
-/// catalog/tag/search but too slow or private to run the VLM over. Nothing
-/// is removed from the library, so unlike the model-install cards above
-/// there's no purge-in-flight state to track — just persist the list; it
-/// takes effect starting with the next whole-library Deep Analyze run.
+/// Folders skipped by a whole-library Deep Analyze pass. Nothing is removed from the library, so there is no purge state to track.
 struct DeepAnalyzeExclusionsCard: View {
     @State private var settings = DeepAnalyzeSettings.shared
     @State private var message: (text: String, isError: Bool)?
@@ -625,7 +603,7 @@ struct PrivacyCard: View {
     }
 }
 
-/// Prototype v3 appearance: lava lamp Full / Calm / Off, and the page text size.
+/// Appearance: lava lamp Full / Calm / Off, and the page text size.
 struct AppearanceCard: View {
     @AppStorage("lavaMode") private var lavaMode: String = LavaMode.full.rawValue
     @AppStorage(TextSize.storageKey) private var textSize: String = TextSize.standard.rawValue

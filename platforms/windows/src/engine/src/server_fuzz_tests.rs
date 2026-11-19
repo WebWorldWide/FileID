@@ -1,11 +1,7 @@
-//! Randomized IPC fuzzer. Mutates valid command frames (the schema exemplars
-//! and every command in the shared conformance cases) and feeds them through
-//! `handle_line` against a temporary state directory and catalog. Asserts no
-//! panic anywhere on the engine's threads, no hung command, and a structured
-//! error for every frame that fails to decode or validate.
-//!
-//! The normal run does a few thousand lines. Set `FILEID_FUZZ_IPC_ITERATIONS`
-//! for a long run and `FILEID_FUZZ_SEED` to replay one.
+//! Randomized IPC fuzzer: mutates valid command frames (schema exemplars and the shared conformance cases) through
+//! `handle_line` against a temporary state directory and catalog. Asserts no panic on the engine's threads, no hung
+//! command, and a structured error for every frame that fails to decode or validate. `FILEID_FUZZ_IPC_ITERATIONS` for a
+//! long run, `FILEID_FUZZ_SEED` to replay one.
 
 use super::*;
 use serde_json::{json, Value};
@@ -34,8 +30,8 @@ impl Rng {
     }
 }
 
-/// Commands whose handlers walk an arbitrary path, launch a process or open a
-/// network connection. Their frames are decoded and validated, not dispatched.
+/// Decoded and validated, not dispatched: their handlers walk arbitrary paths, launch processes or open network
+/// connections.
 const DECODE_ONLY: &[&str] = &[
     "startScan",
     "prewarmModel",
@@ -94,7 +90,7 @@ fn seeds(root: &str) -> Vec<Value> {
         .map(|payload| serde_json::to_value(payload).expect("exemplar serializes"))
         .collect();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../shared/test-corpus/conformance");
-    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("conformance cases").flatten().map(|e| e.path()).collect();
+    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("conformance cases").flatten().map(|e| e.path()).filter(|path| path.extension().is_some_and(|extension| extension == "json")).collect();
     files.sort();
     for file in files {
         let cases: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -202,17 +198,14 @@ fn mutate(value: &mut Value, rng: &mut Rng, tags: &[String], depth: usize) {
     }
 }
 
-/// Repeating an already large element (a 200 KB string 120,000 times) would
-/// build a multi-gigabyte frame that exhausts a CI runner's memory long before
-/// the engine's 64 MiB frame limit could reject it; keep each array growth near 8 MiB.
+/// Repeating a large element (200 KB string × 120,000) would build a multi-gigabyte frame that exhausts a CI runner's
+/// memory long before the 64 MiB frame limit rejects it; keep each growth near 8 MiB.
 fn bounded_copies(copy: &Value, wanted: usize) -> usize {
     const BUDGET: usize = 8 << 20;
     let size = serde_json::to_string(copy).map(|text| text.len()).unwrap_or(1).max(1);
     wanted.min(BUDGET / size).max(usize::from(wanted > 0))
 }
 
-/// Keeps every value's JSON type so the frame still decodes and reaches the
-/// handler with hostile contents.
 fn mutate_typed(value: &mut Value, rng: &mut Rng) {
     match value {
         Value::Object(map) if !map.is_empty() => {
@@ -291,7 +284,6 @@ fn mutate_text(text: String, rng: &mut Rng) -> String {
             }
         }
     }
-    // The stdio reader decodes frames lossily, so handle_line only sees UTF-8.
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -359,9 +351,6 @@ impl Drop for EnvGuard {
 
 type PanicLog = Arc<parking_lot::Mutex<BTreeMap<String, usize>>>;
 
-/// Records panics raised on threads whose name starts with `prefix`, including
-/// ones a handler catches and turns into an error, and forwards every other
-/// panic to the previous hook.
 pub(crate) fn record_panics(prefix: &'static str) -> (PanicLog, impl FnOnce()) {
     let log: PanicLog = Arc::default();
     let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> = Arc::from(std::panic::take_hook());
@@ -392,8 +381,6 @@ pub(crate) fn iterations(var: &str, default: usize) -> usize {
 }
 
 fn seed_catalog(db: &rusqlite::Connection, root: &str) {
-    // Rows point at files that do not exist, so trash and rename can never
-    // reach a real file even when the fuzzer hits a valid command.
     let _ = db.execute_batch(&format!(
         "INSERT OR IGNORE INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES \
            (1,'{root}/missing/a.jpg',1,100,10,0,'image','jpg'),(2,'{root}/missing/b.txt',2,100,10,0,'doc','txt'),\
@@ -463,8 +450,6 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
                 continue;
             }
             *stats.entry("lines").or_default() += 1;
-            // Parsing a multi-megabyte random frame in a debug build on a starved CI runner can take
-            // seconds by itself; that is input size, not a hang, so the budgets below grow by it.
             let parse_started = std::time::Instant::now();
             let mut decoded: Option<IpcCommand> = serde_json::from_str(trimmed).ok();
             let parse_cost = parse_started.elapsed() * 3;
@@ -479,9 +464,8 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
                 *stats.entry("decode_only").or_default() += 1;
                 continue;
             }
-            // Worker responsiveness: a handler blocking every runtime thread
-            // would stall all other commands. This also yields once per frame,
-            // as the real stdin loop does on each read.
+            // A handler blocking every runtime thread would stall other commands; this also yields once per frame, as
+            // the real stdin loop does.
             let probe = std::time::Instant::now();
             let _ = tokio::spawn(async {}).await;
             if probe.elapsed() > std::time::Duration::from_secs(5) {
@@ -531,7 +515,6 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             }
         }
 
-        // Every queued mutation must finish: the gate frees within the deadline.
         d.restructure_cancellations.request_cancel();
         d.deep_analyze_cancel.store(true, Ordering::Release);
         match tokio::time::timeout(std::time::Duration::from_secs(60), d.mutation_gate.lock()).await {

@@ -1,37 +1,6 @@
-// Discovery — walks the user-picked root, emitting one DiscoveredFile per
-// readable file the scan should consider.
-//
-// Rewrite: jwalk (rayon-backed parallel walk) + process_read_dir
-// directory-level pruning + atomic count-before-send. The previous
-// walkdir + tx.blocking_send implementation tied the discovery counter
-// to tagging throughput; if the ML pipeline stalled (a busy
-// CPU) the walk also stalled because the
-// 1024-slot channel filled in under a second on NVMe. Users saw
-// "Discovered 1,324" after 60s for a 22 files/s observed rate against a
-// 50K+ file NVMe → bottleneck was tagging, not the FS.
-//
-// New semantics:
-//   - jwalk distributes stat() calls across `walk_concurrency_for(root)`
-//     threads (NVMe → 16, SATA SSD → 8, HDD → 2; see platform.rs).
-//   - process_read_dir prunes noise directories (node_modules, .git, etc.)
-//     at the directory level so we never recurse into them — eliminates
-//     the per-file component-traversal cost.
-//   - count.fetch_add(1) fires BEFORE blocking_send, so the "Discovered"
-//     counter reflects what the FS walk has seen even when the downstream
-//     channel briefly fills.
-//   - Channel cap is memory-tier-scaled (32K / 256K / 1M — see
-//     discovery_channel_cap). A corpus that fits the cap walks to
-//     completion at filesystem speed, so `done`, the discovered total,
-//     and DiscoveryComplete are truthful within minutes even when the
-//     ML stage is orders of magnitude slower.
-//
-// Filters:
-//   - Hidden / system files: skipped (starts with `.`, OR matches
-//     thumbs.db / desktop.ini / etc.)
-//   - Symlinks: not followed (follow_links = false)
-//   - Zero-byte files: skipped (no content to embed/hash)
-//   - Unsupported file kinds: skipped early so tagging workers don't
-//     waste work
+// Discovery walks the user-picked root and emits one DiscoveredFile per readable file the scan should consider. jwalk stats in parallel on `walk_concurrency_for(root)` threads (see platform.rs); process_read_dir prunes noise directories so we never recurse into them.
+// The counter is bumped BEFORE the blocking send so it tracks the walk even when the channel fills. The channel cap is memory-tier-scaled (see discovery_channel_cap): a corpus that fits walks to completion at filesystem speed, so `done`, the total and DiscoveryComplete are truthful even when the ML stage is far slower.
+// Filters: hidden/system files (leading `.`, thumbs.db, desktop.ini, ...), symlinks (not followed), zero-byte files, and unsupported kinds are skipped before tagging.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -44,11 +13,7 @@ use tokio::sync::mpsc;
 use crate::coordinator::ScanCoordinator;
 use crate::db::zero_byte::ZeroByteObservation;
 
-/// Fixed-size key for the incremental-rescan cache. Keeping every catalogued
-/// `PathBuf` duplicated the full path string (and one heap allocation) for the
-/// duration of a scan: hundreds of MiB at million-file scale. A 128-bit BLAKE3
-/// fingerprint keeps the lookup collision risk negligible while making the
-/// cache's per-file footprint independent of path length.
+/// Fixed-size key for the incremental-rescan cache: keeping every catalogued `PathBuf` duplicated the full path string for the whole scan (hundreds of MiB at million-file scale). A 128-bit BLAKE3 fingerprint keeps collision risk negligible with a per-file footprint independent of path length.
 pub(crate) type SkipFingerprint = [u8; 16];
 
 pub(crate) fn path_fingerprint(path: &std::path::Path) -> SkipFingerprint {
@@ -62,20 +27,8 @@ pub(crate) fn path_fingerprint_text(path: &str) -> SkipFingerprint {
     fingerprint
 }
 
-// Zero-byte files are skipped (no content to embed/hash). No size cap —
-// all sizes go through the same pipeline.
 
-/// Bounded mpsc capacity (Discovery → Tagging), floor value (MemoryTier::Low).
-/// Once the channel fills, `blocking_send` stalls the walker — from that point
-/// the discovered counter, the `done` flag, and the DiscoveryComplete event all
-/// advance in lockstep with ML throughput instead of filesystem speed. On the
-/// 2026-07-20 overnight run (163k-file corpus, ML serialized to ~0.55 file/s)
-/// the old flat 32768 cap pinned "Discovered"/total at the channel capacity for
-/// 17 hours. Tier-scaled caps below let the walk of any realistically-sized
-/// library complete within minutes of scan start so totals/ETA are real; the
-/// per-entry cost is a `DiscoveredFile` (~300 B with its PathBuf), so even the
-/// High-tier worst case bounds queue memory at ~300 MB — and only while ML is
-/// genuinely that far behind.
+/// Bounded mpsc capacity (Discovery → Tagging), floor value (MemoryTier::Low). Once the channel fills, `blocking_send` stalls the walker and the discovered counter, `done` flag and DiscoveryComplete advance in lockstep with ML throughput. Per-entry cost is a DiscoveredFile (~300 B with its PathBuf), so even the High-tier cap bounds queue memory at ~300 MB, and only while ML is far behind.
 const DISCOVERY_CHANNEL_CAP_LOW: usize = 32_768;
 const DISCOVERY_CHANNEL_CAP_BALANCED: usize = 262_144;
 const DISCOVERY_CHANNEL_CAP_HIGH: usize = 1_048_576;
@@ -96,8 +49,7 @@ pub enum FileKind {
     Pdf,
     Doc,
     Audio,
-    /// 3D models. Scanned (not dropped like Other) so Deep Analyze can name them
-    /// from their embedded object/material labels. Wavefront `.obj` only for now.
+    /// 3D models are scanned (not dropped like Other) so Deep Analyze can name them from embedded object/material labels. Wavefront `.obj` only for now.
     Model,
     Other,
 }
@@ -115,7 +67,6 @@ impl FileKind {
         }
     }
 
-    /// Inverse of [`FileKind::as_str`] for the stored `files.kind` column.
     pub fn from_db_str(kind: &str) -> Self {
         match kind {
             "image" => FileKind::Image,
@@ -128,7 +79,6 @@ impl FileKind {
         }
     }
 
-    /// Lossy-but-fast classification by extension.
     pub fn from_extension(ext: &str) -> Self {
         let ext = ext.to_ascii_lowercase();
         match ext.as_str() {
@@ -142,10 +92,7 @@ impl FileKind {
                 FileKind::Video
             }
             "pdf" => FileKind::Pdf,
-            // Office docs + e-books + source code / prose markup — all clustered by their
-            // extracted text (BGE). Lockstep with the macOS FileTypes.{documents,code,ebooks}.
-            // ppt/xls (legacy binary) have no extractor on either engine → text-less docs
-            // that route to Documents/ (the text_stage_done bit stops the backfill re-walk).
+            // Office docs, e-books and source/markup cluster by extracted text (BGE), in lockstep with macOS FileTypes. ppt/xls (legacy binary) have no extractor on either engine → text-less docs routed to Documents/ (text_stage_done stops the backfill re-walk).
             "docx" | "doc" | "odt" | "rtf" | "txt" | "md" | "pages" | "key" | "numbers"
             | "xlsx" | "pptx" | "xls" | "ppt" | "epub"
             | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "c"
@@ -159,8 +106,7 @@ impl FileKind {
             | "ape" | "wv" => {
                 FileKind::Audio
             }
-            // 3D models — `.obj` clusters by its rendered shape (CLIP); the rest are grouped
-            // under 3D Models/ + named by Deep Analyze. Lockstep with macOS FileTypes.models.
+            // 3D models: `.obj` clusters by its rendered shape (CLIP); the rest group under 3D Models/ and are named by Deep Analyze. Lockstep with macOS FileTypes.models.
             "obj" | "stl" | "ply" | "glb" | "gltf" | "fbx" | "usdz" | "usd" | "usda"
             | "usdc" | "dae" | "3mf" | "3ds" | "off" => FileKind::Model,
             _ => FileKind::Other,
@@ -168,8 +114,7 @@ impl FileKind {
     }
 }
 
-/// `SF_DATALESS`: macOS sets it on a file whose contents live only in iCloud
-/// (or another File Provider); reading it downloads the file.
+/// `SF_DATALESS`: macOS sets it on a file whose contents live only in iCloud (or another File Provider); reading it downloads the file.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SF_DATALESS: u32 = 0x4000_0000;
 
@@ -178,16 +123,13 @@ fn flags_are_dataless(st_flags: u32) -> bool {
     st_flags & SF_DATALESS != 0
 }
 
-/// macOS leaves a cloud-only file out of the scan (the Swift engine's rule) and
-/// reports the count; Windows catalogs it from its metadata.
+/// macOS leaves a cloud-only file out of the scan (the Swift engine's rule) and reports the count; Windows catalogs it from its metadata.
 const PLACEHOLDERS_LEFT_OUT: bool = cfg!(target_os = "macos");
 
 #[derive(Debug, PartialEq, Eq)]
 enum PlaceholderAction {
     Process,
-    /// Not catalogued this scan; counted for the `discovery_partial` notice.
     LeaveOut,
-    /// Already catalogued as a placeholder and still one: nothing to write.
     AlreadyRecorded,
 }
 
@@ -212,15 +154,11 @@ fn placeholder_action(
     }
 }
 
-/// Rows catalogued from metadata only: a content-bearing kind with no content
-/// hash. Callers append their path-range clause.
 pub(crate) const KNOWN_PLACEHOLDER_SQL: &str = "SELECT path_text, size_bytes, modified_at FROM files \
      WHERE failed = 0 AND content_hash IS NULL \
      AND kind IN ('image', 'video', 'pdf', 'doc', 'audio')";
 
-/// Cloud placeholder detection. OneDrive / generic Files-On-Demand mark
-/// dehydrated files with these attributes, and macOS marks iCloud / File
-/// Provider files `SF_DATALESS`; touching their content forces a download.
+/// Cloud placeholder detection: OneDrive / generic Files-On-Demand mark dehydrated files with these attributes and macOS marks iCloud / File Provider files `SF_DATALESS`; touching their content forces a download.
 pub(crate) fn is_online_only(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -249,38 +187,20 @@ pub struct DiscoveredFile {
     pub path: PathBuf,
     pub kind: FileKind,
     pub size_bytes: u64,
-    /// Last-modified timestamp as Unix seconds. Used for incremental
-    /// rescans: files unchanged since their `scanned_at` row are skipped.
+    /// Used for incremental rescans: files unchanged since their `scanned_at` row are skipped.
     pub modified_unix: f64,
-    /// Creation timestamp as Unix seconds, when the platform exposes one.
-    /// Threaded through to `files.created_at` for parity with the macOS
-    /// engine (which populates it). `None` when the filesystem doesn't
-    /// record a birth time or the metadata read failed.
+    /// Unix seconds when the platform exposes a birth time (for `files.created_at`, macOS parity); `None` when the filesystem records none or the metadata read failed.
     pub created_unix: Option<f64>,
-    /// True when the file is a cloud placeholder (OneDrive Files-On-Demand /
-    /// `OFFLINE` / `RECALL_ON_*`). Reading its content would trigger a
-    /// network hydration (a surprise download — and the only non-model
-    /// egress), so the pipeline does a metadata-only pass and skips
-    /// decode / embed / OCR for it. Windows only: macOS leaves such a file
-    /// out of the scan and Linux has no placeholder flag.
+    /// True for a cloud placeholder (OneDrive Files-On-Demand `OFFLINE` / `RECALL_ON_*`). Reading its content would hydrate it over the network (a surprise download, the only non-model egress), so the pipeline does a metadata-only pass. Windows only: macOS leaves such a file out and Linux has no placeholder flag.
     pub online_only: bool,
-    /// Volume-local file identity (NTFS MFT reference on Windows; inode on
-    /// POSIX). The dbwriter's rename/move heal uses it to re-bind a moved
-    /// file's catalog row instead of orphaning it. `None` when the metadata
-    /// open failed (permission, race, ...) — the heal then falls through to
-    /// content_hash. Always `None` on non-Windows for now.
+    /// Volume-local file identity (NTFS MFT reference on Windows; inode on POSIX) the dbwriter's rename/move heal uses to re-bind a moved file's row instead of orphaning it. `None` when the metadata open failed; the heal then falls through to content_hash. Always `None` on non-Windows for now.
     pub file_ref: Option<u64>,
-    /// The catalog already holds this exact file (same file id, size and
-    /// date) at a path that no longer exists: it was moved or renamed, so its
-    /// row is re-bound and nothing is read, decoded or analysed again.
+    /// The catalog already holds this exact file (same file id, size and date) at a path that no longer exists: it moved or was renamed, so its row is re-bound and nothing is read, decoded or analysed again.
     pub moved_from_known_row: bool,
 }
 
-/// Successfully scanned rows by volume-local file id, for spotting a file
-/// that only moved (the Swift engine's `Discovery.isMoveOfKnownRow`). Holds
-/// 32 bytes per row; paths are read from the catalog only for a candidate.
+/// Successfully scanned rows by volume-local file id, for spotting a file that only moved (the Swift engine's `Discovery.isMoveOfKnownRow`). Holds 32 bytes per row; paths are read from the catalog only for a candidate.
 pub(crate) struct MoveIndex {
-    /// `(file_ref, size, modified, row id)`, sorted by `file_ref`.
     rows: Vec<(u64, i64, f64, i64)>,
     conn: Arc<Mutex<rusqlite::Connection>>,
 }
@@ -288,7 +208,6 @@ pub(crate) struct MoveIndex {
 impl MoveIndex {
     const CANDIDATE_LIMIT: usize = 8;
 
-    /// `None` when the catalog has no row a moved file could match.
     pub(crate) fn load(conn: &Arc<Mutex<rusqlite::Connection>>) -> Option<Arc<Self>> {
         let mut rows: Vec<(u64, i64, f64, i64)> = {
             let db = conn.lock();
@@ -322,9 +241,7 @@ impl MoveIndex {
             .collect()
     }
 
-    /// True when no row sits at `path` and a successfully scanned row with
-    /// the same file id, size and date sits at a path that is gone from disk.
-    /// Any error means "not a move": the file is analysed.
+    /// True when no row sits at `path` and a successfully scanned row with the same file id, size and date sits at a path that is gone from disk. Any error means "not a move".
     pub(crate) fn is_move(&self, path: &str, file_ref: u64, size: u64, modified: f64) -> bool {
         let ids = self.candidates(file_ref, size, modified);
         if ids.is_empty() {
@@ -355,8 +272,7 @@ impl MoveIndex {
     }
 }
 
-/// `lstat` says the path does not exist. A dangling symlink is present, and a
-/// dead mount (any other error) proves nothing.
+/// `lstat` says the path does not exist. A dangling symlink is present, and a dead mount (any other error) proves nothing.
 fn path_is_gone(path: &str) -> bool {
     let long = crate::util::path_safety::to_extended_length(std::path::Path::new(path));
     matches!(std::fs::symlink_metadata(long), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
@@ -365,51 +281,30 @@ fn path_is_gone(path: &str) -> bool {
 pub struct Discovery {
     root: PathBuf,
     coordinator: ScanCoordinator,
-    /// Paths the orchestrator has determined are already scanned-and-current
-    /// (DB `scanned_at >= modified_unix`). Discovery silently skips these,
-    /// turning a re-run of a 1M-file corpus into a near-instant no-op.
-    /// Empty = classic full-scan.
+    /// Paths already scanned-and-current (DB `scanned_at >= modified_unix`), silently skipped so a re-run of a 1M-file corpus is near-instant. Empty = full scan.
     skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
-    /// Rows already catalogued as cloud placeholders, by path: a file that is
-    /// still a placeholder with the same size and date is not written again.
     known_placeholders: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
     moves: Option<Arc<MoveIndex>>,
-    /// User-excluded folders in `normalize_for_exclusion` form. The walk
-    /// prunes an excluded directory at its parent's read_dir, so equality
-    /// matching suffices — nothing beneath it is ever visited.
+    /// User-excluded folders in `normalize_for_exclusion` form. The walk prunes an excluded directory at its parent's read_dir, so equality matching suffices.
     exclusions: Arc<HashSet<String>>,
 }
 
-/// Handle returned from `Discovery::spawn`. `count` is a live counter the
-/// orchestrator polls to emit Progress events with `discovered=count` so
-/// the user sees the number climb during a long discovery walk; `done`
-/// flips true the instant the walker exits its loop (detects the
-/// empty-folder case where count stays at 0 and we should surface
-/// "no supported files found" instead of hanging).
+/// Handle returned from `Discovery::spawn`. `count` is a live counter the orchestrator polls for Progress events; `done` flips the instant the walker exits, so an empty folder (count stays 0) surfaces "no supported files found" instead of hanging.
 pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
     pub zero_byte_rx: mpsc::Receiver<ZeroByteObservation>,
     pub count: Arc<AtomicU64>,
-    /// Subset of `count` whose kind runs the expensive vision path
-    /// (Image/Video/Model — `needed_gpu` in tagging). Kind-aware ETA math
-    /// needs the remaining-heavy denominator; a blended files/sec swings an
-    /// order of magnitude between photo bursts and hash-only stretches, so
-    /// ETA computed from it oscillated wildly on mixed libraries.
+    /// Subset of `count` whose kind runs the expensive vision path (Image/Video/Model). Kind-aware ETA needs the remaining-heavy denominator; a blended files/sec swings by an order of magnitude on mixed libraries.
     pub heavy_count: Arc<AtomicU64>,
     pub done: Arc<AtomicBool>,
-    /// Stable path hashes of every physically present eligible or skipped file
-    /// observed during the walk, including zero-byte files.
+    /// Stable path hashes of every physically present eligible or skipped file seen by the walk, including zero-byte files.
     pub seen_paths: Arc<Mutex<Vec<i64>>>,
-    /// Every directory the walk read, so the scan can re-stat them afterwards
-    /// and notice files added, renamed or deleted while it ran.
+    /// Every directory the walk read, re-statted afterwards to notice files added, renamed or deleted while it ran.
     pub seen_dirs: Arc<Mutex<Vec<PathBuf>>>,
-    /// Walk errors swallowed during traversal. Surfaced as a non-fatal
-    /// `discovery_partial` event by the scan orchestrator.
+    /// Walk errors swallowed during traversal, surfaced as a non-fatal `discovery_partial` event.
     pub error_count: Arc<AtomicU64>,
-    /// Cloud-only files left out of the scan (macOS), for the same notice.
     pub cloud_only_count: Arc<AtomicU64>,
-    /// Join handle retained by the scan orchestrator so a panic in the blocking
-    /// walker becomes a failed scan instead of an apparently successful empty one.
+    /// Retained by the scan orchestrator so a panic in the blocking walker becomes a failed scan, not an apparently successful empty one.
     pub join: tokio::task::JoinHandle<()>,
 }
 
@@ -419,7 +314,6 @@ struct ClassifiedEntry {
     seen_path_hash: Option<i64>,
 }
 
-/// What `classify_entry` consults for every file of the walk.
 struct WalkContext {
     skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
     known_placeholders: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
@@ -444,11 +338,7 @@ impl WalkContext {
 }
 
 impl Discovery {
-    /// Incremental-rescan-aware constructor. The caller loads the
-    /// "already current" path set from the DB before spawning Discovery.
-    /// Honors a `rescan: true` IPC flag by passing an empty set here.
-    /// `exclusions` are user-excluded folders already resolved against the
-    /// root (see `path_safety::resolve_exclusions`), normalized form.
+    /// The caller loads the "already current" set from the DB before spawning; a `rescan: true` IPC flag passes an empty set. `exclusions` are user-excluded folders resolved against the root (see `path_safety::resolve_exclusions`), normalized.
     pub fn new_with_skip_and_exclusions(
         root: impl Into<PathBuf>,
         coordinator: ScanCoordinator,
@@ -478,10 +368,7 @@ impl Discovery {
         self
     }
 
-    /// Walk the root, sending each readable file onto the returned receiver.
-    /// Spawns a tokio blocking task because jwalk's iterator is sync.
-    /// Closes the channel when traversal completes OR cancellation is
-    /// requested.
+    /// Spawns a tokio blocking task (jwalk's iterator is sync); closes the channel when traversal completes OR cancellation is requested.
     pub fn spawn(self) -> DiscoveryHandle {
         let channel_cap = discovery_channel_cap(crate::platform::memory_tier());
         let (tx, rx) = mpsc::channel(channel_cap);
@@ -520,9 +407,7 @@ impl Discovery {
             );
         }
 
-        // Test gate: cap files yielded by Discovery so a staging run
-        // (e.g. N=100 to validate VRAM behavior) can't wedge the system.
-        // Unset / 0 → no cap.
+        // Test gate: cap files yielded so a staging run (e.g. N=100) can't wedge the system. Unset / 0 → no cap.
         let test_file_cap: u64 = std::env::var("FILEID_TEST_FILE_CAP")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -541,50 +426,25 @@ impl Discovery {
         );
 
         let join = tokio::task::spawn_blocking(move || {
-            // jwalk: rayon-backed parallel walk. process_read_dir prunes
-            // noise directories at the read_dir level so we never recurse
-            // into them (the win is dramatic on trees with deep
-            // node_modules / .git subtrees — those entire subtrees are
-            // dropped with a single name check per directory rather than
-            // per-file component traversal).
-            //
-            // The per-file metadata + file_ref opens used to run on
-            // the single consumer thread (the for-loop below), capping
-            // discovery throughput at one stat/open per file once the ML
-            // stage stopped being the bottleneck. We now do that work INSIDE
-            // process_read_dir — which jwalk runs on the rayon pool, one task
-            // per directory — and stash the finished DiscoveredFile in the
-            // entry's typed client_state. The consumer loop then only takes
-            // the pre-computed payload and sends it, so the stat/open syscalls
-            // fan out across `walk_threads` instead of serializing. Ordering
-            // is unchanged: jwalk still yields entries in the same traversal
-            // order regardless of which thread filled each client_state.
+            // jwalk runs process_read_dir on the rayon pool: directory pruning and the per-file stat/file_ref open happen in parallel, and the consumer loop only sends the precomputed payload in traversal order.
             let coord_for_dir = coordinator.clone();
             let context_for_dir = context.clone();
             let excl_for_dir = exclusions.clone();
             let seen_for_dir = seen_paths_inner.clone();
             let dirs_for_dir = seen_dirs_inner.clone();
-            // Walk a verbatim ("\\?\") root so directories whose full path
-            // exceeds MAX_PATH (260) are traversable — std/jwalk silently
-            // fail on them otherwise (this engine .exe has no long-path
-            // manifest). Children inherit the prefix; we strip it back to
-            // normal form on emit. Fall back to the plain root if the
-            // converted form isn't statable, so short-path scans never
-            // regress.
+            // Walk a verbatim ("\\?\") root so directories past MAX_PATH (260) are traversable (std/jwalk silently fail on them; the engine .exe has no long-path manifest). Children inherit the prefix and it is stripped on emit. Falls back to the plain root if the converted form isn't statable.
             let verbatim_root = crate::util::path_safety::to_extended_length(&root);
             let walk_root = if std::fs::metadata(&verbatim_root).is_ok() {
                 verbatim_root
             } else {
                 root.clone()
             };
-            // The per-entry client state carries either content work, a zero-byte
-            // observation, or neither, computed in parallel below.
             let walker = jwalk::WalkDirGeneric::<(
                 (),
                 (Option<DiscoveredFile>, Option<ZeroByteObservation>),
             )>::new(&walk_root)
                 .follow_links(false)
-                .skip_hidden(false)   // we do our own dot-file filter to also catch thumbs.db etc.
+                .skip_hidden(false) // own dot-file filter also catches thumbs.db etc.
                 .parallelism(jwalk::Parallelism::RayonNewPool(walk_threads))
                 .process_read_dir(move |_depth, dir_path, _state, children| {
                     if coord_for_dir.is_cancelled() {
@@ -592,13 +452,7 @@ impl Discovery {
                         return;
                     }
                     dirs_for_dir.lock().push(dir_path.to_path_buf());
-                    // A directory looks like a dev tree only if a build-system
-                    // marker sits directly in it. Used to gate the ambiguous
-                    // build-dir names (target/build/obj/bin/venv) so we don't
-                    // prune a user's ordinary "build" / "bin" folder of files.
-                    // has_build_marker is only read when an ambiguous build dir
-                    // is present, so skip its per-file scan (a lowercase alloc
-                    // per file) unless one actually is.
+                    // A directory looks like a dev tree only if a build-system marker sits directly in it; this gates the ambiguous build-dir names (target/build/obj/bin/venv) so a user's ordinary "build" or "bin" folder isn't pruned. has_build_marker costs a lowercase alloc per file, so it is read only when an ambiguous build dir is present.
                     let has_ambiguous_build_dir = children.iter().any(|res| {
                         res.as_ref()
                             .ok()
@@ -627,11 +481,7 @@ impl Discovery {
                             if is_noise_directory(&name) {
                                 return false;
                             }
-                            // User exclusions: normalized-equality on the
-                            // child's full path. dir_path carries the walk
-                            // root's "\\?\" prefix when present; normalize
-                            // strips it, so verbatim and plain roots match
-                            // the same stored exclusion.
+                            // User exclusions: normalized equality on the child's full path. dir_path carries the walk root's "\\?\" prefix when present; normalize strips it so verbatim and plain roots match the same stored exclusion.
                             if !excl_for_dir.is_empty() {
                                 let full = dir_path.join(entry.file_name());
                                 let norm = crate::util::path_safety::normalize_for_exclusion(&full);
@@ -639,7 +489,6 @@ impl Discovery {
                                     return false;
                                 }
                             }
-                            // Prune generic build dirs only inside a dev tree.
                             if is_ambiguous_build_directory(&name) {
                                 return !has_build_marker;
                             }
@@ -647,13 +496,10 @@ impl Discovery {
                         } else if file_type.is_file() {
                             !is_noise_file(&name)
                         } else {
-                            false // symlinks, sockets, devices: skip
+                            false
                         }
                     });
-                    // Parallel stage: do the per-file stat + file_ref open here
-                    // (on the rayon pool) and store the result in client_state.
-                    // Merge observed fingerprints once per directory to avoid a
-                    // global lock on every file in million-file incremental walks.
+                    // Parallel stage: per-file stat + file_ref open on the rayon pool, stored in client_state. Fingerprints merge once per directory to avoid a global lock per file in million-file incremental walks.
                     let mut seen_in_directory = Vec::new();
                     for res in children.iter_mut() {
                         let Ok(entry) = res.as_mut() else { continue };
@@ -695,10 +541,7 @@ impl Discovery {
                         continue;
                     }
                 };
-                // jwalk stores a failed read_dir on the directory's own entry
-                // instead of yielding an Err item. Count it, or a directory that
-                // became unreadable passes as a clean walk and reconciliation
-                // soft-hides every catalogued file under it.
+                // jwalk stores a failed read_dir on the directory's own entry instead of yielding an Err item. Count it, or an unreadable directory passes as a clean walk and reconciliation soft-hides every catalogued file under it.
                 if let Some(error) = entry.read_children_error.as_ref() {
                     error_count_inner.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -709,9 +552,7 @@ impl Discovery {
                          are left as they were in the catalog"
                     );
                 }
-                // Payload was computed in parallel inside process_read_dir.
-                // Zero-byte observations use their own bounded path so they never
-                // enter decode/model work and never inflate content-work totals.
+                // Zero-byte observations use their own bounded path so they never enter decode/model work or inflate content-work totals.
                 let (discovered, zero_byte) = entry.client_state;
                 if let Some(observation) = zero_byte {
                     if zero_byte_tx.blocking_send(observation).is_err() {
@@ -721,13 +562,7 @@ impl Discovery {
                 }
                 let Some(discovered) = discovered else { continue };
 
-                // Increment the FS-walk counter BEFORE the channel send so
-                // the "Discovered N" sidebar reflects walk progress even if
-                // the channel briefly backs up. Order matters: this is the
-                // Decoupling fix — under the old code, blocking_send
-                // could stall a file's count when ML stalled. The count +
-                // send stay on this single consumer thread so the counter is
-                // monotonic and the test_file_cap stop condition is exact.
+                // Count before the send so the "Discovered N" counter tracks the walk even when the channel backs up. The count and send stay on this thread so the test cap stop is exact.
                 count_inner.fetch_add(1, Ordering::Relaxed);
                 if matches!(
                     discovered.kind,
@@ -736,12 +571,7 @@ impl Discovery {
                     heavy_count_inner.fetch_add(1, Ordering::Relaxed);
                 }
 
-                // blocking_send applies backpressure when the channel fills
-                // (tier-scaled cap, see discovery_channel_cap). On corpora
-                // that fit the cap this never trips, so the walk — and with
-                // it `done` + the true total — completes at filesystem speed
-                // regardless of ML throughput. Errors only happen if the
-                // receiver dropped (i.e. shutdown); break out cleanly.
+                // blocking_send applies backpressure when the channel fills; on corpora that fit the cap it never trips, so the walk and `done` complete at filesystem speed. It errors only if the receiver dropped (shutdown); break out cleanly.
                 if tx.blocking_send(discovered).is_err() {
                     break;
                 }
@@ -752,7 +582,6 @@ impl Discovery {
                 tracing::info!(cloud_only, moved, "[DISCOVERY] files left out as cloud-only or re-bound as moved");
             }
             done_inner.store(true, Ordering::Release);
-            // Channel auto-closes when tx drops here.
         });
 
         DiscoveryHandle {
@@ -770,15 +599,7 @@ impl Discovery {
     }
 }
 
-/// Build the `DiscoveredFile` payload for one file entry, doing the stat +
-/// `file_ref` opens. Runs on the jwalk/rayon pool (one task per directory) so
-/// these syscalls fan out instead of serializing on the consumer thread
-/// (C6-017). Returns both the optional pipeline payload and an optional
-/// stable path hash for reconciliation. Already-current supported files are seen
-/// even though they do not enter the expensive tagging pipeline.
-///
-/// `entry_path` is the verbatim-prefixed walk path (children inherit the
-/// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
+/// Builds the `DiscoveredFile` payload for one file (stat + `file_ref` open) on the jwalk/rayon pool so these syscalls fan out instead of serializing on the consumer thread. Also returns a stable path hash for reconciliation: already-current supported files are "seen" even though they skip tagging. `entry_path` is the verbatim-prefixed walk path; FS opens reconvert via `to_extended_length`.
 #[cfg(test)]
 fn classify_entry(
     entry_path: &std::path::Path,
@@ -794,15 +615,9 @@ fn classify_entry(
 fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> ClassifiedEntry {
     let skip_paths = context.skip_paths.as_ref();
     let error_count = context.error_count.as_ref();
-    // Strip the verbatim prefix back to normal form: this is what we store +
-    // display + compare against the skip-set (which holds normal-form DB
-    // paths). FS access reconverts via `to_extended_length` at the open site.
+    // Strip the verbatim prefix: this is the form stored, displayed and compared against the skip-set. FS access reconverts at the open site.
     let path = crate::util::path_safety::strip_extended_length(entry_path);
-    // A name that doesn't round-trip through Unicode (an unpaired UTF-16
-    // surrogate on NTFS) would be catalogued under a U+FFFD-mangled path_text
-    // that no later action (open, thumbnail, rename, trash) can resolve back
-    // to the real file — and two such names can collapse into one DB row.
-    // Skip it loudly instead of cataloguing an inert entry.
+    // A name that doesn't round-trip through Unicode (an unpaired UTF-16 surrogate on NTFS) would be catalogued under a U+FFFD-mangled path_text that no later action can resolve, and two such names can collapse into one row. Skip it loudly.
     if is_non_unicode_path(&path) {
         tracing::warn!(
             path = %crate::platform::redact_path_for_log(&path),
@@ -816,8 +631,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
             seen_path_hash: None,
         };
     }
-    // follow_links is false on the walk, so symlink_metadata matches jwalk's
-    // own DirEntry::metadata for the non-followed case.
+    // follow_links is false on the walk, so symlink_metadata matches jwalk's own DirEntry::metadata.
     let metadata = match std::fs::symlink_metadata(entry_path) {
         Ok(m) => m,
         Err(error) => {
@@ -835,11 +649,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         }
     };
     let size = metadata.len();
-    // Compute the reconciliation hash BEFORE any eligibility early-return:
-    // "seen" means present under the root, not pipeline-eligible. A zero-byte
-    // or unsupported-kind file that discovery skips is still physically there,
-    // and omitting it from `seen` would let a clean-walk reconciliation
-    // soft-hide its catalog row as "no longer present" while it plainly exists.
+    // Compute the reconciliation hash BEFORE any eligibility early-return: "seen" means present under the root, not pipeline-eligible, or a clean-walk reconciliation would soft-hide the catalog row of a zero-byte or unsupported file that still exists.
     let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
     if size == 0 {
         return ClassifiedEntry {
@@ -857,12 +667,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         .ok()
         .and_then(crate::util::catalog_unix_seconds)
         .unwrap_or(0.0);
-    // Incremental skip: drop a file only when the DB row for THIS path is
-    // genuinely current — same size AND same on-disk mtime as the stored values.
-    // Mirrors the macOS reference (Discovery.isAlreadyCurrent) and the dbwriter
-    // "unchanged" contract. The previous bare path-membership skip stranded any
-    // file edited after its last scan, because the stored modified_at is never
-    // refreshed for a skipped row (its UPSERT never runs).
+    // Incremental skip: drop a file only when its DB row is current (same size and on-disk mtime), mirroring macOS Discovery.isAlreadyCurrent. A skipped row's modified_at is never refreshed, so path-only membership would strand edited files.
     if let Some(&(db_size, db_modified)) = skip_paths.get(&fingerprint) {
         let unchanged = db_size == size as i64
             && match db_modified {
@@ -887,10 +692,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         .map(FileKind::from_extension)
         .unwrap_or(FileKind::Other);
     if kind == FileKind::Other && !is_cataloged_other(path_extension_lower(entry_path).as_deref()) {
-        // Present but never cataloged (unfinished downloads, scratch and SQLite
-        // temporary files): keep it in `seen` so a catalog row whose kind mapping
-        // changed across versions is never soft-hidden as "no longer present"
-        // while the file still exists on disk.
+        // Present but never cataloged (unfinished downloads, scratch and SQLite temp files): kept in `seen` so a row whose kind mapping changed across versions isn't soft-hidden while the file exists.
         return ClassifiedEntry {
             discovered: None,
             zero_byte: None,
@@ -898,9 +700,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         };
     }
 
-    // Reading a cloud-only file downloads it. macOS leaves it out (any row it
-    // already has stays, since the path is still seen); a placeholder Windows
-    // already catalogued is written again only when its state changes.
+    // Reading a cloud-only file downloads it. macOS leaves it out (an existing row stays since the path is still seen); a placeholder Windows already catalogued is rewritten only when its state changes.
     match placeholder_action(
         online_only,
         PLACEHOLDERS_LEFT_OUT,
@@ -921,10 +721,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         }
     }
 
-    // Volume-local file id: lets the dbwriter heal a renamed/moved file's
-    // existing row instead of recomputing its tags. Cheap metadata-only open
-    // via `FILE_FLAG_BACKUP_SEMANTICS`; `None` on permission/race errors (the
-    // heal then falls through to content_hash).
+    // Volume-local file id so the dbwriter can heal a moved file's row instead of recomputing its tags: a cheap metadata-only open via `FILE_FLAG_BACKUP_SEMANTICS`; `None` on permission/race errors.
     let file_ref = crate::platform::file_ref(entry_path);
     let moved_from_known_row = match (file_ref, context.moves.as_deref()) {
         (Some(file_ref), Some(moves)) if !online_only => {
@@ -951,9 +748,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
     }
 }
 
-/// Other files (archives, installers, unknown types) are cataloged with name, size,
-/// dates and a content hash so they count, search and appear in Duplicates, except
-/// these, which are transient. Mirrors the Swift `FileTypes.neverCataloged`.
+/// Other files (archives, installers, unknown types) are cataloged with name, size, dates and a content hash so they count, search and appear in Duplicates, except these transient ones. Mirrors the Swift `FileTypes.neverCataloged`.
 fn is_cataloged_other(extension: Option<&str>) -> bool {
     !matches!(
         extension,
@@ -968,19 +763,14 @@ fn path_extension_lower(path: &std::path::Path) -> Option<String> {
     path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase())
 }
 
-/// True when `to_string_lossy` would mangle this path: the lossy text is the
-/// only identity the DB/app layers ever see, so such a file can never be
-/// targeted again after cataloguing.
+/// True when `to_string_lossy` would mangle this path: the lossy text is the only identity the DB/app layers see, so such a file could never be targeted again.
 fn is_non_unicode_path(path: &std::path::Path) -> bool {
     path.to_str().is_none()
 }
 
-/// Directory names whose entire subtree should be skipped. Decided once
-/// per directory inside jwalk's `process_read_dir`, so we never recurse
-/// in — the entire subtree is invisible to the walk.
+/// Directory names whose entire subtree is skipped, decided once per directory in `process_read_dir`.
 fn is_noise_directory(name: &str) -> bool {
-    // Case-insensitive comparisons for the System Volume Information /
-    // $RECYCLE.BIN cases — Windows lists these mixed-case at the root.
+    // Case-insensitive: Windows lists System Volume Information / $RECYCLE.BIN mixed-case at the root.
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
@@ -997,11 +787,7 @@ fn is_noise_directory(name: &str) -> bool {
     )
 }
 
-/// Generic directory names that are build artifacts ONLY inside a dev tree.
-/// They double as ordinary user folder names (a photographer's "build" set,
-/// a "bin" of scans, a French "venv"…), so the caller prunes these only when
-/// a build-system marker sits alongside them — otherwise we'd silently make a
-/// user's files invisible to the whole app.
+/// Generic names that are build artifacts ONLY inside a dev tree. They double as ordinary folder names (a photographer's "build" set, a "bin" of scans), so the caller prunes them only when a build-system marker sits alongside; otherwise a user's files would vanish from the app.
 fn is_ambiguous_build_directory(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -1010,7 +796,6 @@ fn is_ambiguous_build_directory(name: &str) -> bool {
     )
 }
 
-/// True if `name` is a build-system marker (sits next to the build dirs above).
 fn is_build_marker(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if matches!(
@@ -1026,9 +811,7 @@ fn is_build_marker(name: &str) -> bool {
     ) {
         return true;
     }
-    // Visual Studio / MSBuild project files — compare via the extension
-    // (case-insensitively) rather than str::ends_with(".sln"), which clippy's
-    // case_sensitive_file_extension_comparisons lint rejects under -D warnings.
+    // Compared via the extension (case-insensitively) because clippy's case_sensitive_file_extension_comparisons rejects `ends_with(".sln")` under -D warnings.
     std::path::Path::new(name).extension().is_some_and(|e| {
         let e = e.to_string_lossy();
         e.eq_ignore_ascii_case("sln")
@@ -1037,10 +820,7 @@ fn is_build_marker(name: &str) -> bool {
     })
 }
 
-/// Per-file noise filter. Cheap O(1) string match — kept separate from
-/// `is_noise_directory` because file-vs-dir semantics differ (no dotfile
-/// rejection for directories; some users' libraries live under
-/// `.local/share/...`).
+/// Per-file noise filter, separate from `is_noise_directory` because file-vs-dir semantics differ (some libraries live under `.local/share/...`).
 fn is_noise_file(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
@@ -1105,7 +885,6 @@ mod tests {
         insert_row(&conn, &gone, 100, 50.0, 0, 7);
         insert_row(&conn, &still_here.to_string_lossy(), 200, 60.0, 0, 8);
         insert_row(&conn, &dir.join("failed-before.jpg").to_string_lossy(), 300, 70.0, 1, 9);
-        // A file id above i64::MAX round-trips through the signed column.
         insert_row(&conn, &dir.join("high-gone.jpg").to_string_lossy(), 400, 80.0, 0, u64::MAX - 5);
         let index = MoveIndex::load(&conn).expect("rows with file ids");
 
@@ -1119,7 +898,6 @@ mod tests {
         assert!(!index.is_move(&new_path, 77, 100, 50.0));
         assert!(!index.is_move(&gone, 7, 100, 50.0), "a row already sits at this path");
 
-        // The row changed after the index was loaded: the catalog is asked again.
         conn.lock().execute("UPDATE files SET failed = 1 WHERE file_ref = 7", []).unwrap();
         assert!(!index.is_move(&new_path, 7, 100, 50.0));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1211,10 +989,7 @@ mod tests {
         assert_eq!(FileKind::from_extension("xyz"), FileKind::Other);
     }
 
-    /// Zero-byte and unsupported-kind files are skipped by the pipeline but are
-    /// still PRESENT on disk, so they must stay in the reconciliation seen-set —
-    /// otherwise a clean walk soft-hides their catalog rows as "no longer
-    /// present" while the files plainly exist. (audit 2026-07-14)
+    /// Zero-byte and unsupported-kind files are skipped by the pipeline but still PRESENT, so they must stay in the reconciliation seen-set or a clean walk soft-hides their rows.
     #[test]
     fn skipped_but_present_files_stay_in_the_seen_set() {
         let dir = std::env::temp_dir().join(format!("fileid-disc-seen-{}", std::process::id()));
@@ -1247,24 +1022,18 @@ mod tests {
 
     #[test]
     fn kind_from_extension_audio_and_model() {
-        // Audio files (named from embedded tags by Deep Analyze).
         assert_eq!(FileKind::from_extension("mp3"), FileKind::Audio);
         assert_eq!(FileKind::from_extension("OGG"), FileKind::Audio);
-        // 3D models get their own scanned kind (not dropped like Other), so Deep
-        // Analyze can name them from embedded object/material labels.
         assert_eq!(FileKind::from_extension("obj"), FileKind::Model);
         assert_eq!(FileKind::from_extension("OBJ"), FileKind::Model);
         assert_eq!(FileKind::Model.as_str(), "model");
-        // Source code + e-books cluster by their extracted text (Doc).
         assert_eq!(FileKind::from_extension("py"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("RS"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("swift"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("epub"), FileKind::Doc);
-        // 3D formats beyond .obj are recognized so they group under 3D Models/.
         assert_eq!(FileKind::from_extension("stl"), FileKind::Model);
         assert_eq!(FileKind::from_extension("glb"), FileKind::Model);
         assert_eq!(FileKind::from_extension("usdz"), FileKind::Model);
-        // Lockstep alignment with macOS (formats Windows can also handle).
         assert_eq!(FileKind::from_extension("wmv"), FileKind::Video);
         assert_eq!(FileKind::from_extension("cr3"), FileKind::Image);
         assert_eq!(FileKind::from_extension("mxf"), FileKind::Video);
@@ -1273,7 +1042,6 @@ mod tests {
         assert_eq!(FileKind::from_extension("odt"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("xls"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("ppt"), FileKind::Doc);
-        // A genuinely unknown binary stays Other.
         assert_eq!(FileKind::from_extension("bin"), FileKind::Other);
     }
 
@@ -1294,9 +1062,7 @@ mod tests {
         assert!(is_noise_directory("Node_Modules"));
     }
 
-    /// Non-Unicode names (unpaired UTF-16 surrogates on NTFS; raw bytes on
-    /// POSIX) must be detected so discovery can skip-log them instead of
-    /// cataloguing a U+FFFD-mangled path no later action can resolve.
+    /// Non-Unicode names (unpaired UTF-16 surrogates on NTFS; raw bytes on POSIX) must be detected so discovery can skip-log them instead of cataloguing a mangled path.
     #[test]
     fn non_unicode_path_detected() {
         assert!(!is_non_unicode_path(std::path::Path::new(
@@ -1345,8 +1111,7 @@ mod tests {
         })
     }
 
-    /// Symlink loops, unreadable directories, hard links and sparse files must
-    /// neither hang, panic nor vanish silently from the walk.
+    /// Symlink loops, unreadable directories, hard links and sparse files must neither hang, panic nor vanish silently from the walk.
     #[test]
     #[cfg(unix)]
     fn unix_edge_cases_walk_to_completion() {
@@ -1397,8 +1162,7 @@ mod tests {
         );
     }
 
-    /// Linux names are bytes. A non-UTF-8 name can't be addressed through the
-    /// text paths the DB stores, so it is skipped and counted, never panics.
+    /// Linux names are bytes: a non-UTF-8 name can't be addressed through the DB's text paths, so it is skipped and counted, never panics.
     #[test]
     #[cfg(target_os = "linux")]
     fn non_utf8_file_names_are_counted_not_catalogued() {
@@ -1431,23 +1195,13 @@ mod tests {
         assert!(!is_noise_file("vacation.jpg"));
     }
 
-    /// jwalk parallel walk against a small synthetic tree must:
-    ///   1. Visit every supported file.
-    ///   2. Prune noise directories (no recursion into node_modules / .git).
-    ///   3. Skip zero-byte files.
-    ///
-    /// This is the smoke test guarding the rewrite. The full
-    /// throughput benchmark lives in tests/discovery_throughput.rs and
-    /// runs under `cargo test --release --test discovery_throughput
-    /// -- --ignored`.
+    /// A parallel walk of a small synthetic tree must visit every supported file, prune noise directories and skip zero-byte files. The throughput benchmark lives in tests/discovery_throughput.rs.
     #[test]
     fn synthetic_tree_walk_prunes_noise_and_counts_files() {
         use std::fs;
         let tmp = tempdir_or_skip();
         let root = tmp.path();
 
-        // 30 image files + 1 zero-byte + 1 ".git" dir + 1 "node_modules" dir
-        // with junk inside that should be invisible to the walk.
         fs::create_dir_all(root.join("pics")).unwrap();
         for i in 0..30 {
             let p = root.join("pics").join(format!("img_{i:03}.jpg"));
@@ -1481,11 +1235,7 @@ mod tests {
         assert_eq!(count, 30);
     }
 
-    /// User folder exclusions prune the excluded subtree at its parent's
-    /// read_dir: nothing beneath an excluded dir is emitted, siblings are
-    /// untouched, and exclusion strings match after normalization
-    /// (trailing separator; case-flip on Windows). An exclusion outside
-    /// the root is dropped by resolve_exclusions and changes nothing.
+    /// User folder exclusions prune the excluded subtree at its parent's read_dir: nothing beneath is emitted, siblings are untouched, exclusion strings match after normalization, and an exclusion outside the root changes nothing.
     #[test]
     fn synthetic_tree_walk_honors_user_exclusions() {
         use std::fs;
@@ -1504,7 +1254,6 @@ mod tests {
         fs::write(root.join("skipme2").join("s2.jpg"), b"jpeg").unwrap();
         fs::write(root.join("skipme_not").join("boundary.jpg"), b"jpeg").unwrap();
 
-        // Trailing separator + (on Windows) case-flip both normalize away.
         let sep = std::path::MAIN_SEPARATOR;
         let excl_1 = if cfg!(windows) {
             root.join("SKIPME").to_string_lossy().into_owned()
@@ -1550,10 +1299,7 @@ mod tests {
         );
     }
 
-    /// `count` MUST be incremented for every file BEFORE the channel send,
-    /// so a slow receiver doesn't desync the "Discovered N" counter from
-    /// actual FS walk progress. This is the load-bearing invariant for
-    /// the Issue 1 decoupling fix.
+    /// `count` MUST be incremented for every file BEFORE the channel send, so a slow receiver can't desync the "Discovered N" counter from the walk.
     #[test]
     fn count_increments_before_channel_send() {
         use std::fs;
@@ -1568,15 +1314,6 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            // Retry the walk a few times over the same tree. Under `cargo test`
-            // the jwalk rayon pool is shared with the whole suite, and on a
-            // saturated CI runner (observed on windows-arm64) a per-file
-            // `symlink_metadata` can transiently fail — classify_entry then
-            // returns `discovered: None` and bumps error_count, so `count`
-            // lands a few below 100 even though the walk completed. A fresh
-            // walk recovers; a genuine persistent under-enumeration still fails
-            // after every attempt. The decoupling property under test (count
-            // reflects walk progress before the receiver drains) is unaffected.
             let mut last = 0u64;
             for _attempt in 0..5 {
                 let coord = ScanCoordinator::new();
@@ -1586,11 +1323,7 @@ mod tests {
                 let done = handle.done.clone();
                 let seen_paths = handle.seen_paths.clone();
                 let mut rx = handle.rx;
-                // Wait for the walk to finish (done flag flips after the last
-                // count.fetch_add + tx.send). Budget is generous (15s) because
-                // the rayon walk shares the thread pool with the rest of the
-                // suite under `cargo test`; a tight 2s poll flaked when
-                // scheduler starvation delayed `done` past 2s.
+                // Wait for the walk to finish; the budget is generous (15s) because the rayon walk shares the thread pool with the rest of the suite, and a tight 2s poll flaked.
                 for _ in 0..750 {
                     if done.load(Ordering::Acquire) {
                         break;
@@ -1598,10 +1331,7 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
                 assert!(done.load(Ordering::Acquire), "discovery walk did not finish within budget");
-                // Assert count == 100 even without draining the receiver yet (the
-                // 32k channel buffers all 100, so the walk completes regardless of
-                // drain) — proving the counter reflects walk progress independent
-                // of receiver drain.
+                // Assert count == 100 without draining the receiver: the 32k channel buffers all 100, proving the counter tracks the walk independent of drain.
                 last = count.load(Ordering::Relaxed);
                 if last == 100 {
                     let mut drained = 0;
@@ -1617,11 +1347,7 @@ mod tests {
         });
     }
 
-    /// The per-file stat + `file_ref` work must live in a standalone
-    /// function the parallel walk stage can call (jwalk's process_read_dir, on
-    /// the rayon pool) — NOT inline on the single consumer loop. Calling it
-    /// directly proves the syscall work was lifted off the consumer thread and
-    /// produces a fully-populated payload independent of the channel/recv.
+    /// The per-file stat + `file_ref` work must live in a standalone function the parallel walk stage calls, not inline on the single consumer loop; calling it directly yields a fully-populated payload.
     #[test]
     fn classify_entry_builds_full_payload_off_consumer() {
         use std::fs;
@@ -1632,8 +1358,6 @@ mod tests {
 
         let skip = HashMap::new();
         let errors = AtomicU64::new(0);
-        // Pass the path exactly as the walk would (no verbatim prefix in the
-        // test env; strip_extended_length is a no-op on a plain path).
         let classified = classify_entry(&p, &skip, &errors);
         let df = classified.discovered.expect("supported file → Some payload");
         assert_eq!(
@@ -1645,9 +1369,6 @@ mod tests {
         assert!(df.modified_unix > 0.0, "modified timestamp populated by the parallel stage");
         assert_eq!(errors.load(Ordering::Relaxed), 0);
 
-        // Zero-byte files and transient downloads resolve to None (skipped) here,
-        // so the consumer never has to re-stat to decide — but they are still
-        // present on disk, so they stay in the reconciliation seen-set.
         let empty = root.join("empty.jpg");
         fs::write(&empty, b"").unwrap();
         let empty_result = classify_entry(&empty, &skip, &errors);
@@ -1660,8 +1381,7 @@ mod tests {
         assert!(other_result.discovered.is_none());
         assert!(other_result.seen_path_hash.is_some());
 
-        // Skip honors size+mtime, not bare membership. An entry whose
-        // stored size+mtime MATCH the live file is skipped (unchanged)...
+        // Skip honors size+mtime, not bare membership: a matching entry is skipped...
         let mut skip2 = HashMap::new();
         skip2.insert(path_fingerprint(&p), (df.size_bytes as i64, Some(df.modified_unix)));
         let unchanged = classify_entry(&p, &skip2, &errors);
@@ -1671,14 +1391,12 @@ mod tests {
             Some(crate::util::path_safety::stable_path_hash(&p.to_string_lossy())),
             "unchanged file is still observed"
         );
-        // ...but a changed mtime defeats the skip so the edit is re-processed.
         let mut skip3 = HashMap::new();
         skip3.insert(
             path_fingerprint(&p),
             (df.size_bytes as i64, Some(df.modified_unix + 100.0)),
         );
         assert!(classify_entry(&p, &skip3, &errors).discovered.is_some(), "mtime change defeats the skip");
-        // A changed size likewise re-processes.
         let mut skip4 = HashMap::new();
         skip4.insert(
             path_fingerprint(&p),
@@ -1687,13 +1405,7 @@ mod tests {
         assert!(classify_entry(&p, &skip4, &errors).discovered.is_some(), "size change defeats the skip");
     }
 
-    /// end-to-end guard: every file the receiver gets must already
-    /// carry a complete payload (size + modified + kind) built in the walk
-    /// stage, and the whole set must be produced (done flag set) before the
-    /// consumer drains a single item. With the stat/file_ref work parallelized
-    /// into process_read_dir, the consumer is a pure take-and-send; this pins
-    /// that contract so a regression that re-serializes stat work onto recv —
-    /// or drops payload fields — is caught.
+    /// End-to-end guard: every file the receiver gets already carries a complete payload (size + modified + kind) built in the walk stage, and the whole set is produced before the consumer drains anything, pinning that stat work isn't re-serialized onto recv.
     #[test]
     fn payloads_ready_before_consumer_drains() {
         use std::fs;
@@ -1713,11 +1425,7 @@ mod tests {
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let done = handle.done.clone();
-            // Wait for the walk to finish WITHOUT draining the receiver. If the
-            // metadata/file_ref opens were still serialized on the consumer
-            // (the pre-fix behavior), the walk could not complete here — the
-            // 32K-slot channel holds all 200 entries, so the producer reaching
-            // `done` proves all payloads were built in the parallel stage.
+            // Wait for the walk WITHOUT draining the receiver: the 32K-slot channel holds all 200 entries, so reaching `done` proves all payloads were built in the parallel stage.
             for _ in 0..200 {
                 if done.load(Ordering::Acquire) {
                     break;
@@ -1737,9 +1445,7 @@ mod tests {
         });
     }
 
-    /// Tiny RAII tempdir helper that bails the test if /tmp isn't writable
-    /// (CI sandboxing edge case). Avoids the `tempfile` crate dep — we
-    /// only need it from tests, not from the engine binary.
+    /// Tiny RAII tempdir helper that bails the test if /tmp isn't writable; avoids a `tempfile` dependency.
     fn tempdir_or_skip() -> TempDir {
         let base = std::env::temp_dir();
         let unique = format!(

@@ -12,9 +12,7 @@ pub enum GpuVendor {
     Amd,
     Intel,
     Qualcomm,
-    /// Other discrete adapter we don't have a vendor name for.
     Other(&'static str),
-    /// No GPU at all (rare on consumer Windows).
     None,
 }
 
@@ -25,7 +23,6 @@ pub struct RuntimeProbe {
 }
 
 impl RuntimeProbe {
-    /// Walks the DXGI adapters (Windows) for the highest-VRAM, non-software one.
     pub fn detect() -> Self {
         let (vendor, adapter_name) = probe_gpu_vendor();
         Self { vendor, adapter_name }
@@ -44,13 +41,10 @@ pub fn ensure_gpu_inference_alive() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Detects whether an error carries [`GPU_DEVICE_REMOVED_MARKER`].
 pub fn error_has_device_removed_marker(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains(GPU_DEVICE_REMOVED_MARKER)
 }
 
-/// The inference backend this process runs models on, for logs and the IPC
-/// `executionProvider` field: always `"tract-cpu"`.
 pub fn inference_backend() -> &'static str {
     TRACT_CPU
 }
@@ -74,8 +68,6 @@ pub fn user_forced_cpu() -> bool {
         .and_then(serde_json::Value::as_str)
         .is_some_and(|choice| choice.eq_ignore_ascii_case("cpu"))
 }
-
-// ── DXGI vendor probe ──────────────────────────────────────────────
 
 #[cfg(windows)]
 fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {

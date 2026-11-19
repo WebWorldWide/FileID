@@ -1,8 +1,4 @@
-// Cleanup: two modes. "Exact" groups live full-file SHA-256 matches;
-// "Similar" groups visually near-identical images by dHash Hamming distance
-// (resizes / re-encodes / crops / light edits). Per-tile selection; the user
-// can override the keeper per group or trash across all groups at once. Similar
-// mode never pre-selects — those copies are NOT byte-identical.
+// Cleanup: Exact groups are full-file SHA-256 matches; Similar groups are dHash look-alikes, which are NOT byte-identical, so Similar never pre-selects.
 import SwiftUI
 import AppKit
 import FileIDShared
@@ -44,9 +40,7 @@ struct CleanupView: View {
     /// Files changed, or a comparison was cut short, while another page was shown.
     @State private var staleWhileHidden = false
 
-    /// Mirrors LibraryView: true while the engine is discovering, tagging, or
-    /// post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz
-    /// scan batch ticks (see the batch handler). (reload storm)
+    /// Mirrors LibraryView: true while the engine is discovering, tagging, or post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz scan batch ticks.
     private var scanActive: Bool {
         guard let p = engine.lastProgress else { return false }
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
@@ -56,8 +50,7 @@ struct CleanupView: View {
         skippedGroups.isEmpty ? groups : groups.filter { !skippedGroups.contains($0.id) }
     }
 
-    /// Counted once per render: the header reads these several times, and each
-    /// read used to walk every file of every group.
+    /// Counted once per render: the header reads these several times, and counting walks every file of every group.
     private struct SelectionTotals {
         var count = 0
         var bytes: Int64 = 0
@@ -107,9 +100,7 @@ struct CleanupView: View {
             store.notifyChanged()
             reload()
         }
-        // Leaving stops an unfinished comparison, as it did when the page was
-        // rebuilt on every visit; coming back runs it again only if it was cut
-        // short or files changed meanwhile.
+        // Leaving stops an unfinished comparison; coming back re-runs it only if it was cut short or files changed.
         .onPageVisibility(shown: {
             guard staleWhileHidden else { return }
             staleWhileHidden = false
@@ -430,10 +421,6 @@ struct CleanupView: View {
         return group.files.filter { selection.contains($0.id) }.count
     }
 
-    private func trashSelectedInGroup(_ g: DuplicateGroup) async {
-        await trashSelected(across: [g])
-    }
-
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
         guard !deleting else { return }   // re-entrancy guard
         deleting = true
@@ -488,11 +475,8 @@ struct CleanupView: View {
         // the user can find "files I deduped this session" in Finder.
         let shouldTag = autoTagOn && !keeperURLsToTag.isEmpty
 
-        // Run the chunked DELETE (+ person reconciliation) and the per-keeper
-        // xattr writes OFF the MainActor — on a large dedup pass these are
-        // thousands of synchronous DB/FS ops and would re-freeze the UI the
-        // off-main trashing above just avoided. Resume on the MainActor only
-        // to mutate @State. (mirrors BulkTagSheet.apply)
+        // Run the chunked DELETE and per-keeper xattr writes off the MainActor: on a large pass they are thousands of synchronous DB/FS ops that would re-freeze the UI.
+        // Resume on the MainActor only to mutate @State.
         let taggedAdded: Int = await Task.detached(priority: .userInitiated) {
             [keeperURLsToTag, shouldTag] in
             guard shouldTag else { return 0 }
@@ -551,14 +535,7 @@ struct CleanupView: View {
         guard new != lastSeenBatchIndex else { return }
         lastSeenBatchIndex = new
         store.notifyChanged()
-        // Exact mode's reload() runs a live full-file SHA-256 pass over up
-        // to ExactDuplicateVerifier.candidateCap candidates; the digest
-        // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch
-        // keeps the whole candidate set hot and contends with the engine's
-        // scan reads on the same drive for the entire scan. Defer the exact
-        // re-verify to scan completion (the lastTerminalEventAt handler).
-        // Similar mode's perceptual index is cheap and drive-light,
-        // so it keeps refreshing live. (reload storm)
+        // Exact re-verify runs once at scan completion: it hashes up to ExactDuplicateVerifier.candidateCap files, and its 30 s digest cache would be cold on every ~1 Hz batch while contending with the scan's reads. Similar mode is cheap, so it refreshes live.
         if !scanActive {
             reload()
         } else if isSimilar, Date().timeIntervalSince(lastScanTimeReload) > 15 {
@@ -570,16 +547,7 @@ struct CleanupView: View {
     }
 
     private func reload() {
-        // Exact mode reads bounded same-size candidates and full-hashes them on
-        // a dedicated queue; Similar mode performs its perceptual index off-main.
-        //
-        // COALESCE instead of cancel-and-restart: hashing and database reads are
-        // not interrupted mid-file, so spawning a fresh task each scan tick would
-        // pile up superseded work. If a
-        // reload is already running, mark it dirty and let it re-run once when it
-        // finishes — at most one in-flight + one pending. A result known-stale
-        // (a newer reload was requested mid-query) is skipped, not assigned, so the
-        // final assignment is always the freshest (latest-wins). (05 delta fix)
+        // Coalesce instead of cancel-and-restart: hashing and DB reads are not interrupted mid-file. At most one run in flight plus one pending; a result superseded mid-query is dropped so the latest assignment wins.
         // Freeze the duplicate re-query + selection re-derivation while a
         // destructive confirmation is on screen, so the count the user is
         // confirming can't drift mid-scan. Re-runs on dialog dismissal
@@ -882,7 +850,6 @@ private struct CopyTile: View {
                           ? "FileID suggests keeping this photo: the best-looking one, then the largest file, then the oldest. Check the others before removing them."
                           : "FileID suggests keeping this copy: the oldest one, then the one in the shortest folder path. Every copy here is identical, so any of them is safe to keep.")
             }
-            // Top-right checkbox.
             Button(action: onToggle) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 22))

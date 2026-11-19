@@ -1,12 +1,5 @@
 ﻿// DebugLog — local-only structured logging for the C# app side.
-//
-// Writes UTF-8 lines to %LOCALAPPDATA%\FileID\logs\app.log. Survives across
-// launches (truncates only when > 10 MB to bound disk usage). Debug lines
-// need FILEID_DEBUG_LOG=1; Trace lines need TraceEnabled. NEVER
-// transmits — this is enforced by the CI binary scan privacy gate.
-//
-// PRIVACY: every log call site that includes a user file path MUST wrap
-// the path in PathRedactor.Redact first. Reviewed every PR.
+// Writes UTF-8 lines to %LOCALAPPDATA%\FileID\logs\app.log, truncating only when > 10 MB to bound disk usage. Debug lines need FILEID_DEBUG_LOG=1; Trace lines need TraceEnabled. NEVER transmits — this is enforced by the CI binary scan privacy gate. PRIVACY: every log call site that includes a user file path MUST wrap the path in PathRedactor.Redact first.
 
 using System.IO;
 using System.Text;
@@ -26,13 +19,7 @@ internal static class DebugLog
     private static long s_reopenAfterTick;
     private static bool s_traceEnabled;
     private static bool s_debugEnabled = ReadDebugSwitch();
-    // One persistent, unbuffered handle: each line is a single synchronous
-    // write to the OS, so it survives a NATIVE fast-fail (the OS keeps what
-    // was written when the process dies) without the per-line open, stat and
-    // close the old File.AppendAllText path paid on the UI thread. A queued
-    // background writer was rejected on purpose: it loses the last lines on a
-    // fast-fail, exactly the [APPLY:N]/[ENGINE-SUB] tail this log exists to
-    // capture (CLAUDE.md marks it load-bearing).
+    // One persistent, unbuffered handle: each line is a single synchronous write to the OS, so it survives a NATIVE fast-fail (the OS keeps what was written when the process dies) without a per-line open, stat and close on the UI thread. A queued background writer was rejected on purpose: it loses the last lines on a fast-fail, exactly the [APPLY:N]/[ENGINE-SUB] tail this log exists to capture (CLAUDE.md marks it load-bearing).
 
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
@@ -41,9 +28,7 @@ internal static class DebugLog
     {
         if (DebugEnabled) Write("DEBUG", message);
     }
-    /// <summary>Debug lines are skipped unless FILEID_DEBUG_LOG=1 (or
-    /// "true") is set for the app process. Info and above always write, so
-    /// the [APPLY:N]/[ENGINE-SUB] forensic lines must stay at Info.</summary>
+    /// <summary>Debug lines are skipped unless FILEID_DEBUG_LOG=1 (or "true") is set for the app process. Info and above always write, so the [APPLY:N]/[ENGINE-SUB] forensic lines must stay at Info.</summary>
     public static bool DebugEnabled
     {
         get => Volatile.Read(ref s_debugEnabled);
@@ -73,11 +58,7 @@ internal static class DebugLog
         }
     }
 
-    /// <summary>Handler-wrap helper. UI click handlers that call IPC or
-    /// touch the file system should route through this so a thrown
-    /// exception logs + dumps + stays caught instead of escaping into the
-    /// dispatcher loop. Caller supplies a short label (typically
-    /// `nameof(OnFooClicked)`) for the log line.</summary>
+    /// <summary>UI click handlers that call IPC or touch the file system should route through this so a thrown exception logs + dumps + stays caught instead of escaping into the dispatcher loop.</summary>
     public static void SafeRun(string label, Action body)
     {
         try { body(); }
@@ -88,10 +69,7 @@ internal static class DebugLog
         }
     }
 
-    /// <summary>Async sibling of <see cref="SafeRun"/>. Use for async
-    /// <c>OnXxxClicked</c> handlers so a thrown exception inside the
-    /// async body lands here instead of becoming an
-    /// UnobservedTaskException at GC time.</summary>
+    /// <summary>Use for async OnXxxClicked handlers so a thrown exception inside the async body lands here instead of becoming an UnobservedTaskException at GC time.</summary>
     public static async System.Threading.Tasks.Task SafeRunAsync(string label, System.Func<System.Threading.Tasks.Task> body)
     {
         try { await body().ConfigureAwait(true); }
@@ -109,9 +87,7 @@ internal static class DebugLog
             var stamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var line = $"{stamp} {level} [tid {Environment.CurrentManagedThreadId}] {message}\n";
             var bytes = s_utf8.GetBytes(line);
-            // The oversize check, the truncation and the append share
-            // s_writeLock so a concurrent append can never land between the
-            // truncate and the marker and lose the forensic tail.
+            // The oversize check, the truncation and the append share s_writeLock so a concurrent append can never land between the truncate and the marker and lose the forensic tail.
             lock (s_writeLock)
             {
                 var stream = EnsureStreamLocked();
@@ -140,8 +116,7 @@ internal static class DebugLog
         }
         catch
         {
-            // Logging must never throw upstream. Disk-full / permission /
-            // antivirus quarantine all silently swallowed.
+            // Logging must never throw upstream.
         }
     }
 
@@ -152,8 +127,7 @@ internal static class DebugLog
         {
             return s_stream;
         }
-        // After a failed open (folder locked, disk full) wait before trying
-        // again so a broken log never costs a syscall storm per line.
+        // After a failed open (folder locked, disk full) wait before trying again so a broken log never costs a syscall storm per line.
         var now = Environment.TickCount64;
         if (s_stream is null && now < Volatile.Read(ref s_reopenAfterTick))
         {
@@ -163,8 +137,7 @@ internal static class DebugLog
         try
         {
             AppPaths.EnsureDirectories();
-            // bufferSize 1 disables FileStream's own buffer: every Write is
-            // handed straight to the OS.
+            // bufferSize 1 disables FileStream's own buffer: every Write is handed straight to the OS.
             var stream = new FileStream(
                 path,
                 FileMode.OpenOrCreate,
@@ -198,8 +171,6 @@ internal static class DebugLog
         try { stream.Dispose(); } catch { /* best-effort */ }
     }
 
-    /// <summary>Closes the log handle (nothing is buffered, so there is
-    /// nothing to flush). The next line reopens it.</summary>
     public static void Close()
     {
         try
@@ -211,7 +182,6 @@ internal static class DebugLog
         }
         catch
         {
-            // best-effort
         }
     }
 
@@ -232,15 +202,6 @@ internal static class DebugLog
         return lines.Length <= maxLines ? lines : lines[^maxLines..];
     }
 
-    /// <summary>
-    /// Write a dedicated crash-{timestamp}-{pid}.txt file with the
-    /// exception, the source handler, and the last 50 lines of app.log
-    /// for context. Designed for cases where the process is about to die
-    /// (or already is) and we want a forensic artifact survivors can read
-    /// even if app.log got truncated by the next launch. Best-effort —
-    /// silently swallows IO errors. Returns the path for inclusion in
-    /// other logs.
-    /// </summary>
     public static string WriteCrashDump(string source, Exception? exception, bool terminating)
     {
         try
@@ -301,20 +262,7 @@ internal static class DebugLog
         }
     }
 
-    // Last-session breadcrumb. The managed crash sinks (Application.
-    // UnhandledException / AppDomain / TaskScheduler) catch every managed
-    // crash but cannot intercept a native fast-fail. WinUI 3's composition
-    // layer calls RaiseFailFastException on cross-thread DispatcherObject
-    // misuse, which terminates the process without unwinding the CLR — no
-    // crash-*.txt is produced.
-    //
-    // Breadcrumb pattern: at startup, BeginSession writes last-session.txt
-    // with start time + pid + a clean_exit=false marker. MarkCleanExit
-    // flips the marker to true at graceful shutdown. On the NEXT launch,
-    // DetectPriorAbnormalExit checks the previous file — if clean_exit
-    // is missing, the previous session died without a managed handler
-    // firing (most likely native fast-fail), and we emit a forensic
-    // artifact session-died-without-handler-{ts}.txt.
+    // Last-session breadcrumb. The managed crash sinks (Application.UnhandledException / AppDomain / TaskScheduler) catch every managed crash but cannot intercept a native fast-fail: WinUI 3's composition layer calls RaiseFailFastException on cross-thread DispatcherObject misuse, which terminates the process without unwinding the CLR, so no crash-*.txt is produced. BeginSession writes last-session.txt (start time, pid, clean_exit=false) and MarkCleanExit flips it; if the NEXT launch finds it unflipped, the previous session died without a handler (most likely a native fast-fail) and DetectPriorAbnormalExit emits session-died-without-handler-{ts}.txt.
     private const string LastSessionFileName = "last-session.txt";
     private const string PriorDeathFilePrefix = "session-died-without-handler-";
 
@@ -336,7 +284,6 @@ internal static class DebugLog
         }
         catch
         {
-            // Breadcrumb is best-effort.
         }
     }
 
@@ -354,7 +301,6 @@ internal static class DebugLog
         }
         catch
         {
-            // best-effort
         }
     }
 
@@ -371,8 +317,7 @@ internal static class DebugLog
             {
                 return; // healthy previous session
             }
-            // Previous session ended without flipping the marker. Surface
-            // a forensic artifact so we know to look further.
+            // Surface a forensic artifact so we know to look further.
             var fileName = $"{PriorDeathFilePrefix}{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.txt";
             var fullPath = Path.Combine(logsDir, fileName);
             var sb = new StringBuilder();
@@ -390,7 +335,6 @@ internal static class DebugLog
         }
         catch
         {
-            // best-effort
         }
     }
 }

@@ -1,21 +1,5 @@
-// Restructure tab — three-tier "assistant" model (Anchor / Mixed / Junk).
-// We respect the user's existing organization decisions:
-//
-//   Anchor folder (meaningful name + homogeneous content):
-//     File stays in place. Nothing about its folder changes.
-//   Mixed folder (meaningful name but a few outliers):
-//     The matching files stay; outliers move out into their proper
-//     anchor bucket via the standard People → Places → Documents →
-//     Year heuristic.
-//   Junk folder (generic name OR fully heterogeneous):
-//     Every file dissolves — re-buckets via the heuristic.
-//
-// The plan + apply now route through the ENGINE butler
-// (Restructure.proposeAll / Restructure.apply via IPC), not the app-side
-// classifier. `requestPlan()` sends `planRestructure`; the engine's
-// `restructurePlan` event is mapped onto the view's `Proposal`/`AssistantSummary`
-// model in `applyPlan()` and drives the Sankey + TreeDiff + recommendation rows.
-// Apply sends `applyRestructure` and reacts to `restructureApplyResult`.
+// Restructure tab. Folders are classed Anchor (kept), Mixed (outliers move out) or Junk (dissolved); see shared/docs/RESTRUCTURE.md.
+// Plans and applies go through the engine butler (`planRestructure` / `applyRestructure`).
 import SwiftUI
 import AppKit
 import GRDB
@@ -158,13 +142,9 @@ struct RestructureView: View {
         let filename: String
         let sourceName: String
         let kind: ProposalKind
-        // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) + the
-        // engine's plain-language "why filed here". Surfaced per the deep-research
-        // finding that showing confidence + reason is the #1 trust signal. (item D1)
+        // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) and the engine's "why filed here": the main trust signal.
         var confidence: String = ""
         var reason: String? = nil
-        /// True for the top "auto" band — drives the "Select confident" helper.
-        var isHighConfidence: Bool { confidence.lowercased() == "auto" }
     }
 
     struct Group: Identifiable, Sendable {
@@ -193,8 +173,7 @@ struct RestructureView: View {
     }
 
     var body: some View {
-        // The step cells stay pinned above the scrolling plan so the Move
-        // action is visible the moment a plan lands. (owner request)
+        // Step cells stay pinned above the scrolling plan so Move is visible as soon as a plan lands.
         VStack(alignment: .leading, spacing: 0) {
             if libraryRoot != nil {
                 stepCells
@@ -289,20 +268,12 @@ struct RestructureView: View {
             moveOutcome = nil
             if selectedRoot != nil { requestPlan() }
         }
-        // Re-request a plan only on Deep Analyze terminal events
-        // (`.deepAnalyzeComplete`). The previous per-file 3-s throttle
-        // still triggered up to 50K full re-plans during a long batch —
-        // `proposeAll` walks every file in the library, so even at 3-s
-        // spacing it caused UI stutters and slowed the engine. Terminal-only
-        // is the right granularity: Deep Analyze is a single batch run, and
-        // proposals don't need to track mid-flight progress.
+        // Re-plan only on .deepAnalyzeComplete: proposeAll walks the whole library, so even a 3-s per-file throttle caused up to 50K re-plans in a long batch.
         .onChangeWhileActive(of: engine.deepAnalyzeComplete?.processed ?? -1) {
             guard libraryRoot != nil else { return }
             store.notifyChanged()
             requestPlan()
         }
-        // Engine-authoritative plan arrived — map it onto the
-        // view's proposal model + summary and rebuild the render caches.
         .onChange(of: engine.restructurePlanSignal) { _, _ in
             applyPlan()
         }
@@ -940,10 +911,7 @@ struct RestructureView: View {
         .accessibilityHint(on ? "Included in the move. Press to skip it." : "Skipped. Press to include it in the move.")
     }
 
-    /// Item D1: at-a-glance confidence badge for a proposed move. The research's
-    /// #1 UX pattern — tier auto/review/ask so the user trusts the sure ones and
-    /// scrutinizes the unsure. Nothing shown when the engine didn't stamp a band
-    /// (rule-cascade moves), so it never adds noise.
+    /// Confidence badge for a proposed move. Shown only when the engine stamped a band; rule-cascade moves get none.
     @ViewBuilder
     private func confidenceBadge(_ confidence: String) -> some View {
         switch confidence.lowercased() {
@@ -980,9 +948,6 @@ struct RestructureView: View {
     /// `engine.restructurePlanSignal`) maps it onto the view's proposal model.
     private func requestPlan() {
         guard let root = libraryRoot else { return }
-        // Capture per-file deselections BEFORE the new plan lands so a re-plan
-        // (e.g. after Deep Analyze finishes mid-review) doesn't re-check rows
-        // the user unchecked. Re-applied in applyPlan().
         priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
         storedPlanID = nil
         storedPlanMoveCount = 0
@@ -1084,7 +1049,6 @@ struct RestructureView: View {
         for p in mapped where p.confidence.lowercased() == "ask" {
             selectedIDs.remove(p.fileID)
         }
-        // Re-apply per-file deselections that carried into the fresh set.
         selectedIDs.subtract(deselected)
         // Preserve the user's "Skip these" choices: re-exclude any persisted
         // skipped outcome's proposals (otherwise skipped rows render dimmed but
@@ -1125,14 +1089,7 @@ struct RestructureView: View {
             embeddings: store.contentEmbeddingCounts())
     }
 
-    /// Apply the selected, non-skipped moves through the engine butler.
-    /// Single-flight: `applying` gates the apply-bar buttons and is
-    /// cleared when `restructureApplyResult` arrives (or the engine resets).
-    /// Selected ∧ not-skipped moves from the CURRENT
-    /// plan/selection. Snapshotted into `pendingMoves` at dialog-present time so a
-    /// background re-plan can't change the set the confirm action applies.
-    /// Belt-and-suspenders: filter the engine plan's own moves so a skipped
-    /// outcome never moves.
+    /// Applies the selected, non-skipped moves through the engine butler. Single-flight: `applying` clears when `restructureApplyResult` arrives. Moves are snapshotted into `pendingMoves` at dialog time so a background re-plan can't change the set.
     private func eligibleMoves() -> [RestructureMove] {
         guard let plan = engine.restructurePlan else { return [] }
         let eligible = Set(
@@ -1172,11 +1129,7 @@ struct RestructureView: View {
 
     // MARK: - Engine plan → view-model mapping
 
-    /// Build the view's proposal model from the engine plan. The display
-    /// `bucket` is the destination's parent directory relative to the library
-    /// root (e.g. "Photos/2023/January", "People/Marie Curie/2023") so the
-    /// Sankey/TreeDiff bucket icons + grouping match the prior app-side output;
-    /// `kind` comes from the engine's per-move folder tier when present.
+    /// Builds the view's proposal model from the engine plan. `bucket` is the destination's parent directory relative to the library root, so the Sankey and TreeDiff icons and grouping match.
     nonisolated static func mapProposals(from plan: RestructurePlan) -> [Proposal] {
         plan.moves.map { m in
             Proposal(
@@ -1260,11 +1213,7 @@ struct RestructureView: View {
         }
     }
 
-    /// Inline file-list view for a recommendation card. Reads from
-    /// the precomputed `inlineGroupsByOutcome` cache populated in
-    /// `applyPlan()` — no `proposals.filter` or `Dictionary(grouping:)`
-    /// runs on the render path. The cache covers `.outcome(...)`
-    /// scopes, which are the only scopes inline lists ever receive.
+    /// Inline file list for a recommendation card. Reads the cache built in `applyPlan()`, so the render path does no filtering or grouping.
     @ViewBuilder
     private func inlineFileList(for scope: DrillDownScope) -> some View {
         if case .outcome(let outcome) = scope,
@@ -1321,9 +1270,7 @@ struct RestructureView: View {
 
     @ViewBuilder
     private func drillDownSheet(_ scope: DrillDownScope) -> some View {
-        // Read the grouping cached in `drillDownGroups` (rebuilt only when
-        // the scope changes) so a per-row checkbox tap doesn't re-filter +
-        // re-group the whole proposal set on every render.
+        // Uses the grouping cached in `drillDownGroups`: a checkbox tap must not re-filter the set.
         let groups = drillDownGroups
         let matchedCount = groups.reduce(0) { $0 + $1.proposals.count }
         let title = drillDownTitle(scope, count: matchedCount)

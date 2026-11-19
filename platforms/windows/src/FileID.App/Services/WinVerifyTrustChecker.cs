@@ -19,16 +19,12 @@ namespace FileID.Services;
 
 internal enum IntegrityVerdict
 {
-    /// <summary>Signature present, chain valid, publisher trusted (or skipped per policy).</summary>
     Trusted,
 
-    /// <summary>Binary is unsigned. Acceptable in dev builds; rejected in signed releases.</summary>
     Unsigned,
 
-    /// <summary>Signature is present but failed verification (revoked cert, tamper, etc).</summary>
     Untrusted,
 
-    /// <summary>The file does not exist or cannot be opened.</summary>
     NotFound,
 }
 
@@ -251,8 +247,6 @@ internal static class WinVerifyTrustChecker
         => value.Replace(" ", "", StringComparison.Ordinal)
             .Replace(":", "", StringComparison.Ordinal)
             .Trim();
-
-    // ─── Win32 interop ─────────────────────────────────────────────────────
 
     private const uint WTD_UI_NONE = 2;
     private const uint WTD_REVOKE_WHOLECHAIN = 1; // SEC-4: actually checks revocation

@@ -1,6 +1,5 @@
-//! Structured Chat answers from fixed SQL templates. Mirrors macOS
-//! `ChatFacts.swift`. No model ever writes SQL: every predicate below is a
-//! constant with bound parameters.
+//! Structured Chat answers from fixed SQL templates (mirrors macOS `ChatFacts.swift`). No model ever writes SQL: every
+//! predicate is a constant with bound parameters.
 
 use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question, MONTH_NAMES};
 use super::roots::RootScope;
@@ -12,12 +11,11 @@ use std::path::Path;
 
 pub(crate) const ANALYZABLE: [&str; 6] = ["image", "video", "pdf", "doc", "audio", "model"];
 pub(crate) const SHOWN: usize = 50;
-/// Above this many matches a listing walks the date or size index; below it,
-/// SQLite sorts the matches. Same threshold in macOS `ChatFacts`.
+/// Above this many matches a listing walks the date or size index; below it SQLite sorts. Same threshold in macOS
+/// `ChatFacts`.
 pub(crate) const LARGE: i64 = 2_000;
 const TAKEN: &str = "COALESCE(f.created_at,f.modified_at)";
 
-/// "RAW" for the RAW family, else the first extension in capitals ("JPG", "PNG").
 pub(crate) fn format_label(extensions: &[String]) -> String {
     if extensions.iter().any(|e| e == "arw") && extensions.iter().any(|e| e == "cr2") {
         "RAW".into()
@@ -26,30 +24,22 @@ pub(crate) fn format_label(extensions: &[String]) -> String {
     }
 }
 
-/// Which files a structured answer or action covers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Filter {
     pub kinds: Vec<String>,
     pub person_ids: Vec<i64>,
     pub person_names: Vec<String>,
     pub date: Option<DateFilter>,
-    /// `named:<folder>` or an absolute path.
     pub folder: Option<String>,
     pub undescribed: bool,
     pub ids: Option<Vec<i64>>,
-    /// Lowercase file extensions ("raw" covers every RAW type).
     pub extensions: Vec<String>,
-    /// Every named person must appear ("Kyle and Maya"), not any of them.
     pub all_people: bool,
-    /// The subject words behind `ids`, for the reply.
     pub subject: Option<String>,
-    /// People the question leaves out ("without Maya").
     pub excluded_person_ids: Vec<i64>,
     pub excluded_person_names: Vec<String>,
-    /// Exclusive byte bounds.
     pub min_bytes: Option<i64>,
     pub max_bytes: Option<i64>,
-    /// The library location the app is scoped to (`rootID`).
     pub root: Option<RootScope>,
 }
 
@@ -76,13 +66,12 @@ impl Filter {
         }
     }
 
-    /// The SQL predicate over `files f`, appending its parameters.
     pub fn clause(&self, args: &mut Vec<Value>) -> String {
         self.predicate(args, false)
     }
 
-    /// `ordered` hides the kind column from the planner (`+f.kind`) so a
-    /// large listing walks the ORDER BY index instead of sorting every match.
+    /// `ordered` hides the kind column from the planner (`+f.kind`) so a large listing walks the ORDER BY index instead
+    /// of sorting every match.
     fn predicate(&self, args: &mut Vec<Value>, ordered: bool) -> String {
         let mut parts = vec!["f.failed=0".to_owned()];
         let kinds = self.effective_kinds();
@@ -167,7 +156,6 @@ impl Filter {
         parts.join(" AND ")
     }
 
-    /// " of Kyle in Downloads from 2023 not described yet".
     pub fn qualifiers(&self) -> String {
         use std::fmt::Write;
         let mut text = String::new();
@@ -212,7 +200,6 @@ pub(crate) fn capitalized(text: &str) -> String {
     chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
-/// Count and total size of the matching files.
 pub(crate) fn totals(conn: &Connection, filter: &Filter) -> Result<(i64, i64)> {
     let mut args = Vec::new();
     let clause = filter.clause(&mut args);
@@ -223,8 +210,6 @@ pub(crate) fn totals(conn: &Connection, filter: &Filter) -> Result<(i64, i64)> {
     )?)
 }
 
-/// Matching files as citations, in the requested order. `count` is the
-/// number of matches, from [`totals`].
 pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usize, count: i64) -> Result<Vec<CatalogHit>> {
     let mut args = Vec::new();
     let clause = filter.predicate(&mut args, count > LARGE);
@@ -257,9 +242,8 @@ pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usi
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Extra copies of files that share a stored content hash and size, with the
-/// copy Cleanup would keep. The keeper order mirrors Cleanup's: best-looking,
-/// largest, oldest, shortest path.
+/// Extra copies sharing a stored content hash and size, with the copy Cleanup would keep (best-looking, largest,
+/// oldest, shortest path).
 pub(crate) struct Extras {
     pub groups: i64,
     pub count: i64,
@@ -334,8 +318,7 @@ pub(crate) struct FolderTotal {
     pub bytes: i64,
 }
 
-/// Folders holding the most files (or bytes), from the stored paths. Both path
-/// separators are folded so a catalog scanned on Windows reads the same.
+/// Both path separators are folded so a catalog scanned on Windows reads the same.
 pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64, root: Option<&RootScope>) -> Result<Vec<FolderTotal>> {
     let path = "replace(f.path_text,char(92),'/')";
     let order = if by_size { "b DESC,c DESC" } else { "c DESC,b DESC" };
@@ -350,7 +333,6 @@ pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64, root: Option
         Ok(FolderTotal { name: dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(&dir).to_owned(), path: dir, count: row.get(1)?, bytes: row.get(2)? })
     })?;
     let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    // Widen the label one folder at a time until no two folders share it.
     for depth in 2..8 {
         let mut seen = std::collections::HashSet::new();
         let repeated: std::collections::HashSet<String> =
@@ -454,8 +436,6 @@ struct PersonGroup {
     files: i64,
 }
 
-/// Face groups with a counted face on an active file. A group is named when
-/// it has a name or a first or last name.
 fn person_groups(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<PersonGroup>> {
     let within = super::roots::clause("f.path_text", "?1");
     let mut statement = conn.prepare(&format!(
@@ -475,16 +455,12 @@ fn person_groups(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<Pers
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// True when faces are grouped but no group has a name, so a person's name in a question can
-/// only be searched as a word.
 pub(crate) fn people_unnamed(conn: &Connection, root: Option<&RootScope>) -> Result<bool> {
     let groups = person_groups(conn, root)?;
     Ok(!groups.is_empty() && groups.iter().all(|group| group.name.is_none()))
 }
 
-/// "How many people are in my library?" and "who is in my photos?": answered
-/// from the face groups, never from the word "people". Files with a counted
-/// face are listed.
+/// Answered from the face groups, never from the word "people"; files with a counted face are listed.
 pub(crate) fn people_answer(conn: &Connection, question: &Question, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
     let groups = person_groups(conn, root)?;
     if groups.is_empty() {
@@ -554,9 +530,8 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
     }
 }
 
-/// "What's in Kyle Senior Pics": the files of the folders with that name, by kind. None when the
-/// catalog has no such folder, so the question is searched as words instead. Mirrors Swift
-/// `ChatFacts.folderAnswer`.
+/// `None` when the catalog has no such folder, so the question is searched as words instead (Swift
+/// `ChatFacts.folderAnswer`).
 pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
     let (count, bytes) = totals(conn, &filter)?;
@@ -577,8 +552,7 @@ pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootSco
     Ok(Some((format!("“{name}” holds {} {files} ({}): {}.", count_label(count), bytes_label(bytes), kinds.join(", ")), hits)))
 }
 
-/// "Where were my photos taken?": the library records positions, not place names, so say how many
-/// files carry one. Mirrors Swift `ChatFacts.placesAnswer`.
+/// The library records positions, not place names, so say how many files carry one (Swift `ChatFacts.placesAnswer`).
 pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&RootScope>) -> Result<String> {
     let filter = Filter { kinds: kinds.to_vec(), root: root.cloned(), ..Filter::default() };
     let (total, _) = totals(conn, &filter)?;
@@ -599,7 +573,6 @@ pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&R
     })
 }
 
-/// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
     if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
         return library_answer(conn, question, filter.root.as_ref());
@@ -690,7 +663,6 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     Ok((message, hits))
 }
 
-/// Words that only join a subject to the question ("about taxes", "photos showing a dog").
 const SUBJECT_FILLERS: [&str; 56] = [
     "them", "they", "it", "its", "those", "these", "ones", "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show", "containing",
     "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where", "who", "me", "my", "i", "do",
@@ -699,9 +671,8 @@ const SUBJECT_FILLERS: [&str; 56] = [
 ];
 pub(crate) const SUBJECT_LIMIT: usize = 200_000;
 
-/// Subject words split into alternatives on "or": "beach or sunset" → [[beach], [sunset]].
-/// Each subject word costs several index lookups, so a pasted paragraph is cut
-/// to the first few alternatives and words (Swift `ChatFacts.subjectGroups`).
+/// "beach or sunset" → [[beach], [sunset]]. Each word costs several index lookups, so a pasted paragraph is cut to the
+/// first few (Swift `ChatFacts.subjectGroups`).
 pub(crate) const SUBJECT_MAX_GROUPS: usize = 6;
 pub(crate) const SUBJECT_MAX_WORDS: usize = 8;
 
@@ -727,12 +698,9 @@ pub(crate) fn subject_groups(query: &str) -> Vec<Vec<String>> {
     groups
 }
 
-/// Every file the subject describes, so counts, sizes and orders see all
-/// matches rather than the best hundred search keeps. A word matches a file's
-/// name, description, scan tags, document or photo text, or current video
-/// evidence, in its written or singular form; every word must match, and "or"
-/// joins alternatives. `None` when no subject word remains. Mirrors macOS
-/// `ChatFacts.subjectIDs`.
+/// Counts, sizes and orders see all matches, not search's best hundred. A word matches name, description, scan tags,
+/// document/photo text or current video evidence, written or singular; every word must match, "or" joins alternatives.
+/// `None` when no subject word remains (macOS `ChatFacts.subjectIDs`).
 pub(crate) fn subject_ids(conn: &Connection, query: &str) -> Result<Option<Vec<i64>>> {
     let groups = subject_groups(query);
     if groups.is_empty() {
@@ -800,7 +768,6 @@ fn files_matching(conn: &Connection, word: &str) -> Result<HashSet<i64>> {
     Ok(ids)
 }
 
-/// Keeps only hits whose files pass the structured filter, preserving order.
 pub(crate) fn restrict(conn: &Connection, hits: Vec<CatalogHit>, filter: &Filter) -> Result<Vec<CatalogHit>> {
     if hits.is_empty() {
         return Ok(hits);

@@ -1,5 +1,4 @@
-//! When a file's text deserves a careful read: the scan's OCR gate and Deep
-//! Analyze's VLM transcription. Mirrors macOS `TextReading.swift` rule for rule
+//! Decides when a file's text deserves a careful read; mirrors macOS `TextReading.swift` rule for rule.
 //! (macOS adds Vision's accurate tier in the scan; this engine's OCR has no
 //! handwriting tier, so the VLM transcription is its handwriting path).
 
@@ -43,8 +42,6 @@ pub(crate) fn is_document_shape(width: u32, height: u32, has_camera: bool) -> bo
     (ratio - 11.0 / 8.5).abs() < 0.015 || (ratio - std::f64::consts::SQRT_2).abs() < 0.015
 }
 
-/// Words a character-level reader typically mangles on handwriting: case flips
-/// inside a word, symbols between letters, or five consonants in a row.
 fn is_garbled_word(raw: &str) -> bool {
     let word = raw.trim_matches(|c: char| ".,:;!?'\"()[]{}".contains(c));
     let chars: Vec<char> = word.chars().collect();
@@ -124,7 +121,6 @@ pub(crate) fn needs_transcription<S: AsRef<str>>(
     }
 }
 
-/// Parsed transcription, or `None` when the model saw no readable text.
 pub(crate) fn parse_transcription(raw: &str) -> Option<(String, bool)> {
     let mut handwritten = false;
     let mut lines = Vec::new();

@@ -1,14 +1,11 @@
-//! Write-ahead journal for Library renames, in the macOS Swift engine's
-//! `PathMoveJournal` format (`path-moves.ndjson` in the state folder): an
-//! intent line, synced, before each move, and a "done" line once the catalog
-//! row names the new path. A kill in between leaves the intent; at the next
-//! start the row is pointed at the destination when the file there is provably
-//! the same one (same inode) and the source is gone, then the file is removed.
-//! On the Mac the app-hosted engine shares the file with the Swift engine, so
-//! either engine repairs a rename the other left half done.
+//! Write-ahead journal for Library renames in the Swift engine's `PathMoveJournal` format (`path-moves.ndjson`): a
+//! synced intent line before each move and a "done" line once the catalog row names the new path. A kill in between
+//! leaves the intent; at next start the row is pointed at the destination when the file there is provably the same
+//! (same inode) and the source is gone, then the intent is removed. The app-hosted Mac engine shares the file with
+//! Swift, so either engine repairs a rename the other left half done.
 //!
-//! A recovery hint checked against the file's inode, not an authority to move
-//! files, so it is not HMAC-signed (like `rename_recover.ndjson`).
+//! A recovery hint checked against the inode, not an authority to move files, so it is not HMAC-signed (like
+//! `rename_recover.ndjson`).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -59,9 +56,7 @@ fn append(path: &Path, line: &Line, sync: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Records a rename before it happens. Returns the intent id, or `None` when
-/// the journal could not be written (the rename still runs: a rescan heals it
-/// through `file_ref`, as before this journal existed).
+/// `None` when the journal could not be written; the rename still runs and a rescan heals it through `file_ref`.
 pub(crate) fn begin_at(journal: &Path, file_id: i64, from: &Path, to: &Path, inode: u64) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string().to_uppercase();
     let line = Line {
@@ -87,8 +82,7 @@ pub(crate) fn begin(file_id: i64, from: &Path, to: &Path, inode: u64) -> Option<
     begin_at(&journal_path()?, file_id, from, to, inode)
 }
 
-/// Marks a rename settled. Unsynced: a lost "done" line only costs one
-/// harmless check at the next start.
+/// Unsynced: a lost "done" line only costs one harmless check at next start.
 pub(crate) fn finish_at(journal: &Path, id: &str) {
     let _ = append(journal, &Line { intent: None, done: Some(id.to_owned()) }, false);
 }
@@ -99,10 +93,8 @@ pub(crate) fn finish(id: &str) {
     }
 }
 
-/// Startup repair (the Swift engine's `PathMoveJournal.reconcile`): an intent
-/// without its "done" line whose source is gone and whose destination holds
-/// the same inode points the catalog row at the destination, if the row still
-/// names the source. The journal is then removed. Returns rows repaired.
+/// Startup repair (`PathMoveJournal.reconcile`): an intent without "done", source gone, destination holding the same
+/// inode, row still naming the source → point the row at the destination. Returns rows repaired.
 pub(crate) fn repair(journal: &Path, conn: &rusqlite::Connection) -> usize {
     let raw = {
         let _guard = LOCK.lock();
@@ -168,7 +160,10 @@ mod tests {
         dir
     }
 
-    // The Swift engine's own lines (JSONEncoder output) repair the same way.
+    // The lines the Swift engine wrote for a restructure (JSONEncoder output):
+    // an intent and its "done" per move. The first move is left pending, as a
+    // kill between the move and the catalog update would, the second is
+    // finished and must never be replayed.
     #[test]
     fn pending_swift_rename_is_repaired_and_the_journal_cleared() {
         let root = scratch("swift");
@@ -182,12 +177,19 @@ mod tests {
         crate::db::test_support::insert_file(&conn, 1, &from.to_string_lossy(), "photo");
         crate::db::test_support::insert_file(&conn, 2, &stale.to_string_lossy(), "photo");
         let journal = root.join(FILE_NAME);
-        let lines = [
-            serde_json::json!({"intent": {"id": "A", "fileID": 1, "from": from.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
-            // Finished: never replayed.
-            serde_json::json!({"intent": {"id": "B", "fileID": 2, "from": stale.to_string_lossy(), "to": to.to_string_lossy(), "fileRef": inode}}),
-            serde_json::json!({"done": "B"}),
-        ];
+        let written = std::fs::read_to_string(crate::db::test_support::swift_written("journals/path-moves.ndjson")).unwrap();
+        let swift: Vec<serde_json::Value> = written.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let (first, second, second_done) = (&swift[0], &swift[2], &swift[3]);
+        assert_eq!(second["intent"]["id"], second_done["done"], "the fixture pairs each intent with its done line");
+        let patched = |line: &serde_json::Value, file_id: i64, from: &Path| {
+            let mut line = line.clone();
+            line["intent"]["fileID"] = file_id.into();
+            line["intent"]["from"] = from.to_string_lossy().into_owned().into();
+            line["intent"]["to"] = to.to_string_lossy().into_owned().into();
+            line["intent"]["fileRef"] = inode.into();
+            line
+        };
+        let lines = [patched(first, 1, &from), patched(second, 2, &stale), second_done.clone()];
         let mut text: String = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
         text.push_str("\n{\"intent\":");
         std::fs::write(&journal, text).unwrap();
@@ -216,8 +218,6 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    // Our own lines: a kill after the move, before the catalog update, heals
-    // at startup; a settled rename or one that never moved changes nothing.
     #[test]
     fn rust_intents_round_trip_through_repair() {
         let root = scratch("rust");
@@ -239,7 +239,6 @@ mod tests {
         begin_at(&journal, 2, &never_from, &never_to, never_inode).unwrap();
         let settled = begin_at(&journal, 2, &never_from, &never_to, never_inode).unwrap();
         finish_at(&journal, &settled);
-        // Swift-compatible keys.
         let first: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(&journal).unwrap().lines().next().unwrap()).unwrap();
         assert_eq!(first["intent"]["fileID"], 1);

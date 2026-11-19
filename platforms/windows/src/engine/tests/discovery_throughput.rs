@@ -29,15 +29,13 @@ fn walk_10k_files_in_under_5_seconds() {
     let tmp = tempdir();
     let root = tmp.path().to_path_buf();
 
-    // Lay out 100 subdirs × 100 files = 10,000 supported files.
     let start_gen = Instant::now();
     for d in 0..100 {
         let dir = root.join(format!("d{d:03}"));
         fs::create_dir_all(&dir).expect("mkdir");
         for f in 0..100 {
-            // One-byte content keeps the test cheap on disk + still
-            // exercises the metadata() stat path. Zero-byte would be
-            // filtered out by Discovery.
+            // One-byte content keeps the test cheap while still exercising the metadata() stat path; zero-byte files
+            // are filtered by Discovery.
             fs::write(dir.join(format!("img_{f:03}.jpg")), b"x").expect("write");
         }
     }
@@ -61,8 +59,6 @@ fn walk_10k_files_in_under_5_seconds() {
         }
         let elapsed = started.elapsed();
         let fs_count = count_ref.load(std::sync::atomic::Ordering::Relaxed);
-        // Both counts must agree — the FS-walk atomic counter is
-        // incremented for every file that goes onto the channel.
         assert_eq!(drained, fs_count, "drained vs. count mismatch (decouple invariant broke)");
         (fs_count, elapsed)
     });
@@ -82,17 +78,14 @@ fn walk_10k_files_in_under_5_seconds() {
     );
 }
 
-/// Counter advances at FS-walk speed, not consumer drain speed. We stall
-/// the consumer (don't drain the channel) and confirm the counter still
-/// hits the full file count within a few seconds — proving the
-/// decoupling actually decouples.
+/// The counter advances at FS-walk speed, not consumer drain speed: with the consumer stalled it must still reach the
+/// full file count within seconds.
 #[test]
 #[ignore = "throughput benchmark; gated behind --ignored to keep CI fast"]
 fn count_advances_independently_of_consumer_drain() {
     let tmp = tempdir();
     let root = tmp.path().to_path_buf();
-    // 5K files: below the 32K channel cap, so the walker fills the
-    // channel without ever blocking on blocking_send.
+    // 5K files: below the 32K channel cap, so the walker never blocks on blocking_send.
     for d in 0..50 {
         let dir = root.join(format!("d{d:03}"));
         fs::create_dir_all(&dir).expect("mkdir");
@@ -112,8 +105,7 @@ fn count_advances_independently_of_consumer_drain() {
         let handle = disc.spawn();
         let count = handle.count.clone();
         let done = handle.done.clone();
-        let _rx = handle.rx; // hold but never drain — simulates a stalled tagger.
-        // Poll for done; count must climb to 5K even though no consumer drains.
+        let _rx = handle.rx;
         for _ in 0..200 {
             if done.load(std::sync::atomic::Ordering::Acquire) { break; }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -123,8 +115,7 @@ fn count_advances_independently_of_consumer_drain() {
     });
 }
 
-// Minimal RAII tempdir helper (avoids the `tempfile` crate dep — already
-// used inside src/ for the same reason).
+// Minimal RAII tempdir (avoids the `tempfile` dependency).
 struct TempDir(PathBuf);
 impl TempDir { fn path(&self) -> &std::path::Path { &self.0 } }
 impl Drop for TempDir { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }

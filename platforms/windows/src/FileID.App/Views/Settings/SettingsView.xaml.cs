@@ -71,14 +71,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // status equal to the cached field. NEXT.md tracked this
             // as the "install-state detection at page load" bug.
             try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
-            // Populate the Recent Scans card. Query is cheap (≤5 rows)
-            // so we do it inline on the dispatcher.
             try { _ = PopulateRecentScansAsync(); } catch { }
         };
     }
 
-    // Reads up to the 5 most-recent scan_sessions rows and renders one
-    // line per row in the Recent Scans card.
     private async System.Threading.Tasks.Task PopulateRecentScansAsync()
     {
         var rows = await System.Threading.Tasks.Task.Run(() =>
@@ -265,8 +261,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             }
         });
 
-    /// <summary>Toggle the NVIDIA card based on the detected GPU vendor. The
-    /// card shows the optional CUDA llama.cpp runtime for Describe Files.</summary>
     private void SyncNvidiaSection()
     {
         var hw = EngineClient.Instance.Info?.Hardware;
@@ -289,7 +283,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             SelectRadio(LavaModeRadios, s.LavaMode);
             SelectRadio(TextSizeRadios, s.TextSize);
             SelectRadio(GranularityRadios, s.RestructureGranularity);
-            // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
             {
@@ -573,7 +566,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── Storage card paths ───────────────────────────────────────────
     public string DbPathText => AppPaths.DbPath;
     public string ThumbCachePathText => AppPaths.ThumbsDir;
     public string ModelsPathText => AppPaths.ModelsDir;
@@ -755,8 +747,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── x:Bind helper functions (copied verbatim from WelcomeSheet) ───
-
     internal Visibility VisibleIfDownloading(Services.ModelInstallStatus s) =>
         s == Services.ModelInstallStatus.Downloading ? Visibility.Visible : Visibility.Collapsed;
 
@@ -839,9 +829,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         CudaLlamaStatusText.Text = $"Place a compatible CUDA llama.cpp runtime in {pack}, then restart the engine. FileID does not download vendor runtimes.";
     }
 
-    /// <summary>PAR-148: always-available "Restart engine" in the Engine
-    /// card. Shutdown + auto-respawn; cancels any in-flight scan. Mirrors macOS SettingsView's "Restart
-    /// Engine" button.</summary>
     private async void OnRestartEngineCardClicked(object sender, RoutedEventArgs e)
     {
         try
@@ -864,9 +851,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>PAR-148: always-available "Stop engine" in the Engine card.
-    /// Cleanly shuts the engine down (user-initiated, so no auto-respawn).
-    /// Mirrors macOS SettingsView's "Stop Engine" button.</summary>
     private async void OnStopEngineCardClicked(object sender, RoutedEventArgs e)
     {
         try

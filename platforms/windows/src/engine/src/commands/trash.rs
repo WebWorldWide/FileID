@@ -9,18 +9,13 @@ use crate::ipc::{self, sink::Sink, BulkActionItem, BulkActionResult};
 use super::bulk::emit_bulk_result;
 use super::trash_log;
 
-/// Per-target restore decision, made BEFORE touching the Recycle Bin.
-/// Keeps the conflict rule and the SEC-7 containment rule in one
-/// pure, unit-testable place.
+/// Per-target restore decision made BEFORE touching the Recycle Bin, keeping the conflict rule and the SEC-7 containment rule in one pure, testable place.
 #[derive(Debug, PartialEq, Eq)]
 enum RestoreDisposition {
-    /// Inside an authorized root and the destination is free — attempt restore.
     Restore,
     /// Outside every authorized library root (SEC-7).
     Refused,
-    /// Destination already occupied by another file — restoring would
-    /// clobber it / the bin's Undelete is a no-op, so report a conflict rather
-    /// than a false success.
+    /// Destination already occupied: restoring would clobber it or the bin's Undelete would no-op, so report a conflict rather than a false success.
     Conflict,
 }
 
@@ -525,14 +520,12 @@ fn persist_windows_restore_receipts(
     Ok(())
 }
 
-/// The canonical library roots the catalog has scanned.
 pub(crate) fn library_roots(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<std::path::PathBuf>> {
     let mut stmt = conn.prepare("SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     Ok(rows.filter_map(|root| root.ok()).filter_map(|root| std::fs::canonicalize(root).ok()).collect())
 }
 
-/// The innermost root containing `path`.
 pub(crate) fn containing_root(roots: &[std::path::PathBuf], path: &std::path::Path) -> Option<std::path::PathBuf> {
     let candidate = crate::util::path_safety::canonicalize_for_containment(path);
     roots.iter().filter(|root| candidate.starts_with(root)).max_by_key(|root| root.components().count()).cloned()
@@ -741,37 +734,17 @@ pub(crate) async fn handle_restore_from_trash(
     emit_bulk_result(&sink, "restoreFromTrash", result).await;
 }
 
-/// Separator for the `FILEID_RB_PATHS` env transport (engine -> PowerShell).
-/// MUST be NUL-free: `std::process::Command` runs `ensure_no_nuls` on every env
-/// value, so an interior NUL makes `.status()` return `Err` WITHOUT ever
-/// spawning powershell.exe — which silently restored NOTHING for every
-/// multi-file batch (`wanted_paths.len() >= 2`). U+001F (Unit Separator) is
-/// NUL-free yet still forbidden in Windows file names (0x01-0x1F), so it can't
-/// appear in any `original_path` or inject a spurious entry; the script splits
-/// on the same byte (`-split [char]0x1f`). (C1-018)
+/// Separator for the `FILEID_RB_PATHS` env transport (engine -> PowerShell). MUST be NUL-free: `Command` runs `ensure_no_nuls` on env values, so an interior NUL makes `.status()` fail WITHOUT spawning powershell.exe, silently restoring nothing for every multi-file batch. U+001F is NUL-free yet forbidden in Windows file names, so it can't appear in an `original_path` or inject an entry; the script splits on the same byte (`-split [char]0x1f`).
 #[cfg(any(windows, test))]
 const RB_PATH_SEP: &str = "\u{1f}";
 
-/// PowerShell batch-restore script. The wanted set uses an ordinal-IGNORE-CASE
-/// comparer so the bin's reconstructed path matches the DB-stored
-/// `original_path` even when their casing diverges (drive-letter / Shell path
-/// normalization). The default parameterless HashSet[string] ctor is ordinal
-/// case-SENSITIVE, which regressed the case-insensitive `-eq` match the
-/// per-item helper used and silently failed recoverable restores. (R-02)
+/// PowerShell batch-restore script.
 ///
-/// The match key is reconstructed from `DeletedFrom + name`, but `$i.Name`
-/// follows Explorer's "Hide extensions for known file types" setting and can
-/// return the display name WITHOUT the extension ("document" for
-/// "document.txt") — so `DeletedFrom\document` never matched the DB's
-/// `...\document.txt` and the whole batch silently restored nothing on any box
-/// with the default shell setting. The physical recycled file (`$i.Path` →
-/// `...\$R######.txt`) always keeps the original extension, so we test BOTH the
-/// display-name path AND the display-name-plus-physical-extension path against
-/// the wanted set. Checking two candidates (rather than grafting only when the
-/// name looks extensionless) also covers multi-dot names like `archive.tar.gz`,
-/// where hiding the final ".gz" still leaves an apparent ".tar" extension.
-/// NOTE: this is concatenated into a SINGLE line — no `#` comments (they would
-/// swallow the rest of the script) and statements are `;`-separated. (audit 2026-07-08)
+/// The wanted set uses an ordinal-IGNORE-CASE comparer so the bin's reconstructed path matches the stored `original_path` despite casing drift (drive letter / Shell normalization); the default HashSet[string] ctor is case-sensitive and silently failed recoverable restores.
+///
+/// The match key is `DeletedFrom + name`, but `$i.Name` follows Explorer's "Hide extensions for known file types" and can omit the extension, which made the whole batch restore nothing on default shell settings. The recycled file (`$i.Path` → `...\$R######.txt`) keeps its extension, so BOTH the display-name path and display-name-plus-physical-extension are tested; two candidates also cover `archive.tar.gz`, where hiding ".gz" leaves an apparent ".tar".
+///
+/// NOTE: concatenated into a SINGLE line, so no `#` comments (they would swallow the rest) and statements are `;`-separated.
 #[cfg(any(windows, test))]
 const RESTORE_BATCH_SCRIPT: &str = "\
 $shell = New-Object -ComObject Shell.Application; \
@@ -858,8 +831,6 @@ fn invoke_windows_restore_chunk(
     if wanted_paths.is_empty() {
         return std::collections::HashMap::new();
     }
-    // Match the full deleted-from path and emit only the first physical item
-    // for each claim, preserving deterministic behavior for duplicate bin rows.
     let joined = wanted_paths.join(RB_PATH_SEP);
     let script = RESTORE_BATCH_SCRIPT;
     let Some(powershell) = system_powershell_path() else {
@@ -1699,16 +1670,13 @@ mod tests {
         std::fs::remove_dir_all(base).ok();
     }
 
-    // C1-003: an occupied destination must be a Conflict (not a Restore that
-    // later reads the occupant via Path::exists() and falsely reports success).
+    // An occupied destination must be a Conflict, not a Restore that later reads the occupant via Path::exists() and falsely reports success.
     #[test]
     fn occupied_destination_is_a_conflict_not_success() {
-        // Inside an authorized root but the path is already occupied.
         assert_eq!(
             restore_disposition(true, true),
             RestoreDisposition::Conflict
         );
-        // The happy path: allowed + free.
         assert_eq!(
             restore_disposition(true, false),
             RestoreDisposition::Restore
@@ -1781,11 +1749,7 @@ mod tests {
         std::fs::remove_dir_all(base).ok();
     }
 
-    // Deterministic multi-entry: when two log items share one original
-    // path, both classify identically (the batch enumeration restores the
-    // first matching bin entry per path and removes it from the wanted set, so
-    // the pick is deterministic rather than arbitrary). Here we assert the
-    // pre-classification is stable and does not depend on item order.
+    // Items sharing one original path classify identically regardless of order (batch enumeration restores the first matching bin entry per path).
     #[test]
     fn same_path_items_classify_identically() {
         let occupied = true;
@@ -1796,11 +1760,7 @@ mod tests {
         assert_eq!(a, RestoreDisposition::Conflict);
     }
 
-    // The batch-restore wanted set must match paths case-INSENSITIVELY,
-    // restoring the case-insensitive `-eq` semantics the per-item helper had.
-    // A parameterless HashSet[string] is ordinal case-SENSITIVE, which fails to
-    // match (and so fails to restore) a recoverable file whenever the bin's
-    // reconstructed path casing diverges from the stored original_path.
+    // The batch-restore wanted set must match paths case-INSENSITIVELY; a parameterless HashSet[string] is case-sensitive and fails to restore when the bin's casing diverges from the stored original_path.
     #[test]
     fn restore_batch_script_matches_paths_case_insensitively() {
         assert!(
@@ -1814,12 +1774,7 @@ mod tests {
         );
     }
 
-    // audit 2026-07-08: $i.Name follows the "hide extensions for known file
-    // types" shell setting and can drop the extension, so the reconstructed
-    // match key must also try the physical extension from $i.Path — otherwise
-    // the whole batch silently restores nothing on any box with the default
-    // shell setting. Also guard the single-line invariant: a `#` comment or an
-    // unescaped newline would break the concatenated script.
+    // $i.Name follows the "hide extensions for known file types" setting and can drop the extension, so the match key must also try the physical extension from $i.Path. Also guards the single-line invariant: a `#` comment or newline would break the concatenated script.
     #[test]
     fn restore_batch_script_grafts_physical_extension() {
         assert!(
@@ -1844,13 +1799,7 @@ mod tests {
         );
     }
 
-    // C1-018: a multi-file batch crosses to PowerShell as the FILEID_RB_PATHS
-    // env var. std::process::Command runs `ensure_no_nuls` on every env value,
-    // so the previous `"\0"` separator made `.status()` return Err WITHOUT ever
-    // spawning powershell.exe for any batch of len >= 2 — restoring nothing even
-    // though the bytes still sat in the Recycle Bin. Lock the separator NUL-free
-    // and keep the Rust join + PowerShell split byte-identical so the script
-    // rebuilds exactly the wanted set the engine sent.
+    // A multi-file batch crosses to PowerShell as the FILEID_RB_PATHS env var, and `Command` rejects NUL in env values, so a `"\0"` separator restored nothing for batches of 2+. Lock the separator NUL-free and keep the Rust join and PowerShell split byte-identical.
     #[test]
     fn recycle_lookup_chunks_fit_the_environment_bound() {
         let paths = ["aa", "bbb", "123456"];
@@ -1868,7 +1817,6 @@ mod tests {
 
     #[test]
     fn batch_restore_env_separator_is_nul_free_and_round_trips() {
-        // The exact guard Command::env enforces: an interior NUL aborts the spawn.
         assert!(
             !RB_PATH_SEP.contains('\0'),
             "FILEID_RB_PATHS separator must be NUL-free or Command::env aborts the spawn"
@@ -1879,18 +1827,15 @@ mod tests {
             RB_PATH_SEP.chars().all(|c| u32::from(c) < 0x20),
             "separator must be a control char forbidden in Windows file names"
         );
-        // The regressed case: 2+ paths must join to a value Command::env accepts.
         let paths = ["C:\\Users\\a\\one.txt", "C:\\Users\\a\\two.txt", "D:\\x\\3"];
         let joined = paths.join(RB_PATH_SEP);
         assert!(!joined.contains('\0'), "multi-path env value must be NUL-free");
-        // Rust join and PowerShell split MUST agree on the separator.
         let round_trip: Vec<&str> = joined.split(RB_PATH_SEP).collect();
         assert_eq!(round_trip, paths.to_vec());
         assert!(
             RESTORE_BATCH_SCRIPT.contains("-split [char]0x1f"),
             "script must split FILEID_RB_PATHS on the same U+001F separator"
         );
-        // Guard against a silent revert to the NUL separator that aborts the spawn.
         assert!(
             !RESTORE_BATCH_SCRIPT.contains("-split [char]0)"),
             "must not split on NUL: Command::env rejects the value and never spawns"

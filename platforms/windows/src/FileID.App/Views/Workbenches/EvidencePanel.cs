@@ -42,16 +42,12 @@ internal sealed class EvidencePanel : StackPanel
         Unloaded += (_, _) => Stop();
     }
 
-    /// <summary>The inline player while a media source plays here, else null.</summary>
     public MediaPlayer? Player => _player;
 
-    /// <summary>Raised on the UI thread when the inline player starts or stops.</summary>
     public event EventHandler? PlayerChanged;
 
     public void HideLabel() => _label.Visibility = Visibility.Collapsed;
 
-    /// <summary>Moves the inline player to <paramref name="seconds"/>, or opens the
-    /// selected media there when nothing is playing yet.</summary>
     public async Task SeekAsync(double seconds)
     {
         if (!double.IsFinite(seconds) || seconds < 0) seconds = 0;

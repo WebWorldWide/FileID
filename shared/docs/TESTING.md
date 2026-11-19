@@ -44,7 +44,7 @@ All three workflows run on push to `main` and on PRs touching the relevant paths
 
 ### `macos.yml` (Swift) — macos-15
 
-- `swift build -c release` (engine + app), `swift test` (SharedTests + EngineTests; corpus tests self-skip when the corpus isn't present).
+- `swift build -c release` (engine + app), `swift test` (AppleKitTests + SharedTests + FileIDAppTests; corpus tests self-skip when the corpus isn't present).
 - Engine startup smoke (asserts a `ready` event; note the macOS engine writes IPC to **stderr**, the Windows engine to **stdout**).
 - Source URL allowlist scan (same allowlist as Windows) + **telemetry-string scan** of both binaries.
 

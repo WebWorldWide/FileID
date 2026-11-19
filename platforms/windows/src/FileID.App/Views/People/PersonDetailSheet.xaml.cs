@@ -1,10 +1,5 @@
 ﻿// PersonDetailSheet code-behind. Loads every face for a cluster + its
-// JPEG crop, populates the structured-name editor, and on commit fires
-// a renamePerson IPC (DB write only — sidecar tags inherit from the
-// per-file scan).
-//
-// structured-name editor + face grid; renamePerson IPC is
-// added as part of this sheet's wiring (engine handler + DTO).
+// JPEG crop, populates the structured-name editor, and on commit fires a renamePerson IPC (DB write only — sidecar tags inherit from the per-file scan).
 
 using System;
 using System.Collections.Generic;
@@ -109,10 +104,7 @@ public sealed partial class PersonDetailSheet : UserControl
         var dispatcher = DispatcherQueue;
         long personId = _personId;
 
-        // The SqliteConnection open + structured-name read + up to 200
-        // File.Exists probes used to run synchronously on the UI thread before
-        // the dialog showed, stalling its open on a cold disk. Do all of it on
-        // a worker thread and marshal the UI writes back.
+        // Do all of it on a worker thread and marshal the UI writes back.
         LoadResult result = await Task.Run(() =>
         {
             var res = new LoadResult();
@@ -126,7 +118,6 @@ public sealed partial class PersonDetailSheet : UserControl
                 using var conn = new SqliteConnection(connStr);
                 conn.Open();
 
-                // Pull structured name fields.
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = PersonQuery;
@@ -145,7 +136,6 @@ public sealed partial class PersonDetailSheet : UserControl
                     }
                 }
 
-                // Pull every face id for this cluster + check for an on-disk JPEG.
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = FacesQuery;
@@ -176,9 +166,6 @@ public sealed partial class PersonDetailSheet : UserControl
                 StatusText.Text = $"Couldn't load: {result.Error}";
                 return;
             }
-            // Guard against a stale load landing after the sheet was re-pointed at
-            // a different person — skip ALL UI writes (name boxes + face grid), not
-            // just the grid, so a slow prior load can't overwrite the new person.
             if (_personId != personId) return;
             if (result.Found)
             {
@@ -200,9 +187,7 @@ public sealed partial class PersonDetailSheet : UserControl
             SyncMoveToolbar();
         }
 
-        // ConfigureAwait(true) resumes on the captured UI context; the
-        // DispatcherQueue post is belt-and-suspenders in case the continuation
-        // resumes on a worker thread (no captured SyncContext).
+        // ConfigureAwait(true) resumes on the captured UI context; the DispatcherQueue post is belt-and-suspenders in case the continuation resumes on a worker thread (no captured SyncContext).
         if (dispatcher is null || dispatcher.HasThreadAccess)
         {
             Apply();
@@ -424,11 +409,7 @@ public sealed partial class PersonDetailSheet : UserControl
         Load();
     }
 
-    // Read-only existence probe for the rename pre-write guard. persons.id is
-    // INTEGER PRIMARY KEY AUTOINCREMENT, so an id is never reused — a present
-    // row is proof it's still the same person we loaded. Throws on a genuine
-    // read error so the caller can distinguish "definitely gone" from
-    // "couldn't check" and avoid blocking a legit rename on a transient fault.
+    // Read-only existence probe for the rename pre-write guard. persons.id is INTEGER PRIMARY KEY AUTOINCREMENT, so an id is never reused — a present row is proof it's still the same person we loaded. Throws on a genuine read error so the caller can distinguish "definitely gone" from "couldn't check" and avoid blocking a legit rename on a transient fault.
     internal static bool PersonExists(string dbPath, long personId)
     {
         if (!File.Exists(dbPath)) return false;
@@ -448,13 +429,7 @@ public sealed partial class PersonDetailSheet : UserControl
 
     public async Task<bool> CommitAsync()
     {
-        // Capture the target person id at commit start and write by that id. A
-        // background re-cluster can merge this person away while the sheet is
-        // open; because persons.id is AUTOINCREMENT the id is never reassigned,
-        // so a missing row means the person is genuinely gone (not a different
-        // person). The engine's renamePerson reports succeeded=1 even on a
-        // 0-row UPDATE, so without this pre-write existence check the dialog
-        // would close on a phantom save.
+        // A background re-cluster can merge this person away while the sheet is open; because persons.id is AUTOINCREMENT the id is never reassigned, so a missing row means the person is genuinely gone (not a different person).
         long personId = _personId;
         StatusText.Text = "Saving...";
         try
@@ -466,8 +441,7 @@ public sealed partial class PersonDetailSheet : UserControl
             }
             catch (Exception ex)
             {
-                // Couldn't verify (transient read error) — don't block the rename
-                // on a check we couldn't run; fall through to the IPC.
+                // Couldn't verify (transient read error) — don't block the rename on a check we couldn't run; fall through to the IPC.
                 Services.DebugLog.Warn("PersonDetailSheet existence check failed: " + ex.Message);
                 gone = false;
             }
@@ -492,13 +466,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 return true;
             }
 
-            // Await the engine's BulkActionResult instead of fire-and-forget:
-            // renamePerson reports failure in the result (e.g. the row update
-            // didn't take), not as a thrown exception, so declaring success on
-            // the IPC send alone left the dialog closing on a failed save (the
-            // silent-failure class). Route through the engine's single-writer
-            // connection so we don't contend SQLite locks with the engine
-            // writer or a sibling sheet in another window.
+            // Route through the engine's single-writer connection so we don't contend SQLite locks with the engine writer or a sibling sheet in another window.
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "renamePerson",
                 () => ViewModels.EngineClient.Instance.RenamePersonAsync(

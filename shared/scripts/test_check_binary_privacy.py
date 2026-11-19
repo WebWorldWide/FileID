@@ -150,13 +150,13 @@ class BinaryPrivacyTests(unittest.TestCase):
             fake.write_bytes(b"not a library")
             self.assertIn("could not create an ONNX Runtime environment", check_ort_runtime(fake)[0])
 
-    def test_macos_ci_scans_the_linked_onnxruntime_framework(self) -> None:
+    def test_macos_ci_scans_the_shipped_binaries_only(self) -> None:
         root = Path(__file__).resolve().parents[2]
         text = (root / ".github/workflows/macos.yml").read_text(encoding="utf-8")
-        self.assertIn("onnxruntime.xcframework/macos-arm64_x86_64/onnxruntime.framework/Versions/A/onnxruntime", text)
         self.assertIn('"$CONTENTS/MacOS/fileidd"', text)
-        self.assertIn('"$ort"', text)
-        self.assertNotIn('.build/release/FileIDEngine "$ort"', text)
+        self.assertIn('"$CONTENTS/Frameworks/libFileIDAppleKit.dylib"', text)
+        self.assertNotIn("onnxruntime.xcframework", text)
+        self.assertNotIn("FileIDEngine-swift", text)
 
     def test_reports_missing_and_accepts_clean_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

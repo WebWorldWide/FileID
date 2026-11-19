@@ -1,6 +1,3 @@
-//! `fileid-engine` library: the engine internals shared by the `FileIDEngine`
-//! binary, the GTK app, the CLI, the TUI, tests and benches.
-
 #![allow(clippy::needless_return)]
 
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]

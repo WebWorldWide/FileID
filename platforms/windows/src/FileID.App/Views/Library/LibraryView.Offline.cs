@@ -4,8 +4,6 @@ using Windows.Devices.Enumeration;
 
 namespace FileID.Views.Library;
 
-/// <summary>OFFLINE tiles (macOS OfflineRoots): reads the locations with listRoots on load,
-/// after each scan and when a drive is plugged in or removed.</summary>
 public sealed partial class LibraryView
 {
     private static readonly TimeSpan VolumeSettleDelay = TimeSpan.FromSeconds(1.5);
@@ -67,7 +65,6 @@ public sealed partial class LibraryView
 
     private void OnVolumeRemoved(DeviceWatcher sender, DeviceInformationUpdate args) => OnVolumeChanged();
 
-    // DeviceWatcher delivers post-enumeration Added/Removed only while Updated is subscribed too.
     private void OnVolumeUpdated(DeviceWatcher sender, DeviceInformationUpdate args) { }
 
     private void OnVolumeChanged()

@@ -1,10 +1,6 @@
-//! HMAC-SHA256 hand-rolled atop the existing `sha2` dependency. 30 lines
-//! beats adding the `hmac` crate for one call site.
-//!
-//! Used by the trash + merge sidecar logs to seal each entry against
-//! local tampering. The key is persisted at
-//! `%LOCALAPPDATA%\FileID\log-hmac.key`; NTFS ACLs already restrict to the
-//! user, enough for the threat model (defense against another local app).
+//! HMAC-SHA256 on the existing `sha2` dependency (cheaper than the `hmac` crate for one call site), sealing trash +
+//! merge sidecar log entries against local tampering. The key lives at `%LOCALAPPDATA%\FileID\log-hmac.key`; NTFS ACLs
+//! restrict it to the user, enough for the threat model (another local app).
 
 use crate::paths;
 
@@ -41,9 +37,7 @@ pub(crate) fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
     hex::encode(hmac_sha256(key, msg))
 }
 
-/// Constant-time string comparison (avoids timing-side-channel HMAC
-/// validation). Caller supplies hex strings of equal length; mismatched
-/// lengths short-circuit fail.
+/// Constant-time (no timing side channel); expects equal-length hex strings, mismatched lengths fail fast.
 pub(crate) fn constant_time_eq_str(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -55,7 +49,6 @@ pub(crate) fn constant_time_eq_str(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Lazily-loaded 32-byte HMAC key for the trash/merge sidecar logs.
 pub(crate) fn log_hmac_key() -> anyhow::Result<Vec<u8>> {
     static KEY: parking_lot::Mutex<Option<Vec<u8>>> = parking_lot::Mutex::new(None);
     let mut guard = KEY.lock();
@@ -68,7 +61,6 @@ pub(crate) fn log_hmac_key() -> anyhow::Result<Vec<u8>> {
     let bytes = if path.exists() {
         std::fs::read(&path)?
     } else {
-        // Generate via getrandom() through `uuid` (already a dep).
         // Two UUIDs = 32 bytes of OS-CSPRNG entropy.
         let mut k = Vec::with_capacity(32);
         k.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
@@ -84,8 +76,7 @@ pub(crate) fn log_hmac_key() -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    // RFC 4231 test vector: HMAC-SHA256 with key = 20 bytes of 0x0b,
-    // msg = "Hi There" → b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+    // RFC 4231 test vector 1.
     #[test]
     fn hmac_sha256_matches_rfc4231_vector_1() {
         let key = [0x0bu8; 20];
@@ -97,7 +88,7 @@ mod tests {
         );
     }
 
-    // RFC 4231 test vector 2: key = "Jefe", msg = "what do ya want for nothing?"
+    // RFC 4231 test vector 2.
     #[test]
     fn hmac_sha256_matches_rfc4231_vector_2() {
         let mac = hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?");
@@ -109,13 +100,12 @@ mod tests {
 
     #[test]
     fn hmac_handles_key_longer_than_block_size() {
-        // 64 bytes is the block size; 65 should still produce a stable hash
-        // (the key is pre-hashed by the SHA function).
+        // 64 bytes is the block size; 65 must still hash stably (the key is pre-hashed).
         let long_key = [0xaau8; 65];
         let a = hmac_sha256_hex(&long_key, b"x");
         let b = hmac_sha256_hex(&long_key, b"x");
         assert_eq!(a, b);
-        assert_eq!(a.len(), 64); // 32 bytes hex-encoded
+        assert_eq!(a.len(), 64);
     }
 
     #[test]
@@ -136,9 +126,7 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Appending any byte to the message must change the MAC. Catches
-        /// a future regression where the inner-block padding accidentally
-        /// truncates the message at a SHA block boundary.
+        /// Catches the inner-block padding truncating the message at a SHA block boundary.
         #[test]
         fn appending_byte_to_msg_changes_mac(
             key in proptest::collection::vec(proptest::num::u8::ANY, 1..96),
@@ -152,13 +140,8 @@ mod tests {
             proptest::prop_assert_ne!(base, with_extra);
         }
 
-        /// Appending any NON-ZERO byte to the key must change the MAC.
-        /// HMAC's RFC 2104 spec zero-pads short keys to the block size,
-        /// so appending a 0 to a short key is a true no-op (intentional);
-        /// this test catches the bug we'd see if the implementation
-        /// silently TRUNCATED the key at the block boundary (64 bytes)
-        /// instead of pre-hashing it — at that point even a non-zero
-        /// extra would land in the truncated tail and not change the MAC.
+        /// Appending a NON-ZERO byte to the key must change the MAC (zero-pad makes appending 0 a true no-op); catches
+        /// a key truncated at the 64-byte block boundary instead of pre-hashed.
         #[test]
         fn appending_nonzero_byte_to_key_changes_mac(
             key in proptest::collection::vec(proptest::num::u8::ANY, 1..96),

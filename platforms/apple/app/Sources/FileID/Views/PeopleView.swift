@@ -399,20 +399,14 @@ struct PeopleView: View {
         }
     }
 
-    /// True when there are person clusters but none of them have been
-    /// given a name yet AND nothing's already running. Drives the
-    /// visibility of the "Skip naming" row — once at least one person
-    /// is named OR Deep Analyze is already in flight, the skip option
-    /// is irrelevant noise and goes away.
+    /// True when clusters exist but none are named and nothing is running. Drives the "Skip naming" row.
     private var canSkipNaming: Bool {
         guard !persons.isEmpty else { return false }
         guard !engine.deepAnalyzeInFlight else { return false }
         return !persons.contains { $0.hasAnyName }
     }
 
-    /// Item 2: true once at least one cluster is named (and nothing's running).
-    /// Gates the positive "Continue to Deep Analyze" forward affordance — the
-    /// counterpart to canSkipNaming. Mutually exclusive with it in the header.
+    /// True once at least one cluster is named and nothing is running: the forward "Continue to Deep Analyze" affordance, exclusive with canSkipNaming.
     private var canContinueToDeepAnalyze: Bool {
         guard !persons.isEmpty else { return false }
         guard !engine.deepAnalyzeInFlight else { return false }
@@ -536,11 +530,7 @@ struct PeopleView: View {
     private var headerBlock: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            // Surface the "skip naming" escape hatch right at the top
-            // of the People tab — that's where the user is when they
-            // realize they don't want to name anyone. Quiet styling so
-            // it doesn't compete with the recommended naming flow, but
-            // visible enough that it's discoverable.
+                // Quiet "skip naming" escape hatch, discoverable at the top of the tab.
             if canSkipNaming {
                 skipNamingRow
             } else if canContinueToDeepAnalyze {
@@ -551,9 +541,7 @@ struct PeopleView: View {
         .padding(.vertical, 14)
     }
 
-    /// Inline notice + button that lets the user bypass naming and
-    /// run Deep Analyze immediately. Only shown when at least one
-    /// person cluster exists but none have been named yet.
+    /// Inline notice and button to skip naming and run Deep Analyze now.
     @ViewBuilder
     private var skipNamingRow: some View {
         HStack(spacing: 10) {
@@ -581,10 +569,7 @@ struct PeopleView: View {
         .dsBannerSurface(fill: Color.white.opacity(0.04), stroke: Theme.hairline)
     }
 
-    /// Item 2: positive "keep moving" affordance — once at least one person is
-    /// named, advance straight to Deep Analyze (which uses those names in its
-    /// captions + smart filenames). The forward counterpart to skipNamingRow:
-    /// "if they have named someone, switch it to continue."
+    /// Forward affordance once someone is named: continues to Deep Analyze, which uses those names in captions and smart filenames.
     @ViewBuilder
     private var continueToDeepAnalyzeRow: some View {
         HStack(spacing: 10) {
@@ -643,13 +628,7 @@ struct PeopleView: View {
                                     activeSheet = .personDetail(person.id)
                                 }
                             }
-                            // Drag a person card onto another to merge
-                            // them. Source person's photos move into
-                            // target; source row is deleted. Disabled
-                            // while in merge / mark-unknown checkbox
-                            // mode — otherwise an accidental drag
-                            // mid-selection would merge instead of
-                            // toggling a checkbox.
+                            // Drag a card onto another to merge; disabled in checkbox modes so a drag mid-selection doesn't merge.
                             .modifier(PersonCardDragMergeModifier(
                                 enabled: !mergeMode && !unknownMode,
                                 personID: person.id,
@@ -660,10 +639,7 @@ struct PeopleView: View {
                                     pendingDragMerge = PendingDragMerge(source: sourceID, target: person.id, targetName: person.displayName)
                                 }
                             ))
-                            // Spring entrance: cards scale + fade in when
-                            // they appear. Disabled when the user has
-                            // "Reduce Motion" turned on — instant fade
-                            // only, no scale.
+                            // Spring entrance; under Reduce Motion, a plain fade.
                             .transition(reduceMotion
                                 ? .opacity
                                 : .asymmetric(
@@ -682,9 +658,7 @@ struct PeopleView: View {
         }
     }
 
-    /// Subtle footer revealing the count of unknown-marked people,
-    /// with a toggle to show / hide them. Hidden by default so the
-    /// grid stays clean (the user's whole point of marking them).
+    /// Footer toggle that reveals people marked unknown; hidden by default.
     @ViewBuilder
     private var hiddenUnknownsFooter: some View {
         if hiddenUnknownCount > 0 {
@@ -808,9 +782,7 @@ struct PeopleView: View {
 
 // MARK: - Card
 
-/// Draggable + drop-target modifier on a PersonCard. Splits the
-/// drag-merge logic out of PeopleView's body so we can conditionally
-/// apply it (disabled in merge / mark-unknown selection modes).
+/// Drag-merge drop target for a PersonCard, applied conditionally: off in merge and mark-unknown modes.
 private struct PersonCardDragMergeModifier: ViewModifier {
     let enabled: Bool
     let personID: Int64
@@ -1440,10 +1412,7 @@ private struct PersonFileTile: View {
 
 // MARK: - Move-photos target picker
 
-/// Picker shown when the user wants to reassign photos from one
-/// person's cluster to another. Lists every other person, named or not
-/// (skips self and people marked unknown), with their representative
-/// thumbnail and photo count. Picking one asks before moving.
+/// Picker for moving photos to another person's cluster. Skips self and people marked unknown; picking one asks before moving.
 private struct MovePhotosTargetPicker: View {
     let sourcePerson: ReadStore.PersonRow
     let engine: EngineClient

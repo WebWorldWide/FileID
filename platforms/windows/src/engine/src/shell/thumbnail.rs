@@ -1,13 +1,5 @@
-// Thumbnail — IShellItemImageFactory::GetImage.
-//
-// Uses the system's IThumbnailProvider chain — the same code path Explorer
-// uses to render thumbnails in Detail/List view. Handles every kind we
-// need (Office, RTF, .pages, .key, .numbers, ai, eps, psd, dwg, …) because
-// the provider is whichever the user has installed.
-//
-// Output: tightly packed RGBA8. The Win32 path is
-// HBITMAP-backed BGRA; we swap channels on extraction so callers always
-// see RGBA regardless of source.
+// Thumbnail via IShellItemImageFactory::GetImage: the IThumbnailProvider chain Explorer uses, so any format the user has a provider for (Office, RTF, .pages, psd, dwg, …) renders.
+// Output is tightly packed RGBA8; the HBITMAP-backed BGRA is swapped on extraction.
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -81,7 +73,6 @@ fn render_at_with_flags(path: &Path, dim: i32, flags: SIIGBF) -> Result<Thumbnai
 }
 
 unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
-    // Pull dimensions via GetObject(BITMAP).
     let mut bitmap = BITMAP::default();
     let written = unsafe {
         GetObjectW(
@@ -137,9 +128,7 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
         anyhow::bail!("GetDIBits returned 0");
     }
 
-    // BGRA → RGBA swap. The HBITMAP from the shell may have premultiplied
-    // alpha; Explorer renders correctly because it uses BGRA throughout.
-    // We swap channels so callers see canonical RGBA.
+    // BGRA → RGBA swap; the shell HBITMAP may be premultiplied.
     let mut rgba = bgra;
     for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);

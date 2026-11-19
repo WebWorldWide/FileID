@@ -1,6 +1,4 @@
-//! `benchmark::measure` against a loopback stand-in for llama-server. The
-//! scripted replies decide correctness; the server reports `timings` as
-//! llama-server does. No model or inference runtime is involved.
+//! `benchmark::measure` against a loopback stand-in for llama-server; the scripted replies decide correctness.
 use super::*;
 use super::super::benchmark::{measure, summarize, write_probes};
 use std::io::{Read, Write};
@@ -21,8 +19,7 @@ async fn generated_benchmark_child() {
     tokio::time::sleep(Duration::from_secs(60)).await;
 }
 
-/// Requests arrive in a fixed order: five probe answers, five captions, then
-/// two moment sequences (the first answered with valid JSON, the second not).
+/// Request order: five probe answers, five captions, then two moment sequences (first valid JSON, second not).
 fn answer_for(body: &str, served: usize) -> &'static str {
     if body.contains("red circles") { "There are 3 circles." }
     else if body.contains("large square") { "Blue" }

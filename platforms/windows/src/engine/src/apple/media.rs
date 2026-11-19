@@ -1,9 +1,6 @@
-//! Stage 8: AVFoundation media tools, timeline frames and on-device Apple
-//! Speech through FileIDAppleKit. Probes, the trim/remux/audio/proxy/rotate
-//! exports and speech run in process, as in the Swift engine; frame decoding,
-//! the frame pool and the video export run in this binary's own worker
-//! processes (`models::native_process::self_worker`), so a decoder crash on a
-//! damaged file ends a worker, not the engine.
+//! AVFoundation media tools, timeline frames and on-device Apple Speech through FileIDAppleKit. Probes, exports and
+//! speech run in process; frame decoding, the frame pool and the video export run in this binary's own worker processes
+//! (`models::native_process::self_worker`), so a decoder crash on a damaged file ends a worker, not the engine.
 
 use super::ffi;
 use crate::models::native_process::self_worker::{self, Worker};
@@ -29,7 +26,6 @@ fn flag(cancel: &AtomicBool) -> *const bool {
     cancel.as_ptr().cast_const()
 }
 
-/// Takes ownership of a JSON reply from the adapter.
 fn reply(pointer: *mut c_char) -> Result<Value> {
     ensure!(!pointer.is_null(), "The media adapter returned no reply");
     // SAFETY: the adapter returned a NUL-terminated string it allocated for us.
@@ -43,7 +39,6 @@ fn reply(pointer: *mut c_char) -> Result<Value> {
     Ok(value)
 }
 
-/// AVFoundation facts in the adapter's probe shape.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Probe {
@@ -64,8 +59,7 @@ pub(crate) struct Probe {
     pub(crate) frame_rate: Option<f64>,
 }
 
-/// Probes `path`. `strict` applies the media tools' refusals; `mime_type` types
-/// a staged `.part` file.
+/// `strict` applies the media tools' refusals; `mime_type` types a staged `.part` file.
 pub(crate) fn probe(path: &Path, mime_type: Option<&str>, strict: bool) -> Result<Probe> {
     let path = c_path(path)?;
     let mime = mime_type.map(CString::new).transpose().context("Invalid media type")?;
@@ -75,8 +69,6 @@ pub(crate) fn probe(path: &Path, mime_type: Option<&str>, strict: bool) -> Resul
     serde_json::from_value(value).context("The media adapter returned an invalid probe")
 }
 
-/// Runs a trim/remux/audio/proxy/rotate export in process; returns the source
-/// probe the adapter checked before exporting.
 pub(crate) fn export_common(recipe: &crate::ipc::ToolRecipe, source: &Path, output: &Path, cancel: &AtomicBool) -> Result<Probe> {
     let request = serde_json::json!({
         "recipe": recipe,
@@ -89,15 +81,12 @@ pub(crate) fn export_common(recipe: &crate::ipc::ToolRecipe, source: &Path, outp
     serde_json::from_value(value["probe"].clone()).context("The media adapter returned an invalid probe")
 }
 
-/// The planned or finished video export's framing and stabilization summary;
-/// the worker verified the output before replying.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Converted {
     #[serde(default)]
     pub(crate) summary: String,
 }
 
-/// The fit/pad/stabilize/follow-people video export in a worker process;
 /// `output == None` plans without writing.
 pub(crate) fn convert_video(recipe: &crate::ipc::ToolRecipe, source: &Path, output: Option<&Path>, cancel: &AtomicBool) -> Result<Converted> {
     let mut request = serde_json::json!({ "recipe": recipe, "source": source.to_str().context("Invalid media path")? });
@@ -116,8 +105,6 @@ pub(crate) fn convert_video(recipe: &crate::ipc::ToolRecipe, source: &Path, outp
     serde_json::from_value(value).context("The native video worker did not return a valid result")
 }
 
-/// Decodes one frame at `seconds` into a JPEG at `output` in a worker process;
-/// returns the decoded frame's time.
 pub(crate) fn sample_frame(source: &Path, seconds: f64, (width, height): (u32, u32), output: &Path, cancel: &AtomicBool) -> Result<f64> {
     let (seconds, width, height) = (seconds.to_string(), width.to_string(), height.to_string());
     let args = [source.as_os_str(), OsStr::new(&seconds), OsStr::new(&width), OsStr::new(&height), output.as_os_str()];
@@ -130,7 +117,6 @@ pub(crate) fn sample_frame(source: &Path, seconds: f64, (width, height): (u32, u
     value["seconds"].as_f64().filter(|seconds| seconds.is_finite()).context("The video worker returned an invalid reply")
 }
 
-/// One pool frame from `manifest.json`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub(crate) struct PoolFrame {
     pub(crate) seconds: f64,
@@ -145,8 +131,6 @@ pub(crate) struct PoolManifest {
     pub(crate) frames: Vec<PoolFrame>,
 }
 
-/// The frame pool for a whole video (one sequential hardware decode) in a
-/// worker process: JPEGs and signatures every `interval` seconds in `directory`.
 pub(crate) fn sample_pool(source: &Path, interval: f64, max_side: u32, directory: &Path, duration_hint: f64, cancel: &AtomicBool) -> Result<PoolManifest> {
     std::fs::create_dir_all(directory)?;
     let (interval, max_side) = (interval.to_string(), max_side.to_string());
@@ -177,13 +161,12 @@ pub(crate) fn sample_pool(source: &Path, interval: f64, max_side: u32, directory
 pub(crate) enum SpeechStatus {
     Ready,
     Unavailable,
-    /// The host bundle has no speech usage description, so macOS would end the
-    /// process on a request (a bare engine binary outside FileID.app).
+    /// The host bundle has no speech usage description, so macOS would end the process on a request (bare engine binary
+    /// outside FileID.app).
     CannotAsk,
 }
 
-/// On-device speech availability; with `ask`, an undecided user sees the
-/// system permission prompt for FileID.app.
+/// With `ask`, an undecided user sees the system permission prompt for FileID.app.
 pub(crate) fn speech_status(ask: bool) -> SpeechStatus {
     // SAFETY: plain value call.
     match unsafe { ffi::fileid_apple_speech_status(ask) } {
@@ -208,7 +191,6 @@ pub(crate) fn speech_model_version() -> String {
 
 pub(crate) use crate::pipeline::speech_passages::Segment as SpeechSegment;
 
-/// Recognised words of `[start, end)` seconds, timestamps relative to `start`.
 pub(crate) fn transcribe(source: &Path, start: f64, end: f64, cancel: &AtomicBool) -> Result<Vec<SpeechSegment>> {
     let path = c_path(source)?;
     // SAFETY: the path and the flag outlive the synchronous call.
@@ -216,13 +198,10 @@ pub(crate) fn transcribe(source: &Path, start: f64, end: f64, cancel: &AtomicBoo
     serde_json::from_value(value["segments"].clone()).context("The speech adapter returned invalid segments")
 }
 
-/// Whether this process was started as one of the engine's media workers.
 pub(crate) fn is_worker(args: &[OsString]) -> bool {
     args.first().is_some_and(|flag| Worker::from_flag(flag).is_some())
 }
 
-/// The worker side of a re-executed media worker; `None` when `args` (without
-/// the program name) do not start with a worker flag.
 pub(crate) fn run_worker(args: &[OsString]) -> Option<i32> {
     let worker = Worker::from_flag(args.first()?)?;
     watch_parent();
@@ -234,7 +213,6 @@ pub(crate) fn run_worker(args: &[OsString]) -> Option<i32> {
     })
 }
 
-/// Ends the worker when the engine that started it goes away.
 fn watch_parent() {
     // SAFETY: getppid has no preconditions.
     let parent = unsafe { libc::getppid() };
@@ -254,7 +232,6 @@ fn print(value: &Value) {
     let _ = stdout.flush();
 }
 
-/// `<source> <seconds> <width> <height> <output.jpg>`.
 fn frame_worker(args: &[OsString]) -> i32 {
     let [source, seconds, width, height, output] = args else { return EXIT_INVALID };
     let (Some(seconds), Some(width), Some(height)) = (
@@ -308,7 +285,6 @@ fn pool_worker(args: &[OsString]) -> i32 {
     unsafe { ffi::fileid_apple_video_pool(path.as_ptr(), interval, max_side, directory.as_ptr(), std::ptr::null()) }
 }
 
-/// `<request JSON>`; prints the adapter's reply.
 fn convert_worker(args: &[OsString]) -> i32 {
     let [request] = args else { return EXIT_INVALID };
     let Ok(request) = CString::new(request.as_bytes()) else { return EXIT_INVALID };

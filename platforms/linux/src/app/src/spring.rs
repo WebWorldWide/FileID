@@ -1,16 +1,5 @@
-// Spring motion — maps the macOS SwiftUI spring (`response` / `dampingFraction`)
-// onto libadwaita's `adw::SpringAnimation`, the GTK equivalent of the
-// Composition `SpringScalarNaturalMotionAnimation` the Windows port uses.
-//
-//   damping_ratio = dampingFraction
-//   mass          = 1
-//   stiffness     = (2π / response)² × mass
-//
-// shared/docs/DESIGN_V3_PORT.md: the tight spring (0.35 / 0.78) drives
-// toggles, segments, selection and pills; the standard spring (0.40 / 0.80)
-// drives panes, panel insertion, expanding rows and aspect changes. With GTK
-// animations disabled the tight spring lands instantly and the standard one
-// lands at once behind a 0.15 s ease-out opacity fade.
+// With GTK animations off, the tight spring lands instantly and the standard one
+// lands behind a 0.15 s ease-out opacity fade.
 
 use adw::prelude::*;
 use std::f64::consts::PI;
@@ -42,7 +31,6 @@ pub fn animations_enabled() -> bool {
     gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations())
 }
 
-/// Animate a scalar on the standard spring, handing each value to `setter`.
 pub fn animate<W, F>(widget: &W, from: f64, to: f64, setter: F) -> adw::SpringAnimation
 where
     W: IsA<gtk::Widget>,
@@ -88,7 +76,6 @@ pub fn fade_progress(elapsed_micros: i64) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Fades `widget` from transparent to its current opacity on the frame clock.
 /// libadwaita skips its own animations when GTK animations are off, so this
 /// drives the frames itself. Unmapped widgets are left alone: their tick
 /// callback would never run and they would stay invisible.

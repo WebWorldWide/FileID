@@ -12,9 +12,6 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Search &amp; Moments timeline (DESIGN_V3_PORT "Timeline", macOS MomentTimeline): Examined,
-/// Chapters and Speech lanes over one ruler, with a 1.5 px gold playhead in every lane. Clicking a
-/// lane or pressing the arrow keys on it seeks.</summary>
 internal sealed class MomentTimeline : StackPanel
 {
     private const double LabelWidth = 70;
@@ -316,7 +313,6 @@ internal sealed class MomentTimeline : StackPanel
         }
         catch (Exception)
         {
-            // Missing font resource: keep the default face.
         }
     }
 

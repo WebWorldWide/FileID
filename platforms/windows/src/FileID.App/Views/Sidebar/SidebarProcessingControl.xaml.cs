@@ -498,7 +498,6 @@ public sealed partial class SidebarProcessingControl : UserControl
             ? "Wait for the current work to finish, then rescan."
             : $"Look for new or changed files in {vm.FolderDisplay}. Files already read are skipped. (Ctrl+R)");
 
-        // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = engine.IsPaused ? "Resume" : "Pause";
         PauseResumeGlyph.Glyph = engine.IsPaused ? "\uE768" : "\uE769";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
@@ -609,10 +608,6 @@ public sealed partial class SidebarProcessingControl : UserControl
         return $"{hours:F1}h";
     }
 
-    /// <summary>open the engine's daily-rolled JSON log in the
-    /// user's default .jsonl handler. Lets the user diagnose a stuck scan
-    /// or surface a tagging failure without having to navigate AppData
-    /// by hand.</summary>
     private void OnOpenLogClicked(object sender, RoutedEventArgs e)
     {
         try

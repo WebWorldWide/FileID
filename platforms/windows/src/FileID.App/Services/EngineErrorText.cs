@@ -1,9 +1,5 @@
 ﻿namespace FileID.Services;
 
-/// <summary>Plain titles and sentences for the errors FileID's helper
-/// reports, keyed on the error kind. Mirrors the Mac app's
-/// <c>errorTitle</c> / <c>errorText</c> (Sidebar.swift) and adds the kinds
-/// only the Windows helper sends.</summary>
 internal static class EngineErrorText
 {
     public const string TryAgain = "Try again. If it keeps happening, quit and reopen FileID.";
@@ -41,9 +37,6 @@ internal static class EngineErrorText
         _ => "Something went wrong"
     };
 
-    /// <summary>The sentence under the title. Known kinds get fixed wording;
-    /// anything else shows the helper's own message unless it reads like a
-    /// log line.</summary>
     public static string Text(string? kind, string? message) => kind switch
     {
         "scan_failed" => "Press Scan again. Files already read are skipped.",
@@ -70,8 +63,7 @@ internal static class EngineErrorText
         _ => Plain(message, TryAgain)
     };
 
-    /// <summary>The helper's own sentence when it reads like one, otherwise
-    /// <paramref name="fallback"/>.</summary>
+    /// <summary>The helper's own sentence when it reads like one, otherwise fallback.</summary>
     public static string Plain(string? message, string fallback) =>
         LooksTechnical(message) ? fallback : message!.Trim();
 

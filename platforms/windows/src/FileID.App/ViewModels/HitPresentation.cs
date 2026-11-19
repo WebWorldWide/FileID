@@ -3,9 +3,6 @@ using FileID.IpcSchema;
 
 namespace FileID.ViewModels;
 
-/// <summary>Search result and Chat source wording (macOS MomentResultRow and
-/// ChatWorkbench sourceMeta): file name, time or page, and what kind of
-/// evidence matched.</summary>
 internal static class HitPresentation
 {
     private static readonly char[] Separators = { '/', '\\' };
@@ -46,7 +43,6 @@ internal static class HitPresentation
 
     public static bool IsSampled(CatalogHit hit) => hit.Kind == "sampledFrame";
 
-    /// <summary>"m:ss · Page n · Chapter" under a Search &amp; Moments result.</summary>
     public static string ResultMeta(CatalogHit hit)
     {
         var parts = TimeAndPage(hit);
@@ -54,7 +50,6 @@ internal static class HitPresentation
         return string.Join(" · ", parts);
     }
 
-    /// <summary>"m:ss · Page n", plus a warning for unchecked video frames, under a Chat source.</summary>
     public static string SourceMeta(CatalogHit hit)
     {
         var parts = TimeAndPage(hit);

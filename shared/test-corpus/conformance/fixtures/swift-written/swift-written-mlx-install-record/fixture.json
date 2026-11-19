@@ -1,0 +1,30 @@
+{
+ "mtimes": {
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.cache/huggingface/download/config.json.metadata": [
+   1795033074,
+   658512757
+  ],
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed": [
+   1795033075,
+   69006615
+  ],
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": [
+   1795033073,
+   474275996
+  ],
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2": [
+   1795033074,
+   595084242
+  ],
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json": [
+   1795033073,
+   464570575
+  ],
+  "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights/model.safetensors": [
+   1795033073,
+   465520580
+  ]
+ },
+ "removed": [],
+ "vars": {}
+}

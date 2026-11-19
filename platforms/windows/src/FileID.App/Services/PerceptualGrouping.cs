@@ -1,8 +1,4 @@
 ﻿// Perceptual near-duplicate grouping — pure + testable.
-// The engine stores a 64-bit difference-hash (dHash) per image in `files.phash`
-// (the Int64 bit-pattern of a UInt64). Two images are "visually similar" when the
-// Hamming distance of their dHashes is small; union-find clusters any transitive
-// chain of within-threshold pairs into one group.
 
 using System;
 using System.Collections.Generic;

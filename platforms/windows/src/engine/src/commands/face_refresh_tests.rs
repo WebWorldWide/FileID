@@ -77,8 +77,6 @@ struct Library {
     _dir: TempDir,
 }
 
-/// Faces 1–2 in a present photo (2 fails), 3 in a photo deleted from a present
-/// location, 4 on an unplugged location, 5 already current.
 fn library() -> Library {
     let dir = tempdir();
     let root = dir.path().join("library");
@@ -197,7 +195,7 @@ fn an_interrupted_job_comes_back_paused() {
     recover(conn).unwrap();
     let job: (String, String) = conn.query_row("SELECT state, error FROM catalog_jobs WHERE id=?1", [JOB_ID], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(job, ("paused".into(), INTERRUPTED.into()));
-    assert!(is_job(conn, JOB_ID).unwrap());
+    assert!(crate::commands::catalog::is_job_of_kind(conn, JOB_ID, JOB_KIND).unwrap());
 }
 
 #[test]

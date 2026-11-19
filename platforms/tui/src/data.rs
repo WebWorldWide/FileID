@@ -1,13 +1,4 @@
-//! DB read layer + a background loader that streams progress events.
-//!
-//! Every read goes through `fileid_engine::db::open_read`, the same read
-//! surface the CLI uses (`platforms/cli/src/*.rs`), so there is no contract
-//! drift: same schema, same column names, same FileKind / restructure logic.
-//!
-//! The loader runs on a worker thread and pushes [`LoadMsg`] values back to the
-//! UI thread over an `mpsc` channel. The status/progress line is driven off
-//! that stream — the architecture an engine-spawn-IPC event feed would slot
-//! into unchanged (see README "Stubbed").
+//! DB read layer and background loader. Reads go through `fileid_engine::db::open_read`, the same surface the CLI uses, so schema and classification cannot drift. The loader streams [`LoadMsg`] values to the UI thread over an `mpsc` channel.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -106,7 +97,6 @@ pub struct Snapshot {
     pub total_analyses: i64,
 }
 
-/// Messages streamed from the loader thread to the UI thread.
 pub enum LoadMsg {
     Versioned {
         generation: u64,

@@ -1,9 +1,6 @@
 import FileIDShared
 
-/// Decides whether a bulk-action reply answers one waiter. A reply carrying
-/// the id of the command it answers goes only to the waiter that sent that
-/// command; a reply without an id (an older engine), or a waiter that never
-/// learned its command's id, falls back to the action-name prefix.
+/// Matches a reply to its waiter by command id, falling back to the action-name prefix for older engines.
 struct BulkResultMatcher: Sendable {
     let actionPrefix: String
     let sentID: String?

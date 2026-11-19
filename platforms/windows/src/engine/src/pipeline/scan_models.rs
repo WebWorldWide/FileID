@@ -1,7 +1,4 @@
-//! The scan's model stack, loaded when a scan first has a file to analyse and
-//! kept between scans. A scan that finds nothing new loads nothing; a second
-//! scan shortly after the first reuses the loaded stack; an idle stack is
-//! freed after `PARK_AFTER`, or at once when another model needs the memory.
+//! The scan's model stack: loaded on first use, kept for the next scan, freed after `PARK_AFTER` or when another model needs the memory.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -15,8 +12,6 @@ use parking_lot::Mutex;
 use crate::models::idle::IdleSlot;
 use crate::pipeline::tagging::ModelStack;
 
-/// How long a finished scan's models stay loaded for the next scan. Matches
-/// the resident Deep Analyze model's idle period.
 pub const PARK_AFTER: Duration = Duration::from_secs(120);
 
 /// Counts the live holders of the models the Mac adapter keeps for the whole
@@ -26,10 +21,8 @@ pub struct AdapterModels {
     holders: Mutex<usize>,
 }
 
-/// The Mac adapter's scan models: held by every live scan stack and timeline pass.
 pub static ADAPTER_MODELS: AdapterModels = AdapterModels::new();
 
-/// One holder's claim on the adapter models; the last drop unloads them.
 #[must_use]
 pub struct AdapterHold {
     owner: &'static AdapterModels,
@@ -41,8 +34,6 @@ impl AdapterModels {
         Self { holders: Mutex::new(0) }
     }
 
-    /// Run `load` under the lock. When `held` says it left a model loaded, the
-    /// caller becomes a holder and `unload` runs once the last holder drops.
     pub fn hold<R>(&'static self, load: impl FnOnce() -> R, held: impl FnOnce(&R) -> bool, unload: fn()) -> (R, Option<AdapterHold>) {
         let mut holders = self.holders.lock();
         let loaded = load();
@@ -80,8 +71,6 @@ impl std::fmt::Debug for AdapterHold {
     }
 }
 
-/// Why the scan's models could not be loaded; carried out of the scan as its
-/// error so the caller can report it under the right kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelLoadFailure {
     pub kind: &'static str,
@@ -105,7 +94,6 @@ impl std::error::Error for ModelLoadFailure {}
 pub type LoadFuture = Pin<Box<dyn Future<Output = Result<Arc<ModelStack>, ModelLoadFailure>> + Send>>;
 type Loader = Box<dyn FnOnce() -> LoadFuture + Send>;
 
-/// The models of one scan: resolved at most once, on first use.
 pub struct ModelSource {
     cell: tokio::sync::OnceCell<Option<Arc<ModelStack>>>,
     loader: Mutex<Option<Loader>>,
@@ -129,8 +117,6 @@ impl ModelSource {
         })
     }
 
-    /// The stack, loading it on the first call. `None` when loading failed;
-    /// `failure()` then says why.
     pub async fn get(&self) -> Option<Arc<ModelStack>> {
         self.cell
             .get_or_init(|| async {
@@ -154,7 +140,6 @@ impl ModelSource {
             .clone()
     }
 
-    /// The stack if this scan has loaded it.
     pub fn loaded(&self) -> Option<Arc<ModelStack>> {
         self.cell.get().cloned().flatten()
     }
@@ -212,25 +197,18 @@ impl StackKey {
 static RESIDENT: IdleSlot<(StackKey, Arc<ModelStack>)> = IdleSlot::new("scan models", PARK_AFTER);
 static EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
-/// The stack a previous scan left loaded, if it still fits `key`. A stack that
-/// no longer fits is freed here, before its replacement is loaded.
 pub fn resident(key: &StackKey) -> Option<Arc<ModelStack>> {
     resident_in(&RESIDENT, key)
 }
 
-/// Keep `stack` loaded for the next scan and restart its idle period.
 pub fn keep(key: StackKey, stack: Arc<ModelStack>) {
     RESIDENT.put((key, stack));
 }
 
-/// Counts `release_for_other_models` calls; a scan that saw one while it ran
-/// does not put its stack back.
 pub fn evictions() -> u64 {
     EVICTIONS.load(Ordering::Acquire)
 }
 
-/// Free the idle scan models now: another model (Deep Analyze, Chat) is about
-/// to load and needs the memory more.
 pub fn release_for_other_models() -> bool {
     EVICTIONS.fetch_add(1, Ordering::AcqRel);
     let freed = RESIDENT.clear();
@@ -289,7 +267,6 @@ mod tests {
         assert!(!SLOT.is_loaded(), "the stale stack is freed before its replacement loads");
         drop(stack);
 
-        // Idle parking frees the stack; the next scan loads again.
         SLOT.put((cpu.clone(), Arc::new(ModelStack::empty())));
         let later = std::time::Instant::now() + Duration::from_secs(61);
         assert!(crate::models::idle::Park::park_idle(&SLOT, later));

@@ -56,47 +56,39 @@
     ]
   },
   {
-    "name": "cross-tools-swift-previews-chapters-rust-executes",
-    "description": "A chapter-marker export (VTT) previewed by swift is executed by rust and undone by swift, with the same outputs, names and states in both engines; the video is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
+    "name": "swift-written-tools-chapters-preview",
+    "description": "A chapter-marker export (VTT) previewed by the Swift engine, its operation record in the catalog it wrote, is executed and undone by this engine; the video is never modified.",
+    "fixture": "swift-written-tools-chapters-preview",
+    "os": ["darwin"],
     "tree": [
-      {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
-      {"path": "out/keep.txt", "content": "keep\n"}
+        {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
+        {"path": "out/keep.txt", "content": "keep\n"}
     ],
     "steps": [
-      {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
-      {"label": "swift previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "vtt", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.vtt}", "sourcePath": "{path:Clip.mov}"}]}},
-      {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.vtt"]}},
-      {"restart": "rust"},
-      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.vtt}"}]}},
-      {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
-      {"restart": "swift"},
-      {"label": "swift undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.vtt}"}]}},
+        {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
+        {"restart": true},
+        {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
     ]
   },
   {
-    "name": "cross-tools-rust-previews-chapters-swift-executes",
-    "description": "A chapter-marker export (JSON) previewed by rust is executed by swift and undone by rust, with the same outputs, names and states in both engines; the video is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["rust"],
-    "start": "rust",
+    "name": "tools-chapters-json-preview-execute-undo-across-restarts",
+    "description": "A chapter-marker export (JSON) previewed, executed and undone across engine restarts, with the same outputs, names and states; the video is never modified.",
     "tree": [
-      {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
-      {"path": "out/keep.txt", "content": "keep\n"}
+        {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
+        {"path": "out/keep.txt", "content": "keep\n"}
     ],
     "steps": [
-      {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
-      {"label": "rust previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "json", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.json}", "sourcePath": "{path:Clip.mov}"}]}},
-      {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.json"]}},
-      {"restart": "swift"},
-      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.json}"}]}},
-      {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
-      {"restart": "rust"},
-      {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
+        {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
+        {"label": "rust previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "json", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.json}", "sourcePath": "{path:Clip.mov}"}]}},
+        {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.json"]}},
+        {"restart": true},
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.json}"}]}},
+        {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
+        {"restart": true},
+        {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
     ]
   }
 ]

@@ -1,11 +1,5 @@
-// Subprocess wrapper around llama.cpp's `llama-mtmd-cli.exe` for VLM
-// inference (Deep Analyze).
-//
-// A subprocess keeps the engine free of a linked llama.cpp build (cmake,
-// ~150 MB of artifacts) and lets it ship the upstream release binaries.
-//
-// Hardening: explicit canonical runtime or app-owned bundles, never PATH.
-// Binary is host/header/size-checked before an admitted owned version probe.
+// Subprocess wrapper around llama.cpp's `llama-mtmd-cli.exe` for Deep Analyze VLM inference: keeps the engine free of a linked llama.cpp build and ships the upstream release binaries.
+// Hardening: explicit canonical runtime or app-owned bundles, never PATH. The binary is host/header/size-checked before an admitted owned version probe.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,26 +10,16 @@ use tokio::process::Command;
 #[path = "vlm_cli_output.rs"]
 mod cli_output;
 
-/// Default caption prompt.
 pub const CAPTION_PROMPT: &str = "Describe this image in one specific, factual sentence: name the main subjects (people by count, notable objects, the place, the activity) and transcribe any visible text verbatim. Be concrete and definite — no hedging like \"appears to be\" or \"likely\", no generic filler, no preamble.";
 
-/// Default rename prompt — produces a short, kebab-cased filename
-/// suitable for `sanitize_proposed_name`.
 pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), using separate words joined by hyphens. Never concatenate words. No quotes or extension. For a form, receipt, or repeated document type, include a visible name or reference that distinguishes this file from similar copies. Only include a date when it is visibly legible in the image or document; never infer or invent a year.";
 
 pub const RENAME_RETRY_PROMPT: &str = "Return only a filename stem made of exactly 3 to 5 separate lowercase words joined by hyphens. Use only visible subjects, text, setting, or actions. Do not concatenate words, add quotes, an extension, a date unless visibly legible, or any explanation. Example: boy-getting-face-paint";
 
-/// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
-/// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
-/// into individual `source='vlm'` tags shown as Library chips. A real
-/// vision-language model names what's actually in the image; the prompt is
-/// deliberately strict (concrete nouns, no meta words) because smaller VLMs
-/// otherwise drift toward vague labels like "photo" / "object".
+/// Tagging prompt: 1–2 concrete content tags, parsed by `deep_analyze::parse_vlm_tags`. Deliberately strict because smaller VLMs drift toward vague labels like "photo".
 pub const TAG_PROMPT: &str = "Give 1 or 2 specific lowercase tags naming the main subject of this image (for example: golden retriever, mountain lake, birthday cake, sushi platter). Use concrete nouns. Do not use generic words like photo, image, picture, object, thing, scene, background, location, or text. Comma-separated, no sentences, no numbering.";
 
-/// Caption prompt with the named people in the image injected so the VLM refers
-/// to them by name. Plain prompt when no one is named. Mirrors the macOS
-/// `nameContext` injection. (item 3)
+/// Names the people in the image so the VLM refers to them by name; plain prompt when no one is named.
 pub fn caption_prompt_with_faces(face_names: &[String]) -> String {
     if face_names.is_empty() {
         CAPTION_PROMPT.to_string()
@@ -48,9 +32,7 @@ pub fn caption_prompt_with_faces(face_names: &[String]) -> String {
     }
 }
 
-/// Rename prompt with the named people injected. A deterministic prefix is also
-/// applied after generation (`apply_person_prefix`), so the names land even when
-/// the model ignores this hint. (item 3)
+/// Also applied after generation (`apply_person_prefix`), so names land even when the model ignores this hint.
 pub fn rename_prompt_with_faces(face_names: &[String]) -> String {
     if face_names.is_empty() {
         RENAME_PROMPT.to_string()
@@ -103,14 +85,7 @@ impl VlmRunner {
     }
 }
 
-/// Resolve the (gguf, mmproj) pair for a given model_kind. Returns None
-/// if either file is missing — the caller surfaces "model not installed"
-/// without crashing.
-///
-/// Resolution goes through the registry: the wire kind is snake_case
-/// ("mistral_small_3_2") but the installer writes the registry's dotted
-/// dir ("vlm/mistral-small-3.2"), so a naive join(model_kind) never found
-/// installed weights and Deep Analyze reported every model missing.
+/// Resolves the (gguf, mmproj) pair through the registry: the wire kind is snake_case but the installer writes the registry's dotted dir, so a plain join(model_kind) misses installed weights. None if either file is missing.
 pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
     if let crate::models::registry::LookupResult::Found(model) =
         crate::models::registry::lookup_full(model_kind)
@@ -144,10 +119,7 @@ fn find_weights_at(root: &std::path::Path, model_kind: &str) -> Option<(PathBuf,
     }
 }
 
-/// Caption an image. Streams stdout line-by-line, calling `on_token`
-/// per chunk and accumulating the final text. Honors cancellation via
-/// the shared `AtomicBool` — flips kill the child process within
-/// 50-100 ms.
+/// Honors cancellation via the shared `AtomicBool`; the child is killed within 50-100 ms.
 pub async fn caption(
     runner: &VlmRunner,
     req: &CaptionRequest,
@@ -169,16 +141,8 @@ pub async fn caption(
     if req.greedy {
         cmd.arg("--temp").arg("0");
     }
-    // Never pass `--no-display-prompt`: llama-mtmd-cli rejects that llama-cli
-    // flag with `invalid argument`, and mtmd-cli never echoes the prompt.
-    // Offload all layers to the GPU, mirroring the persistent server
-    // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
-    // this the per-file CLI path ran the entire VLM decode + vision
-    // projector on the CPU — many-fold slower. Quality-neutral (same
-    // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
-    // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
-    // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
-    // recovery), evacuating the GPU for the per-file CLI path too.
+    // Never pass `--no-display-prompt`: llama-mtmd-cli rejects that llama-cli flag.
+    // Offload all layers to the GPU: modern llama.cpp defaults to 0, which ran the whole VLM decode on the CPU many-fold slower. llama.cpp spills to CPU when VRAM is short. 0 layers when the user pinned the EP to CPU (GPU-TDR recovery).
     let forced_cpu = crate::models::runtime::user_forced_cpu();
     cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
     // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
@@ -200,18 +164,8 @@ pub async fn caption(
     Ok(CaptionResult { text })
 }
 
-// ── Discrete-GPU selection for the llama.cpp runner ────────────────────
-//
-// On hybrid iGPU+dGPU systems the Vulkan backend can default to the integrated
-// GPU. We probe the runner once with `--list-devices`, and when a clearly
-// dominant (≥2 GiB more VRAM) discrete device exists we pass `--device VulkanN`
-// so Deep Analyze runs on the dGPU.
-//
-// Unsupported clean probes select no flag; admission, cap, timeout and cleanup
-// failures terminate startup. CUDA builds list "CUDAn" (not "Vulkann") device
-// lines, so this is a no-op there — and on a single-GPU box there's nothing to
-// pin. Because the probe uses the SAME binary that runs inference, a parseable
-// device list also proves the build supports `--device`.
+// ── Discrete-GPU selection ── on hybrid iGPU+dGPU systems the Vulkan backend can default to the iGPU, so the runner is probed once with `--list-devices` and `--device VulkanN` is passed when a device has ≥2 GiB more VRAM.
+// Unsupported clean probes select no flag; admission, cap, timeout and cleanup failures terminate startup. CUDA builds list "CUDAn" lines, so this is a no-op there. The probe uses the same binary that runs inference, so a parseable list also proves `--device` support.
 
 /// Best-effort discrete-GPU device name (e.g. `"Vulkan0"`) for `--device`,
 /// cached per binary. Returns None when it can't confidently pick one.
@@ -257,7 +211,6 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
         if !is_vulkan {
             continue;
         }
-        // First "<digits> MiB" token-pair on the line is the device VRAM.
         let toks: Vec<&str> = l.split_whitespace().collect();
         let vram = toks.windows(2).find_map(|w| {
             if w[1].starts_with("MiB") {
@@ -327,9 +280,7 @@ mod tests {
         assert_eq!(parse_best_vulkan_device(out), None);
     }
 
-    /// The wire kind is snake_case but the installer writes the registry's
-    /// dotted dir — a naive join(model_kind) reported every installed VLM as
-    /// missing (Deep Analyze "model isn't installed" on a complete install).
+    /// Regression: the snake_case wire kind vs the registry's dotted dir made a complete install look missing.
     #[test]
     fn installed_weights_resolve_from_wire_model_kind() {
         static NEXT: AtomicU64 = AtomicU64::new(0);

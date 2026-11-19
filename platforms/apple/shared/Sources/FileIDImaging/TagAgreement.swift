@@ -1,12 +1,8 @@
 import Foundation
 
-/// Combines RAM++ tags with the Apple Vision classifier the primary pass
-/// already ran. Measured on 100 hand-checked photos from the owner's library
-/// (2026-10-21): RAM++ called baseball dugouts "canoe" and cornhole boards
-/// "skateboard"/"frisbee" at 0.89–0.98, while Vision, which has the same
-/// labels, gave them under 0.01. Vetoing only those labels took tag precision
-/// from 0.929 to 0.948 with no correct tag lost. A broad veto over every shared
-/// label was rejected: it also dropped correct "park", "tree" and "baseball".
+/// Combines RAM++ tags with the Apple Vision classifier from the primary pass. RAM++ calls baseball dugouts "canoe" and cornhole boards
+/// "skateboard"/"frisbee" at 0.89–0.98 while Vision gives them under 0.01. Vetoing only those labels raised tag precision from 0.929 to 0.948
+/// with no correct tag lost. A broad veto over every shared label was rejected: it also dropped correct "park", "tree" and "baseball".
 package enum TagAgreement {
     package static let vetoable: Set<String> = ["canoe", "skateboard", "frisbee"]
     package static let vetoBelow: Float = 0.01

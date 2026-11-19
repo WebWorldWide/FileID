@@ -30,8 +30,6 @@ impl ResidentService {
     pub(crate) fn new(scheduler:Arc<ResourceScheduler>,idle:Duration,cpu:impl Fn()->bool+Send+Sync+'static)->Arc<Self> {
         Arc::new(Self{state:Arc::new(tokio::sync::Mutex::new(State{entry:None,last_used:Instant::now(),failure:None})),closed:AtomicBool::new(false),stopped:tokio::sync::Notify::new(),idle,scheduler,cpu:Box::new(cpu),waiters:AtomicUsize::new(0)})
     }
-    /// Another job (a Chat answer) is queued for the model, so a long batch
-    /// should hand its lease over between files.
     pub(crate) fn has_waiters(&self)->bool {self.waiters.load(Ordering::Acquire)>0}
     pub(crate) async fn acquire(self:&Arc<Self>,kind:&str,cancel:Arc<AtomicBool>)->Result<ResidentLease> {
         let root=crate::paths::models_dir()?;let proof_cancel=cancel.clone();let key_cancel=cancel.clone();let load_cancel=cancel.clone();

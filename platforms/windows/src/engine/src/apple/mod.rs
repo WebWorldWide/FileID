@@ -1,9 +1,6 @@
-//! Apple adapters for the engine the macOS app hosts (`Contents/MacOS/fileidd`),
-//! compiled only with `--features apple-adapters` on macOS. Apple-framework
-//! mechanics (IOPM, security-scoped bookmarks, later Vision, ImageIO,
-//! AVFoundation and MLX) run in the Swift FileIDAppleKit library behind the
-//! C interface in `ffi.rs`; this module wraps it in safe types. Catalog
-//! writes, job policy and ranking stay in Rust.
+//! Apple adapters for the engine the macOS app hosts (`Contents/MacOS/fileidd`), compiled only with `--features
+//! apple-adapters`. Apple-framework mechanics run in the Swift FileIDAppleKit library behind the C interface in
+//! `ffi.rs`; catalog writes, job policy and ranking stay in Rust.
 
 pub mod faces;
 mod ffi;
@@ -15,20 +12,16 @@ use std::ffi::{CStr, CString, OsString, c_char};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-/// Interface version this engine was built against.
 pub const ABI_VERSION: u32 = 2;
 
-/// Exit status when the bundled FileIDAppleKit implements another interface.
 const EXIT_ABI_MISMATCH: i32 = 78;
 
-/// Interface version of the loaded FileIDAppleKit.
 pub fn adapter_abi_version() -> u32 {
     // SAFETY: no arguments; the library is linked at load time.
     unsafe { ffi::fileid_apple_abi_version() }
 }
 
-/// Run as the Mac app's engine: events on fd 2 (the app reads the engine's
-/// stderr), state in the Swift engine's folder, then a hard exit.
+/// Events on fd 2 (the app reads the engine's stderr), state in the Swift engine's folder, then a hard exit.
 pub fn run_hosted() -> ! {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if media::is_worker(&args) {
@@ -61,9 +54,8 @@ pub fn run_hosted() -> ! {
     hard_exit(code)
 }
 
-/// Release adapter state and leave without running atexit handlers or static
-/// destructors, as the Swift engine does: MLX's destructors crash during normal
-/// teardown. The catalog is already checkpointed and closed by `server::run`.
+/// Skips atexit handlers and static destructors, as the Swift engine does: MLX's destructors crash during normal
+/// teardown. The catalog is already checkpointed by `server::run`.
 pub fn hard_exit(code: i32) -> ! {
     // SAFETY: no arguments; idempotent in the adapter.
     unsafe { ffi::fileid_apple_shutdown() };
@@ -72,13 +64,12 @@ pub fn hard_exit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// An IOPM PreventSystemSleep assertion (the display may still sleep), held
-/// until dropped. Lid-closed runs on Apple silicon still need AC power.
+/// An IOPM PreventSystemSleep assertion (the display may still sleep). Lid-closed runs on Apple silicon still need AC
+/// power.
 #[derive(Debug)]
 pub struct SleepAssertion(u32);
 
 impl SleepAssertion {
-    /// `None` when the assertion could not be taken (best effort, like the Swift engine).
     pub fn begin(reason: &str) -> Option<Self> {
         let reason = CString::new(reason.replace('\0', " ")).ok()?;
         // SAFETY: `reason` is a valid NUL-terminated string for the call.
@@ -94,8 +85,6 @@ impl Drop for SleepAssertion {
     }
 }
 
-/// Access to a folder the user granted through a security-scoped bookmark,
-/// held until dropped.
 #[derive(Debug)]
 pub struct BookmarkLease {
     id: u64,
@@ -104,7 +93,6 @@ pub struct BookmarkLease {
 }
 
 impl BookmarkLease {
-    /// Resolve `bookmark` and start accessing it; `None` when it no longer resolves.
     pub fn open(bookmark: &[u8]) -> Option<Self> {
         let mut path: *mut c_char = std::ptr::null_mut();
         let mut stale = false;
@@ -132,7 +120,6 @@ impl BookmarkLease {
         &self.path
     }
 
-    /// The bookmark resolved but should be recreated by the app.
     pub fn is_stale(&self) -> bool {
         self.stale
     }
@@ -145,7 +132,6 @@ impl Drop for BookmarkLease {
     }
 }
 
-/// Takes ownership of an adapter-allocated string.
 fn take_string(pointer: *mut c_char) -> Option<Vec<u8>> {
     (!pointer.is_null()).then(|| {
         // SAFETY: the adapter returned a NUL-terminated string it allocated for us.
@@ -166,9 +152,7 @@ fn adapter_error(error: *mut c_char, fallback: &str) -> anyhow::Error {
     anyhow::anyhow!(message.unwrap_or_else(|| fallback.to_owned()))
 }
 
-/// Moves `path` to the user's Trash with FileManager.trashItem; returns where
-/// it landed when Foundation says. Callers check identity before and after
-/// (`shell::macos::trash`).
+/// Callers check identity before and after (`shell::macos::trash`).
 pub fn trash_item(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     let path = c_path(path)?;
     let mut landed: *mut c_char = std::ptr::null_mut();
@@ -183,7 +167,6 @@ pub fn trash_item(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     Ok(landed)
 }
 
-/// The item's Finder tags (`URLResourceKey.tagNamesKey`).
 pub fn finder_tags(path: &Path) -> anyhow::Result<Vec<String>> {
     let path = c_path(path)?;
     let mut error: *mut c_char = std::ptr::null_mut();
@@ -196,7 +179,6 @@ pub fn finder_tags(path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(serde_json::from_slice(&json)?)
 }
 
-/// Replaces the item's Finder tags with `tags` (empty clears them).
 pub fn set_finder_tags(path: &Path, tags: &[String]) -> anyhow::Result<()> {
     let path = c_path(path)?;
     let owned = tags
@@ -234,8 +216,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // Trash only through the refusal path: a missing file never reaches the
-    // user's Trash, and the adapter reports why.
+    // Trash only through the refusal path: a missing file never reaches the user's Trash.
     #[test]
     fn trash_of_a_missing_file_reports_the_error() {
         let missing = std::env::temp_dir().join(format!("fileid-apple-missing-{}", uuid::Uuid::new_v4()));

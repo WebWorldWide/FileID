@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Data-driven engine conformance suite.
 
-Runs the JSON cases in shared/test-corpus/conformance/ against one native engine
-binary (the macOS Swift FileIDEngine or the shared Rust fileid-engine). Each case
-builds a disposable state directory, an optional generated file tree and SQL
-fixture, sends IPC commands and checks events, database rows and files.
+Runs the JSON cases in shared/test-corpus/conformance/ against the shared Rust
+engine (fileid-engine, plain or as the Mac app hosts it). Each case builds a
+disposable state directory, an optional generated file tree and SQL fixture,
+sends IPC commands and checks events, database rows and files.
 
 Expected values are literal (exact) or a tolerance object:
   {"$tol": "exact", "value": V}   deep equality, including every object key
@@ -15,21 +15,21 @@ Expected values are literal (exact) or a tolerance object:
   {"$tol": "last", "value": V}    a non-empty list whose last element matches V
   {"$tol": "present"}             any non-null value
   {"$tol": "hamming", "value": N, "bits": B}  an integer hash within B differing bits (default 4)
-  {"$engine": {"swift": A, "rust": B}}  per-engine expectation; an optional
+  {"$engine": {"rust": A, "rustHosted": B}}  A applies to every build; an optional
       "rustHosted" applies to the Rust engine the Mac app hosts (the
-      apple-adapters build, events on stderr) instead of "rust"
+      apple-adapters build, events on stderr) instead
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
-macOS, how the Swift engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
+macOS, how the engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
 {size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {hardware} (the Mac's benchmark hardware string), {clip_model} (the CLIP
-embedding model id both engines derive from the model manifest) and {bookmark:rel} (a base64
+embedding model id the engine derives from the model manifest) and {bookmark:rel} (a base64
 bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
 
 A command step with "commandID" sends the command under that id instead of a random one,
-so a later "expect" can require an engine to echo it (bulkActionResult.commandID).
+so a later "expect" can require the engine to echo it (bulkActionResult.commandID).
 
 A catalog step with "until": seconds resends its request until "expect" matches or the
 time runs out, for durable jobs that finish after their reply.
@@ -39,12 +39,17 @@ also checks "symlinks", empties folders ("emptyDir") and writes tree entries ("t
 its checks.
 A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
 A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
-Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
-{"restart": "rust"} steps; they run only when --peer-engine supplies the other.
-A case with "appHosted": true runs only when every engine it uses (the one under
-test and any it "requires") is one the Mac app hosts, i.e. writes events on stderr:
-the Swift engine and the Rust engine built with the Apple adapters. Case "env"
-values expand {state} and {root}.
+A {"restart": true} step stops the engine and starts it again on the same state.
+A case with "appHosted": true runs only against the Rust engine the Mac app hosts
+(built with the Apple adapters; writes events on stderr). Case "env" values expand
+{state} and {root}.
+A case with "fixture": "<name>" starts from state the retired Swift engine wrote
+(fixtures/swift-written/<name>: state/, tree/ overlay and fixture.json with file
+times, removed files, saved step values and chat conversation), laid out in the fixed folder
+/private/tmp/fileid-conformance-fixture/<case name> it was captured in, so the paths
+inside the catalog stay true; the file identities the Swift run recorded are
+refreshed to the replayed files. Such cases are macOS-only ("os": ["darwin"]) and
+must not run alongside another conformance run.
 A case with "model": {"repo": "<org>/<name>"} needs that MLX model installed
 ($FILEID_CONFORMANCE_MODELS, else ~/Documents/huggingface, read only) and is skipped
 without it: a real model is too large to ship in the repo and no engine may download
@@ -55,14 +60,13 @@ A case may list knownDivergences ({"engine", "reason", optional "os" list and
 that engine; if it passes, the marker is stale and the run fails so the tracker
 stays honest.
 
---test-trash-root is for engines built with a test Trash root (the Rust
-`test-trash-root` cargo feature, the Swift FILEID_TEST_TRASH_ROOT compile
-condition; test builds only, never shipped): each case's engine moves trashed
-files into <state>/Trash instead of the user's Trash, divergences marked
-"liftedByTestTrashRoot" no longer apply, and cases marked "requiresTestTrashRoot"
-(true, or a list of OS names such as ["darwin"] where only that OS needs it) run;
-they are skipped otherwise, so no engine ever reaches the user's Trash. The Swift
-engine has the same root when built with -Xswiftc -DFILEID_TEST_TRASH_ROOT.
+--test-trash-root is for an engine built with a test Trash root (the Rust
+`test-trash-root` cargo feature; test builds only, never shipped): each case's
+engine moves trashed files into <state>/Trash instead of the user's Trash,
+divergences marked "liftedByTestTrashRoot" no longer apply, and cases marked
+"requiresTestTrashRoot" (true, or a list of OS names such as ["darwin"] where only
+that OS needs it) run; they are skipped otherwise, so no engine ever reaches the
+user's Trash.
 
 Cases marked "requiresSymlinks" are skipped when the runner's account cannot create
 symlinks (Windows without Developer Mode or the privilege).
@@ -117,7 +121,7 @@ def bookmark(path):
 
 
 def foundation_standardized(path):
-    """An output file as the Swift engine names it: its folder through
+    """An output file as the engine names it: its folder through
     `URL.standardizedFileURL`, which on macOS drops a leading /private when the rest
     exists (/private/var/… → /var/…), then the file name."""
     folder, name = os.path.split(path)
@@ -135,8 +139,7 @@ def clip_model():
 
 
 def mac_hardware():
-    """The hardware string the Mac engines file benchmarks under
-    (ModelBenchmarkRunner.hardwareFingerprint in the Swift engine)."""
+    """The hardware string the Mac engine files benchmarks under."""
     def sysctl(name):
         return subprocess.run(["sysctl", "-n", name], capture_output=True, text=True, check=True).stdout.strip()
     memory = round(int(sysctl("hw.memsize")) / 1073741824)
@@ -192,7 +195,7 @@ class Engine:
     """One engine process. Events are read from stdout and stderr because the
     macOS engine writes its event stream to stderr."""
 
-    def __init__(self, binary, directory, swift=None, env=None):
+    def __init__(self, binary, directory, env=None):
         environment = engine_env(directory)
         environment.update(env or {})
         self.process = subprocess.Popen(
@@ -213,19 +216,7 @@ class Engine:
             if isinstance(event, dict) and isinstance(event.get("payload"), dict):
                 if "ready" in event["payload"]:
                     self.stream["ready"] = name
-                    info = event["payload"]["ready"]
-                    info = info.get("_0", info) if isinstance(info, dict) else {}
-                    if isinstance(info, dict) and info.get("engine") in ("swift", "rust"):
-                        self.stream["engine"] = info["engine"]
                 self.events.put(event["payload"])
-
-    @property
-    def flavor(self):
-        """The engine named in ready (IPC 1.26), else the stream it used: the
-        Swift engine and the Rust engine the Mac app hosts both write stderr."""
-        if "engine" in self.stream:
-            return self.stream["engine"]
-        return "swift" if self.stream.get("ready") == "stderr" else "rust"
 
     def next_event(self, deadline):
         while time.monotonic() < deadline:
@@ -673,12 +664,12 @@ def await_event(engine, ctx, step, timeout, seen):
                 continue
 
 
-def run_step(engine, ctx, step, binaries):
+def run_step(engine, ctx, step, binary):
     seen = []
     timeout = step.get("timeout", TIMEOUT)
     if "restart" in step:
         engine.close()
-        return start(binaries, step["restart"] if isinstance(step["restart"], str) else ctx.flavor, ctx)
+        return start(binary, ctx)
     if "command" in step:
         engine.send(ctx.expand(step["command"]), ctx.expand(step.get("commandID")))
         actual = await_event(engine, ctx, step, timeout, seen) if "await" in step else None
@@ -764,9 +755,8 @@ def run_step(engine, ctx, step, binaries):
     return engine
 
 
-def start(binaries, flavor, ctx):
-    ctx.flavor = flavor
-    engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case, ctx.extra_env))
+def start(binary, ctx):
+    engine = Engine(binary, ctx.state, env=case_env(ctx.state, ctx.case, ctx.extra_env))
     ready = engine.wait("ready")
     ctx.pid = ready.get("pid")
     ctx.hosted = engine.stream.get("ready") == "stderr"
@@ -817,26 +807,70 @@ def stage_model(ctx, source):
     ctx.extra_env["FILEID_HF_CACHE_ROOT"] = str(ctx.state.parent / "hf")
 
 
-def run_case(case, flavor, binaries, os_name, parent):
-    with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
-        ctx = Context(case, flavor, os_name, Path(temporary))
+FIXTURE_FOLDER = Path("/private/tmp/fileid-conformance-fixture")
+FIXTURES = CASES / "fixtures/swift-written"
+
+
+def lay_out_fixture(ctx):
+    """State the Swift engine wrote, at the paths it was captured under: the case's
+    generated tree (no catalog rows: the fixture's catalog has them), then the files
+    the Swift run added or changed, the ones it removed, every file's modification
+    time, the chat conversation id, and the file identities of the replayed files (inodes cannot be committed)."""
+    source = FIXTURES / ctx.case["fixture"]
+    manifest = json.loads((source / "fixture.json").read_text(encoding="utf-8"))
+    build_tree(ctx, ctx.case.get("tree", []))
+    if (source / "tree").is_dir():
+        shutil.copytree(source / "tree", ctx.root, dirs_exist_ok=True)
+    for relative in manifest["removed"]:
+        (ctx.root / relative).unlink()
+    for relative, (seconds, nanoseconds) in manifest["mtimes"].items():
+        os.utime(ctx.root / relative, ns=(seconds * 1_000_000_000 + nanoseconds,) * 2)
+    shutil.copytree(source / "state", ctx.state, dirs_exist_ok=True)
+    ctx.saved.update(manifest["vars"])
+    ctx.conversation = manifest.get("conversation", ctx.conversation)
+    with connect(ctx.database) as database:
+        for row_id, path in database.execute("SELECT id, path_text FROM files").fetchall():
+            if os.path.exists(path):
+                database.execute("UPDATE files SET file_ref = ? WHERE id = ?", (os.stat(path).st_ino, row_id))
+
+
+@contextlib.contextmanager
+def case_directory(case, parent):
+    if "fixture" not in case:
+        with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
+            yield Path(temporary)
+        return
+    directory = FIXTURE_FOLDER / case["name"]
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def run_case(case, flavor, binary, os_name, parent):
+    with case_directory(case, parent) as directory:
+        ctx = Context(case, flavor, os_name, directory)
         if case.get("model"):
             stage_model(ctx, model_source(case))
-        first = case.get("start", flavor)
-        start(binaries, first, ctx).close()
-        rows = build_tree(ctx, case.get("tree", []))
-        if rows:
-            insert_rows(ctx, rows)
-        if case.get("sql"):
-            with connect(ctx.database) as database:
-                for statement in case["sql"]:
-                    database.execute(ctx.expand(statement))
-        engine = start(binaries, first, ctx)
+        if "fixture" in case:
+            lay_out_fixture(ctx)
+        else:
+            start(binary, ctx).close()
+            rows = build_tree(ctx, case.get("tree", []))
+            if rows:
+                insert_rows(ctx, rows)
+            if case.get("sql"):
+                with connect(ctx.database) as database:
+                    for statement in case["sql"]:
+                        database.execute(ctx.expand(statement))
+        engine = start(binary, ctx)
         try:
             for index, step in enumerate(case["steps"]):
                 label = step.get("label", f"step {index + 1}")
                 try:
-                    engine = run_step(engine, ctx, step, binaries)
+                    engine = run_step(engine, ctx, step, binary)
                 except (Failure, TimeoutError, RuntimeError) as error:
                     raise Failure(f"{label}: {error}") from None
         finally:
@@ -859,14 +893,14 @@ def load_cases(selected):
             if not selected or any(fnmatch.fnmatch(case["name"], pattern) for pattern in selected)]
 
 
-def detect_engine(binary, parent):
-    """The engine's flavour and whether it writes events on stderr (the Swift
-    engine and the Rust engine the Mac app hosts)."""
+def is_app_hosted(binary, parent):
+    """Whether the engine writes its events on stderr, as the Rust engine the Mac app
+    hosts does."""
     with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
         engine = Engine(binary, temporary)
         try:
             engine.wait("ready")
-            return engine.flavor, engine.stream.get("ready") == "stderr"
+            return engine.stream.get("ready") == "stderr"
         finally:
             engine.close()
 
@@ -882,45 +916,34 @@ def safe_parent(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine", type=Path, required=True, help="engine binary under test")
-    parser.add_argument("--peer-engine", type=Path, help="the other engine, for cross-engine cases")
-    parser.add_argument("--flavor", choices=("auto", "swift", "rust"), default="auto")
+    parser.add_argument("--flavor", choices=("auto", "rust"), default="auto")
     parser.add_argument("--case", action="append", default=[], help="glob of case names to run")
     parser.add_argument("--os", default=host_os(), help=argparse.SUPPRESS)
     parser.add_argument("--fixture-parent", type=Path, default=Path(tempfile.gettempdir()))
     parser.add_argument("--test-trash-root", action="store_true",
-                        help="the engines were built with a test Trash root (see above)")
+                        help="the engine was built with a test Trash root (see above)")
     args = parser.parse_args()
     global TEST_TRASH_ROOT
     TEST_TRASH_ROOT = args.test_trash_root
     parent = safe_parent(args.fixture_parent)
     binary = args.engine.resolve(strict=True)
-    detected, hosted_engine = detect_engine(binary, parent)
-    flavor = detected if args.flavor == "auto" else args.flavor
-    binaries = {flavor: binary}
-    hosted = {flavor: hosted_engine}
-    if args.peer_engine:
-        peer = args.peer_engine.resolve(strict=True)
-        peer_flavor, peer_hosted = detect_engine(peer, parent)
-        binaries[peer_flavor] = peer
-        hosted[peer_flavor] = peer_hosted
+    flavor = "rust"
+    hosted_engine = is_app_hosted(binary, parent)
     counts = {"pass": 0, "fail": 0, "known": 0, "stale": 0, "skip": 0}
     symlinks_ok = can_symlink(parent)
     print(f"conformance: {flavor} engine {binary} on {args.os}")
     for case in load_cases(args.case):
         name = case["name"]
-        missing = set(case.get("requires", [])) - set(binaries)
         trash_root = case.get("requiresTestTrashRoot")
         needs_trash_root = not TEST_TRASH_ROOT and (args.os in trash_root if isinstance(trash_root, list) else bool(trash_root))
         needs_symlinks = bool(case.get("requiresSymlinks")) and not symlinks_ok
         no_model = case.get("model") and model_source(case) is None
-        unhosted = case.get("appHosted") and not all(hosted.get(engine) for engine in {flavor, *case.get("requires", [])})
-        if flavor not in case.get("engines", ["swift", "rust"]) or missing or needs_trash_root or unhosted or needs_symlinks or no_model \
-                or args.os not in case.get("os", [args.os]):
+        unhosted = case.get("appHosted") and not hosted_engine
+        if needs_trash_root or unhosted or needs_symlinks or no_model or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
-            reason = (f"needs {', '.join(sorted(missing))} engine" if missing
-                      else "needs test-trash-root engine builds (--test-trash-root)" if needs_trash_root
+            reason = ("needs a test-trash-root engine build (--test-trash-root)" if needs_trash_root
                       else "needs a runner account that may create symlinks" if needs_symlinks
-                      else "needs engines the Mac app hosts" if unhosted
+                      else "needs the engine the Mac app hosts" if unhosted
                       else f"model {case['model']['repo']} is not installed" if no_model
                       else "not applicable here")
             print(f"SKIP   {name} ({reason})")
@@ -931,7 +954,7 @@ def main():
             print(f"KNOWN  {name} [{flavor}] not run: {divergence['reason']}")
             continue
         try:
-            run_case(case, flavor, binaries, args.os, parent)
+            run_case(case, flavor, binary, args.os, parent)
             error = None
         except Failure as failure:
             error = str(failure)

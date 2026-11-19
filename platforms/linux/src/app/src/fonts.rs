@@ -1,8 +1,5 @@
-// Bundled brand fonts (Archivo, Instrument Serif; SIL OFL, the same files
-// macOS ships in Resources/Fonts). Registered before GTK starts by pointing
-// fontconfig at a generated config that includes the system one and adds the
-// bundled directory, so no new crate is needed. Flatpak builds can instead
-// install them to /app/share/fonts, which fontconfig already scans.
+// Fonts are registered before GTK starts: a generated fontconfig includes the system
+// config plus the bundled dir (no new crate). Flatpak installs to /app/share/fonts instead.
 
 use std::path::{Path, PathBuf};
 

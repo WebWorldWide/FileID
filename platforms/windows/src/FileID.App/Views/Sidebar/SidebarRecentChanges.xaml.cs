@@ -1,7 +1,4 @@
-﻿// SidebarRecentChanges code-behind. Badge count follows
-// ChangeLog.PendingCount; ChangeLog.Changed may fire off the UI thread
-// (pushes arrive via EngineClient event handlers), so all XAML writes go
-// through DispatcherQueue.TryEnqueue.
+﻿// SidebarRecentChanges code-behind. Badge count follows ChangeLog.PendingCount; ChangeLog.Changed may fire off the UI thread (pushes arrive via EngineClient event handlers), so all XAML writes go through DispatcherQueue.TryEnqueue.
 
 using System;
 using FileID.Services;

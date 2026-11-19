@@ -1,8 +1,5 @@
-// Stage 5: document text for the scan, as the Swift engine's DocText.extract
-// produces it: capped plain-text reads, PDFKit page text, and Word/RTF/
-// OpenDocument through the Cocoa text system that /usr/bin/textutil uses, read
-// in process (adapters launch no processes). PowerPoint, Excel, EPUB and HTML
-// are not handled here; the Rust engine's extractor reads those.
+// Stage 5: document text for the scan, matching the Swift engine's DocText.extract: capped plain-text reads, PDFKit page text, and
+// Word/RTF/OpenDocument through the Cocoa text system, read in process (adapters launch no processes). PowerPoint, Excel, EPUB and HTML are left to the Rust extractor.
 import AppKit
 import Foundation
 import FileIDImaging

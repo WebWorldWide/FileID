@@ -1,6 +1,5 @@
-//! Hardware-detection IPC handlers: `emit_ready` (engine startup handshake)
-//! and `verifyCudaPack` (kept in the contract; answers with the same
-//! `HardwareInfo` shape as the Ready event).
+//! `emit_ready` (engine startup handshake) and `verifyCudaPack` (kept in the contract; answers with the same
+//! `HardwareInfo` shape).
 
 use crate::ipc::{
     sink::Sink, EngineInfo, EventPayload, HardwareInfo, HardwareReprobed, IpcEvent, Wrap,
@@ -10,9 +9,6 @@ use crate::platform;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Build a fresh `HardwareInfo` snapshot by re-running the detection probe.
-/// Shared by `emit_ready` (engine startup) and the `verifyCudaPack` handler
-/// so both surfaces see the same authoritative shape.
 pub(crate) fn build_hardware_info() -> HardwareInfo {
     let probe = RuntimeProbe::detect();
     let vendor_str = match probe.vendor {
@@ -50,16 +46,11 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
         npu_present: false,
         power_source: power_src.as_str().into(),
         battery_percent: battery_pct,
-        // Phase-1 ships "auto" only; the Eco/Performance selector in
-        // Settings is shown but grayed pending the throttling/release
-        // valve work tracked in NEXT.md.
+        // Only "auto" ships; the Eco/Performance selector in Settings is grayed pending the throttling work in NEXT.md.
         active_profile: "auto".into(),
     }
 }
 
-/// Engine startup handshake. Emits a `ready` event containing version,
-/// PID, worker cap, RAM, and the fresh hardware probe so the app's sidebar
-/// can transition out of `.starting`.
 pub(crate) async fn emit_ready(sink: &Sink) {
     let hardware = build_hardware_info();
     let info = EngineInfo {
@@ -74,9 +65,8 @@ pub(crate) async fn emit_ready(sink: &Sink) {
         .await;
 }
 
-/// Handle `verifyCudaPack`. No GPU pack exists any more (every model runs on
-/// the CPU), so this re-emits the hardware snapshot with a diagnostics string
-/// that says so; the command stays in the IPC contract for older apps.
+/// No GPU pack exists (every model runs on the CPU), so this re-emits the hardware snapshot with a diagnostics string
+/// saying so; kept in the IPC contract for older apps.
 pub(crate) async fn handle_verify_cuda_pack(sink: &Sink) {
     let hardware = build_hardware_info();
     tracing::info!(execution_provider = %hardware.execution_provider, "[VERIFY] hardware reprobed");

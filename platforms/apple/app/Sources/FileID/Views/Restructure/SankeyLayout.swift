@@ -1,11 +1,6 @@
 import SwiftUI
 
-/// Nested value types for SankeyFlowView's layout. Lives in a sibling
-/// extension file so the main `SankeyFlowView.swift` focuses on the View
-/// body + drawing + hit-testing, and the layout primitives are easy to
-/// find. Public access shape (`SankeyFlowView.Layout`, `SankeyFlowView.Node`,
-/// `SankeyFlowView.Flow`, `SankeyFlowView.Slot`) is unchanged — Swift
-/// resolves nested types across all extensions of the parent type.
+/// Nested layout value types for SankeyFlowView, kept in this extension file so the view file stays on body, drawing and hit-testing.
 extension SankeyFlowView {
     struct Layout {
         var sources: [Node]

@@ -19,16 +19,8 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     private bool _isLoading;
     private string? _errorMessage;
     private bool _disposed;
-    /// <summary>Cancelled in <see cref="Dispose"/> so a Refresh running on a
-    /// thread-pool thread unwinds before the view is gone.</summary>
+    /// <summary>Cancelled in Dispose so a Refresh running on a thread-pool thread unwinds before the view is gone.</summary>
     private readonly CancellationTokenSource _disposalCts = new();
-    // Refresh coordination (mirrors LibraryViewModel A4/A5): RefreshAsync bumps
-    // _refreshGen and captures it; the UI-marshaled apply discards a result whose
-    // generation is no longer current, so a slow earlier Load (e.g. a pre-trash
-    // scan snapshot) can't clobber the latest Groups. _activeLoads counts in-flight
-    // refreshes so the spinner stays on until the LAST one finishes — an earlier
-    // finally no longer clears IsLoading while a later overlapping RefreshAsync is
-    // still loading.
     private long _refreshGen;
     private int _activeLoads;
 
@@ -67,9 +59,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _activeLoads);
         try
         {
-            // Linked token created inside the try: a Dispose() race after the
-            // _disposed check makes _disposalCts.Token throw ObjectDisposedException,
-            // caught below as a clean teardown no-op instead of escaping to the caller.
+            // Linked token created inside the try: a Dispose() race after the _disposed check makes _disposalCts.Token throw ObjectDisposedException, caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { if (Interlocked.Read(ref _refreshGen) == myGen) { IsLoading = true; ErrorMessage = null; } });
@@ -79,13 +69,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        // Surface DB/IO failures as an actionable message instead of the raw
-        // SQLite jargon ("database disk image is malformed") the user can't act on.
-        // ConfigureAwait(false) above resumes these catch/finally arms on a
-        // thread-pool thread; ErrorMessage/IsLoading raise PropertyChanged that
-        // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
-        // them to the captured UI thread — else a native fast-fail
-        // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
+        // Surface DB/IO failures as an actionable message instead of the raw SQLite jargon ("database disk image is malformed") the user can't act on.
         catch (SqliteException ex) { ReportLoadError(SqliteErrorTranslator.Humanize(ex), myGen); }
         catch (IOException ex) { ReportLoadError(SqliteErrorTranslator.Humanize(ex), myGen); }
         catch (Exception ex) { ReportLoadError(ex.Message, myGen); }
@@ -104,20 +88,13 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             ErrorMessage = message;
         });
 
-    /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
-    /// catch/finally run on a thread-pool thread (Task.Run + ConfigureAwait(false)),
-    /// so raising ErrorMessage/IsLoading PropertyChanged there would drive x:Bind
-    /// XAML writes off the UI thread — a native fast-fail. No-op when already on the
-    /// UI thread. Mirrors LibraryViewModel.OnUi.
+    /// <summary>Marshal a UI-affined mutation onto the captured dispatcher.</summary>
     private void OnUi(Action action)
     {
         if (_ui.HasThreadAccess) action();
         else _ui.TryEnqueue(() => { if (!_disposed) action(); });
     }
 
-    /// <summary>Files larger than this use a head+tail+size COMPOSITE
-    /// content_hash in the engine, not a full BLAKE3 — so matching hashes are
-    /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
     private const long FullHashMaxBytes = 16L * 1024 * 1024;
 
     private List<DuplicateGroup> Load(CancellationToken ct)
@@ -207,9 +184,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     }
     private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen)
     {
-        // Drop results from a refresh a newer one has already superseded — checked
-        // on the UI thread right before the swap so it also catches a refresh that
-        // started during the dispatch gap. (mirrors LibraryViewModel A4)
+        // Drop results from a refresh a newer one has already superseded — checked on the UI thread right before the swap so it also catches a refresh that started during the dispatch gap.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
@@ -222,18 +197,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     private void Replace(IReadOnlyList<DuplicateGroup> rows)
         => MergeByContentHash(Groups, rows);
 
-    /// <summary>Reconcile <paramref name="groups"/> to match <paramref name="rows"/>
-    /// by <see cref="DuplicateGroup.ContentHash"/>, in place (mirrors
-    /// <c>LibraryViewModel.MergeById</c>). The old Clear+Add raised a
-    /// CollectionChanged.Reset ~1 Hz during a scan, re-realizing the whole
-    /// ItemsRepeater, re-decoding every member thumbnail, and discarding the
-    /// user's in-flight keeper/skip state. Surviving groups whose membership is
-    /// unchanged keep their existing instance (and its IsKeeper / IsSkipped /
-    /// loaded thumbnails); only genuine deltas emit Add/Remove. A group whose
-    /// member set changed is replaced (its <c>Members</c> binding is OneTime, so
-    /// the list must re-realize to reflect the new membership). Static +
-    /// collection-only so it carries no UI-thread affinity beyond the
-    /// ObservableCollection it mutates.</summary>
+    /// <summary>Surviving groups whose membership is unchanged keep their existing instance (and its IsKeeper / IsSkipped / loaded thumbnails); only genuine deltas emit Add/Remove.</summary>
     internal static void MergeByContentHash(
         ObservableCollection<DuplicateGroup> groups,
         IReadOnlyList<DuplicateGroup> rows)
@@ -247,12 +211,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         var existingByHash = new Dictionary<string, DuplicateGroup>(groups.Count);
         foreach (var g in groups) existingByHash[g.ContentHash] = g;
 
-        // Target sequence: reuse a surviving group instance only when its member
-        // set is identical (so the OneTime Members binding stays valid and the
-        // keeper/skip state is preserved); otherwise take the fresh instance.
-        // `reused` tracks the surviving instances we keep by reference, so step 1
-        // can drop the old instance of a group whose membership changed (its hash
-        // survives but we're replacing it with the fresh one).
+        // Target sequence: reuse a surviving group instance only when its member set is identical (so the OneTime Members binding stays valid and the keeper/skip state is preserved); otherwise take the fresh instance.
         var desired = new List<DuplicateGroup>(rows.Count);
         var nextHashes = new HashSet<string>(rows.Count);
         var reused = new HashSet<DuplicateGroup>();
@@ -271,15 +230,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // 1) Remove any existing group we're not reusing by reference — both
-        //    genuinely-gone hashes and replaced-instance survivors.
         for (int i = groups.Count - 1; i >= 0; i--)
         {
             if (!reused.Contains(groups[i])) groups.RemoveAt(i);
         }
 
-        // 2) Align order to `desired` via Remove+Insert of the instance, so a
-        //    surviving-but-reordered group keeps its instance.
         for (int j = 0; j < desired.Count; j++)
         {
             var want = desired[j];
@@ -290,9 +245,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>True when two groups hold the same member Ids (order-insensitive).
-    /// Same ContentHash + same member set ⇒ the surviving instance is reusable
-    /// and its keeper/skip state worth preserving.</summary>
+    /// <summary>True when two groups hold the same member Ids (order-insensitive).</summary>
     private static bool SameMembers(DuplicateGroup a, DuplicateGroup b)
     {
         if (a.Members.Count != b.Members.Count) return false;
@@ -321,22 +274,16 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 
 internal sealed class DuplicateGroup : INotifyPropertyChanged
 {
-    /// <summary>The shared content hash (BLAKE3 / composite, hex) of every
-    /// member — the group's identity. Bound as the keeper RadioButton's Tag.</summary>
     public required string ContentHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int MemberCount => Members.Count;
     public int TotalMemberCount => Members.Count;
     public bool IsSimilar { get; init; }
 
-    /// <summary>True when members exceed the engine's full-hash threshold, so
-    /// the shared content_hash is a head+tail+size composite — "likely", not
-    /// byte-verified duplicates. Drives the cautious caption (#3).</summary>
+    /// <summary>True when members exceed the engine's full-hash threshold, so the shared content_hash is a head+tail+size composite — "likely", not byte-verified duplicates.</summary>
     public bool IsApproximate { get; init; }
 
-    // FEAT-CRIT-2: per-group skip flag. Members of a skipped group are
-    // excluded from "Trash non-keepers". Mirrors the macOS Cleanup
-    // per-group "Skip" action.
+    // Members of a skipped group are excluded from "Trash non-keepers".
     private bool _isSkipped;
     public bool IsSkipped
     {
@@ -354,9 +301,6 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     {
         get
         {
-            // Approximate (>16 MB composite-hash) groups are NOT byte-verified —
-            // present them as "likely duplicates — verify before deleting" so the
-            // caption never makes a false byte-for-byte guarantee (#3).
             var label = IsApproximate
                 ? $"Probably the same file · {MemberCount} copies · check before removing"
                 : $"Same file · {MemberCount} copies";
@@ -374,15 +318,9 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     public required string FileName { get; init; }
     public required long SizeBytes { get; init; }
 
-    /// <summary>Modified-at unix seconds. Part of the thumbnail cache key so a
-    /// member shown in both Cleanup and Library resolves to the same path|mtime
-    /// L1/L2 entry instead of being cached twice.</summary>
+    /// <summary>Part of the thumbnail cache key so a member shown in both Cleanup and Library resolves to the same path|mtime L1/L2 entry instead of being cached twice.</summary>
     public double? ModifiedAt { get; init; }
 
-    /// <summary>shared per-group key for the keeper RadioButton's
-    /// GroupName. Was previously bound to `Path` per member, which made
-    /// mutual exclusion impossible (each member had its own group). Set
-    /// to the parent group's content hash at construction.</summary>
     public required string GroupKey { get; init; }
     public bool IsSimilar { get; init; }
 
@@ -413,9 +351,7 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     }
 
     private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _thumbnail;
-    /// <summary>Shell thumbnail, loaded lazily by the view's members
-    /// ItemsRepeater (ElementPrepared) via ThumbnailService — mirrors macOS's
-    /// per-tile QLThumbnail. Null until loaded; cleared on tile recycle.</summary>
+    /// <summary>Null until loaded; cleared on tile recycle.</summary>
     public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? Thumbnail
     {
         get => _thumbnail;
@@ -429,16 +365,13 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Placeholder-glyph visibility — shown until the thumbnail loads.</summary>
     public Microsoft.UI.Xaml.Visibility ShowPlaceholder =>
         _thumbnail == null ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
 
-    /// <summary>Marker set when the tile recycles out of the repeater so a late
-    /// thumbnail bind can't land on a stale tile.</summary>
+    /// <summary>Marker set when the tile recycles out of the repeater so a late thumbnail bind can't land on a stale tile.</summary>
     public bool IsDetached { get; set; }
 
-    /// <summary>Release the bound bitmap on recycle (bypasses the IsDetached
-    /// guard so the recycled tile shows the placeholder, not a stale image).</summary>
+    /// <summary>Release the bound bitmap on recycle (bypasses the IsDetached guard so the recycled tile shows the placeholder, not a stale image).</summary>
     public void ClearThumbnailForRecycle()
     {
         if (_thumbnail == null) return;

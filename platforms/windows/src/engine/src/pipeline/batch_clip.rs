@@ -1,17 +1,4 @@
-// Batched CLIP image inference coordinator.
-//
-// One Session, batched inputs. A dedicated OS thread owns the
-// `MobileClipImage`. Tagging workers submit (rgb, oneshot) requests
-// through a crossbeam channel. The coordinator drains up to BATCH_SIZE
-// requests (or BATCH_TIMEOUT_MS, whichever first), packs them into one
-// (N, 3, 224, 224) tensor, runs `embed_batch` once, and fans the
-// embeddings back through the oneshots. One forward pass serves the whole
-// batch instead of N single-image calls, and memory stays at the footprint of
-// one session.
-//
-// Failure mode: if `embed_batch` errors, every request in that batch
-// receives the error — caller decides whether to skip the file or retry.
-// The coordinator never panics on a single bad input.
+// Failure mode: if `embed_batch` errors, every request in that batch receives the error and the caller decides whether to skip or retry; the coordinator never panics on a single bad input.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,39 +10,14 @@ use tokio::sync::oneshot;
 
 use crate::models::mobileclip::MobileClipImage;
 
-/// Max images per batched inference: 8 gives tract's multithreaded matmul
-/// enough rows to split across the performance cores. Tunable via
-/// `FILEID_CLIP_BATCH_SIZE`.
+/// Max images per batched inference: 8 gives tract's multithreaded matmul enough rows to split across the performance cores. `FILEID_CLIP_BATCH_SIZE` overrides.
 const DEFAULT_BATCH_SIZE: usize = 8;
 
-/// Hard ceiling on how long the coordinator waits for batch fill once it has at
-/// least one request. Tunable via `FILEID_CLIP_BATCH_TIMEOUT_MS`.
-///
-/// HW-4 finding (RTX 2060, 2026-06-01): widening this 20 ms → 75 ms did NOT
-/// help — batch avg rose only 1.5 → ~2.0 and throughput stayed ~5 files/s while
-/// per-file CLIP latency grew 190 → ~250 ms. The root cause is upstream/
-/// downstream, NOT this window: only ~2 files are ever concurrently in the CLIP
-/// stage even though there are 9 tagging workers, so the coordinator never has
-/// more than ~2 requests queued no matter how long it waits. Per-stage
-/// instrumentation (`ramplus_us`/`vision_wait_us` in [STATS]) then PINNED the
-/// real bottleneck — NOT DBWriter, NOT this window: RAM++ Swin-L @384 costs
-/// ~670 ms/file and runs on only pool_size=2 sessions (VRAM-clamped on the 6 GB
-/// card), so workers spend ~680 ms just WAITING for the vision-sem/RAM++ pool;
-/// CLIP (~190 ms) sits downstream and is starved. The real lever is RAM++
-/// throughput (a larger pool, or a batched RAM++ ONNX re-export).
-/// Kept at 20 ms (a longer wait only adds latency). See NEXT.md.
+/// Hard ceiling on waiting for a batch to fill once it has one request (`FILEID_CLIP_BATCH_TIMEOUT_MS`). Widening it did not raise batch size: CLIP is starved by the RAM++ stage upstream.
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 20;
 
-/// Channel depth — backs up tagging workers if CLIP is the bottleneck
-/// instead of letting decode race ahead and balloon memory. Benign on any tier:
-/// each `ClipRequest` carries only the pre-resized 224×224 buffer (~150 KB), so
-/// a full 256-deep queue is ~38 MB even though the value is 6 GB-tuned. (Unlike
-/// the RAM++ batch channel, which carries FULL frames — see ram_plus_batch.rs.)
 const REQUEST_CHANNEL_CAP: usize = 256;
 
-/// Stats: lets `[STATS]` log average batch size so we can verify
-/// batching is actually engaging. `batch_count` is the number of
-/// inference calls; `batch_size_sum` divided by it = avg batch size.
 pub static STATS_BATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static STATS_BATCH_SIZE_SUM: AtomicU64 = AtomicU64::new(0);
 
@@ -64,18 +26,13 @@ struct ClipRequest {
     response: oneshot::Sender<Result<Vec<f32>>>,
 }
 
-/// Handle that tagging workers use to submit embed requests. Cheap to
-/// clone (`Arc`-wrapped sender).
 #[derive(Clone)]
 pub struct ClipBatchCoordinator {
     sender: Sender<ClipRequest>,
 }
 
 impl ClipBatchCoordinator {
-    /// Spawn the coordinator on a dedicated OS thread that owns
-    /// `model` for the rest of the process. The thread exits when all
-    /// senders are dropped (i.e. the Tagger has finished and the
-    /// scan-session arc tree is being released).
+    /// Runs the coordinator on a dedicated OS thread that owns `model`; it exits when all senders are dropped.
     pub fn spawn(mut model: MobileClipImage) -> Arc<Self> {
         let batch_size = read_env_usize("FILEID_CLIP_BATCH_SIZE", DEFAULT_BATCH_SIZE).max(1);
         let batch_timeout_ms = read_env_usize("FILEID_CLIP_BATCH_TIMEOUT_MS", DEFAULT_BATCH_TIMEOUT_MS as usize) as u64;
@@ -101,9 +58,6 @@ impl ClipBatchCoordinator {
         Arc::new(Self { sender })
     }
 
-    /// Submit one image, await its embedding. Cheap-error path: returns
-    /// Err if the coordinator thread has exited (process shutting down)
-    /// or the underlying embed_batch failed for this batch.
     pub async fn embed(&self, rgb: Vec<u8>) -> Result<Vec<f32>> {
         if crate::coordinator::process_gpu_device_removed() {
             return Err(anyhow!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER));
@@ -136,9 +90,6 @@ fn run_coordinator(
     batch_timeout_ms: u64,
 ) {
     loop {
-        // Block until the first request of a new batch arrives. recv()
-        // returns Err only when every sender is dropped → coordinator
-        // shuts down cleanly.
         let first = match receiver.recv() {
             Ok(r) => r,
             Err(_) => {
@@ -149,7 +100,6 @@ fn run_coordinator(
         let mut batch: Vec<ClipRequest> = Vec::with_capacity(batch_size);
         batch.push(first);
 
-        // Greedy: pull any already-pending requests without waiting.
         while batch.len() < batch_size {
             match receiver.try_recv() {
                 Ok(r) => batch.push(r),
@@ -158,10 +108,7 @@ fn run_coordinator(
             }
         }
 
-        // If still under cap, wait up to batch_timeout_ms for more to
-        // arrive. Use a poll-and-sleep loop instead of recv_timeout —
-        // crossbeam offers recv_timeout but we want to stay tight to
-        // the deadline regardless of channel granularity.
+    // Poll-and-sleep rather than recv_timeout: keeps the deadline tight regardless of channel granularity.
         if batch.len() < batch_size && batch_timeout_ms > 0 {
             let deadline = Instant::now() + Duration::from_millis(batch_timeout_ms);
             while batch.len() < batch_size {
@@ -180,8 +127,6 @@ fn run_coordinator(
         STATS_BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
         STATS_BATCH_SIZE_SUM.fetch_add(batch.len() as u64, Ordering::Relaxed);
 
-        // Move the 224×224 buffers out instead of cloning them — the batch is
-        // fully consumed below either way. Senders ride alongside in order.
         let mut imgs: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
         let mut senders: Vec<oneshot::Sender<Result<Vec<f32>>>> = Vec::with_capacity(batch.len());
         for req in batch {
@@ -203,7 +148,6 @@ fn run_coordinator(
                 }
             }
             Ok(_) => {
-                // Pathological: model returned a wrong-shaped output.
                 for sender in senders {
                     let _ = sender.send(Err(anyhow!(
                         "MobileCLIP embed_batch returned wrong-sized embedding vec"

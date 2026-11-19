@@ -2,9 +2,7 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Which cataloged paths sit under a location that is offline right now (macOS
-/// OfflineRoots). The most specific location wins, so an online folder inside an offline
-/// drive's path stays online. Paths compare case-insensitively with either separator.</summary>
+/// <summary>The most specific location wins, so an online folder inside an offline drive's path stays online.</summary>
 internal sealed class OfflineRoots : IEquatable<OfflineRoots>
 {
     private readonly (string Path, bool Online)[] _entries;

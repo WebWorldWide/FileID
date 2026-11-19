@@ -15,7 +15,6 @@ use std::time::Duration;
 pub trait Coalesce {
     /// False for replies and terminal events, which always keep their place.
     fn is_progress(&self) -> bool;
-    /// Whether this progress event makes the unread `older` one redundant.
     fn supersedes(&self, older: &Self) -> bool;
 }
 
@@ -102,7 +101,6 @@ impl<T: Coalesce> Drop for EventSender<T> {
     }
 }
 
-/// Ends a receiver's wait from elsewhere (a timeout, a closed dialog).
 pub struct Closer<T> {
     shared: Weak<RefCell<Shared<T>>>,
 }

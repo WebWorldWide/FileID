@@ -1,6 +1,3 @@
-//! `listModels`: the curated defaults plus the extended catalog, with
-//! install state, hardware fit and any local benchmark for this machine.
-
 use crate::ipc::sink::Sink;
 use crate::ipc::{EngineError, EventPayload, IpcEvent, ListModelsPayload, ModelCatalog, ModelCatalogItem, Wrap};
 use crate::models::{catalog, registry};
@@ -22,8 +19,7 @@ const CURATED_VISION: [Curated; 5] = [
     Curated { kind: "mistral_small_3_2", name: "Mistral Small 3.2 24B", family: "Mistral", upstream: "mistralai/Mistral-Small-3.2-24B-Instruct-2506", license: "Apache-2.0", parameters: 24.0 },
 ];
 
-/// Resident-memory estimate shared with the catalog generator: weights plus
-/// ~15% runtime overhead plus a fixed context/projector allowance.
+/// Shared with the catalog generator: weights plus ~15% runtime overhead plus a fixed context/projector allowance.
 pub(crate) fn resident_estimate_gb(download_bytes: u64) -> f64 {
     (((download_bytes as f64 / 1e9) * 1.15 + 0.6) * 100.0).round() / 100.0
 }
@@ -39,8 +35,6 @@ pub(crate) fn tier_for(resident_gb: f64) -> &'static str {
     }
 }
 
-/// Conservative fit: a model fits when it can stay resident in about 60% of
-/// system memory, or entirely in dedicated VRAM with 10% headroom.
 pub(crate) fn fits(resident_gb: f64, physical_memory_gb: f64, vram_mb: u64) -> bool {
     resident_gb <= physical_memory_gb * 0.6 || resident_gb * 1.1 <= vram_mb as f64 / 1024.0
 }
@@ -52,8 +46,7 @@ fn platform() -> &'static str {
 pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -> Vec<ModelCatalogItem> {
     let mut items = Vec::new();
     let measured = crate::models::benchmark::local_results();
-    // The engine the Mac app hosts serves the app's MLX models, as the Swift
-    // engine does; GGUF models never run there.
+    // The Mac-hosted engine serves the app's MLX models, as Swift does; GGUF models never run there.
     if crate::paths::APP_HOSTED {
         return crate::models::mlx::catalog_items(role, physical_memory_gb, &measured);
     }
@@ -103,7 +96,6 @@ pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -
             download_bytes: entry.download_bytes,
             estimated_resident_gb: entry.estimated_resident_gb,
             tier: entry.tier.clone(),
-            // A local benchmark is this machine's verification of a candidate.
             status: if measured.contains_key(&entry.id) { "verified".into() } else { entry.status.clone() },
             runnable,
             installed: runnable && crate::models::vlm::find_weights(&entry.id).is_some(),

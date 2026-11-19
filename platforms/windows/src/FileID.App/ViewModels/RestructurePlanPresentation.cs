@@ -53,9 +53,7 @@ internal static class RestructurePlanPresentation
            && TryGetCompleteConfidenceCounts(plan, out var counts)
            && counts.Auto > 0;
 
-    /// <summary>macOS shouldShowMissingContentModels: the library has files to
-    /// analyze but the scan stored no CLIP and no text embeddings, so a plan
-    /// can only sort by date and name.</summary>
+    /// <summary>macOS shouldShowMissingContentModels: the library has files to analyze but the scan stored no CLIP and no text embeddings, so a plan can only sort by date and name.</summary>
     internal static bool ShouldShowMissingContentModels(
         int analyzableFiles,
         int clipEmbeddings,

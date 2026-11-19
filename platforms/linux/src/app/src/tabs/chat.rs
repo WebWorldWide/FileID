@@ -1,6 +1,4 @@
-// Chat (DESIGN_V3_PORT "Chat"): the conversation column with LOOKING IN
-// chips, role-railed messages, citation chips under the latest answer and the
-// composer, beside a 300 px Sources pane with an inline player.
+// Chat conversation column (composer, citation chips) beside a Sources pane with an inline player.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -475,7 +473,6 @@ pub fn inspector(engine: Engine, on_close: Rc<dyn Fn()>) -> gtk::Widget {
 
 fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     let compact = inspector.is_some();
-    // ── Conversation column ────────────────────────────────────────────────
     let column = v3::vbox(0);
     column.set_hexpand(true);
     column.set_vexpand(true);
@@ -625,7 +622,6 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     composer_box.append(&status);
     column.append(&composer_box);
 
-    // ── Sources pane ───────────────────────────────────────────────────────
     let pane = v3::vbox(0);
     pane.add_css_class("v3-pane");
     let sources_count = v3::meta("0");
@@ -899,7 +895,6 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
     ));
     root.add_controller(shortcuts);
 
-    // The shell's "Ask Chat" hands the question over through chat.ask.
     let group = gio::SimpleActionGroup::new();
     let ask = gio::SimpleAction::new(ASK_ACTION, Some(glib::VariantTy::STRING));
     let weak = Rc::downgrade(ui);

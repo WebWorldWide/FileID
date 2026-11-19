@@ -41,17 +41,6 @@ impl NormalizedFaceBBox {
         bounds.oriented(orientation)
     }
 
-    pub fn source_pixels_from_upright(bbox: [f32;4], source_width: u32, source_height: u32, orientation: u8) -> Option<[f32;4]> {
-        if source_width == 0 || source_height == 0 || !(1..=8).contains(&orientation) { return None; }
-        let (width,height) = if orientation >= 5 { (source_height,source_width) } else { (source_width,source_height) };
-        let upright = Self::validated(f64::from(bbox[0])/f64::from(width), f64::from(bbox[1])/f64::from(height),
-            f64::from(bbox[2])/f64::from(width), f64::from(bbox[3])/f64::from(height))?;
-        let inverse = match orientation { 6 => 8, 8 => 6, value => value };
-        let raw = upright.oriented(inverse)?;
-        Some([(raw.x*f64::from(source_width)) as f32,(raw.y*f64::from(source_height)) as f32,
-            (raw.width*f64::from(source_width)) as f32,(raw.height*f64::from(source_height)) as f32])
-    }
-
     fn oriented(self, orientation: u8) -> Option<Self> {
         let bounds = self;
         let orient = |x: f64, y: f64| match orientation {

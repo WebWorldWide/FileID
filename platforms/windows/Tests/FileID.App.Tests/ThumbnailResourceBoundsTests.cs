@@ -83,11 +83,7 @@ public sealed class ThumbnailResourceBoundsTests
         Assert.InRange(ThumbnailService.WorkerCount, 2, 4);
     }
 
-    /// A burst larger than the queue capacity must complete EVERY request:
-    /// the newest requests stay queued for real work and the evicted oldest
-    /// are placeholder-completed by the drop callback — none may hang in the
-    /// shimmer state, which is the failure the original unbounded design's
-    /// comment warned about.
+    /// <summary>A burst larger than the queue capacity must complete EVERY request: the newest requests stay queued for real work and the evicted oldest are placeholder-completed by the drop callback — none may hang in the shimmer state, which is the failure the original unbounded design's comment warned about.</summary>
     [Fact]
     public async Task BurstBeyondCapacityCompletesEveryRequestAndKeepsNewest()
     {

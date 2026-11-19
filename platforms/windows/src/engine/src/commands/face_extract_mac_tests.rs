@@ -26,7 +26,6 @@ fn unit(axis: usize) -> Vec<f32> {
     v
 }
 
-/// A photo on disk with `faces` boxes, stamped like a fresh Swift scan (no vectors).
 fn photo(conn: &Connection, dir: &Path, id: i64, faces: &[i64]) -> PathBuf {
     let path = dir.join(format!("{id}.jpg"));
     std::fs::write(&path, format!("photo {id}")).unwrap();

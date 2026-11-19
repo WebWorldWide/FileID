@@ -1,13 +1,4 @@
 ﻿// TreeDiffControl — side-by-side current vs proposed folder tree.
-//
-// Renders two TreeView columns: the
-// current folder structure as discovered, and the proposed structure
-// after applying the plan. Folders that change are highlighted gold;
-// new folders show a "+", deleted/empty folders fade.
-//
-// Pure WinUI 3 (no Win2D). Two TreeView controls inside a 2-column Grid,
-// driven by ObservableCollection<DiffNode> built from the engine's
-// RestructurePlan.Moves list.
 
 using System;
 using System.Collections.Generic;
@@ -27,7 +18,6 @@ public sealed class TreeDiffControl : Control
     {
         public required string Name { get; init; }
         public required string Path { get; init; }
-        /// <summary>"unchanged", "added", "removed", "moved-source", "moved-dest".</summary>
         public required string Status { get; init; }
         public int FileCount { get; set; }
         public ObservableCollection<DiffNode> Children { get; } = new();
@@ -89,12 +79,10 @@ public sealed class TreeDiffControl : Control
 
         foreach (var m in plan.Moves)
         {
-            // Current: take parent of the source as the folder.
             var srcRel = TrimRoot(m.Source, libraryRoot);
             var srcDir = ParentDir(srcRel);
             EnsurePath(currentBuckets, current, srcDir, "moved-source").FileCount++;
 
-            // Proposed: parent of the destination.
             var dstRel = TrimRoot(m.Destination, libraryRoot);
             var dstDir = ParentDir(dstRel);
             EnsurePath(proposedBuckets, proposed, dstDir, "moved-dest").FileCount++;

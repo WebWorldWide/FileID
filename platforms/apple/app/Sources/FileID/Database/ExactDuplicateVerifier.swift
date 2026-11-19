@@ -186,18 +186,6 @@ enum ExactDuplicateVerifier {
         for key in oldest { cacheState.values.removeValue(forKey: key) }
     }
 
-    static func matchesImmediately(
-        keeper: URL, victim: URL, expectedSize: Int64
-    ) async -> ExactFileDigest.CacheKey? {
-        await withCheckedContinuation { continuation in
-            destructiveQueue.async {
-                let match = ExactFileDigest.matchWithIdentity(
-                    first: keeper, second: victim, expectedSize: expectedSize)
-                continuation.resume(returning: match?.second)
-            }
-        }
-    }
-
     private static func keeperComesFirst(_ lhs: FileRow, _ rhs: FileRow) -> Bool {
         let la = lhs.aesthetic ?? 0
         let ra = rhs.aesthetic ?? 0

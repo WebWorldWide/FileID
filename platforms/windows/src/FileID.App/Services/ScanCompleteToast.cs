@@ -1,12 +1,5 @@
 ﻿// Fires a Windows shell toast when a scan completes. We use the raw
-// ToastNotification API (no Microsoft.Toolkit.Uwp.Notifications dep —
-// that package adds a 600KB transitive surface that we don't need for
-// the few toasts FileID raises).
-//
-// Subscribe at app startup; unsubscribe never (lives for the process).
-//
-// PRIVACY: toast text is local, never sent anywhere. No registration with
-// Notification Hub / WNS — we just push to the local Action Center.
+// Subscribe at app startup; unsubscribe never (lives for the process). PRIVACY: toast text is local, never sent anywhere.
 
 using System;
 using System.Reactive.Linq;
@@ -35,10 +28,7 @@ public static class ScanCompleteToast
             });
     }
 
-    /// <summary>
-    /// Disposes the Rx subscription. Call from app shutdown (App.OnSuspending
-    /// or equivalent) so the lambda doesn't outlive the process intent.
-    /// </summary>
+    /// <summary>Call from app shutdown (App.OnSuspending or equivalent) so the lambda doesn't outlive the process intent.</summary>
     public static void Stop()
     {
         _sub?.Dispose();
@@ -67,8 +57,6 @@ public static class ScanCompleteToast
         }
         catch
         {
-            // Toast subsystem may be disabled (group policy / focus assist).
-            // Best-effort — failure is non-critical.
         }
     }
 

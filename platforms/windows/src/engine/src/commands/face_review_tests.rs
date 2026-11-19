@@ -67,7 +67,6 @@ fn owner(conn: &Connection, face: i64) -> Option<i64> {
     conn.query_row("SELECT person_id FROM face_prints WHERE id=?1", [face], |r| r.get(0)).unwrap()
 }
 
-/// Two people (1 along x, 2 along y), each with one assigned face, and new faces to place.
 fn library() -> Connection {
     let conn = db();
     for file in 1..=6 {

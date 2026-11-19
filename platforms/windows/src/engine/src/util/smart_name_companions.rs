@@ -1,6 +1,5 @@
-//! Files that keep one name stem when smart names rename them: a RAW and its
-//! JPEG/HEIC, a Live Photo's HEIC/JPEG and MOV, and `.xmp`/`.aae` sidecars
-//! (`IMG_1.xmp` or darktable's `IMG_1.ARW.xmp`). Lockstep with macOS
+//! Files that keep one name stem when smart names rename them: a RAW and its JPEG/HEIC, a Live Photo's HEIC/JPEG and
+//! MOV, and `.xmp`/`.aae` sidecars (`IMG_1.xmp` or darktable's `IMG_1.ARW.xmp`). Lockstep with macOS
 //! `SmartNameCompanions.swift`.
 
 use std::collections::HashSet;
@@ -56,8 +55,6 @@ pub struct Member {
     pub role: Role,
 }
 
-/// `name` and every companion of it in `listing`, in role then name order;
-/// empty when it has none.
 pub fn members(name: &str, listing: &[String]) -> Vec<Member> {
     let Some((stem, suffix, role)) = base(name) else { return Vec::new() };
     let key = lower(&stem);
@@ -80,10 +77,8 @@ pub fn is_group(members: &[Member]) -> bool {
     members.len() >= 2 && members.iter().any(|member| member.role != Role::Sidecar)
 }
 
-/// The first `_N` bump (1 = none, up to 99) at which every member's new name,
-/// `stem` plus its own suffix, is free in the folder and the batch, or its own
-/// name in another case. `members` holds each member's suffix and lowercased
-/// current name.
+/// The first `_N` bump (1 = none, up to 99) at which every member's new name is free in the folder and batch, or is its
+/// own name in another case.
 pub fn shared_names(
     stem: &str,
     members: &[(String, String)],
@@ -102,11 +97,9 @@ pub fn shared_names(
     })
 }
 
-/// Sidecars in `listing` that follow a rename of a `planned` RAW, JPEG/HEIC or
-/// MOV: `<stem>.xmp`/`.aae` or `<name>.xmp` (extension in any case), not hidden
-/// and not planned themselves. One is kept only when every same-stem RAW,
-/// JPEG/HEIC or MOV in the folder is planned, and goes to the first planned
-/// member with that stem as `(planned index, sidecar name, suffix after the stem)`.
+/// Sidecars that follow a rename of a `planned` RAW/JPEG/HEIC/MOV: `<stem>.xmp`/`.aae` or `<name>.xmp`, not hidden, not
+/// planned. Kept only when every same-stem RAW/JPEG/HEIC/MOV is planned; goes to the first planned member as `(planned
+/// index, sidecar name, suffix after the stem)`.
 pub fn following_sidecars(planned: &[String], listing: &[String]) -> Vec<(usize, String, String)> {
     let planned_names: HashSet<&str> = planned.iter().map(String::as_str).collect();
     let primary = |name: &str| base(name).filter(|(_, _, role)| *role != Role::Sidecar).map(|(stem, _, _)| stem);
@@ -141,7 +134,6 @@ pub fn following_sidecars(planned: &[String], listing: &[String]) -> Vec<(usize,
     found
 }
 
-/// Lower is better evidence, in the order `propose` reads its sources.
 pub fn source_rank(source: &str, style: Style) -> u8 {
     match source {
         "chapter" => 0,

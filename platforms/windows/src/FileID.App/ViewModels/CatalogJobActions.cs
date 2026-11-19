@@ -9,7 +9,6 @@ internal static class CatalogJobActions
     public static bool CanResume(string? kind, string? state) =>
         kind is "catalogIndex" or "timelineSample" or TakeProposalPolicy.JobKind or FaceQueuePolicy.JobKind && state is "paused" or "failed" or "cancelled";
 
-    /// <summary>What a job is doing, in plain words.</summary>
     public static string StateWords(string? state, double progress) => state switch
     {
         "queued" => "Waiting",
@@ -32,8 +31,6 @@ internal static class CatalogJobActions
         _ => "Looking through videos"
     };
 
-    /// <summary>One list row for a job: what it is, how it is going and how
-    /// many files it covers. No ids, internal states or raw error text.</summary>
     public static string RowText(CatalogJob job)
     {
         var files = job.FileIDs.Count;
@@ -43,8 +40,7 @@ internal static class CatalogJobActions
         return text;
     }
 
-    /// <summary>True when two job lists would show the same rows and enable
-    /// the same buttons, so the list on screen can be left alone.</summary>
+    /// <summary>True when two job lists would show the same rows and enable the same buttons, so the list on screen can be left alone.</summary>
     public static bool SameJobs(IReadOnlyList<CatalogJob> shown, IReadOnlyList<CatalogJob> next)
     {
         if (shown.Count != next.Count) return false;
@@ -72,8 +68,7 @@ internal static class CatalogJobActions
     }
     public static CatalogRequest ControlRequest(string action, CatalogJob job)
     {
-        // The engine resumes only paused timeline jobs; a failed or cancelled
-        // one is retried as a fresh job over the same files, as on macOS.
+        // The engine resumes only paused timeline jobs; a failed or cancelled one is retried as a fresh job over the same files, as on macOS.
         if (action == "resumeJob" && job.Kind == "timelineSample" && job.State is "failed" or "cancelled")
             return TimelineRequest(job.FileIDs.Distinct().Order().ToArray(), null);
         if (action == "resumeJob" && job.Kind == TakeProposalPolicy.JobKind && job.State is "failed" or "cancelled")

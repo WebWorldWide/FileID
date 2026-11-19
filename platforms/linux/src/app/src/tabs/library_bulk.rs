@@ -1,8 +1,5 @@
-// Library bulk rename and bulk tag for the selected files, with "Undo last
-// rename" and "Undo last tags" (macOS `BulkRenameSheet`, `BulkTagSheet`, and
-// the Library toolbar). Renames go through `renameFiles`, tags through
-// `applyTags`; both undo paths use the same commands and the journals in
-// `library_bulk_model`.
+// Library bulk rename and tag for the selected files, with Undo last rename and Undo last tags.
+// Renames use renameFiles, tags use applyTags; undo reuses the same commands and journals.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -84,7 +81,6 @@ fn id_list(ids: &[i64]) -> String {
     ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
 }
 
-// ── Toolbar ──────────────────────────────────────────────────────────────────
 
 pub(super) struct BulkBar {
     pub root: gtk::Box,
@@ -252,7 +248,6 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-// ── Rename sheet ─────────────────────────────────────────────────────────────
 
 struct RenameSheet {
     bar: Rc<BulkBar>,
@@ -768,7 +763,6 @@ fn run_undo_rename(bar: &Rc<BulkBar>, entry: Option<u64>) -> bool {
     true
 }
 
-// ── Tag sheet ────────────────────────────────────────────────────────────────
 
 fn open_tag_sheet(bar: &Rc<BulkBar>, anchor: &gtk::Button) {
     let rows = (bar.selected)();

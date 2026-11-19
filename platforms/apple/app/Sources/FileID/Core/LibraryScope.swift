@@ -1,10 +1,7 @@
 import Foundation
 import FileIDShared
 
-/// One library location that Library, Search & Moments and Chat are scoped to. A file belongs to
-/// it when its path is the location's path or lies under it, never a sibling that shares the
-/// prefix (/Camera never holds /Camera2), and never inside a deeper location: the most specific
-/// location owns a file, as in `OfflineRoots`. Mirrors the engines' `rootID` rule.
+/// One library location that Library, Search & Moments and Chat are scoped to. A file belongs to the most specific location containing its path; a sibling sharing a prefix (/Camera vs /Camera2) never matches. Mirrors the engines' `rootID` rule.
 struct LibraryScope: Equatable, Sendable {
     static let storageKey = "libraryScopeRootID"
 

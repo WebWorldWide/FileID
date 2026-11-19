@@ -51,11 +51,7 @@ const GREEN: Color = Color::Rgb(134, 217, 164);
 /// gold fill reads clearly against it inside the gold-tinted banner band.
 const GAUGE_TRACK: Color = Color::Rgb(48, 42, 28);
 
-/// Top-level vertical split: header (2 — brand+tabs row, then a divider with the
-/// active-tab underline) · body (rest) · status line (1) · key bar (1). The key
-/// bar is the always-visible bottom row of actions. Pure + deterministic so it's
-/// unit-testable without a terminal. Body stays at index 1 (callers depend on
-/// that).
+/// Top-level vertical split: header (2) · body · status line (1) · key bar (1). The body stays at index 1, which callers depend on.
 pub fn frame_chunks(area: Rect) -> Rc<[Rect]> {
     Layout::vertical([
         Constraint::Length(2),
@@ -89,9 +85,7 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 }
 
-/// The header: `FileID` brand (gold) + numbered tabs on row 0, then a full-width
-/// hairline on row 1 with a bright-gold underline drawn under the active tab —
-/// the terminal stand-in for the mockup's `border-bottom:2px solid #FFCC00`.
+/// Header: brand and numbered tabs on row 0, then a hairline with a gold underline under the active tab.
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     const FULL: [&str; 6] = [
         "Library",
@@ -212,15 +206,8 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// A standing, hard-to-miss banner pinned above every tab's body whenever the AI
-/// models aren't installed (or are downloading). Returns the body area to render
-/// below it: the FULL area when there's nothing to announce, otherwise the area
-/// minus its one banner row. Painted as a gold-tinted band (the same tint as a
-/// selected row) so it reads as a persistent notice — NOT a fleeting status-line
-/// message — until the models are present or a download finishes.
+/// Gold-tinted notice above every tab's body while AI models are missing or downloading, not a fleeting status message. Returns the body area below it.
 fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
-    // A live install takes the banner slot, replacing the static notice with a
-    // real progress gauge that visibly fills 0→100.
     if let Some(dl) = &app.download {
         if area.height >= 2 {
             return render_download_gauge(f, dl, area);
@@ -254,20 +241,12 @@ fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
     rows[1]
 }
 
-/// The AI-model install gauge. A gold-tinted band pinned above every tab while
-/// models download: a title
-/// row (`⟳ Installing AI models…`, or a green `✓ … press s to scan` once done),
-/// a ratatui [`Gauge`] (gold fill on a dark track, the overall percent centered),
-/// and — where there's room — the live label beneath (`arcface · 182/271 MB · …`).
-/// Returns the body area below the band. Degrades to a 2-row band (no label) on
-/// short terminals; the percent is clamped so the widget can't panic.
+/// The AI-model install gauge band: title, a [`Gauge`] with the overall percent, and the live label where there is room. Degrades to a 2-row band on short terminals; the percent is clamped so the widget cannot panic.
 fn render_download_gauge(f: &mut Frame, dl: &DownloadState, area: Rect) -> Rect {
     let pct = dl.percent.min(100);
     let band_h = if area.height >= 5 { 3 } else { 2 };
     let rows = Layout::vertical([Constraint::Length(band_h), Constraint::Min(0)]).split(area);
     let band = rows[0];
-    // Paint the whole band the standing-notice gold tint first; the gauge row
-    // overwrites its slice with the track colour.
     f.render_widget(Block::default().style(Style::default().bg(SEL_BG)), band);
 
     let inner = if band_h == 3 {
@@ -446,8 +425,6 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let visible = app.visible_files();
 
-    // Context line: a live scan note, the active search, or the plain-language
-    // search prompt — with the file count pinned to the right.
     if app.scanning {
         let status = truncate(&app.status, rows[0].width.saturating_sub(22) as usize);
         render_context(
@@ -500,9 +477,6 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
         render_context(f, rows[0], left, Some(count));
     }
 
-    // Empty / no-match state: a full-width panel that says what to do, instead of
-    // a blank two-column list the user can't act on. While a scan is running we
-    // keep the (filling) list so the "Reading your files…" context reads right.
     if visible.is_empty() && !app.scanning {
         if !app.search.is_empty() {
             render_empty(
@@ -733,8 +707,7 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
         dup_row(cw, g)
     });
 
-    // Detail: the copies in the selected set — the first marked KEEP (green), the
-    // rest flagged as duplicates. Read-only: FileID never deletes here.
+    // Read-only: FileID never deletes here.
     let block = titled_block("Copies", CYAN);
     let detail = match app.data.dupes.get(cursor) {
         Some(g) => {
@@ -1075,11 +1048,7 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line).style(Style::default().bg(BG)), area);
 }
 
-/// The always-visible key bar (bottom row). Each key is a dark pill with gold
-/// text (the terminal stand-in for the mockup's `#23232b` key chips) + a dim
-/// label. The hints are context-aware: a modal overlay surfaces its OWN keys;
-/// otherwise the active tab's actions show, with `press ? for all keys` pinned
-/// to the right.
+/// Always-visible bottom key bar: dark pills with gold keys. A modal overlay shows its own keys; otherwise the active tab's actions, with `press ? for all keys` pinned right.
 fn render_key_bar(f: &mut Frame, app: &App, area: Rect) {
     // Re-assert BG so the row stays legible on light terminals.
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
@@ -1287,8 +1256,6 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         rows[0],
     );
 
-    // (1) Title: the current folder (home-collapsed, tail-truncated) + its own
-    // shallow counts, so the user sees what a scan here would pick up.
     let here = if browser.virtual_drives {
         "This computer".to_string()
     } else {
@@ -1310,9 +1277,7 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         rows[1],
     );
 
-    // (2) The subdirectory list, WINDOWED to the visible rows so counts are
-    // computed lazily (one shallow read_dir per on-screen row, cached). Selected
-    // row gets the calm gold-bar band, same as the dashboard lists.
+    // computed lazily (one shallow read_dir per on-screen row, cached).
     let list_area = rows[2];
     let total = browser.rows.len();
     let vh = (list_area.height as usize).max(1);
@@ -1322,7 +1287,7 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         browser.selected.saturating_sub(vh / 2).min(total - vh)
     };
     let end = (offset + vh).min(total);
-    let cw = list_area.width.saturating_sub(2) as usize; // 2-char selection gutter
+    let cw = list_area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = browser.rows[offset..end]
         .iter()
         .enumerate()
@@ -1476,7 +1441,7 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let popup = centered(area, w, h);
     overlay_bg(f, popup);
 
-    let field_max = w.saturating_sub(5) as usize; // borders + "> " + cursor
+    let field_max = w.saturating_sub(5) as usize;
     let mut lines = vec![
         Line::from(Span::styled(
             "Folder to scan",
@@ -1510,7 +1475,6 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-// ── shared builders ──────────────────────────────────────────────────────────
 
 /// A plain-language context strip under the tabs: left description spans, with an
 /// optional right-aligned count (the mockup's `12,481 files`).
@@ -1899,11 +1863,10 @@ mod tests {
         };
         let c = frame_chunks(area);
         assert_eq!(c.len(), 4);
-        assert_eq!(c[0].height, 2); // header: brand+tabs row, then the underline divider
-        assert_eq!(c[2].height, 1); // status line
-        assert_eq!(c[3].height, 1); // always-visible key bar
-        assert_eq!(c[1].height, 20); // body gets the rest
-        // chunks tile the area with no gap
+        assert_eq!(c[0].height, 2);
+        assert_eq!(c[2].height, 1);
+        assert_eq!(c[3].height, 1);
+        assert_eq!(c[1].height, 20);
         assert_eq!(c[0].height + c[1].height + c[2].height + c[3].height, 24);
     }
 
@@ -2051,7 +2014,6 @@ mod tests {
     fn input_tail_keeps_end_visible() {
         assert_eq!(input_tail("/short", 20), "/short");
         assert_eq!(input_tail("/unsafe\x1b[2J", 20), "/unsafe�[2J");
-        // Overflow keeps the trailing chars (where the cursor is), prefixed `…`.
         let out = input_tail("/very/long/path/to/some/deep/folder", 10);
         assert_eq!(out.chars().count(), 10);
         assert!(out.starts_with('…'));
@@ -2075,8 +2037,6 @@ mod tests {
 
         let (w, h) = (80u16, 24u16);
         let mut app = App::new("/tmp/x.sqlite".into());
-        // Settle the loader to an empty, not-yet-created library so the welcome
-        // screen renders (loading=false, db_exists=false) — the all-BG body.
         app.apply_load(LoadMsg::Done(Box::new(Snapshot {
             db_exists: false,
             ..Snapshot::default()
@@ -2085,8 +2045,6 @@ mod tests {
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
 
-        // Body chunk = rows [2, h-2): every cell painted with the brand dark bg,
-        // never left on the terminal's default (which would vanish on light bg).
         let body = frame_chunks(Rect {
             x: 0,
             y: 0,
@@ -2105,8 +2063,6 @@ mod tests {
             }
         }
 
-        // The gold brand accent renders somewhere (the `FileID` brand / tabs),
-        // proving a known label paints in a high-contrast fg on the dark bg.
         let has_gold = (0..h).any(|y| (0..w).any(|x| buf[(x, y)].fg == GOLD));
         assert!(has_gold, "gold brand accent not rendered in any cell");
     }
@@ -2147,8 +2103,6 @@ mod tests {
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
 
-        // Row 1 must hold at least one gold `─` (under "1 Library", the default
-        // active tab), and the rest of the rule is the dim divider colour.
         let gold_rule = (0..80).any(|x| buf[(x, 1)].fg == GOLD && buf[(x, 1)].symbol() == "─");
         assert!(gold_rule, "no gold underline on the active tab");
     }
@@ -2196,7 +2150,6 @@ mod tests {
 
         let app = App::new("/tmp/x.sqlite".into());
         let lib = frame_text(80, 24, &app);
-        // The bottom row (the key bar) must carry the headline action labels.
         let bar = lib.lines().last().unwrap_or("");
         assert!(bar.contains("scan"), "key bar missing scan: {bar:?}");
         assert!(
@@ -2208,13 +2161,11 @@ mod tests {
             bar.contains("for all keys"),
             "key bar missing the help tail: {bar:?}"
         );
-        // Everything fits an 80-col row: no glyph is lost off the edge.
         assert!(
             bar.trim_end().chars().count() <= 80,
             "key bar overflows 80 cols: {bar:?}"
         );
 
-        // People tab: search is Library-only, so it drops from the bar.
         let mut app2 = App::new("/tmp/x.sqlite".into());
         app2.tab = Tab::People;
         let ppl = frame_text(80, 24, &app2);
@@ -2256,8 +2207,6 @@ mod tests {
         assert!(text.contains("Files here"), "file preview header missing");
         assert!(text.contains("photo.png"), "preview file not listed");
         assert!(text.contains(".."), "the up-a-level row is missing");
-        // The hint line advertises the new drives jump + hidden toggle (with its
-        // current state), alongside the scan/cancel affordances.
         assert!(text.contains("d drives"), "browser drives hint missing");
         assert!(
             text.contains("hidden:off"),
@@ -2306,7 +2255,6 @@ mod tests {
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.browser = Some(Browser::open(base.clone()));
-        // Default: the dot-entries are filtered, and the hint reads `hidden:off`.
         let text = frame_text(100, 30, &app);
         assert!(
             text.contains("hidden:off"),
@@ -2317,7 +2265,6 @@ mod tests {
             "hidden subdir must not render by default"
         );
 
-        // Press `.` → hidden entries reveal, and the hint flips to `hidden:on`.
         app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
         let text = frame_text(100, 30, &app);
         assert!(
@@ -2370,24 +2317,19 @@ mod tests {
         use crate::app::{App, Browser, Tab};
         use crate::data::{LoadMsg, Snapshot};
 
-        // A few sizes: realistic, narrow, and pathologically small.
         for (w, h) in [(100u16, 30u16), (80, 24), (20, 6), (4, 3), (1, 1)] {
             for tab in Tab::ALL {
                 let mut app = App::new("/tmp/x.sqlite".into());
                 app.tab = tab;
-                // Exercise the standing models-missing banner at every size too.
                 app.missing_models = vec!["MobileCLIP".to_string()];
-                // db_exists=true with empty vecs → the per-tab empty branches run
-                // (not the welcome screen), exercising the empty-list renderers.
                 app.apply_load(LoadMsg::Done(Box::new(Snapshot {
                     db_exists: true,
                     ..Snapshot::default()
                 })));
-                let _ = frame_text(w, h, &app); // must not panic
+                let _ = frame_text(w, h, &app);
 
-                // …and the same with the folder browser open over it.
                 app.browser = Some(Browser::open(std::env::temp_dir()));
-                let _ = frame_text(w, h, &app); // must not panic
+                let _ = frame_text(w, h, &app);
             }
         }
     }
@@ -2395,8 +2337,7 @@ mod tests {
     /// The standing "models missing" banner renders above EVERY tab's body (so a
     /// fresh install can't miss the prompt to press `D`), and the Settings panel —
     /// `D`'s on-screen home — is reachable even before the first scan creates the
-    /// library DB. Previously the welcome screen masked every tab on a fresh DB,
-    /// so Settings (and the download prompt) were unreachable.
+    /// library DB. The welcome screen must not mask every tab, or Settings and the download prompt become unreachable.
     #[test]
     fn models_missing_banner_and_settings_reachable_on_a_fresh_library() {
         use crate::app::{App, Tab};
@@ -2405,7 +2346,6 @@ mod tests {
         for tab in Tab::ALL {
             let mut app = App::new("/tmp/x.sqlite".into());
             app.missing_models = vec!["CLIP image encoder".to_string()];
-            // Resolved-but-not-yet-created library (fresh scratch): db_exists=false.
             app.apply_load(LoadMsg::Done(Box::new(Snapshot {
                 db_exists: false,
                 ..Snapshot::default()
@@ -2428,8 +2368,6 @@ mod tests {
             );
         }
 
-        // Settings is reachable on a fresh library: its download action shows even
-        // with db_exists=false, while Library still shows the first-run welcome.
         let mut app = App::new("/tmp/x.sqlite".into());
         app.apply_load(LoadMsg::Done(Box::new(Snapshot {
             db_exists: false,
@@ -2473,7 +2411,6 @@ mod tests {
         assert!(text.contains("62%"), "gauge percent label missing");
         assert!(text.contains("arcface"), "gauge live label missing");
 
-        // The bar is actually FILLED in gold — proof it renders, not just labels.
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
@@ -2502,7 +2439,7 @@ mod tests {
                     label: "arcface · 182/271 MB".to_string(),
                     done,
                 });
-                let _ = frame_text(w, h, &app); // must not panic
+                let _ = frame_text(w, h, &app);
             }
         }
     }
@@ -2567,8 +2504,6 @@ mod tests {
         use crate::app::{App, Tab};
         use crate::data::{LoadMsg, Snapshot};
 
-        // A loaded-but-empty library (db_exists, zero rows) runs the per-tab
-        // empty branches rather than the first-run welcome screen.
         let load = || {
             let mut app = App::new("/tmp/x.sqlite".into());
             app.apply_load(LoadMsg::Done(Box::new(Snapshot {
@@ -2578,7 +2513,6 @@ mod tests {
             app
         };
 
-        // Library: a headline + the s-to-scan call-to-action.
         let mut lib = load();
         let t = frame_text(100, 30, &lib);
         assert!(
@@ -2590,7 +2524,6 @@ mod tests {
             "Library empty CTA missing"
         );
 
-        // Library no-match: a search that hits nothing is a DISTINCT state.
         lib.search = "zzz-no-such-thing".to_string();
         let t = frame_text(100, 30, &lib);
         assert!(
@@ -2602,7 +2535,6 @@ mod tests {
             "Library no-match CTA missing"
         );
 
-        // People / Cleanup / Deep Analyze / Restructure: each explains itself + offers a step.
         for (tab, headline, cta_text) in [
             (Tab::People, "No people yet.", "detect & group faces"),
             (Tab::Cleanup, "No duplicates found.", "check for duplicates"),

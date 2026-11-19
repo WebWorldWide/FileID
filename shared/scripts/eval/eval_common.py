@@ -1,15 +1,13 @@
 """Shared helpers for the People and timeline evaluations.
 
-Drives one native engine (the macOS Swift FileIDEngine or the shared Rust
-fileid-engine) over newline-delimited JSON, always with its database, logs and
+Drives one native engine (the shared Rust fileid-engine) over newline-delimited JSON, always with its database, logs and
 state redirected into a scratch folder inside the evaluation directory. Never
 point an engine at the owner's live catalog: every Engine here refuses to start
 without an explicit state directory, and refuses protected source roots.
 
 Engines also run with HOME, CFFIXED_USER_HOME and the model folders pointed at an
 isolated home (`<eval root>/home` by default) that holds copies of the installed
-models, because the Swift engine finds its models under the home folder and marks
-a vision model folder each time it loads it.
+models.
 """
 from __future__ import annotations
 
@@ -101,7 +99,7 @@ def database_path(state: Path) -> Path:
 
 class Engine:
     """One engine process; events are read from stdout and stderr because the
-    macOS engine writes its event stream to stderr."""
+    Mac app-hosted engine writes its event stream to stderr."""
 
     def __init__(self, binary: Path, state: Path, env: dict | None = None, log: Path | None = None,
                  home: Path | None = None):

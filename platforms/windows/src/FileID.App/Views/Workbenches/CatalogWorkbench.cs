@@ -330,7 +330,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private long RequireFile() => _fileID ?? throw new InvalidOperationException("Pick a result first.");
     private void ResetEditor() { _editingID = null; _title.Text = ""; _summary.Text = ""; _start.Value = 0; _end.Value = 0; }
 
-    /// <summary>The selected results, or every result when none are selected, once per file.</summary>
     private IReadOnlyList<CatalogHit> AskTargets()
     {
         var picked = SelectedHits().ToArray();
@@ -355,8 +354,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private IEnumerable<CatalogHit> SelectedHits() =>
         _hits.SelectedItems.OfType<FrameworkElement>().Select(row => row.Tag).OfType<CatalogHit>();
 
-    // ---- Results ----------------------------------------------------------------
-
     private void RenderHits(IReadOnlyList<CatalogHit> hits, bool searched)
     {
         _lastHits = hits;
@@ -376,8 +373,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         ToolTipService.SetToolTip(_bestTakes, TakeGroupsPolicy.SearchTooltip(hits));
     }
 
-    /// <summary>Result rail row (DESIGN_V3_PORT "Search &amp; Moments", Results): thumbnail, file name,
-    /// time / page / kind line (lavender for unchecked video frames) and the matched text.</summary>
     private Grid ResultRow(CatalogHit hit)
     {
         var image = new Image { Stretch = Stretch.UniformToFill };
@@ -434,8 +429,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         });
     }
 
-    // ---- Player -------------------------------------------------------------------
-
     private void SelectHit(CatalogHit? hit)
     {
         _selectedHit = hit;
@@ -458,8 +451,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         LoadTracks(hit);
     }
 
-    /// <summary>Reads the Examined and Speech lanes from the read-only catalog on a worker
-    /// thread; a stale answer for an earlier selection is dropped.</summary>
     private void LoadTracks(CatalogHit hit)
     {
         if (!TakeGroupsPolicy.IsVideoPath(hit.Path)) return;
@@ -539,8 +530,6 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             return MomentTimelinePolicy.Duration(null, _chapterList, _tracks.Examined, _tracks.Speech);
         }
     }
-
-    // ---- Requests -----------------------------------------------------------------
 
     private Task SearchAsync(CancellationToken ct) => SearchAsync((string)_mode.SelectedItem, ct);
     private async Task SearchAsync(string mode, CancellationToken ct)

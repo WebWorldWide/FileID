@@ -1,7 +1,3 @@
-//! IPC command handlers, split by domain. Each submodule owns a coherent
-//! group of `handle_*` functions; the dispatcher in `server::handle_line`
-//! pattern-matches the inbound command and calls the relevant handler here.
-
 pub(crate) mod bulk;
 pub(crate) mod deep_analyze;
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -52,12 +48,10 @@ pub mod roots;
 pub mod benchmark;
 pub mod timeline;
 mod timeline_media;
-// The Mac app's engine exports and analyses video with AVFoundation instead.
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) mod video_export;
 mod media_recipes;
 
-/// Whether FileID's vetted FFmpeg runtime is installed (macOS video frames need it).
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) fn ffmpeg_runtime_available() -> bool {
     video_export::available()

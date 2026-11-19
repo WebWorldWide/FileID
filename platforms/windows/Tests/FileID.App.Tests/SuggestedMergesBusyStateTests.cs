@@ -3,14 +3,7 @@ using Xunit;
 
 namespace FileID.App.Tests;
 
-/// The Suggested-merges sheet fetches over every person cluster (3,014 on a real
-/// library) and the engine emits only a TERMINAL mergeSuggestions event — no
-/// per-step progress. Without a visible busy state the sheet showed one static
-/// line of text for several seconds and read as frozen/broken.
-///
-/// Source-derived so it fails if the indicator is removed or stops being cleared
-/// on an exit path, which is how this reverts to "looks hung" without anyone
-/// noticing.
+/// <summary>The Suggested-merges sheet fetches over every person cluster (3,014 on a real library) and the engine emits only a TERMINAL mergeSuggestions event — no per-step progress.</summary>
 public sealed class SuggestedMergesBusyStateTests
 {
     private static readonly string RepoRoot = FindRepoRoot();
@@ -32,9 +25,6 @@ public sealed class SuggestedMergesBusyStateTests
             root.Descendants(xaml + "ProgressRing"),
             e => e.Attribute(name)?.Value == "BusyRing");
 
-        // A ProgressRing is indeterminate by nature. Assert no one has bolted a
-        // fabricated percentage onto it — the engine reports no progress, so any
-        // determinate value would be invented.
         Assert.Null(ring.Attribute("Value"));
         Assert.Null(ring.Attribute("IsIndeterminate"));
 
@@ -47,18 +37,13 @@ public sealed class SuggestedMergesBusyStateTests
     {
         var code = File.ReadAllText(SheetCode());
 
-        // Entered exactly once, when the fetch starts.
         Assert.Equal(1, CountOf(code, "SetBusy(true"));
 
-        // Cleared on success, timeout, and error — three awaited exit paths in the
-        // Loaded handler — plus once in Render() for the reply-driven path. A
-        // missing clear leaves the ring spinning forever over stale content.
+        // A missing clear leaves the ring spinning forever over stale content.
         Assert.True(CountOf(code, "SetBusy(false") >= 4,
             "SetBusy(false) must run on the success, timeout, and error paths and in Render()");
 
-        // Render() must not clear the busy state on a null (not-yet-arrived)
-        // result, or the ring vanishes and "No merge-review candidates found." flashes
-        // before the real reply lands.
+        // Render() must not clear the busy state on a null (not-yet-arrived) result, or the ring vanishes and "No merge-review candidates found." flashes before the real reply lands.
         var render = code[code.IndexOf("private void Render()", StringComparison.Ordinal)..];
         var nullGuard = render.IndexOf("if (sug is null) return;", StringComparison.Ordinal);
         var clear = render.IndexOf("SetBusy(false)", StringComparison.Ordinal);

@@ -1,9 +1,7 @@
 import Foundation
 
 public enum FileKind: String, Sendable {
-    // `model` = 3D models (scanned, not dropped like `other`) so Deep Analyze can
-    // name them from their embedded object/material labels. Lockstep with the Rust
-    // engine's FileKind::Model ("model"). Wavefront `.obj` only for now.
+    // `model` is 3D models: scanned, not dropped like `other`, so Deep Analyze can name them from embedded labels. Lockstep with the Rust engine's FileKind::Model.
     case image, video, pdf, doc, audio, model, other
 }
 

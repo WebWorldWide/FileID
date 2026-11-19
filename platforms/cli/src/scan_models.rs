@@ -1,29 +1,4 @@
-//! `fileid scan --models` — FULL-pipeline scan via the engine.
-//!
-//! The model-free `scan` (scan.rs) only indexes filenames + plain text. This
-//! path drives the engine's real ML pipeline — image tags (RAM++), CLIP
-//! embeddings, face detect/embed/cluster, perceptual + content hashes, binary-
-//! document text — exactly as the desktop apps do.
-//!
-//! The engine's `startScan` hard-requires the AI models and owns its own async
-//! runtime + model sessions, so we can't run it from a simple library call. We
-//! reuse the engine the same way the desktop clients do: spawn the
-//! `FileIDEngine` binary and speak newline-delimited JSON over stdio, reusing
-//! the engine's own `ipc::IpcCommand` / `IpcEvent` types (no schema drift).
-//!
-//! Two pre-flights before we ever spawn:
-//!   1. Models installed? We mirror the engine's exact `startScan` gate
-//!      (`mobileclip_s2` + `arcface` sentinels) and, if anything is missing,
-//!      print the exact install command and stop. macOS uses a separate Rust
-//!      engine model directory.
-//!   2. Engine binary located? If not, we say how to point at it.
-//!
-//! The full pipeline writes the engine's canonical library by default. An
-//! explicit `--db`/`$FILEID_DB` is inherited by the child through the engine's
-//! `FILEID_DB` override, so isolated full scans and read commands agree. The
-//! only remaining divergence is the macOS desktop-app library selected
-//! implicitly by read commands; that case is surfaced with an exact `--db`
-//! follow-up hint.
+//! `fileid scan --models`: the full ML pipeline, driven by spawning the engine binary over newline-delimited JSON IPC (the engine owns its async runtime lifecycle). Pre-flights check the models and engine binary before spawning. Post-scan hints add `--db` when reads would open a different library (macOS desktop app).
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -44,10 +19,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         anyhow::bail!("scan root is not a directory: {}", root_abs.display());
     }
 
-    // Pin the engine's OWN models dir (and inherit it into the spawned engine
-    // below) so the model gate + the scan both look where `fileid models
-    // download` installs — including on macOS, where the default would be the
-    // desktop app's read-only CoreML dir. No-op when the user pinned it.
+    // Pin the engine's own models dir so the gate and the scan use what `fileid models download` installs to (macOS default is the read-only CoreML dir).
     crate::ensure_engine_models_dir();
 
     let models_dir = fileid_engine::paths::models_dir().ok();
@@ -57,20 +29,14 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         fileid_engine::paths::db_path().ok()
     };
 
-    // ── Pre-flight 1: models installed? ──────────────────────────────────
-    // Runs before the --db caveat: on macOS this reports that full-ML scanning
-    // is the desktop app's job (the Rust engine can't reuse the app's Swift
-    // models), so that recommendation shouldn't trail a now-moot --db note.
+    // Runs before the --db caveat: on macOS full-ML scanning is the desktop app's job, so that advice must not trail a moot --db note.
     let missing = missing_required();
     if !missing.is_empty() {
         report_missing_models(ctx, &missing, models_dir.as_deref());
         anyhow::bail!("full-pipeline scan did not run: AI models not installed");
     }
 
-    // An explicit DB is forwarded to the child. Without one, the engine writes
-    // its canonical XDG/%LOCALAPPDATA% library; on macOS, read commands may
-    // implicitly prefer the Swift app's library instead. Surface that remaining
-    // mismatch so post-scan commands never appear empty without explanation.
+    // Forward an explicit DB to the child. Otherwise the engine writes its XDG library, and on macOS reads may prefer the Swift app's library; surface that mismatch.
     if engine_writes_unseen_library(engine_db.as_deref(), ctx.db.as_path()) {
         let where_ = engine_db.as_ref().map_or_else(
             || "<engine default>".to_string(),
@@ -93,7 +59,6 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         ));
     }
 
-    // ── Pre-flight 2: engine binary located? ─────────────────────────────
     let Some(engine_bin) = client::locate_engine() else {
         report_no_engine(ctx);
         anyhow::bail!("full-pipeline scan did not run: engine binary not found");
@@ -102,19 +67,12 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     drive_scan(ctx, &engine_bin, &root_abs, rescan, engine_db.as_deref())
 }
 
-/// Will the effective engine target differ from the library read commands open?
-/// Explicit overrides already agree; the expected mismatch is macOS's implicit
-/// Swift-app DB versus the Rust engine's XDG default. An unresolved engine path
-/// counts as a divergence we cannot name.
+/// True when the engine's target differs from the library reads open (macOS desktop app vs XDG default). An unresolved engine path counts as a divergence.
 fn engine_writes_unseen_library(engine_db: Option<&Path>, reader_db: &Path) -> bool {
     engine_db != Some(reader_db)
 }
 
-/// The ` --db <engine library>` suffix for the post-scan "explore" commands, so
-/// they open the library the engine just wrote when the CLI's reads would
-/// otherwise default elsewhere (the macOS desktop-app library). Empty — keeping
-/// that line byte-identical to before — when reads already resolve to the
-/// engine's library (the Win/Linux default, or macOS with no desktop app).
+/// The ` --db <engine library>` suffix for the post-scan hints. Empty when reads already resolve to the engine's library, keeping that line byte-identical.
 fn explore_db_arg(engine_db: Option<&Path>, reader_db: &Path) -> String {
     match engine_db {
         Some(p) if engine_writes_unseen_library(Some(p), reader_db) => {
@@ -225,9 +183,7 @@ fn report_no_engine(ctx: &Ctx) {
     );
 }
 
-/// Spawn the engine, send `startScan`, stream progress to stderr, and report
-/// the outcome. Closes the engine's stdin on completion so its parent-EOF
-/// watchdog shuts it down cleanly.
+/// Spawns the engine, sends `startScan`, streams progress, and reports the outcome. Closing stdin lets the engine's parent-EOF watchdog shut it down.
 fn drive_scan(
     ctx: &Ctx,
     engine_bin: &Path,
@@ -327,11 +283,7 @@ fn drive_scan(
                     "  Clustering: {people} people · {faces} faces · {unmatched_faces} unmatched ({clustering_seconds:.2}s)"
                 );
                 println!("  Duration:   {seconds:.2}s{rate}");
-                // The engine wrote its OWN library; when the CLI's reads default
-                // elsewhere (the macOS desktop-app library), qualify the explore
-                // hints with that `--db` so the suggested commands open the
-                // library this scan just populated, not an empty one. Byte-
-                // identical (no suffix) when reads already resolve to it.
+                // Qualify the explore hints with `--db` when reads default elsewhere, so they open the library this scan just populated.
                 let db_hint = explore_db_arg(engine_db, ctx.db.as_path());
                 println!(
                     "  Explore:    {}  ·  {}  ·  {}",
@@ -346,9 +298,7 @@ fn drive_scan(
             Ok(())
         }
         ScanOutcome::Error { kind, message } => {
-            // The engine reported an error → it did NOT scan. Surface the right
-            // output (JSON payload / clean install guidance / raw error) but
-            // ALWAYS exit non-zero so `scan --models && next` can't proceed.
+            // The engine did not scan; always exit non-zero so `scan --models && next` cannot proceed.
             if ctx.json {
                 print_json(&serde_json::json!({
                     "command": "scan",
@@ -425,9 +375,7 @@ fn report_progress(ctx: &Ctx, live: bool, payload: &EventPayload) {
     }
 }
 
-/// Best-effort `(tags, files-with-faces, people)` for the completion summary.
-/// Read-only, never fatal — the engine has already exited and freed the DB by
-/// the time we call this (the scan is done).
+/// Best-effort `(tags, files-with-faces, people)` for the completion summary. Read-only and never fatal; the engine has already exited.
 fn count_results(db: &Path) -> Option<(i64, i64, i64)> {
     let conn = fileid_engine::db::open_read(db).ok()?;
     let tags: i64 = conn
@@ -448,12 +396,7 @@ fn count_results(db: &Path) -> Option<(i64, i64, i64)> {
 mod tests {
     use super::*;
 
-    // Regression for the macOS default invocation: a successful `scan --models`
-    // writes the engine's XDG library, but the CLI's reads default to the
-    // desktop app's library — a divergence the old `db_explicit` gate let pass
-    // silently, so dedupe/search/people reported no AI data. The note must fire,
-    // and the explore hints must redirect reads at the engine's library. Pure
-    // path comparison, so this exercises the decision identically on every OS.
+    // macOS default: the engine writes its XDG library while reads default to the desktop app's, so the note must fire and the explore hints must redirect reads.
     #[test]
     fn divergence_fires_for_macos_app_db_default() {
         let engine = Path::new("/home/u/.local/share/FileID/fileid.sqlite");
@@ -469,10 +412,7 @@ mod tests {
         );
     }
 
-    // Win/Linux default invocation (and macOS without a desktop-app library):
-    // reads resolve to the very library the engine writes. The note MUST stay
-    // silent and the explore line MUST be byte-identical (no `--db` suffix) — no
-    // false positive across platforms.
+    // Win/Linux default (and macOS without a desktop-app library): reads resolve to the engine's library, so the note and suffix must stay absent.
     #[test]
     fn no_divergence_when_reader_is_engine_library() {
         let p = Path::new("/state/FileID/fileid.sqlite");
@@ -480,8 +420,7 @@ mod tests {
         assert_eq!(explore_db_arg(Some(p), p), "");
     }
 
-    // An explicit `--db` is now inherited by the spawned engine through
-    // FILEID_DB, so the effective engine path and reader path agree.
+    // An explicit `--db` is inherited via FILEID_DB, so engine and reader paths agree.
     #[test]
     fn explicit_db_override_eliminates_divergence() {
         let pinned = Path::new("/tmp/lib/fileid.sqlite");
@@ -489,9 +428,7 @@ mod tests {
         assert_eq!(explore_db_arg(Some(pinned), pinned), "");
     }
 
-    // The engine can't resolve its own path (`db_path()` -> Err): we can't name
-    // where it writes, so reads certainly don't open it — warn (note fires), but
-    // emit no `--db` hint we'd be unable to fill in.
+    // Engine path unresolvable: reads cannot open it either, so warn but emit no `--db` hint.
     #[test]
     fn unresolvable_engine_db_warns_without_hint() {
         let reader = Path::new("/state/FileID/fileid.sqlite");

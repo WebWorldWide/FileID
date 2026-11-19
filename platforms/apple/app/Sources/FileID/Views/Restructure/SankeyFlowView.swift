@@ -1,10 +1,6 @@
 import SwiftUI
 
-/// Sankey flow diagram for the Restructure tab. All ribbons render
-/// in one `Canvas`. Layout (sources, destinations, flows, slot Y
-/// positions, cross-highlight indexes) is computed once per data or
-/// geometry change and cached in `layout`. Hover is a single
-/// `.onContinuousHover` that hit-tests by cursor-to-bezier proximity.
+/// Sankey flow diagram for Restructure: one Canvas draws every ribbon. Layout is cached in `layout`; hover is one `.onContinuousHover` that hit-tests by bezier proximity.
 struct SankeyFlowView: View {
     let proposals: [RestructureView.Proposal]
     var onTapSource: (String) -> Void = { _ in }
@@ -51,10 +47,7 @@ struct SankeyFlowView: View {
         }
     }
 
-    /// Column headers: "FROM (N)" → "TO (M)" with a connecting arrow
-    /// in the middle. Tiny tracking-spaced caps reads as a section
-    /// header, not a label, and the arrow makes the directionality
-    /// of the diagram unmistakable at a glance.
+    /// Column headers: "FROM (N)" → "TO (M)" with an arrow.
     @ViewBuilder
     private var columnHeaderRow: some View {
         let nodeColW: CGFloat = 196
@@ -110,13 +103,10 @@ struct SankeyFlowView: View {
                 nodeColW ... (totalW - nodeColW)
 
             ZStack(alignment: .topLeading) {
-                // 1. Single Canvas draws every ribbon. One view,
-                // one draw pass per render — orders of magnitude
-                // cheaper than 70 Path views.
+                // One Canvas draws every ribbon: one draw pass per render instead of ~70 Path views.
                 ribbonCanvas(ribbonAreaX: ribbonAreaX, totalH: totalH)
                     .opacity(Double(entranceProgress))
 
-                    // 2. Source column.
                     ForEach(layout.sources) { node in
                         if let slot = layout.srcSlots[node.id] {
                             Button {
@@ -146,7 +136,6 @@ struct SankeyFlowView: View {
                         }
                     }
 
-                    // 3. Destination column.
                     ForEach(layout.destinations) { node in
                         if let slot = layout.dstSlots[node.id] {
                             Button {
@@ -205,9 +194,6 @@ struct SankeyFlowView: View {
                         entranceProgress = 1
                     }
                 }
-                // Floating tooltip near the cursor when hovering a
-                // ribbon — shows the source folder, destination, and
-                // file count of the ribbon under the pointer.
                 hoverTooltip(geo: geo)
             }
             .frame(height: sankeyHeight)
@@ -223,10 +209,7 @@ struct SankeyFlowView: View {
 
     // MARK: - Ribbon canvas
 
-    /// Draw all ribbons in a single Canvas. Hovered ribbon (if any)
-    /// is drawn last so it overlays the others. Non-hovered ribbons
-    /// share the source-node tint at low opacity at rest, lower still
-    /// when something else is hovered.
+    /// Draws all ribbons in one Canvas; the hovered ribbon is drawn last so it overlays the others.
     @ViewBuilder
     private func ribbonCanvas(ribbonAreaX: ClosedRange<CGFloat>,
                                 totalH: CGFloat) -> some View {
@@ -234,7 +217,6 @@ struct SankeyFlowView: View {
         let dimAll = hoveredFlowID != nil
 
         Canvas(opaque: false, rendersAsynchronously: false) { ctx, _ in
-            // Draw non-highlighted ribbons first (under).
             for flow in layout.flows where flow.id != hoveredFlowID {
                 drawRibbon(
                     ctx: ctx,
@@ -243,7 +225,6 @@ struct SankeyFlowView: View {
                     state: dimAll ? .dimmed : .resting
                 )
             }
-            // Highlighted ribbon last so it sits on top.
             if let id = hoveredFlowID,
                let flow = layout.flowsByID[id] {
                 drawRibbon(
@@ -344,11 +325,7 @@ struct SankeyFlowView: View {
                     lineWidth: isFocused ? 1.5 : 1
                 )
         )
-        // Subtle scale + tinted glow for the focused node. Resting
-        // shadow shrunk 5 → 2.5pt so adjacent nodes don't bleed into
-        // each other at small gaps. Focused state still gets a
-        // generous 12pt glow because only one node is focused at a
-        // time so there's no neighbor to overlap with.
+        // Focused node gets a 12pt glow. The resting shadow is 2.5pt so adjacent nodes don't bleed together at small gaps.
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .shadow(
             color: isFocused ? node.tint.opacity(0.55) : .black.opacity(0.22),
@@ -371,19 +348,13 @@ struct SankeyFlowView: View {
         case .none:
             return nil
         case .flow(let folder, let bucket):
-            // Walk the cached flowsByID sparingly — small set.
             for f in layout.flows where f.sourceFolder == folder
                                       && f.destBucket == bucket {
                 return f.id
             }
             return nil
         case .sourceFolder, .destBucket, .outcome:
-            // Node + outcome highlights affect MANY ribbons. We
-            // signal via the dimAll path inside ribbonCanvas (resting
-            // ribbons that touch the focused source/bucket/outcome
-            // stay bright; others dim). The single-flow lookup
-            // returns nil so no specific ribbon gets the .highlighted
-            // overlay treatment.
+            // Node and outcome highlights dim the other ribbons via the dimAll path, so no single flow is highlighted.
             return nil
         }
     }
@@ -470,8 +441,6 @@ struct SankeyFlowView: View {
             let srcLabel = display.isEmpty ? folder : display
             let tooltipW: CGFloat = 240
             let tooltipH: CGFloat = 56
-            // Anchor tooltip slightly above-right of the cursor;
-            // clamp within the diagram bounds.
             let rawX = cursorPos.x + 14
             let rawY = cursorPos.y - tooltipH - 10
             let x = max(8, min(rawX, geo.size.width - tooltipW - 8))
@@ -518,21 +487,13 @@ struct SankeyFlowView: View {
         }
     }
 
-    /// Y of a horizontal cubic bezier at a given cursor X.
-    /// Control points are pinned at the midpoint horizontally so the
-    /// curve has flat tangents at start/end (matches the rendered
-    /// path). Solved via the cubic bezier parametric formula at
-    /// t = (cursorX - startX) / (endX - startX).
+    /// Y of the bezier at `cursorX`, with flat horizontal tangents at both ends.
     private func bezierY(cursorX: CGFloat,
                            startX: CGFloat, endX: CGFloat,
                            startY: CGFloat, endY: CGFloat) -> CGFloat {
         guard endX != startX else { return (startY + endY) / 2 }
         let t = max(0, min(1, (cursorX - startX) / (endX - startX)))
         let oneMinus = 1 - t
-        // Control points: (startX + dx*0.5, startY) and
-        // (endX - dx*0.5, endY). For a horizontal sweep, the y
-        // component reduces to the standard cubic interpolation
-        // between startY and endY weighted by the bezier basis.
         return (oneMinus * oneMinus * oneMinus) * startY
              + 3 * (oneMinus * oneMinus) * t * startY
              + 3 * oneMinus * (t * t) * endY
@@ -568,21 +529,13 @@ struct SankeyFlowView: View {
 
     // MARK: - Layout (cached)
 
-    /// Updates @State layout cache only when geometry changed
-    /// meaningfully. A single-pixel resize won't blow away the cache.
-    /// Non-mutating because @State's wrappedValue setter routes
-    /// writes through SwiftUI's StoredLocation, not through `self`.
+    /// Updates the @State layout cache only when geometry changes meaningfully, so a single-pixel resize doesn't drop it.
     private func recomputeLayoutIfNeeded(width: CGFloat, height: CGFloat) {
         let widthChanged = abs(width - lastWidth) > 1.5
         let heightChanged = abs(height - lastHeight) > 1.5
         if !widthChanged && !heightChanged && layout.isPopulated { return }
         let new = Self.computeLayout(proposals: proposals,
                                        width: width, height: height)
-        // The closure-captured self is a value; assigning to its
-        // @State backing requires us to issue the write through the
-        // .onAppear/.onChange closure body, which DOES have mutating
-        // access to the wrapper. We rely on SwiftUI binding semantics
-        // here.
         layout = new
         lastWidth = width
         lastHeight = height
@@ -598,7 +551,6 @@ struct SankeyFlowView: View {
             return .empty
         }
 
-        // 1. Build raw source/destination tallies.
         struct SrcAccum { var folder: String; var count: Int; var isJunk: Bool }
         var srcAccum: [String: SrcAccum] = [:]
         var dstCount: [String: Int] = [:]
@@ -617,8 +569,7 @@ struct SankeyFlowView: View {
             dstCount[p.bucket, default: 0] += 1
         }
 
-        // 2. Pick top-N visible nodes per column. Long tail rolls up
-        // into a single "Other" placeholder.
+        // The long tail rolls up into one "Other" node per column.
         let allSrcs = srcAccum.values
             .sorted { a, b in a.count != b.count ? a.count > b.count : a.folder < b.folder }
         let visibleSrcs = Array(allSrcs.prefix(topN))
@@ -683,9 +634,7 @@ struct SankeyFlowView: View {
             ))
         }
 
-        // 3. Aggregate flows. Long-tail sources/destinations remap
-        // to the "Other" rollup nodes so every flow has a valid
-        // endpoint pair.
+        // Long-tail endpoints remap to the "Other" nodes so every flow has a valid pair.
         let visibleSrcIDs = Set(sources.map(\.id))
         let visibleDstIDs = Set(destinations.map(\.id))
         struct Bucket { var sourceFolder: String; var destBucket: String;
@@ -733,15 +682,10 @@ struct SankeyFlowView: View {
         }
         let totalFlowCount = flows.reduce(0) { $0 + $1.count }
 
-        // 4. Barycentric ordering — re-sort source/destination columns
-        // so each node sits near the average position of the nodes it
-        // connects to. This is the standard heuristic for cutting
-        // Sankey ribbon crossings; one or two passes is usually
-        // enough. We seed with count-sorted positions, then iterate.
+        // Barycentric ordering reduces ribbon crossings; one or two passes suffice.
         var srcOrder = sources.map(\.id)
         var dstOrder = destinations.map(\.id)
         for _ in 0..<2 {
-            // Source y = weighted avg of destination indices.
             let dstIndex: [String: Int] = Dictionary(
                 uniqueKeysWithValues: dstOrder.enumerated().map { ($1, $0) }
             )
@@ -759,7 +703,6 @@ struct SankeyFlowView: View {
             srcOrder.sort {
                 (srcWeight[$0] ?? 0) < (srcWeight[$1] ?? 0)
             }
-            // Destination y = weighted avg of source indices (with new order).
             let srcIndex: [String: Int] = Dictionary(
                 uniqueKeysWithValues: srcOrder.enumerated().map { ($1, $0) }
             )
@@ -778,7 +721,6 @@ struct SankeyFlowView: View {
                 (dstWeight[$0] ?? 0) < (dstWeight[$1] ?? 0)
             }
         }
-        // Apply ordering.
         let srcMap: [String: Node] = Dictionary(
             uniqueKeysWithValues: sources.map { ($0.id, $0) }
         )
@@ -801,18 +743,15 @@ struct SankeyFlowView: View {
             destinations.append(rollup)
         }
 
-        // 5. Compute slot Y positions per column.
         let srcSlots = layoutSlots(nodes: sources, totalHeight: height)
         let dstSlots = layoutSlots(nodes: destinations, totalHeight: height)
 
-        // 6. Build a flow-by-id lookup so the hover path doesn't have
-        // to scan the array.
+        // The hover path looks flows up by id instead of scanning.
         let flowsByID = Dictionary(
             uniqueKeysWithValues: flows.map { ($0.id, $0) }
         )
 
-        // 7. Helper indexes for cross-highlight without per-render
-        // O(N) scans of `proposals`.
+        // Cross-highlight indexes, so hover never scans `proposals`.
         var destinationsForSource: [String: Set<String>] = [:]
         var sourcesForDestination: [String: Set<String>] = [:]
         for p in proposals {
@@ -852,13 +791,7 @@ struct SankeyFlowView: View {
         )
     }
 
-    /// Compute proportional slot Y positions for a column. Flexes
-    /// small nodes up to `preferredMin`, scales the rest to fit
-    /// `totalHeight`. The 14pt gap is wider than any node shadow
-    /// radius so adjacent cards' shadows don't bleed into each
-    /// other; the 14pt vertical buffer (`columnVerticalBuffer`)
-    /// reserves room above the first / below the last node for the
-    /// focused-state gold halo to bloom without clipping.
+    /// Proportional slot Y positions for a column: small nodes flex up to `preferredMin`, the rest scale to fit. The 14pt gaps keep node shadows apart, and the buffer leaves room for the focused halo.
     private static let columnVerticalBuffer: CGFloat = 14
 
     private static func layoutSlots(nodes: [Node], totalHeight: CGFloat) -> [String: Slot] {
@@ -868,7 +801,6 @@ struct SankeyFlowView: View {
         let preferredMin: CGFloat = 28
         let absoluteMin: CGFloat = 18
         let buffer = columnVerticalBuffer
-        // Effective layout height excludes the top + bottom buffers.
         let layoutHeight = max(0, totalHeight - buffer * 2)
         let availableHeight = max(0, layoutHeight - CGFloat(nodes.count - 1) * gap)
         let absMinTotal = absoluteMin * CGFloat(nodes.count)
