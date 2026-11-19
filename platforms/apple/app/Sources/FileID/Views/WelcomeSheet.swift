@@ -83,7 +83,7 @@ struct WelcomeSheet: View {
                 title: "Search by description",
                 detail: "Find photos by typing what's in them",
                 technical: "CLIP ViT-B/32",
-                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
+                size: "~\(ModelSize.label(Int64(CLIPModelInstaller.approxDownloadBytes)))",
                 status: clip.status,
                 action: { clip.install() },
                 cancel: { clip.cancel() }
@@ -92,7 +92,7 @@ struct WelcomeSheet: View {
                 title: "Photo tags",
                 detail: "Labels what's in each photo",
                 technical: "RAM++",
-                size: "~\(ByteCountFormatter.string(fromByteCount: ramplus.spec.approxBytes, countStyle: .file))",
+                size: "~\(ModelSize.label(ramplus.spec.approxBytes))",
                 status: ramplus.status,
                 action: { ramplus.install() },
                 cancel: { ramplus.cancel() }
@@ -101,7 +101,7 @@ struct WelcomeSheet: View {
                 title: "Faces",
                 detail: "Groups photos by person",
                 technical: recommendedFace.displayName,
-                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
+                size: "~\(ModelSize.label(Int64(recommendedFace.approxBytes)))",
                 status: arcface.status,
                 action: { arcface.install() },
                 cancel: { arcface.cancel() }
@@ -110,7 +110,7 @@ struct WelcomeSheet: View {
                 title: "Documents",
                 detail: "Understands what documents are about",
                 technical: "BGE-small",
-                size: "~\(ByteCountFormatter.string(fromByteCount: bge.spec.approxBytes, countStyle: .file))",
+                size: "~\(ModelSize.label(bge.spec.approxBytes))",
                 status: bge.status,
                 action: { bge.install() },
                 cancel: { bge.cancel() }
@@ -534,8 +534,7 @@ struct WelcomeSheet: View {
     }
 
     private var vlmSizeLabel: String {
-        let gb = Double(resolvedVLMTotalBytes) / 1_073_741_824.0
-        return String(format: "~%.1f GB", gb)
+        "~\(ModelSize.label(resolvedVLMTotalBytes))"
     }
 
     private var vlmRateETA: String? {

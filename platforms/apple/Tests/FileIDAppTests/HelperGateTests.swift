@@ -1,3 +1,4 @@
+import Foundation
 import FileIDShared
 import Testing
 @testable import FileID
@@ -46,6 +47,14 @@ struct HelperGateTests {
         #expect(HelperGate.downloadDisabled(inProgress: false, helperDown: true))
         #expect(HelperGate.downloadDisabled(inProgress: true, helperDown: false))
         #expect(!HelperGate.downloadDisabled(inProgress: false, helperDown: false))
+    }
+
+    @Test func oneModelReadsTheSameSizeOnEveryScreen() {
+        let qwen8B: Int64 = 5_780_000_000
+        #expect(ModelSize.label(qwen8B) == ByteCountFormatter.string(fromByteCount: qwen8B, countStyle: .file))
+        #expect(ModelSize.label(qwen8B) == "5.78 GB")
+        #expect(ModelSize.downloadBadge(qwen8B) == "5.78 GB download")
+        #expect(!ModelSize.label(qwen8B).contains("5.4"), "5.78 GB is 5.4 GiB; the old badge labelled GiB as GB")
     }
 
     @Test func aMissingDescriptionModelIsAFailureTheDescribePageShows() {

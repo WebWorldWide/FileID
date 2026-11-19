@@ -270,8 +270,7 @@ private struct ModelOptionRow: View {
         } else if installed {
             BadgePill(label: "Downloaded", color: Theme.delight)
         } else {
-            let gb = String(format: "%.1f GB", Double(kind.approxBytes) / 1_073_741_824)
-            BadgePill(label: "\(gb) download", color: Theme.text3)
+            BadgePill(label: ModelSize.downloadBadge(kind.approxBytes), color: Theme.text3)
         }
     }
 

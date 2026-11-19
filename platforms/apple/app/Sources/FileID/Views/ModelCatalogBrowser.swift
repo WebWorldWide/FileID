@@ -76,7 +76,7 @@ struct ModelCatalogBrowser: View {
                         .help("\(kind.sourceRepo) · \(kind.licenseName)")
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 4) {
-                            Text(ByteCountFormatter.string(fromByteCount: kind.approxBytes, countStyle: .file)).monospacedDigit()
+                            Text(ModelSize.label(kind.approxBytes)).monospacedDigit()
                             Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
                                 .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : Theme.text3)
                             if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }

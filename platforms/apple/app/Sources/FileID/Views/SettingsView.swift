@@ -363,7 +363,7 @@ struct ModelInstallCard: View {
     @State private var confirmRemove = false
     @Environment(\.helperDown) private var helperDown
 
-    private var sizeLabel: String { ByteCountFormatter.string(fromByteCount: approxBytes, countStyle: .file) }
+    private var sizeLabel: String { ModelSize.label(approxBytes) }
 
     var body: some View {
         Panel(padding: 16) {
