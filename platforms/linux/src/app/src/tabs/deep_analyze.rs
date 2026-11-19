@@ -94,27 +94,18 @@ fn vlm_fits(
     available_ram_gb: f64,
     free_disk_bytes: Option<u64>,
 ) -> bool {
-    let (minimum_total, working_set) = match kind {
-        "mistral_small_3_2" => (23.5, 16.0),
-        "qwen2_5_vl_7b" => (11.5, 7.0),
-        "gemma_3_4b" => (7.5, 4.5),
-        _ => return false,
-    };
-    if total_ram_gb < minimum_total {
+    let gib = model_install_info(kind).1;
+    if gib <= 0.0 {
         return false;
     }
-    let reserve = if total_ram_gb <= 10.0 {
-        2.0
-    } else if total_ram_gb <= 20.0 {
-        4.0
+    let requested = fileid_engine::util::model_memory::estimate_download_mb((gib * 1_073_741_824.0) as u64);
+    let total = (total_ram_gb * 1024.0) as u64;
+    let memory_fits = if available_ram_gb > 0.0 {
+        fileid_engine::util::model_memory::fits_now(total, (available_ram_gb * 1024.0) as u64, requested)
     } else {
-        6.0
+        fileid_engine::util::model_memory::fits_budget(total, requested)
     };
-    let mut usable = (total_ram_gb - reserve).max(0.0);
-    if available_ram_gb > 0.0 {
-        usable = usable.min((available_ram_gb - 1.5).max(0.0));
-    }
-    if usable < working_set {
+    if !memory_fits {
         return false;
     }
     let Some(free) = free_disk_bytes else {
@@ -1927,6 +1918,16 @@ mod recommendation_tests {
     use super::*;
 
     const PLENTY: u64 = 200 * 1024 * 1024 * 1024;
+
+    #[test]
+    fn fit_is_the_engines_memory_rule() {
+        assert!(vlm_fits("gemma_3_4b", 8.0, 6.0, None));
+        assert!(!vlm_fits("qwen2_5_vl_7b", 8.0, 6.0, None), "a 7B model never fits an 8 GB machine");
+        assert!(vlm_fits("qwen2_5_vl_7b", 16.0, 0.0, None), "unknown free memory asks only about installed memory");
+        assert!(!vlm_fits("qwen2_5_vl_7b", 16.0, 3.0, None), "a busy 16 GB machine cannot load it now");
+        assert!(!vlm_fits("qwen2_5_vl_7b", 16.0, 12.0, Some(1024)), "disk still counts");
+        assert!(!vlm_fits("unknown_model", 64.0, 60.0, None));
+    }
 
     #[test]
     fn low_ram_uses_gemma() {

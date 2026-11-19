@@ -55,13 +55,9 @@ public sealed partial class DeepAnalyzeView : UserControl
         Unloaded -= OnUnloadedHandler;
     }
 
-    private static double RamBudgetGB(string kind) => kind switch
-    {
-        "mistral_small_3_2" => 16.0,
-        "qwen2_5_vl_7b" => 7.0,
-        "gemma_3_4b" => 4.5,
-        _ => 7.0,
-    };
+    // The engine's verdict per vision model for this PC (its own memory admission), from listModels; nothing here decides what fits.
+    private static readonly Dictionary<string, ModelCatalogItem> s_modelFit = new();
+    private static string? s_recommendedKind;
 
     private static double? PhysicalRamGB()
     {
@@ -72,12 +68,33 @@ public sealed partial class DeepAnalyzeView : UserControl
         return null;
     }
 
-    private static bool Fits(string kind, double ramGB)
+    // Until the engine answers, only a model already on disk is offered; the engine admits or refuses it when it loads.
+    private static bool Fits(string kind) =>
+        s_modelFit.TryGetValue(kind, out var model) ? model.Fits : VlmWeightsPresent(kind);
+
+    private static string NeedsMemoryText(string kind, double ramGB) =>
+        s_modelFit.TryGetValue(kind, out var model)
+            ? $"Needs {model.EstimatedResidentGB:0} GB memory (this PC has {ramGB:0})"
+            : "Checking what this PC can run…";
+
+    private async System.Threading.Tasks.Task RefreshModelFitAsync()
     {
-        if (kind is "qwen3_vl_4b" or "qwen3_vl_8b") return true;
-        if (ModelCatalogPresentation.IsCatalogModelKind(kind)) return true;
-        var headroom = Math.Max(0, ramGB - 8.0);
-        return RamBudgetGB(kind) <= headroom;
+        try
+        {
+            var catalog = await EngineClient.Instance.ListModelsAsync("vision");
+            if (_unloaded) return;
+            foreach (var model in catalog.Models) s_modelFit[model.Id] = model;
+            s_recommendedKind = catalog.RecommendedId;
+            // A model that can never run here is not the default: follow the engine's pick until the user chooses one that runs.
+            if (!Fits(_activeModel) && !VlmWeightsPresent(_activeModel)
+                && s_recommendedKind is { } recommended && recommended != _activeModel)
+            {
+                SelectModel(recommended);
+            }
+            SyncCards();
+            SyncDeepAnalyzeControls();
+        }
+        catch (Exception ex) { DebugLog.Warn("RefreshModelFitAsync failed: " + ex.Message); }
     }
 
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
@@ -86,6 +103,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         SelectionRegistry.Instance.PropertyChanged += OnSelectionRegistryChanged;
         SyncCards();
+        _ = RefreshModelFitAsync();
         UpdateActiveModelLabel();
         SyncSelectionButtons();
         _ = RefreshNamePeopleGateAsync();
@@ -344,9 +362,9 @@ public sealed partial class DeepAnalyzeView : UserControl
     private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, double? ramGB)
     {
         // When the engine has reported physical RAM and this VLM's budget can't fit under the ~8 GB headroom, disable install/select and show a "Needs N GB (you have M)" affordance instead of letting the model OOM-kill the engine on load.
-        if (ramGB is double available && !Fits(kind, available))
+        if (ramGB is double available && !Fits(kind))
         {
-            status.Text = $"Needs {RamBudgetGB(kind):0} GB memory (this PC has {available:0})";
+            status.Text = NeedsMemoryText(kind, available);
             status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
             bar.Visibility = Visibility.Collapsed;
             installButton.IsEnabled = false;
@@ -557,7 +575,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         var ec = EngineClient.Instance;
         if (ec.GpuDeviceRemoved) return EngineClient.GpuRestartRequiredMessage;
-        if (PhysicalRamGB() is double ramGB && !Fits(_activeModel, ramGB))
+        if (PhysicalRamGB() is not null && !Fits(_activeModel))
         {
             return $"{ModelDisplayName(_activeModel)} needs more memory than this PC has. Choose a smaller model above.";
         }
@@ -612,7 +630,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             ? blocker
             : "You can keep using your PC while this runs.";
         _runMetaDefaultBrush ??= RunMetaText.Foreground;
-        RunMetaText.Foreground = blocker is not null && !busy && PhysicalRamGB() is double ram && !Fits(_activeModel, ram)
+        RunMetaText.Foreground = blocker is not null && !busy && PhysicalRamGB() is not null && !Fits(_activeModel)
             ? ThemeHelper.GetBrushSafe("WarningBrush")
             : _runMetaDefaultBrush;
 
@@ -858,7 +876,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private bool SelectModel(string id)
     {
         if (!AppSettings.IsAllowedVlmKind(id)) return false;
-        if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return false;
+        if (PhysicalRamGB() is not null && !Fits(id)) return false;
 
         _activeModel = id;
         HighlightActiveCard();
