@@ -1,5 +1,17 @@
 # FileID — State
 
+## 2026-11-19 — Mac acceptance iteration 1: real-data pass, 5 fixer lanes merged (`agent/prod-integrate`, PR #345)
+
+Six tester lanes ran every Mac feature on the Rust engine against real folders (Eckerts, Adlon, a scanned 463-file library); about 60 defects, roughly 14 major, no data-safety issue. Five fixer lanes, each on its own branch with regression tests, were merged as `7a8cf9bd`.
+
+- **Scan (S1–S8):** the post-scan pass no longer waits for the careful-text reader (Eckerts 86.6 s → 35–47 s; unchanged rescan 184 s → 2.8 s); timed-out files are read once more in the same scan; a permission-denied image says so; a second put-back of a finished batch is refused.
+- **Chat (C1–C12):** follow-ups keep the new subject and resolve "it / those / the second one"; face and camera questions read the catalog; "find duplicates and trash them" proposes the Trash card; same-named folders are called out; Moments search is hybrid like Library and Chat. C10 not reproduced; C8 partly fixed ("undo" with nothing applied and the weather answer remain).
+- **People and Cleanup (P1–P12):** person counts match the People page; merge undo restores pending suggestions; revert-merge reconciles representatives; "different people" clears the merge suggestion; a RAW and its rendered twin are one shot in look-alike groups; clearer Duplicates, preview and rename-collision copy. P5 and P12 not reproduced (guard tests).
+- **Mac UI (U1–U15):** the Library counters retry when the WAL catalog is not yet open (the "No files yet" launch); factory reset keeps the description models; the engine installs models under Application Support like the app; many copy fixes.
+- **Models (M1–M9):** one memory rule owned by the engine (`util/model_memory.rs`); `listModels` reports `fits`, `fitsNow`, `availableMemoryMB` and `recommendedID`; a load refused for memory falls back to the largest smaller installed model; the metallib lives only beside `libFileIDAppleKit.dylib`; the app has no downloader of its own.
+- **Verified on the merged tree (Mac):** `cargo fmt`, `clippy -D warnings` (plain and `test-trash-root`), lib tests 1572 and 1598 (`test-trash-root`) passed, app-hosted conformance 132/0, plain conformance 102/0 (30 app-hosted-only skips), all 27 policy scripts, `unittest discover`. Swift, Windows, Linux, CLI and TUI are left to CI.
+- **Not verified:** C# and GTK changes (C11 heading, M3 picker) were not built locally; Mac UI fixes were checked by self-capture and unit tests, not by interactive clicking; no VoiceOver pass.
+
 ## 2026-11-18 — tract replaces ONNX Runtime on every platform; Mac app is Rust-engine only; licence audit; UI polish (`agent/prod-integrate`, PR #345)
 
 Microsoft's ONNX Runtime repositories started returning 404 on 2026-11-17; the owner chose one runtime for all three platforms. Briefs in `~/FileIDDev/briefs/prod-2026-11-17/`; decisions in `DECISIONS.md` (2026-11-18).
