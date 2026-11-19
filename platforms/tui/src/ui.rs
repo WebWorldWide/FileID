@@ -1475,7 +1475,6 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-
 /// A plain-language context strip under the tabs: left description spans, with an
 /// optional right-aligned count (the mockup's `12,481 files`).
 fn render_context(f: &mut Frame, area: Rect, left: Vec<Span<'static>>, right: Option<String>) {

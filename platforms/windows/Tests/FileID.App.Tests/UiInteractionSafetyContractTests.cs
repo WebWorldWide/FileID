@@ -60,7 +60,7 @@ public sealed class UiInteractionSafetyContractTests
         var body = Between(
             source,
             "private async void OnClusterDrop",
-            "// ─── FEAT-CRIT-1");
+            "internal static void OfferMergeUndo(");
 
         Assert.Contains("CompareExchange(ref _bulkOpInFlight", body, StringComparison.Ordinal);
         Assert.Contains("finally", body, StringComparison.Ordinal);

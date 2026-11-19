@@ -4933,9 +4933,9 @@ mod tests {
 
     const SWIFT_RESTRUCTURE_FOLDER: &str = "/private/tmp/fileid-conformance-fixture/swift-written-restructure-apply/tree";
 
-    // One line of the undo journal the Swift engine wrote before it adopted the
-    // library-root header (older app versions; hand-written in that format
-    // because the current Swift engine always writes the header).
+    // One line of the undo journal older Swift-engine app versions wrote before the
+    // library-root header existed.
+    #[cfg(target_os = "macos")]
     fn headerless_swift_line(root: &Path, to: &Path) -> String {
         let text = std::fs::read_to_string(crate::db::test_support::swift_written("journals/restructure_undo-headerless.ndjson")).unwrap();
         let mut entry: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
