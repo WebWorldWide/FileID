@@ -93,7 +93,7 @@ struct SettingsTab: View {
                                 infoRow("Total files",   store.totalFiles.formatted())
                                 infoRow("Photos tagged", store.totalImages.formatted())
                                 infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
-                                infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableMB: store.totalReclaimableMB))
+                                infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableBytes: store.totalReclaimableBytes))
                                 infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
                                     .help(ReadStore.defaultDBURL.path)
                                 Button("Show library file in Finder") {
@@ -200,6 +200,7 @@ struct SettingsTab: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .environment(\.helperDown, HelperGate.isDown(engine))
         .onAppear {
             Task { sessions = store.recentSessions() }
             #if DEBUG
@@ -259,9 +260,8 @@ struct SettingsTab: View {
         .font(Theme.Font.body(13.5))
     }
 
-    static func duplicateSpaceLabel(reclaimableMB: Double) -> String {
-        let bytes = Int64(reclaimableMB * 1_000_000)
-        return bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    static func duplicateSpaceLabel(reclaimableBytes bytes: Int64) -> String {
+        bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
@@ -361,6 +361,7 @@ struct ModelInstallCard: View {
     let fallback: String
     var onRemoved: () -> Void = {}
     @State private var confirmRemove = false
+    @Environment(\.helperDown) private var helperDown
 
     private var sizeLabel: String { ByteCountFormatter.string(fromByteCount: approxBytes, countStyle: .file) }
 
@@ -428,6 +429,8 @@ struct ModelInstallCard: View {
                     Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
+                .disabled(helperDown)
+                .help(helperDown ? HelperGate.downloadsUnavailableNote : "")
                 .accessibilityLabel("Download \(title), about \(sizeLabel)")
                 Spacer()
             }
@@ -468,6 +471,8 @@ struct ModelInstallCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Try again") { installer.install() }.buttonStyle(.dsSecondary)
+                        .disabled(helperDown)
+                        .help(helperDown ? HelperGate.downloadsUnavailableNote : "")
                         .accessibilityLabel("Try again to download \(title)")
                     Spacer()
                 }
@@ -483,6 +488,7 @@ struct EssentialModelsCard: View {
     @State private var ramPlus = ModelInstaller.ramPlus
     @State private var bge = ModelInstaller.bge
     @State private var face = ModelInstaller.face
+    @Environment(\.helperDown) private var helperDown
 
     private var items: [(installer: any ModelInstalling, bytes: Int64)] {
         [(clip, CLIPModelInstaller.approxDownloadBytes), (ramPlus, ramPlus.spec.approxBytes),
@@ -503,6 +509,9 @@ struct EssentialModelsCard: View {
                     MetaText(missing.isEmpty
                              ? "Search, tags, faces and documents are all downloaded."
                              : "Search, tags, faces and documents each need a small model. Without them, FileID still finds files by name and by text inside them.")
+                    if helperDown && !missing.isEmpty {
+                        MetaText(HelperGate.downloadsUnavailableNote)
+                    }
                 }
                 Spacer()
                 if !missing.isEmpty {
@@ -513,7 +522,7 @@ struct EssentialModelsCard: View {
                               systemImage: "arrow.down.circle.fill")
                     }
                     .buttonStyle(.dsPrimary)
-                    .disabled(idle.isEmpty)
+                    .disabled(idle.isEmpty || helperDown)
                     .help(busy ? "Each model's progress is shown in its card below" : "Downloads every missing model below, once, from the internet (huggingface.co)")
                 }
             }

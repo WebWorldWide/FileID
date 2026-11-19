@@ -8,7 +8,7 @@ struct LocationsCard: View {
 
     private var roots: [LibraryRoot] { engine.libraryRoots }
     private var engineReady: Bool { if case .ready = engine.state { return true } else { return false } }
-    private var helperDown: Bool { engine.startFailure != nil || HelperGate.isDown(engine.state) }
+    private var helperDown: Bool { HelperGate.isDown(engine) }
 
     var body: some View {
         Panel(padding: 16) {

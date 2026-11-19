@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// What the Scan, Rescan and title-bar controls do while FileID's helper can't run.
 enum HelperGate {
@@ -8,6 +9,15 @@ enum HelperGate {
         if case .crashed = state { return true }
         return false
     }
+
+    /// The helper cannot run: it failed to start or stopped.
+    @MainActor
+    static func isDown(_ engine: EngineClient) -> Bool {
+        engine.startFailure != nil || isDown(engine.state)
+    }
+
+    /// Model downloads are the helper's job, so they stay off while it is down.
+    static let downloadsUnavailableNote = "FileID's helper isn't running, so models can't download yet. Restart the helper first."
 
     static func scanDisabled(startRequested: Bool, helperDown: Bool) -> Bool {
         startRequested || helperDown
@@ -27,5 +37,17 @@ enum HelperGate {
 enum LibraryCounters {
     static func needsRefresh(isSimilaritySeed: Bool, kind: String?, query: String, listedRows: Int, scopedTotalFiles: Int) -> Bool {
         !isSimilaritySeed && kind == nil && query.isEmpty && listedRows > scopedTotalFiles
+    }
+}
+
+private struct HelperDownKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True while FileID's helper can't run; cards read it to turn off what needs the helper.
+    var helperDown: Bool {
+        get { self[HelperDownKey.self] }
+        set { self[HelperDownKey.self] = newValue }
     }
 }
