@@ -379,6 +379,18 @@ struct PlannedRename {
     sidecars: Vec<(PathBuf, String)>,
 }
 
+/// What a person is told when the move itself failed: the usual causes in words, anything else as the system reports it.
+fn rename_failure_text(err: &anyhow::Error, dest: &std::path::Path) -> String {
+    match err.downcast_ref::<std::io::Error>().map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::AlreadyExists) => {
+            format!("a file named {} already exists in this folder; choose a different name", file_name_of(dest))
+        }
+        Some(std::io::ErrorKind::NotFound) => "the file is no longer where FileID last saw it; refresh and try again".into(),
+        Some(std::io::ErrorKind::PermissionDenied) => "FileID doesn't have permission to rename this file".into(),
+        _ => err.to_string(),
+    }
+}
+
 fn file_name_of(path: &std::path::Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -673,8 +685,9 @@ fn rename_files_blocking(
         };
         let p = &planned[bad];
         let grouped = if unit.len() > 1 { "; its group keeps its names" } else { "" };
-        results[p.slot] = failed_item(p.file_id, format!("rename failed: {err}{grouped}"));
-        let why = format!("not renamed: {} couldn't be renamed ({err}), so its group keeps its names", file_name_of(&p.src));
+        let reason = rename_failure_text(&err, &p.dest);
+        results[p.slot] = failed_item(p.file_id, format!("rename failed: {reason}{grouped}"));
+        let why = format!("not renamed: {} couldn't be renamed ({reason}), so its group keeps its names", file_name_of(&p.src));
         for &index in moved.iter().rev() {
             let p = &planned[index];
             results[p.slot] = match crate::util::path_safety::rename_no_replace(&p.dest, &p.src) {
@@ -3787,6 +3800,18 @@ mod tests {
             assert!(names.iter().any(|listed| listed == name), "{names:?}");
         }
         assert!(!names.iter().any(|name| name.starts_with("beach")), "{names:?}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_name_says_so_in_words() {
+        let (directory, db) = rename_fixture("collide", &[(1, "IMG_1.JPG"), (2, "IMG_2.JPG")]);
+        let result = rename_files_blocking(&db, &renames(&[(1, "IMG_2.JPG")]), &no_clobber_rename_bound);
+        assert_eq!((result.succeeded, result.failed), (0, 1), "{:?}", result.messages);
+        let (ok, message) = message_of(&result, 1);
+        assert!(!ok && message.contains("a file named IMG_2.JPG already exists in this folder"), "{message}");
+        assert!(!message.contains("os error"), "{message}");
+        assert_eq!(listed(&directory), ["IMG_1.JPG", "IMG_2.JPG"]);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
