@@ -135,11 +135,16 @@ struct TakeReview: View {
     }
 
     private var primaryTitle: String {
-        let others = victims.count
-        if keep.count <= 1, let best = bestID, keep.contains(best) {
-            return "Keep the best, move the other \(others) to Trash"
-        }
-        return "Keep \(keep.count), move the other \(others) to Trash"
+        Self.primaryTitle(loading: loading, hasTakes: !qualities.isEmpty, kept: keep.count, others: victims.count,
+                          keepsOnlyBest: bestID.map { keep.contains($0) } ?? false)
+    }
+
+    /// The button never states a count before there is something to count: while the takes are still being checked, or when they could not be checked, it says so.
+    static func primaryTitle(loading: Bool, hasTakes: Bool, kept: Int, others: Int, keepsOnlyBest: Bool) -> String {
+        if loading { return "Checking these takes…" }
+        if !hasTakes { return "Move the others to Trash" }
+        if kept <= 1, keepsOnlyBest { return "Keep the best, move the other \(others) to Trash" }
+        return "Keep \(kept), move the other \(others) to Trash"
     }
 
     private var primaryHelp: String {
