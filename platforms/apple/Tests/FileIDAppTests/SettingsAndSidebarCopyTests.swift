@@ -7,9 +7,14 @@ import FileIDShared
 struct SettingsAndSidebarCopyTests {
     @Test("no space to free reads None, not a zero-byte size")
     func duplicateSpaceNeverReadsZeroKB() {
-        #expect(SettingsTab.duplicateSpaceLabel(reclaimableMB: 0) == "None")
-        #expect(SettingsTab.duplicateSpaceLabel(reclaimableMB: 0.0000001) == "None")
-        #expect(SettingsTab.duplicateSpaceLabel(reclaimableMB: 12).contains("MB"))
+        #expect(SettingsTab.duplicateSpaceLabel(reclaimableBytes: 0) == "None")
+        #expect(SettingsTab.duplicateSpaceLabel(reclaimableBytes: 12_000_000).contains("MB"))
+    }
+
+    @Test("Settings and Cleanup print the same byte total the same way")
+    func duplicateSpaceMatchesCleanup() {
+        let bytes: Int64 = 22_100_000
+        #expect(SettingsTab.duplicateSpaceLabel(reclaimableBytes: bytes) == ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
     }
 
     @Test("Locations says the helper is down instead of claiming there are no locations")
