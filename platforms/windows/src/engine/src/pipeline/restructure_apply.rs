@@ -739,6 +739,27 @@ fn recover_prior_undo_journal(path: &Path, library_root: &Path) -> Result<()> {
 /// entry is fsync'd before its move starts, so a torn tail means that move
 /// never executed and skipping it is safe. Corruption anywhere earlier fails
 /// closed — an explicit error beats a partial undo that reorders dependents.
+fn default_undo_journal_path(library_root: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        Some(library_root.join(".fileid-test-restructure-undo.ndjson"))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = library_root;
+        crate::paths::trash_log_path()
+            .ok()
+            .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
+    }
+}
+
+/// An applied layout of `library_root` is waiting to be undone.
+pub(crate) fn undo_pending(library_root: &Path) -> bool {
+    let Some(path) = default_undo_journal_path(library_root) else { return false };
+    let Ok(Some(scan)) = scan_undo_journal_spans(&path) else { return false };
+    !scan.spans.is_empty() && validate_owned_undo_scan(&scan, library_root).is_ok()
+}
+
 fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -2257,16 +2278,7 @@ impl RestructureApply {
         if let Some(path) = self.undo_journal_override.clone() {
             return Some(path);
         }
-        #[cfg(test)]
-        {
-            Some(self.library_root.join(".fileid-test-restructure-undo.ndjson"))
-        }
-        #[cfg(not(test))]
-        {
-            crate::paths::trash_log_path()
-                .ok()
-                .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
-        }
+        default_undo_journal_path(&self.library_root)
     }
 
     fn open_undo_journal(&self) -> Result<Option<UndoJournalIter>> {
@@ -4385,6 +4397,26 @@ mod tests {
     }
 
     /// A torn trailing journal entry (crash mid-append, before its fsync, so its move never executed) must not abort the undo of the valid durable entries before it.
+    #[test]
+    fn undo_is_pending_only_while_an_applied_layout_waits() {
+        let root = undo_fixture_root("undo-pending");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("photo.jpg");
+        std::fs::write(&src, b"PIC").unwrap();
+        let dst = root.join("Sorted").join("photo.jpg");
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false);
+
+        assert!(!undo_pending(&root), "nothing applied yet");
+        apply.apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())]).unwrap();
+        assert!(undo_pending(&root));
+        assert!(!undo_pending(&root.join("elsewhere")), "another folder has nothing to undo");
+        apply.undo_last().unwrap();
+        assert!(!undo_pending(&root), "undone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn undo_tolerates_a_torn_trailing_journal_entry() {
         let root = undo_fixture_root("undo-torn");

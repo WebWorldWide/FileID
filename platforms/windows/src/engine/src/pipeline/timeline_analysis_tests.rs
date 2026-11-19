@@ -160,6 +160,26 @@ fn chapter_suggestions_split_at_confirmed_transitions() {
 }
 
 #[test]
+fn scene_captions_each_start_a_chapter_where_the_picture_changes() {
+    let captions = [
+        Caption { seconds: 0.0, text: "A child wearing a yellow helmet rides a red scooter on a concrete driveway".into() },
+        Caption { seconds: 15.0, text: "A child in a green top sits on concrete beside grass".into() },
+        Caption { seconds: 33.0, text: "Three children play basketball on a suburban driveway".into() },
+        Caption { seconds: 51.0, text: "A person in a blue shirt stands in front of a residential street".into() },
+    ];
+    let scene_version = format!("{SCENE_VERSION_PREFIX}model@rev");
+    let chapters = chapter_suggestions(1, "rev", &scene_version, 83.0, &captions);
+    assert_eq!(chapters.iter().map(|chapter| chapter.start_seconds).collect::<Vec<_>>(), [0.0, 15.0, 33.0, 51.0]);
+    assert!(close(chapters[3].end_seconds, 83.0) && (chapters[0].end_seconds - 14.999).abs() < 1e-9);
+    assert!(chapter_suggestions(1, "rev", "frame-v", 83.0, &captions).is_empty());
+    let same = [
+        Caption { seconds: 0.0, text: "A child rides a scooter on a driveway".into() },
+        Caption { seconds: 10.0, text: "A child rides a scooter on the driveway".into() },
+    ];
+    assert!(chapter_suggestions(1, "rev", &scene_version, 20.0, &same).is_empty());
+}
+
+#[test]
 fn concise_titles_cut_at_sentence_and_word_boundaries() {
     assert_eq!(concise_title("A dog runs. Then it sits."), "A dog runs");
     let long = "word ".repeat(30);

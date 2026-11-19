@@ -104,12 +104,15 @@ struct State {
 pub(crate) struct Judged {
     pub(crate) response: CatalogResponse,
     pub(crate) weak: Option<std::collections::HashSet<i64>>,
+    /// Files whose picture scored as a strong match; the other good matches were found by name, tag, text or description.
+    pub(crate) strong: std::collections::HashSet<i64>,
 }
 impl Judged {
     pub(crate) fn labelled(mut self) -> Self {
         if let Some(weak) = &self.weak {
             let (good, weaker): (Vec<_>, Vec<_>) = std::mem::take(&mut self.response.hits).into_iter().partition(|hit| !weak.contains(&hit.file_id));
-            self.response.message = Some(search_strength::summary(good.len(), weaker.len()));
+            let strong = good.iter().filter(|hit| self.strong.contains(&hit.file_id)).count();
+            self.response.message = Some(search_strength::summary(good.len(), strong, weaker.len()));
             self.response.hits = good.into_iter().chain(weaker).collect();
         }
         self
@@ -381,7 +384,7 @@ impl CatalogIndex {
         };
         if mode == "keyword" {
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-            return Ok(Judged { response, weak: None });
+            return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });
         }
         let mut query_vector = crate::commands::catalog_search::vector(&tx, request)?;
         normalize(&mut query_vector);
@@ -417,7 +420,7 @@ impl CatalogIndex {
                     );
                     response.jobs = crate::commands::catalog::jobs(&conn)?;
                     response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-                    return Ok(Judged { response, weak: None });
+                    return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });
                 };
                 // The graph builds in the background for the next search; the search's own lease goes first because a
                 // background build is not admitted beside it. A paused or failed index job does not stop this answer.
@@ -462,6 +465,11 @@ impl CatalogIndex {
         }
         let weak_visual: Option<std::collections::HashSet<i64>> =
             judging.then(|| visual.iter().filter(|(_, margin)| !search_strength::is_strong(*margin)).map(|(hit, _)| hit.file_id).collect());
+        let strong: std::collections::HashSet<i64> = visual
+            .iter()
+            .filter(|(hit, _)| weak_visual.as_ref().is_some_and(|weak| !weak.contains(&hit.file_id)))
+            .map(|(hit, _)| hit.file_id)
+            .collect();
         let visual: Vec<CatalogHit> = visual.into_iter().map(|(hit, _)| hit).collect();
         response.message = Some(
             if mode == "semantic" {
@@ -473,11 +481,11 @@ impl CatalogIndex {
         );
         if mode == "semantic" {
             response.hits = crate::commands::catalog_search::select(visual, limit, files_only);
-            return Ok(Judged { response, weak: weak_visual });
+            return Ok(Judged { response, weak: weak_visual, strong });
         }
         let Some(mut weak) = weak_visual else {
             response.hits = crate::commands::catalog_search::merge(keyword, visual, limit, files_only);
-            return Ok(Judged { response, weak: None });
+            return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });
         };
         for hit in &keyword {
             weak.remove(&hit.file_id);
@@ -486,7 +494,7 @@ impl CatalogIndex {
         let merged = crate::commands::catalog_search::merge(keyword, visual, everything, files_only);
         let (good, weaker): (Vec<_>, Vec<_>) = merged.into_iter().partition(|hit| !weak.contains(&hit.file_id));
         response.hits = crate::commands::catalog_search::select(good.into_iter().chain(weaker).collect(), limit, files_only);
-        Ok(Judged { response, weak: Some(weak) })
+        Ok(Judged { response, weak: Some(weak), strong })
     }
     /// `None` when the catalog is past what is fast to compare (the graph answers those).
     fn exact_nearest(&self, tx: &Connection, query: &[f32], wanted: usize) -> Result<Option<Vec<(Entry, f32)>>> {

@@ -77,7 +77,7 @@ pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-fn display_name(kind: &str) -> String {
+pub(crate) fn display_name(kind: &str) -> String {
     vlm::model_spec(kind).ok().and_then(|spec| spec["displayName"].as_str().map(str::to_owned)).unwrap_or_else(|| kind.to_owned())
 }
 

@@ -1,10 +1,12 @@
 import Foundation
 
-/// How a Library search with the engine's strength summary ("3 good matches, 1 weaker.") is shown.
-/// The engine lists good matches first, then weaker look-alikes; its summary says how many of each.
+/// How a Library search with the engine's strength summary ("3 matches (2 strong visual), 1 weaker.") is shown.
+/// The engine lists matches first (strong picture scores, then name, tag and text hits), then weaker look-alikes;
+/// its summary says how many of each and how many of the matches are strong visual ones.
 enum LibrarySearchOutcome {
     struct Strength: Equatable {
         let good: Int
+        let strong: Int?
         let weaker: Int
         let text: String
 
@@ -15,10 +17,11 @@ enum LibrarySearchOutcome {
         var displayText: String {
             guard good + weaker >= LibrarySearchOutcome.resultLimit else { return text }
             let noun = good == 1 ? "match" : "matches"
+            let strongPart = strong.map { " (\($0)\(weaker == 0 ? "+" : "") strong visual)" } ?? ""
             switch (good, weaker) {
-            case (_, 0): return "\(good)+ good \(noun)."
+            case (_, 0): return "\(good)+ \(noun)\(strongPart)."
             case (0, _): return "No good matches, \(weaker)+ weaker."
-            default: return "\(good) good \(noun), \(weaker)+ weaker."
+            default: return "\(good) \(noun)\(strongPart), \(weaker)+ weaker."
             }
         }
 
@@ -26,10 +29,11 @@ enum LibrarySearchOutcome {
         init?(message: String?) {
             let text = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard text.count <= 80 else { return nil }
-            if text == "No matches." { (good, weaker) = (0, 0) }
-            else if let weak = Self.number(text, #"^No good matches, (\d{1,9}) weaker\.$"#, group: 1) { (good, weaker) = (0, weak) }
-            else if let good = Self.number(text, #"^(\d{1,9}) good match(?:es)?(?:, \d{1,9} weaker)?\.$"#, group: 1) {
+            if text == "No matches." { (good, strong, weaker) = (0, 0, 0) }
+            else if let weak = Self.number(text, #"^No good matches, (\d{1,9}) weaker\.$"#, group: 1) { (good, strong, weaker) = (0, 0, weak) }
+            else if let good = Self.number(text, #"^(\d{1,9}) match(?:es)?(?: \(\d{1,9} strong visual\))?(?:, \d{1,9} weaker)?\.$"#, group: 1) {
                 self.good = good
+                strong = Self.number(text, #" \((\d{1,9}) strong visual\)"#, group: 1)
                 weaker = Self.number(text, #", (\d{1,9}) weaker\.$"#, group: 1) ?? 0
             } else { return nil }
             self.text = text
@@ -68,7 +72,7 @@ enum LibrarySearchOutcome {
         let good = hitIDs.prefix(strength.good).filter { keptIDs.contains($0) && seen.insert($0).inserted }.count
         let weaker = hitIDs.dropFirst(strength.good).filter { keptIDs.contains($0) && seen.insert($0).inserted }.count
         if good == 0 { return weaker == 0 ? "No matches." : "No good matches, \(weaker) weaker." }
-        return "\(good) good \(good == 1 ? "match" : "matches")" + (weaker > 0 ? ", \(weaker) weaker." : ".")
+        return "\(good) \(good == 1 ? "match" : "matches")" + (weaker > 0 ? ", \(weaker) weaker." : ".")
     }
 
     /// `message` is the engine's reply message, nil when it sent none (older engine, no search model).

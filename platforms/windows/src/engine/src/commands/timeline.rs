@@ -221,7 +221,7 @@ pub fn recover(conn: &Connection) -> Result<()> {
 
 /// The Mac-hosted engine runs Swift's scene-pool timeline (one caption per CLIP scene, versioned with the pinned model
 /// revision) so either engine resumes the other's coverage; other builds sample a frame every interval.
-const SCENE_PREFIX: &str = "timeline-scene-v1/";
+const SCENE_PREFIX: &str = analysis::SCENE_VERSION_PREFIX;
 
 fn frame_model_version(model: &str) -> String {
     if timeline_media::FRAME_POOL {

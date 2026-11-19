@@ -624,7 +624,7 @@ pub(crate) fn reference_answer(reference: &super::chat_intent::Reference, hits: 
         return ("There is no earlier list to pick from yet. Ask a question first, then say “the second one”.".into(), vec![]);
     }
     let count = hits.len();
-    let describe = |hit: &CatalogHit| format!("{} ({})", file_name(&hit.path), hit.text);
+    let describe = |hit: &CatalogHit| if hit.text.is_empty() { file_name(&hit.path) } else { format!("{} ({})", file_name(&hit.path), hit.text) };
     let pick = match reference {
         Reference::Nth(n) => hits.get(n - 1).cloned().ok_or_else(|| format!("The last answer showed {} {}, so there is no number {n}.", count_label(count as i64), if count == 1 { "file" } else { "files" })),
         Reference::Last => Ok(hits[count - 1].clone()),

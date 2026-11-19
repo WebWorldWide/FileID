@@ -359,6 +359,8 @@ fn concise_title(text: &str) -> String {
 }
 
 pub const CHAPTER_SUGGESTION_PREFIX: &str = "timeline-chapter-suggestion-v1/";
+/// Captions written once per detected scene rather than once per sampling interval.
+pub const SCENE_VERSION_PREFIX: &str = "timeline-scene-v1/";
 
 pub fn chapter_suggestions(
     file_id: i64,
@@ -372,12 +374,19 @@ pub fn chapter_suggestions(
         .filter(|c| c.seconds.is_finite() && c.seconds >= 0.0 && !c.text.trim().is_empty())
         .collect();
     ordered.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
-    if ordered.len() < 3 || !duration.is_finite() || duration <= 0.0 {
+    let by_scene = frame_model_version.starts_with(SCENE_VERSION_PREFIX);
+    if ordered.len() < if by_scene { 2 } else { 3 } || !duration.is_finite() || duration <= 0.0 {
         return vec![];
     }
-    let boundaries: Vec<usize> = (1..ordered.len() - 1)
-        .filter(|&i| similarity(&ordered[i - 1].text, &ordered[i].text) < 0.12 && similarity(&ordered[i].text, &ordered[i + 1].text) >= 0.35)
-        .collect();
+    // A scene caption already stands for a whole scene, so a new chapter starts wherever the picture changes; sampled
+    // captions need the next caption to confirm the change.
+    let boundaries: Vec<usize> = if by_scene {
+        (1..ordered.len()).filter(|&i| similarity(&ordered[i - 1].text, &ordered[i].text) < 0.35).collect()
+    } else {
+        (1..ordered.len() - 1)
+            .filter(|&i| similarity(&ordered[i - 1].text, &ordered[i].text) < 0.12 && similarity(&ordered[i].text, &ordered[i + 1].text) >= 0.35)
+            .collect()
+    };
     if boundaries.is_empty() {
         return vec![];
     }

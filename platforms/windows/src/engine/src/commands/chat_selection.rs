@@ -777,15 +777,22 @@ where
     (results, true)
 }
 
-/// Prefers an installed small Qwen3-VL (on the Mac, 2B with the main-subject confirmation was more precise and ~2×
-/// faster than 4B on held-out questions), then the larger ones.
+/// Without a usable requested model, prefers an installed small Qwen3-VL (on the Mac, 2B with the main-subject
+/// confirmation was more precise and ~2× faster than 4B on held-out questions), then the larger ones.
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 const CHECK_LADDER: [(&str, f64); 3] = [("qwen3_vl_2b_instruct_gguf_q8_0", 3.22), ("qwen3_vl_8b", 7.71), ("qwen3_vl_4b", 4.43)];
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 const CHECK_LADDER: [(&str, f64); 3] = [("qwen3_vl_2b", 3.0), ("qwen3_vl_8b", 8.5), ("qwen3_vl_4b", 5.0)];
 
-pub(crate) fn check_model(available_gb: f64, installed: impl Fn(&str) -> bool, fallback: Option<String>) -> Option<String> {
-    CHECK_LADDER.iter().find(|(kind, gb)| *gb <= available_gb && installed(kind)).map(|(kind, _)| (*kind).to_owned()).or(fallback)
+/// The model the chat is set to answers first (the footer promises the same AI as Describe Files) when it is installed
+/// and fits the memory free now; the ladder picks when it does not.
+pub(crate) fn check_model(available_gb: f64, installed: impl Fn(&str) -> bool, requested: Option<String>) -> Option<String> {
+    let fits = |kind: &str| CHECK_LADDER.iter().find(|(name, _)| *name == kind).is_none_or(|(_, gb)| *gb <= available_gb);
+    requested
+        .clone()
+        .filter(|kind| installed(kind) && fits(kind))
+        .or_else(|| CHECK_LADDER.iter().find(|(kind, gb)| *gb <= available_gb && installed(kind)).map(|(kind, _)| (*kind).to_owned()))
+        .or(requested)
 }
 
 pub(crate) fn query_vector(request: &ChatRequest, text: &str) -> Option<(Vec<f32>, String)> {
@@ -992,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn check_model_prefers_an_installed_small_qwen_then_the_largest_that_fits() {
+    fn check_model_uses_the_requested_model_then_a_small_qwen_then_the_largest_that_fits() {
         let small = CHECK_LADDER[0].0;
         let all = |kind: &str| [small, "qwen3_vl_4b", "qwen3_vl_8b"].contains(&kind);
         let large = |kind: &str| kind == "qwen3_vl_4b" || kind == "qwen3_vl_8b";
@@ -1000,6 +1007,9 @@ mod tests {
         assert_eq!(check_model(2.0, all, Some("gemma_3_4b".into())).as_deref(), Some("gemma_3_4b"));
         assert_eq!(check_model(16.0, large, None).as_deref(), Some("qwen3_vl_8b"));
         assert_eq!(check_model(6.0, large, None).as_deref(), Some("qwen3_vl_4b"));
+        assert_eq!(check_model(16.0, all, Some("qwen3_vl_4b".into())).as_deref(), Some("qwen3_vl_4b"));
+        assert_eq!(check_model(16.0, all, Some("qwen3_vl_8b".into())).as_deref(), Some("qwen3_vl_8b"));
+        assert_eq!(check_model(4.0, all, Some("qwen3_vl_8b".into())).as_deref(), Some(small));
         assert_eq!(check_model(16.0, |_| false, None), None);
         assert!(is_small(CHECK_LADDER[0].0));
     }
