@@ -22,9 +22,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(inputs.include) }}
     runs-on: ${{ matrix.runner }}
-    # Since the tract runtime replaced ONNX Runtime, a hosted Mac needs ~35 min for clippy and tests
-    # (~40 on Intel), then the fat-LTO release builds take over 25 more; both overran 60.
-    timeout-minutes: ${{ startsWith(matrix.runner, 'macos-') && 100 || 60 }}
+    # Hosted Mac and Windows runners need 1-1.7 hours end to end now that tract is the one runtime
+    # (clippy + tests 35-60 min, fat-LTO release builds 25-45 more, then the cache save); Linux stays under 45.
+    timeout-minutes: ${{ startsWith(matrix.runner, 'ubuntu') && 60 || 150 }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
