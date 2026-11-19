@@ -293,6 +293,9 @@ struct WelcomeSheet: View {
     private func footerNote(stacked: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
+            if helperDown && !essentialsInstalled {
+                MetaText(HelperGate.downloadsUnavailableNote, color: Theme.warning)
+            }
             if let free = availableDiskBytes {
                 MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac")
             }
@@ -320,8 +323,8 @@ struct WelcomeSheet: View {
                 }
                 .buttonStyle(DSPrimaryButtonStyle(height: 32))
                 .fixedSize()
-                .disabled(installAllRequested)
-                .help("Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
+                .disabled(HelperGate.downloadDisabled(inProgress: installAllRequested, helperDown: helperDown))
+                .help(helperDown ? HelperGate.downloadsUnavailableNote : "Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
             }
             .fixedSize()
         }
@@ -360,7 +363,8 @@ struct WelcomeSheet: View {
                 } else {
                     MetaText(size)
                     Button("Download", action: action).buttonStyle(.dsSecondary)
-                        .help("Download \(technical) (\(size))")
+                        .disabled(helperDown)
+                        .help(helperDown ? HelperGate.downloadsUnavailableNote : "Download \(technical) (\(size))")
                 }
             }
             // The hidden description sizes the line, so a download's progress text or a failure message takes its place without moving the rows below.
@@ -594,6 +598,8 @@ struct WelcomeSheet: View {
         vlmLastProgressAt = nil
         vlmLastError = nil
     }
+
+    private var helperDown: Bool { HelperGate.isDown(engine) }
 
     private var essentialsDownloadLabel: String {
         var bytes: Int64 = 0

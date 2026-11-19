@@ -42,6 +42,12 @@ struct HelperGateTests {
         #expect(HelperGate.downloadsUnavailableNote.contains("Restart the helper"))
     }
 
+    @Test func welcomeDownloadButtonsAreOffWhileTheHelperIsDownOrTheyAlreadyRan() {
+        #expect(HelperGate.downloadDisabled(inProgress: false, helperDown: true))
+        #expect(HelperGate.downloadDisabled(inProgress: true, helperDown: false))
+        #expect(!HelperGate.downloadDisabled(inProgress: false, helperDown: false))
+    }
+
     @Test func aMissingDescriptionModelIsAFailureTheDescribePageShows() {
         let error = EngineError(kind: "vlm_model_missing", message: "The qwen3_vl_2b model isn't installed yet.", modelKind: "qwen3_vl_2b")
         #expect(ModelFailureText.isModelFailure(error))
