@@ -511,7 +511,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
 
     let messages = v3::vbox(20);
     let empty = v3::vbox(10);
-    empty.append(&v3::label("Find the moment.", &["v3-serif-34"]));
+    empty.append(&v3::label("Ask your library.", &["v3-serif-34"]));
     empty.append(&v3::wrapped(
         "Ask about your files in plain words. Answers cite the files they come from; nothing leaves this computer.",
         &["v3-body", "tone-text2"],

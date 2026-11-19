@@ -199,7 +199,7 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
     }
     private void BuildEmptyState()
     {
-        var title = new TextBlock { Text = "Find the moment.", FontSize = 34, Foreground = ThemeHelper.GetBrushSafe("Text1Brush") };
+        var title = new TextBlock { Text = "Ask your library.", FontSize = 34, Foreground = ThemeHelper.GetBrushSafe("Text1Brush") };
         var body = new TextBlock
         {
             Text = "Ask about files, people and moments in this library, or ask FileID to do something. Answers list the files they come from, and anything that moves, renames or deletes files waits for your OK.",
