@@ -23,6 +23,7 @@
 //   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
 //   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder>
 //   FILEID_SELF_SHOT_DRAWER=1      opens Chat beside the page before the captures
+//   FILEID_SELF_SHOT_FACTORY_RESET=<Application Support/FileID path>  runs Settings' factory reset at the end, only when the value is exactly the folder it would erase
 //   FILEID_WIN_SIZE=WxH            content size of the window
 // Not captured: an AVPlayerView's picture and inline controls (a video preview reads black here, as it does for any H.264 clip).
 import AppKit
@@ -237,6 +238,10 @@ enum SelfShot {
                 }
             }
             await runExtras(engine: engine, store: store, navigate: navigate, plan: plan)
+            if env("FILEID_SELF_SHOT_FACTORY_RESET") == AppSupportPath.fileID.path {
+                note("factory reset of \(AppSupportPath.fileID.path)")
+                engine.factoryResetAndQuit()
+            }
             NSApp.terminate(nil)
             try? await Task.sleep(for: .seconds(3))
             exit(0)
