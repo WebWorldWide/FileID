@@ -21,6 +21,7 @@ pub fn title(kind: &str) -> &'static str {
         "model_download_failed" | "download_tls_pin_failed" => "The download didn't finish",
         "model_download_disk_full" => "Not enough disk space",
         "scan_already_running" => "A scan is already running",
+        "scan_slower_path" => "This scan will take longer",
         _ => "Something went wrong",
     }
 }
@@ -94,6 +95,14 @@ mod tests {
         assert_eq!(title("restructure_busy"), "A folder move is already running");
         assert_eq!(text("model_load_failed", "x"), "Open Settings and install the model again.");
         assert_eq!(title("no_such_kind"), "Something went wrong");
+    }
+
+    #[test]
+    fn a_slower_scan_notice_is_not_called_a_failure() {
+        assert_eq!(
+            sentence("scan_slower_path", "Picture search can't use this computer's graphics chip."),
+            "This scan will take longer. Picture search can't use this computer's graphics chip."
+        );
     }
 
     #[test]

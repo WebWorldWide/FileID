@@ -690,6 +690,12 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         }
                         refresh_view(&ui);
                     }
+                    EngineEvent::FaceClusteringCancelled(message) => {
+                        if ui.face_clustering.borrow_mut().finish_active().is_some() {
+                            set_status(&ui, message);
+                        }
+                        refresh_view(&ui);
+                    }
                     EngineEvent::Exited => {
                         abandon_merges(&ui);
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
