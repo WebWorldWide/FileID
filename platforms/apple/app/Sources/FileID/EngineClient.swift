@@ -1181,6 +1181,10 @@ public final class EngineClient {
         send(.cancelPrewarm(modelKind: nil))
     }
 
+    #if DEBUG
+    func selfShotSetModelProgress(_ progress: ModelDownloadProgress) { modelDownloadProgress = progress }
+    #endif
+
     /// Drops a stale `modelDownloadProgress` left by a cancelled prewarm. The engine auto-clears the bar only at 1.0 (or on exit), so a user Cancel leaves the last fraction with the same modelKind and would fool WelcomeSheet's retry watchdogs into thinking a fresh download is progressing, arming neither the "no response" nor "stalled" timer. A modelKind clears only that model's residue; nil clears whatever is showing.
     public func clearModelDownloadProgress(forModelKind modelKind: String? = nil) {
         if let modelKind, modelDownloadProgress?.modelKind != modelKind { return }

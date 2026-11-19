@@ -45,6 +45,13 @@ struct WelcomeSheet: View {
             persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
             ramGB: ram,
             freeDiskBytes: freeDisk))
+        #if DEBUG
+        if SelfShot.welcomeDemoDownload {
+            self._vlmRequested = State(initialValue: true)
+            self._vlmSmoothedBytesPerSec = State(initialValue: 29_900_000)
+            self._vlmLockedTotalBytes = State(initialValue: 5_800_000_000)
+        }
+        #endif
     }
 
     private var systemRAMGB: Double {
@@ -161,7 +168,7 @@ struct WelcomeSheet: View {
             )
             .disabled(!vlmInstalled && !vlmInProgress && !selectedVLMCanInstall)
             if let selectedVLMInstallBlocker {
-                MetaText(selectedVLMInstallBlocker, color: Theme.danger, size: 11).padding(.horizontal, 22).padding(.vertical, 6)
+                MetaText(selectedVLMInstallBlocker, color: Theme.danger).padding(.horizontal, 22).padding(.vertical, 6)
             }
                 }
             }
@@ -251,18 +258,40 @@ struct WelcomeSheet: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
-                if let free = availableDiskBytes {
-                    MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac", size: 11)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    footerNote(stacked: false)
+                    Spacer(minLength: 8)
+                    footerButtons
+                }
+                VStack(alignment: .trailing, spacing: 10) {
+                    footerNote(stacked: true).frame(maxWidth: .infinity, alignment: .leading)
+                    footerButtons
                 }
             }
-            Spacer()
-            if essentialsInstalled {
-                Button("Continue") { dismiss() }
-                    .buttonStyle(DSPrimaryButtonStyle(height: 32))
-                    .keyboardShortcut(.defaultAction)
-            } else {
+        }
+        .padding(.horizontal, 22).padding(.vertical, 16)
+        .overlay(alignment: .top) { Hairline() }
+    }
+
+    private func footerNote(stacked: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
+            if let free = availableDiskBytes {
+                MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac")
+            }
+        }
+        .fixedSize(horizontal: !stacked, vertical: true)
+    }
+
+    @ViewBuilder
+    private var footerButtons: some View {
+        if essentialsInstalled {
+            Button("Continue") { dismiss() }
+                .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                .keyboardShortcut(.defaultAction)
+        } else {
+            HStack(spacing: 8) {
                 Button("Later") { dismiss() }
                     .buttonStyle(DSSecondaryButtonStyle(height: 32))
                     .keyboardShortcut(.cancelAction)
@@ -278,9 +307,8 @@ struct WelcomeSheet: View {
                 .disabled(installAllRequested)
                 .help("Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
             }
+            .fixedSize()
         }
-        .padding(.horizontal, 22).padding(.vertical, 16)
-        .overlay(alignment: .top) { Hairline() }
     }
 
     private func modelRow(title: String, detail: String, technical: String, size: String,
@@ -302,29 +330,39 @@ struct WelcomeSheet: View {
                           cancel: @escaping () -> Void) -> some View {
         let frac = installed ? 1.0 : (progressFrac ?? 0)
         let failed = !inProgress && !installed && progressLabel != nil
-        VStack(alignment: .leading, spacing: 6) {
+        let progressLine = [progressLabel, rateETA].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(title).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
                     .help(technical)
-                Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2).lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 8)
                 if installed {
-                    MetaText("Ready", color: Theme.delight, size: 11)
+                    MetaText("Ready", color: Theme.delight)
                 } else if inProgress {
-                    MetaText(progressLabel ?? "\(Int(frac * 100))%", color: Theme.gold, size: 11).lineLimit(1)
+                    MetaText("\(Int(frac * 100))%", color: Theme.gold).monospacedDigit()
                     Button("Cancel", action: cancel).buttonStyle(.dsGhost)
                 } else {
-                    MetaText(size, size: 11)
-                    Button("Download", action: action).buttonStyle(DSSecondaryButtonStyle(height: 24))
+                    MetaText(size)
+                    Button("Download", action: action).buttonStyle(.dsSecondary)
                         .help("Download \(technical) (\(size))")
                 }
             }
-            GrainProgressBar(progress: inProgress && frac == 0 ? 0.03 : frac, tone: installed ? .done : .gold)
-            if inProgress, let rateETA, !rateETA.isEmpty { MetaText(rateETA, size: 11) }
-            if failed, let progressLabel { MetaText(progressLabel, color: Theme.danger, size: 11) }
+            // The hidden description sizes the line, so a download's progress text or a failure message takes its place without moving the rows below.
+            ZStack(alignment: .topLeading) {
+                Text(detail).font(Theme.Font.body(13)).opacity(0).accessibilityHidden(true)
+                if failed, let progressLabel {
+                    Text(progressLabel).font(Theme.Font.body(13)).foregroundStyle(Theme.danger)
+                } else if inProgress, !progressLine.isEmpty {
+                    Text(progressLine).font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                } else {
+                    Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            GrainProgressBar(progress: inProgress && frac == 0 ? 0.03 : frac, tone: installed ? .done : .gold).padding(.top, 3)
         }
-        .padding(.horizontal, 22).padding(.vertical, 10)
+        .padding(.horizontal, 22).padding(.vertical, 8)
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 
