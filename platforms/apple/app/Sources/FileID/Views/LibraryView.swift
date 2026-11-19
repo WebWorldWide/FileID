@@ -1088,7 +1088,7 @@ struct LibraryView: View {
         for _ in 0..<120 {
             let request = CatalogRequest(requestID: UUID().uuidString, action: "search", query: query, fileID: seedID,
                                          searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
-                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: 60, rootID: rootID, resultScope: "files")
+                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: LibrarySearchOutcome.resultLimit, rootID: rootID, resultScope: "files")
             guard let response = await TakeRequests.send(engine, request, timeout: 10) else { return nil }
             if response.status != "indexing" { return response }
             do { try await Task.sleep(for: .seconds(1)) } catch { return nil }

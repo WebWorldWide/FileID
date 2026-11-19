@@ -23,6 +23,14 @@ struct LibrarySearchOutcomeTests {
         #expect(d.source == .engine && d.addKeywordRows && d.hiddenWeaker == 0 && d.label == "4 good matches, 20 weaker.")
     }
 
+    @Test func aSummaryThatFillsTheRequestLimitSaysItWasCut() {
+        #expect(decide("60 good matches.").label == "60+ good matches.")
+        #expect(decide("45 good matches, 15 weaker.").label == "45 good matches, 15+ weaker.")
+        #expect(decide("8 good matches, 51 weaker.").label == "8 good matches, 51 weaker.")
+        #expect(decide("No good matches, 60 weaker.", showWeaker: true).label == "No good matches, 60+ weaker.")
+        #expect(decide("59 good matches.").label == "59 good matches.")
+    }
+
     @Test func keywordMatchesOnlyKeepWeakerBehindTheAction() {
         let d = decide("No good matches, 60 weaker.", keywords: 3)
         #expect(d.source == .keyword && d.hiddenWeaker == 60 && d.label == "3 by name, tag or text")
