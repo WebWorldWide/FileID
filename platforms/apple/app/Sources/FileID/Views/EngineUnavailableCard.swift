@@ -52,8 +52,8 @@ struct EngineUnavailableCard: View {
 
     static func reinstallHint(for failure: EngineStartFailure) -> String {
         failure.suggestsReinstall
-            ? "Reinstall FileID from the original download to put it back. Your library and settings stay where they are."
-            : "If it keeps happening, reinstall FileID from the original download. Your library and settings stay where they are."
+            ? "Reinstall FileID from the original download to put it back. Your library and settings stay where\u{00A0}they\u{00A0}are."
+            : "If it keeps happening, reinstall FileID from the original download. Your library and settings stay where\u{00A0}they\u{00A0}are."
     }
 
     /// The log is app.log; before it exists, show the folder FileID keeps its files in.
@@ -81,6 +81,7 @@ struct EngineUnavailableOverlay: ViewModifier {
                         .padding(24)
                 }
                 .transition(.opacity)
+                .accessibilityAddTraits(.isModal)
             }
         }
     }

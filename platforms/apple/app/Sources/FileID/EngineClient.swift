@@ -26,7 +26,7 @@ public final class EngineClient {
     private var catalogResponseOrder: [String] = []
     public private(set) var catalogResponses: [String: CatalogResponse] = [:]
     public private(set) var catalogJobs: [CatalogJob] = []
-    public func searchCatalog(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil, limit: Int = 60) async -> CatalogResponse? {
+    func searchCatalog(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil, limit: Int = LibrarySearchOutcome.resultLimit) async -> CatalogResponse? {
         for _ in 0..<120 {
             guard !Task.isCancelled else { return nil }
             let id = UUID().uuidString
@@ -982,13 +982,13 @@ public final class EngineClient {
         }
     }
 
-    /// Factory Reset: terminate the engine, wipe the Application Support folder, purge all UserDefaults, and quit.
+    /// Factory Reset: terminate the engine, wipe the Application Support folder except the downloaded description models, purge all UserDefaults, and quit.
     public func factoryResetAndQuit() {
         terminateRunningEngine()
         SpotlightIndexer.wipe()
         let fm = FileManager.default
         if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
-            try? fm.removeItem(at: AppSupportPath.fileID)
+            FactoryReset.erase(root: AppSupportPath.fileID, keeping: [ModelCachePaths.huggingFaceRoot], fileManager: fm)
         }
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
@@ -1180,6 +1180,10 @@ public final class EngineClient {
     public func cancelPrewarm() {
         send(.cancelPrewarm(modelKind: nil))
     }
+
+    #if DEBUG
+    func selfShotSetModelProgress(_ progress: ModelDownloadProgress) { modelDownloadProgress = progress }
+    #endif
 
     /// Drops a stale `modelDownloadProgress` left by a cancelled prewarm. The engine auto-clears the bar only at 1.0 (or on exit), so a user Cancel leaves the last fraction with the same modelKind and would fool WelcomeSheet's retry watchdogs into thinking a fresh download is progressing, arming neither the "no response" nor "stalled" timer. A modelKind clears only that model's residue; nil clears whatever is showing.
     public func clearModelDownloadProgress(forModelKind modelKind: String? = nil) {

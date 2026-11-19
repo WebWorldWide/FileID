@@ -48,9 +48,8 @@ struct SettingsTab: View {
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
-                            .font(Theme.Font.body(11))
-                            .foregroundStyle(Theme.text3)
+                        MetaText("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
+                            .fixedSize(horizontal: false, vertical: true)
                         restartHelperRow
                     }
                 }
@@ -94,7 +93,7 @@ struct SettingsTab: View {
                                 infoRow("Total files",   store.totalFiles.formatted())
                                 infoRow("Photos tagged", store.totalImages.formatted())
                                 infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
-                                infoRow("Space duplicates use", ByteCountFormatter.string(fromByteCount: Int64(store.totalReclaimableMB * 1_000_000), countStyle: .file))
+                                infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableMB: store.totalReclaimableMB))
                                 infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
                                     .help(ReadStore.defaultDBURL.path)
                                 Button("Show library file in Finder") {
@@ -162,7 +161,7 @@ struct SettingsTab: View {
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
-                                Text("Permanently erase FileID's library, local models, settings, and caches.")
+                                Text("Permanently erase FileID's library, settings, caches and small helper models. The large description models are kept.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 Button(role: .destructive) {
                                     confirmFactoryReset = true
@@ -180,7 +179,7 @@ struct SettingsTab: View {
                                     }
                                     Button("Cancel", role: .cancel) { }
                                 } message: {
-                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, downloaded models and caches. The large description models are kept. Your own files are not touched. This can't be undone.")
+                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, caches and the small downloaded helper models. The large description models are kept; remove them under Settings ▸ AI models. Your own files are not touched. This can't be undone.")
                                 }
                             }
                         }
@@ -245,8 +244,8 @@ struct SettingsTab: View {
     private var restartHelperRow: some View {
         HStack(spacing: 8) {
             Button("Restart helper now") { engine.restart() }
-                .buttonStyle(DSSecondaryButtonStyle(height: 24))
-            MetaText("Applies the change right away. Stops a scan that is running.", size: 11)
+                .buttonStyle(.dsSecondary)
+            MetaText("Applies the change right away. Stops a scan that is running.")
         }
     }
 
@@ -258,6 +257,11 @@ struct SettingsTab: View {
             Spacer()
         }
         .font(Theme.Font.body(13.5))
+    }
+
+    static func duplicateSpaceLabel(reclaimableMB: Double) -> String {
+        let bytes = Int64(reclaimableMB * 1_000_000)
+        return bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
@@ -306,7 +310,7 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            DSIconButton("Describe \(folder) again", systemImage: "xmark", tint: Theme.text3) {
+                            DSIconButton("Stop skipping \(URL(fileURLWithPath: folder).lastPathComponent)", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
                             }
                         }
@@ -390,6 +394,7 @@ struct ModelInstallCard: View {
     private func rowView(_ row: Row) -> some View {
         HStack(alignment: .top, spacing: 8) {
             rowIcon(present: installer.presentFilePaths.contains(row.path.path)).padding(.top, 2)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.name).font(Theme.Font.body(13.5, .semibold))
                 if let detail = row.detail {
@@ -417,12 +422,13 @@ struct ModelInstallCard: View {
         case .unknown:
             ProgressView().controlSize(.small)
         case .missing(let reason):
-            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11)
+            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11.5)
             HStack(spacing: 8) {
                 Button { installer.install() } label: {
                     Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
+                .accessibilityLabel("Download \(title), about \(sizeLabel)")
                 Spacer()
             }
         case .downloading(let fraction, let message, _, _):
@@ -438,6 +444,7 @@ struct ModelInstallCard: View {
                     Spacer()
                     Button("Cancel") { installer.cancel() }
                         .buttonStyle(.borderless).controlSize(.small)
+                        .accessibilityLabel("Cancel downloading \(title)")
                 }
             }
         case .extracting:
@@ -448,11 +455,12 @@ struct ModelInstallCard: View {
             }
         case .installed(let bytes):
             HStack(spacing: 8) {
-                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11)
+                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11.5)
                 Spacer()
                 Button("Remove") { confirmRemove = true }
                     .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                     .padding(.trailing, -6)
+                    .accessibilityLabel("Remove \(title)")
             }
         case .installFailed(let why):
             VStack(alignment: .leading, spacing: 6) {
@@ -460,6 +468,7 @@ struct ModelInstallCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Try again") { installer.install() }.buttonStyle(.dsSecondary)
+                        .accessibilityLabel("Try again to download \(title)")
                     Spacer()
                 }
             }
@@ -548,7 +557,7 @@ extension ModelInstallCard {
             installer: installer,
             title: "Documents",
             blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Without it, documents are grouped by file name.",
-            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the Neural Engine", path: installer.spec.primaryFile)],
+            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the CPU", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Documents model?",
             fallback: "Organize Folders groups documents by file name instead.")

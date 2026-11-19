@@ -63,7 +63,15 @@ struct FileIDApp: App {
                 }
                 #if DEBUG
                 .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
-                    if let action = note.object as? String, action == "welcome" || action == "close" { showWelcome = action == "welcome" }
+                    guard let action = note.object as? String else { return }
+                    if action == "welcome-download" {
+                        let kind = AIModelKind.safeDefaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0, freeDiskBytes: nil)
+                        SelfShot.welcomeDemoDownload = true
+                        engine.selfShotSetModelProgress(ModelDownloadProgress(modelKind: kind.rawValue, fraction: 0.04, message: "Downloading \(kind.displayName)… 4%", bytesDone: 230_000_000, totalBytes: 5_800_000_000))
+                        showWelcome = true
+                    } else if action == "welcome" || action == "close" {
+                        showWelcome = action == "welcome"
+                    }
                 }
                 #endif
         }

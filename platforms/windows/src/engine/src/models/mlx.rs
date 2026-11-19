@@ -256,23 +256,28 @@ fn home() -> Option<PathBuf> {
     ["CFFIXED_USER_HOME", "HOME"].iter().filter_map(std::env::var_os).find(|value| !value.is_empty()).map(PathBuf::from)
 }
 
-/// `FILEID_HF_CACHE_ROOT` when absolute; in the App Store sandbox `Application Support/FileID/Models/huggingface`;
-/// otherwise `~/Documents/huggingface`; then `models`.
+/// `cache_root()` then `models`.
 pub fn models_root() -> Option<PathBuf> {
     Some(cache_root()?.join("models"))
 }
 
+/// `FILEID_HF_CACHE_ROOT` when absolute; otherwise `Application Support/FileID/Models/huggingface`, except that a
+/// Developer ID install which already holds models in `~/Documents/huggingface/models` keeps using that folder
+/// (nothing is moved). Same rule as `ModelCachePaths.swift`, so new weights never land in a folder iCloud uploads.
 pub fn cache_root() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("FILEID_HF_CACHE_ROOT").filter(|root| Path::new(root).is_absolute()) {
         return Some(PathBuf::from(root));
     }
     let home = home()?;
+    let support = home.join("Library/Application Support/FileID/Models/huggingface");
     let sandboxed = std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some_and(|id| !id.is_empty());
-    Some(if sandboxed {
-        home.join("Library/Application Support/FileID/Models/huggingface")
-    } else {
-        home.join("Documents/huggingface")
-    })
+    if sandboxed {
+        return Some(support);
+    }
+    let legacy = home.join("Documents/huggingface");
+    let legacy_in_use = std::fs::read_dir(legacy.join("models"))
+        .is_ok_and(|mut entries| entries.any(|entry| entry.is_ok_and(|entry| !entry.file_name().to_string_lossy().starts_with('.'))));
+    Some(if legacy_in_use { legacy } else { support })
 }
 
 pub fn model_dir(repo: &Repo) -> Option<PathBuf> {

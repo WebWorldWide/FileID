@@ -12,8 +12,8 @@
 //   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>&act=<action>[:<argument>]];...   extra captures after the pages
-//        actions: select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested, review (People sheets),
-//        models (Chat/Describe model sheets), welcome; each is closed again after the capture
+//        actions: select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested (Suggest merges sheet), review[:faces|merges|splits] (People review sheet on that tab),
+//        models (Chat/Describe model sheets), welcome, welcome-download (Welcome with the description model mid-download); each is closed again after the capture
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
 //   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
 //   FILEID_SELF_SHOT_DESCRIBE=<n>  after the pages, describe the first n photos with the active model (the Library selection button's call) and capture the Describe Files page and the status pill while it runs and when it ends
@@ -23,7 +23,9 @@
 //   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
 //   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder>
 //   FILEID_SELF_SHOT_DRAWER=1      opens Chat beside the page before the captures
+//   FILEID_SELF_SHOT_FACTORY_RESET=<Application Support/FileID path>  runs Settings' factory reset at the end, only when the value is exactly the folder it would erase
 //   FILEID_WIN_SIZE=WxH            content size of the window
+// Not captured: an AVPlayerView's picture and inline controls (a video preview reads black here, as it does for any H.264 clip).
 import AppKit
 import SwiftUI
 import FileIDShared
@@ -146,6 +148,8 @@ enum SelfShot {
     static var isActive: Bool { plan != nil }
     static let opensChatDrawer = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_DRAWER"] == "1" && plan != nil
     static let expandAdvanced = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_ADVANCED"] == "1" && plan != nil
+    /// Makes the Welcome sheet open with the description model downloading, so that state can be captured without a download.
+    static var welcomeDemoDownload = false
     private static weak var engineRef: EngineClient?
     private static var started = false
 
@@ -203,8 +207,11 @@ enum SelfShot {
             for view in plan.views {
                 let defaults = UserDefaults.standard
                 defaults.set(view.kind ?? "", forKey: "library.kindFilter")
-                if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
                 navigate(view.page)
+                try? await Task.sleep(for: .seconds(0.4))
+                NotificationCenter.default.post(name: .selfShotAction, object: "reset")
+                try? await Task.sleep(for: .seconds(0.4))
+                if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
                 try? await Task.sleep(for: .seconds(plan.settle))
                 if view.scrollToBottom || view.scrollOffset != nil { scrollContent(to: view.scrollOffset); try? await Task.sleep(for: .seconds(0.6)) }
                 if let name = view.preview {
@@ -231,6 +238,10 @@ enum SelfShot {
                 }
             }
             await runExtras(engine: engine, store: store, navigate: navigate, plan: plan)
+            if env("FILEID_SELF_SHOT_FACTORY_RESET") == AppSupportPath.fileID.path {
+                note("factory reset of \(AppSupportPath.fileID.path)")
+                engine.factoryResetAndQuit()
+            }
             NSApp.terminate(nil)
             try? await Task.sleep(for: .seconds(3))
             exit(0)
@@ -374,6 +385,7 @@ enum SelfShot {
         func visit(_ view: NSView) {
             if view.isHidden || view.alphaValue == 0 || view.layer?.opacity == 0 { return }
             if let scroll = view as? NSScrollView, let document = scroll.documentView, !scroll.isHiddenOrHasHiddenAncestor,
+               isOnScreen(scroll, in: root),
                document.frame.height > scroll.contentView.bounds.height + 1, scroll.convert(scroll.bounds, to: nil).minX > 200,
                scroll.bounds.width * scroll.bounds.height > (best.map { $0.bounds.width * $0.bounds.height } ?? 0) { best = scroll }
             view.subviews.forEach(visit)
@@ -387,6 +399,13 @@ enum SelfShot {
         let y = document.isFlipped ? min(end, offset ?? end) : max(0, end - (offset ?? end))
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    /// A kept-alive page that is faded out is still in the view tree; only the page on screen answers a hit test at its centre.
+    private static func isOnScreen(_ scroll: NSScrollView, in root: NSView) -> Bool {
+        guard let superview = root.superview else { return true }
+        let centre = superview.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), from: scroll)
+        return root.hitTest(centre)?.isDescendant(of: scroll) ?? false
     }
 
     /// Moves AppKit's key view loop forward `steps` times, the way Tab would, without sending an event.

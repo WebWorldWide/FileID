@@ -473,8 +473,8 @@ struct TitleBar: View {
                         IndeterminateBar()
                     }
                     HStack(spacing: 6) {
-                        if let button = row.button { Button(button.label) { button.run() }.buttonStyle(DSSecondaryButtonStyle(height: 24)) }
-                        Button("Open \(row.open.title)") { activityOpen = false; activeTab = row.open }.buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        if let button = row.button { Button(button.label) { button.run() }.buttonStyle(.dsSecondary) }
+                        Button("Open \(row.open.title)") { activityOpen = false; activeTab = row.open }.buttonStyle(.dsSecondary)
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 12)

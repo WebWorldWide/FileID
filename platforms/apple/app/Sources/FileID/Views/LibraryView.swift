@@ -179,6 +179,7 @@ struct LibraryView: View {
                 case "select": if parts.count == 2, let row = rows.first(where: { $0.url.lastPathComponent == parts[1] }) { paneSelectedID = row.id }
                 case "checks": selectMode = true; for row in rows.prefix(Int(parts.last ?? "") ?? 3) { checkedFiles[row.id] = row }
                 case "close": paneSelectedID = nil; selectMode = false; checkedFiles = [:]
+            case "reset": paneSelectedID = nil; selectMode = false; checkedFiles = [:]; similarSeed = nil; if !searchText.isEmpty { searchText = "" }
                 default: break
                 }
             }
@@ -927,7 +928,10 @@ struct LibraryView: View {
     @ViewBuilder
     private var empty: some View {
         if store.scopedTotalFiles == 0 {
-            if scanActive {
+            if !store.countersAvailable {
+                EmptyStateView(icon: "hourglass", title: "Opening your library",
+                               message: "FileID is counting the files it has already read.")
+            } else if scanActive {
                 EmptyStateView(icon: "hourglass", title: "Reading your files",
                                message: "Files appear here as the scan reads them.")
             } else if store.totalFiles > 0 {
@@ -1085,7 +1089,7 @@ struct LibraryView: View {
         for _ in 0..<120 {
             let request = CatalogRequest(requestID: UUID().uuidString, action: "search", query: query, fileID: seedID,
                                          searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
-                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: 60, rootID: rootID, resultScope: "files")
+                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: LibrarySearchOutcome.resultLimit, rootID: rootID, resultScope: "files")
             guard let response = await TakeRequests.send(engine, request, timeout: 10) else { return nil }
             if response.status != "indexing" { return response }
             do { try await Task.sleep(for: .seconds(1)) } catch { return nil }

@@ -296,7 +296,7 @@ Current `AIModels.swift` exposes seven model kinds; repositories, revisions, siz
 ## VLM storage
 
 VLMs cache to:
-- macOS Developer ID: `~/Documents/huggingface/models/<repo>/`; Mac App Store builds: `FileID/Models/huggingface/models/<repo>/` inside the sandbox container.
+- macOS: `~/Library/Application Support/FileID/Models/huggingface/models/<repo>/` (the sandbox container's copy in Mac App Store builds); a Developer ID install that already holds models in `~/Documents/huggingface/models/` keeps using that folder, nothing is moved.
 - Windows: `%LOCALAPPDATA%\FileID\Models\vlm\<model-dir>\{model.gguf,mmproj.gguf\}`; registry-managed Hugging Face models use `%LOCALAPPDATA%\FileID\Models\HuggingFace\<repo>\` (user-initiated installs; outside Documents).
 
 ## GPU runtimes

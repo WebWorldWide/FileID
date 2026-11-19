@@ -31,6 +31,8 @@ public final class ReadStore: @unchecked Sendable {
     @ObservationIgnored private var duplicateTotals: (groups: Int, bytes: Int64, at: Date)?
     @ObservationIgnored private var duplicateTotalsStale = false
     private static let duplicateInterval: TimeInterval = 5
+    @ObservationIgnored private var retryTask: Task<Void, Never>?
+    @ObservationIgnored private var retryAttempts = 0
     private let dbURL: URL
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
@@ -123,10 +125,35 @@ public final class ReadStore: @unchecked Sendable {
             } catch {
                 reportError("Could not open DB: \(error)")
                 self.countersAvailable = false
+                scheduleRetry()
                 return
             }
         }
         refreshCounters()
+    }
+
+    /// A reader that cannot open the catalog, or a counters read that fails while the engine is still creating or
+    /// migrating it, is asked again with a growing delay until it works, so a launch never stays on a placeholder 0.
+    private func scheduleRetry() {
+        countersLock.withLock {
+            guard retryTask == nil else { return }
+            let delay = min(5.0, 0.5 * pow(2.0, Double(retryAttempts)))
+            retryAttempts += 1
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.countersLock.withLock { self.retryTask = nil }
+                await MainActor.run { self.openIfPossible() }
+            }
+        }
+    }
+
+    private func cancelRetry(resetBackoff: Bool) {
+        countersLock.withLock {
+            retryTask?.cancel()
+            retryTask = nil
+            if resetBackoff { retryAttempts = 0 }
+        }
     }
 
     public func notifyChanged() {
@@ -141,6 +168,7 @@ public final class ReadStore: @unchecked Sendable {
     /// until every in-flight read (each holding a strong `q`) drains, so
     /// closing never frees the connection out from under a reader.
     public func close() {
+        cancelRetry(resetBackoff: true)
         queue = nil
     }
 
@@ -200,12 +228,14 @@ public final class ReadStore: @unchecked Sendable {
 
                 switch self.computeCounters() {
                 case .ok(let snapshot):
+                    self.cancelRetry(resetBackoff: true)
                     await MainActor.run { self.applyCounters(snapshot) }
                 case .failure(let message):
                     await MainActor.run {
                         self.lastError = message
                         self.countersAvailable = false
                     }
+                    self.scheduleRetry()
                 case .noDatabase:
                     break
                 }
@@ -295,6 +325,7 @@ public final class ReadStore: @unchecked Sendable {
     private func applyCounters(_ snapshot: CounterSnapshot) {
         // Observation notifies on every set, changed or not; unchanged counters stay quiet.
         if !self.countersAvailable { self.countersAvailable = true }
+        if self.lastError != nil { self.lastError = nil }
         if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
         if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
         if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }

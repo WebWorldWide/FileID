@@ -124,7 +124,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "49ab265bda91f9c72bdff23211af0fa190a2fa6ffefb92a3807a37b43e067785",
   "platforms/windows/src/engine/src/commands/video_export.rs": "95b83f52ddf1ac261daabe0157a4ba4cece7e53a814bb8398929efc07b190c3d",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "8bc194383e36dc1bd12abc02ca52ae096f178082b9e1ae50bd965bbd146666b6",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "dbafbf68cfcc101f9750a24e9f165f56f00908d5b982e58c93f84e1b1c4f37d9",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "ab9ba3bc96f9a49657447add537698d230917a50f2e1d3b263c6f54573eb9640",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f551ebd6a8a17a39619436c62d7e3b463a9527cd37060b7b1c4e1058707db541",
   "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "4e4010f0331c6471ffd0fa9ddb118cd8ab3dbb351e17b52fb464e78ffb11f7c9",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",

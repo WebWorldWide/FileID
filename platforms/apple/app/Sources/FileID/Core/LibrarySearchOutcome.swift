@@ -8,6 +8,17 @@ enum LibrarySearchOutcome {
         let weaker: Int
         let text: String
 
+        /// The engine's sentence, with "+" on a count the request limit cut short.
+        var displayText: String {
+            guard good + weaker >= LibrarySearchOutcome.resultLimit else { return text }
+            let noun = good == 1 ? "match" : "matches"
+            switch (good, weaker) {
+            case (_, 0): return "\(good)+ good \(noun)."
+            case (0, _): return "No good matches, \(weaker)+ weaker."
+            default: return "\(good) good \(noun), \(weaker)+ weaker."
+            }
+        }
+
         /// Nil unless `message` is exactly one of the engine's summary sentences.
         init?(message: String?) {
             let text = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -28,6 +39,9 @@ enum LibrarySearchOutcome {
             return Int(text[range])
         }
     }
+
+    /// Hits the Library asks the engine for; a summary that reaches it counts only the rows that fit.
+    static let resultLimit = 60
 
     enum Source: Equatable { case engine, keyword }
 
@@ -60,7 +74,7 @@ enum LibrarySearchOutcome {
             return Decision(source: .engine, addKeywordRows: true, label: plainLabel, hiddenWeaker: 0)
         }
         if strength.good > 0 || showWeaker {
-            return Decision(source: .engine, addKeywordRows: true, label: strength.text, hiddenWeaker: 0)
+            return Decision(source: .engine, addKeywordRows: true, label: strength.displayText, hiddenWeaker: 0)
         }
         let label = strength.weaker > 0 ? (keywordCount > 0 ? "\(keywordCount) by name, tag or text" : "No good matches") : "No matches"
         return Decision(source: .keyword, addKeywordRows: false, label: label, hiddenWeaker: strength.weaker)

@@ -198,12 +198,18 @@ fn models_root_follows_model_cache_paths() {
     let scratch = Scratch::new("root");
     assert_eq!(models_root(), Some(scratch.dir.join("hf/models")));
     unsafe { std::env::set_var("FILEID_HF_CACHE_ROOT", "relative/path") };
-    assert_eq!(models_root(), Some(scratch.dir.join("home/Documents/huggingface/models")));
+    let support = "Library/Application Support/FileID/Models/huggingface";
+    assert_eq!(models_root(), Some(scratch.dir.join("home").join(support).join("models")), "a new install stays out of Documents");
     unsafe { std::env::set_var("CFFIXED_USER_HOME", scratch.dir.join("cf")) };
-    assert_eq!(models_root(), Some(scratch.dir.join("cf/Documents/huggingface/models")));
-    assert_eq!(cache_root(), Some(scratch.dir.join("cf/Documents/huggingface")), "the adapters' root follows the same home");
+    assert_eq!(cache_root(), Some(scratch.dir.join("cf").join(support)), "the adapters' root follows the same home");
+    let legacy_models = scratch.dir.join("cf/Documents/huggingface/models");
+    std::fs::create_dir_all(&legacy_models).unwrap();
+    std::fs::write(legacy_models.join(".DS_Store"), b"").unwrap();
+    assert_eq!(cache_root(), Some(scratch.dir.join("cf").join(support)), "an empty legacy folder does not count");
+    std::fs::create_dir_all(legacy_models.join("org")).unwrap();
+    assert_eq!(models_root(), Some(legacy_models.clone()), "a Documents folder that already holds models keeps being used");
     unsafe { std::env::set_var("APP_SANDBOX_CONTAINER_ID", "com.fileid.app") };
-    assert_eq!(models_root(), Some(scratch.dir.join("cf/Library/Application Support/FileID/Models/huggingface/models")));
+    assert_eq!(models_root(), Some(scratch.dir.join("cf").join(support).join("models")));
     let repo = lookup("qwen3_vl_4b").unwrap();
     assert!(model_dir(repo).unwrap().ends_with("models/lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"));
 }

@@ -15,7 +15,7 @@ struct Detail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if pickedURL == nil && store.totalFiles == 0 && activeTab != .settings {
+            if pickedURL == nil && store.countersAvailable && store.totalFiles == 0 && activeTab != .settings {
                 EmptyState(onPickFolder: pickFolder)
             } else {
                 pageHeader

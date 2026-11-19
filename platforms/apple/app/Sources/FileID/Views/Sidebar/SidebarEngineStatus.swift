@@ -23,7 +23,7 @@ struct EngineStatusRow: View {
                     .help(reason)
                 if let onRestart {
                     Button("Restart") { onRestart() }
-                        .buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        .buttonStyle(.dsSecondary)
                         .help("Start the helper again. If it keeps stopping, quit and reopen FileID.")
                 }
             }

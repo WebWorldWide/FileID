@@ -56,8 +56,11 @@ struct Sidebar: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { shownArea = activeTab.area ?? .browse }
-        .onChange(of: activeTab) { _, tab in if let area = tab.area, area != shownArea { withAnimation(Theme.quick) { shownArea = area } } }
+        .onAppear { shownArea = Self.areaShown(activeTab: activeTab, lastUsed: .lastUsed()) }
+        .onChange(of: activeTab) { _, tab in
+            let area = Self.areaShown(activeTab: tab, lastUsed: shownArea)
+            if area != shownArea { withAnimation(Theme.quick) { shownArea = area } }
+        }
         .background(Theme.bg1.opacity(0.55), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
     }
@@ -76,7 +79,7 @@ struct Sidebar: View {
     private var areaSwitcher: some View {
         HStack(spacing: 2) {
             ForEach(MainWindow.Area.allCases) { area in
-                let on = Self.highlightedArea(activeTab: activeTab) == area
+                let on = shownArea == area
                 Button {
                     withAnimation(Theme.spring) { shownArea = area }
                     activeTab = area.remembered(current: activeTab)
@@ -106,8 +109,9 @@ struct Sidebar: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
-    /// The area whose pill is lit: the one holding the open page, none on Settings.
-    nonisolated static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
+    /// The area whose pages the list shows and whose pill is lit: the one holding the open page; on Settings, which no
+    /// area holds, the one the person was last in.
+    nonisolated static func areaShown(activeTab: MainWindow.Tab, lastUsed: MainWindow.Area) -> MainWindow.Area { activeTab.area ?? lastUsed }
 
     /// A stopped folder plan explains itself on Organize Folders; the sidebar
     /// keeps its card for errors nothing else explains.
@@ -196,7 +200,8 @@ struct Sidebar: View {
     }
 
     /// Readable titles for engine notices; the code stays in the log line, not on screen.
-    nonisolated static func errorTitle(_ kind: String) -> String {
+    nonisolated static func errorTitle(_ kind: String, message: String = "") -> String {
+        if isMemoryShortage(kind: kind, message: message) { return "This Mac is short on memory" }
         switch kind {
         case "discovery_partial": return "Some files were left out"
         case "empty_folder": return "No files to scan"
@@ -250,6 +255,7 @@ struct Sidebar: View {
     /// The sentence under the title. Known kinds get fixed wording; anything
     /// else shows FileID's own message unless it reads like a log line.
     nonisolated static func errorText(kind: String, message: String) -> String {
+        if isMemoryShortage(kind: kind, message: message) { return "Close a few apps, then try again. The model is installed." }
         switch kind {
         case "scan_failed": return "Press Scan again. Files already read are skipped."
         case "db_unavailable", "db_failed", "db_open_failed", "db_integrity_check_failed", "plan_restructure_db_unavailable":
@@ -291,6 +297,11 @@ struct Sidebar: View {
         }
     }
 
+    /// A model that is installed but was refused for lack of free memory: reinstalling would not help.
+    nonisolated static func isMemoryShortage(kind: String, message: String) -> Bool {
+        ["model_load_failed", "deep_load_failed"].contains(kind) && message.lowercased().contains("memory")
+    }
+
     nonisolated static func looksTechnical(_ message: String) -> Bool {
         if message.isEmpty || message.count > 220 { return true }
         let lowered = message.lowercased()
@@ -305,7 +316,7 @@ struct Sidebar: View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
-                Text(Self.errorTitle(err.kind)).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
+                Text(Self.errorTitle(err.kind, message: err.message)).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
                 Text(Self.errorText(kind: err.kind, message: err.message)).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }

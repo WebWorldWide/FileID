@@ -203,6 +203,7 @@ struct FaceReviewSheet: View {
     let splits: FaceQueueModel
     let personByID: [Int64: ReadStore.PersonRow]
     let store: ReadStore
+    var startOn: FaceQueueKind?
     let onDone: () -> Void
     @State private var queue: FaceQueueKind = .faces
 
@@ -252,7 +253,7 @@ struct FaceReviewSheet: View {
         await model.reload()
         await merges.reload()
         await splits.reload()
-        if model.total == 0 { queue = merges.total > 0 ? .merges : (splits.total > 0 ? .splits : .faces) }
+        if let startOn { queue = startOn } else if model.total == 0 { queue = merges.total > 0 ? .merges : (splits.total > 0 ? .splits : .faces) }
     }
 }
 
