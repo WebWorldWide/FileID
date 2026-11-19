@@ -2207,6 +2207,11 @@ pub(crate) async fn handle_mark_persons_different(
              VALUES (?1, ?2, 0, 1.0, 'user-verified', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![pa, pb, now, fa, fb, file_a, bbox_a, file_b, bbox_b],
         )?;
+        conn.execute(
+            "DELETE FROM face_merge_suggestions \
+             WHERE (person_id = ?1 AND other_person_id = ?2) OR (person_id = ?2 AND other_person_id = ?1)",
+            rusqlite::params![pa, pb],
+        )?;
         Ok(BulkActionResult {
             command_id: None,
             action: "markPersonsDifferent".into(),
@@ -3867,6 +3872,50 @@ mod tests {
         assert_eq!(result.inner.succeeded, 0);
         assert_eq!(result.inner.failed, 1);
         assert!(result.inner.messages.iter().all(|item| !item.ok));
+    }
+
+    #[tokio::test]
+    async fn mark_persons_different_clears_the_pair_from_the_merges_queue() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, file) in [(1, 10), (2, 20), (3, 30)] {
+            conn.execute("INSERT INTO persons(id, created_at) VALUES (?1, 1.0)", [id]).unwrap();
+            crate::db::test_support::insert_file(&conn, file, &format!("/fixture/{file}.jpg"), "image");
+            conn.execute(
+                "INSERT INTO face_prints(id, file_id, person_id, print_data, bbox) VALUES (?1, ?2, ?1, X'', '0,0,1,1')",
+                [id, file],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO face_merge_suggestions(person_id, other_person_id, score, namespace, created_at)
+                VALUES (1, 2, 0.8, 'ns', 1.0), (3, 1, 0.7, 'ns', 1.0);",
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_mark_persons_different(
+            sink,
+            db.clone(),
+            ipc::MarkPersonsDifferentPayload {
+                source_person_id: 2,
+                destination_person_id: 1,
+                source_anchor_face_id: 2,
+                destination_anchor_face_id: 1,
+            },
+        )
+        .await;
+        let event = events.recv().await.expect("terminal bulk event");
+        let EventPayload::BulkActionResult(result) = event.payload else {
+            panic!("expected BulkActionResult");
+        };
+        assert_eq!((result.inner.succeeded, result.inner.failed), (1, 0));
+        let pairs: Vec<(i64, i64)> = {
+            let conn = db.lock();
+            let mut statement =
+                conn.prepare("SELECT person_id, other_person_id FROM face_merge_suggestions").unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().flatten().collect()
+        };
+        assert_eq!(pairs, vec![(3, 1)]);
     }
 
     fn reassign_face_db() -> std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>> {
