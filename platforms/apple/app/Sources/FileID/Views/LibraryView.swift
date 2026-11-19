@@ -604,8 +604,17 @@ struct LibraryView: View {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 10) {
                     filterControls
+                    summaryControls(wrapped: false)
                     Spacer(minLength: 8)
                     modeControls
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterControls
+                        Spacer(minLength: 8)
+                        modeControls
+                    }
+                    HStack(alignment: .center, spacing: 10) { summaryControls(wrapped: true) }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .center, spacing: 10) {
@@ -619,6 +628,7 @@ struct LibraryView: View {
                             modeControls
                         }
                     }
+                    HStack(alignment: .center, spacing: 10) { summaryControls(wrapped: true) }
                 }
             }
         }
@@ -661,15 +671,16 @@ struct LibraryView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
         kindPicker
+    }
 
+    @ViewBuilder
+    private func summaryControls(wrapped: Bool) -> some View {
         if !(rows.isEmpty && shownTotal == 0) {
-            ViewThatFits(in: .horizontal) {
-                if let visualSummary { MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize() }
-                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
-                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
-                Color.clear.frame(width: 0, height: 0)
+            if let visualSummary {
+                MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize(horizontal: !wrapped, vertical: true)
+            } else {
+                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize(horizontal: !wrapped, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
 
         if hiddenWeaker > 0, !rows.isEmpty {
