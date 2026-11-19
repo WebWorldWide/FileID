@@ -2033,6 +2033,12 @@ pub(crate) async fn handle_reassign_face(
                          (SELECT fp.id FROM face_prints fp
                           WHERE fp.person_id = ?1
                             AND fp.arcface_embedding IS NOT NULL
+                            AND COALESCE(fp.excluded, 0) = 0
+                            AND fp.id IN (persons.representative_face_id, ?2)
+                          ORDER BY COALESCE(fp.face_quality, 0) DESC, (fp.id = persons.representative_face_id) DESC LIMIT 1),
+                         (SELECT fp.id FROM face_prints fp
+                          WHERE fp.person_id = ?1
+                            AND fp.arcface_embedding IS NOT NULL
                           ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
                          (SELECT fp.id FROM face_prints fp
                           WHERE fp.person_id = ?1
@@ -2041,7 +2047,7 @@ pub(crate) async fn handle_reassign_face(
                      anchor_radius = NULL,
                      last_clustered_at = NULL
                  WHERE id = ?1",
-                rusqlite::params![person_id],
+                rusqlite::params![person_id, payload.face_id],
             )?;
         }
         crate::commands::face_review::record_reassignment(&tx, payload.face_id, previous_person_id, destination)?;
@@ -4038,6 +4044,35 @@ mod tests {
             .unwrap();
         assert_eq!(source, (1, Some(1)));
         assert_eq!(destination, (2, Some(2)));
+    }
+
+    #[tokio::test]
+    async fn reassigning_a_face_away_and_back_keeps_the_representative() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, created_at, file_count, representative_face_id) VALUES (1, 1.0, 3, 1);
+                 INSERT INTO face_prints(id, file_id, person_id, arcface_embedding, face_quality)
+                    VALUES (1, 10, 1, x'00', 0.5), (2, 11, 1, x'00', 0.4), (3, 12, 1, x'00', 0.9);",
+            )
+            .unwrap();
+        let away = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload { face_id: 2, destination_person_id: None, create_new_person: true },
+        )
+        .await;
+        assert_eq!(away.succeeded, 1);
+        let representative = |db: &parking_lot::Mutex<rusqlite::Connection>| -> Option<i64> {
+            db.lock().query_row("SELECT representative_face_id FROM persons WHERE id=1", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(representative(&db), Some(1), "a higher quality face that was already there does not replace it");
+        let back = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload { face_id: 2, destination_person_id: Some(1), create_new_person: false },
+        )
+        .await;
+        assert_eq!(back.succeeded, 1);
+        assert_eq!(representative(&db), Some(1));
     }
 
     #[tokio::test]
