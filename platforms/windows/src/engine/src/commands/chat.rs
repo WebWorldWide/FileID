@@ -85,6 +85,10 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     let model = (request.action == "send" && request.use_model == Some(true))
         .then(|| summary_model(request.model_kind.as_deref()))
         .flatten();
+    let model = match model {
+        Some(requested) => Some(crate::models::resident_model::runnable(&requested).await),
+        None => None,
+    };
     if request.action == "send" && request.scope_file_ids.is_some() {
         let model = model.and_then(|requested| {
             let available = crate::platform::available_memory_mb() as f64 / 1024.0;

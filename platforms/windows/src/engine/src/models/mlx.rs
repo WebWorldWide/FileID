@@ -299,9 +299,9 @@ fn tier(gigabytes: f64) -> &'static str {
     }
 }
 
-pub fn catalog_items<S: std::hash::BuildHasher>(
+pub(crate) fn catalog_items<S: std::hash::BuildHasher>(
     role: Option<&str>,
-    physical_memory_gb: f64,
+    memory: crate::commands::models::Memory,
     benchmarks: &HashMap<String, ModelBenchmark, S>,
 ) -> Vec<ModelCatalogItem> {
     listed()
@@ -310,6 +310,7 @@ pub fn catalog_items<S: std::hash::BuildHasher>(
             if role.is_some_and(|role| role != kind_role) {
                 return None;
             }
+            let (fits, fits_now) = crate::commands::models::fits("mlx", 0, repo.ram_budget_gb, memory);
             Some(ModelCatalogItem {
                 id: repo.kind.into(),
                 name: repo.display_name.into(),
@@ -327,7 +328,8 @@ pub fn catalog_items<S: std::hash::BuildHasher>(
                 status: if repo.favorite { "curated" } else { "candidate" }.into(),
                 runnable: true,
                 installed: has_config(repo),
-                fits: repo.ram_budget_gb <= physical_memory_gb * 0.6,
+                fits,
+                fits_now,
                 benchmark: benchmarks.get(repo.kind).cloned(),
             })
         })

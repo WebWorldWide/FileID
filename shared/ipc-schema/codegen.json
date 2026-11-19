@@ -332,6 +332,9 @@
       },
       "ModelCatalog": {
         "fields": {
+          "availableMemoryMB": {
+            "type": "u64"
+          },
           "vramMB": {
             "type": "u64"
           }

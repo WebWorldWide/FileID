@@ -318,25 +318,30 @@ pub fn cpu_topology() -> CpuTopology {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_perflevel_cores(level: u8) -> Option<u32> {
+    let name = std::ffi::CString::new(format!("hw.perflevel{level}.physicalcpu")).ok()?;
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>();
+    // SAFETY: `name` is NUL-terminated and `value`/`size` outlive the call, `size` being the buffer's size.
+    let status = unsafe { libc::sysctlbyname(name.as_ptr(), (&raw mut value).cast(), &raw mut size, std::ptr::null_mut(), 0) };
+    (status == 0 && value > 0).then_some(value)
+}
+
 #[cfg(not(windows))]
 pub fn cpu_topology() -> CpuTopology {
-    CpuTopology {
-        p_cores: num_cpus::get_physical().max(1) as u32,
-        e_cores: 0,
-        logical: num_cpus::get().max(1) as u32,
+    let logical = num_cpus::get().max(1) as u32;
+    #[cfg(target_os = "macos")]
+    if let Some(p_cores) = macos_perflevel_cores(0) {
+        return CpuTopology { p_cores, e_cores: macos_perflevel_cores(1).unwrap_or(0), logical };
     }
+    CpuTopology { p_cores: num_cpus::get_physical().max(1) as u32, e_cores: 0, logical }
 }
 
 pub fn performance_core_count() -> usize {
     #[cfg(target_os = "macos")]
-    {
-        let mut value: u32 = 0;
-        let mut size = std::mem::size_of::<u32>();
-        // SAFETY: `value` and `size` outlive the call and `size` is the buffer's size.
-        let status = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&raw mut value).cast(), &raw mut size, std::ptr::null_mut(), 0) };
-        if status == 0 && value > 0 {
-            return value as usize;
-        }
+    if let Some(count) = macos_perflevel_cores(0) {
+        return count as usize;
     }
     #[cfg(target_os = "linux")]
     {
@@ -463,15 +468,23 @@ impl MemoryTier {
     }
 }
 
-pub fn memory_tier() -> MemoryTier {
-    let avail_mb = available_memory_mb();
-    if avail_mb < 8 * 1024 {
-        MemoryTier::Low
-    } else if avail_mb < 32 * 1024 {
-        MemoryTier::Balanced
-    } else {
-        MemoryTier::High
+/// Tier from installed and available memory as fractions of the machine, so a 16 GB Mac under ordinary desktop load stays Balanced and a 32 GB one can reach High. Machines under 11 GiB (nominal 12 GB parts report just under 12 GiB) stay Low: their whole budget is small.
+pub fn memory_tier_for(total_mb: u64, available_mb: u64) -> MemoryTier {
+    if total_mb == 0 || available_mb == 0 {
+        return MemoryTier::Low;
     }
+    let available = available_mb.min(total_mb);
+    if total_mb < 11 * 1024 || available * 4 < total_mb {
+        MemoryTier::Low
+    } else if total_mb >= 24 * 1024 && available * 2 >= total_mb {
+        MemoryTier::High
+    } else {
+        MemoryTier::Balanced
+    }
+}
+
+pub fn memory_tier() -> MemoryTier {
+    memory_tier_for((physical_memory_gb() * 1024.0) as u64, available_memory_mb())
 }
 
 /// RAM++ runs in f32 on tract: ~4.5 GB resident at one pooled session, 6.4 GB at two. Below this much installed RAM the scan skips RAM++ and tags with CLIP scene tags. Installed, not available, RAM so a machine tags the same way every run; nominal 12 GB parts report just under 12 GiB after the iGPU reservation. A failed query (0.0) keeps RAM++ on.
@@ -1333,6 +1346,30 @@ mod adaptive_tests {
         assert!(!ram_plus_fits_in_memory(10.9));
         assert!(ram_plus_fits_in_memory(11.5));
         assert!(ram_plus_fits_in_memory(16.0));
+    }
+
+    #[test]
+    fn memory_tier_scales_with_installed_memory_not_absolute_free_gib() {
+        let gb = |n: u64| n * 1024;
+        assert_eq!(memory_tier_for(gb(8), gb(7)), MemoryTier::Low);
+        assert_eq!(memory_tier_for(gb(16), 6225), MemoryTier::Balanced);
+        assert_eq!(memory_tier_for(gb(16), gb(3)), MemoryTier::Low);
+        assert_eq!(memory_tier_for(gb(16), gb(15)), MemoryTier::Balanced);
+        assert_eq!(memory_tier_for(gb(32), gb(10)), MemoryTier::Balanced);
+        assert_eq!(memory_tier_for(gb(32), gb(20)), MemoryTier::High);
+        assert_eq!(memory_tier_for(gb(64), gb(40)), MemoryTier::High);
+        assert_eq!(memory_tier_for(gb(64), gb(8)), MemoryTier::Low);
+        assert_eq!(memory_tier_for(0, gb(8)), MemoryTier::Low);
+        assert_eq!(memory_tier_for(gb(16), 0), MemoryTier::Low);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_silicon_reports_performance_and_efficiency_cores() {
+        let topology = cpu_topology();
+        let physical = num_cpus::get_physical() as u32;
+        assert_eq!(topology.p_cores + topology.e_cores, physical);
+        assert!(topology.p_cores >= 1);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
     claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
     DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
-    PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES,
+    PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES, STATS_RAMPLUS_US,
     STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US, VISION_TIMEOUT_MESSAGE,
 };
 use crate::apple::scan;
@@ -44,8 +44,9 @@ pub(crate) fn unload_adapters() {
     scan::unload_models();
 }
 
-/// The models this path runs: CLIP and RAM++ on MLX through the adapter (CLIP
-/// falls back to the shared ONNX engine when MLX cannot load), BGE through the shared ONNX engine.
+/// The models this path runs: CLIP and RAM++ on MLX through the adapter (both
+/// fall back to the shared ONNX engine when MLX cannot load, RAM++ only when the
+/// installed memory allows it), BGE through the shared ONNX engine.
 /// Face models stay unloaded: faces come from Vision.
 pub(super) fn model_stack(worker_count: usize) -> ModelStack {
     let pool_size = resolve_pool_size(worker_count);
@@ -78,15 +79,52 @@ pub(super) fn model_stack(worker_count: usize) -> ModelStack {
     let mobileclip_pool = (!clip)
         .then(|| load_pool("MobileCLIP", pool_size, crate::models::mobileclip::default_weights_path(), |p| MobileClipImage::load(p)))
         .flatten();
+    let ram_plus_pool = (!ram_plus).then(tract_ram_plus_pool).flatten();
     ModelStack {
         bge_text: load_bge_text(),
         mobileclip_pool,
+        ram_plus: ram_plus_pool,
         pool_size,
         apple_scan: true,
         apple_clip: clip,
         adapter_hold,
         ..ModelStack::empty()
     }
+}
+
+/// RAM++ on tract, one session: the MLX load failed (no Metal, `FILEID_RAMPLUS_BACKEND=onnx`), and the installed memory holds the f32 graph.
+fn tract_ram_plus_pool() -> Option<Vec<parking_lot::Mutex<crate::models::ram_plus::RamPlusTagger>>> {
+    let tags = crate::models::ram_plus::default_tags_path().ok().filter(|tags| tags.is_file())?;
+    let installed_gb = crate::platform::physical_memory_gb();
+    if !crate::platform::ram_plus_fits_in_memory(installed_gb) {
+        tracing::warn!(model = "RAM++", installed_gb = format!("{installed_gb:.1}"), min_gb = crate::platform::RAM_PLUS_MIN_TOTAL_GB, "MLX RAM++ unavailable and too little installed memory for the tract copy; tags come from Vision only");
+        return None;
+    }
+    let pool = load_pool("RAM++", 1, crate::models::ram_plus::default_onnx_path(), |onnx| crate::models::ram_plus::RamPlusTagger::load(onnx, tags.clone()));
+    if pool.is_some() {
+        tracing::info!(model = "RAM++", "MLX RAM++ unavailable; tagging with the tract copy");
+    }
+    pool
+}
+
+fn ram_plus_ready(models: &ModelStack) -> bool {
+    RAM_PLUS_READY.load(Ordering::Acquire) || models.ram_plus.is_some()
+}
+
+/// RAM++ tags of one image: the adapter's (which agrees them with Vision) or, when MLX is out, the tract copy's.
+fn ram_plus_tags(image: &scan::Image, pass: &scan::PrimaryPass, models: &ModelStack) -> Vec<(String, f32)> {
+    if RAM_PLUS_READY.load(Ordering::Acquire) {
+        return image.ram_plus_tags(Some(pass)).unwrap_or_default();
+    }
+    let Some(pool) = models.ram_plus.as_ref() else { return Vec::new() };
+    let Some((rgb, width, height)) = image.rgb() else { return Vec::new() };
+    let started = Instant::now();
+    let tags = crate::models::ram_plus::RamPlusTagger::preprocess_tensor(&rgb, width, height)
+        .and_then(|chw| crate::models::checkout(pool, 0).tag_prepared(chw))
+        .map_err(|error| tracing::warn!(?error, "RAM++ (tract) failed"))
+        .unwrap_or_default();
+    record_stage(&STATS_RAMPLUS_US, started);
+    super::without_people_words(tags, pass.face_count == 0)
 }
 
 fn read_for_hash(file: &DiscoveredFile, legacy: bool) -> (Option<Vec<u8>>, Option<[u8; 32]>, Option<LegacyHashes>) {
@@ -401,11 +439,12 @@ async fn image_row(
     // Deferred (the default): the row gets the classifier's tags now and the
     // catch-up pass adds RAM++'s after the main pass, so the scan runs at the
     // classifier's speed. `FILEID_RAMPLUS_INLINE=1` keeps RAM++ in the scan.
-    let ram_ready = RAM_PLUS_READY.load(Ordering::Acquire);
+    let ram_ready = ram_plus_ready(models);
     let deferred = ram_ready && catch_up::ram_plus_deferred(true);
+    let ram_models = models.clone();
     let analysis = blocking(move || {
         let pass = image.primary_pass().filter(|pass| pass.complete)?;
-        let ram = if ram_ready && !deferred { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
+        let ram = if ram_ready && !deferred { ram_plus_tags(&image, &pass, &ram_models) } else { Vec::new() };
         let text_tags: Vec<String> = pass.classify_tags.iter().cloned().chain(ram.iter().map(|(tag, _)| tag.clone())).collect();
         let read = image.text_read(&pass.classify_tags, &text_tags, has_camera).unwrap_or_default();
         Some((pass, ram, read, text_tags, image.dhash()))
@@ -472,7 +511,7 @@ async fn image_row(
 /// The Mac scan's decoder, RAM++ and text read behind the catch-up pass.
 /// Holds the stack so the adapter's RAM++ stays loaded until the catch-up ends.
 pub(super) struct CatchUp {
-    pub(super) _models: Arc<ModelStack>,
+    pub(super) models: Arc<ModelStack>,
 }
 
 impl CatchUp {
@@ -485,7 +524,7 @@ impl CatchUp {
 impl catch_up::Analyzer for CatchUp {
     fn ready(&self, phase: catch_up::Phase) -> bool {
         match phase {
-            catch_up::Phase::Tags => RAM_PLUS_READY.load(Ordering::Acquire),
+            catch_up::Phase::Tags => ram_plus_ready(&self.models),
             catch_up::Phase::CarefulText => scan::ocr_ready(),
         }
     }
@@ -530,7 +569,7 @@ impl catch_up::Analyzer for CatchUp {
                     face_count: file.face_count.max(0) as usize,
                     faces: Vec::new(),
                 };
-                let ram = image.ram_plus_tags(Some(&pass)).unwrap_or_default();
+                let ram = ram_plus_tags(&image, &pass, &self.models);
                 // A marker the Swift engine wrote carries no extras: work them
                 // out as the scan does, from the capture time or the file's birth.
                 let extras = context.x.clone().unwrap_or_else(|| {

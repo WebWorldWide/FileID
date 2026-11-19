@@ -1,6 +1,6 @@
-// User-initiated downloads of the single-directory ONNX models (RAM++, BGE,
-// SFace, Face Mesh) from their Hugging Face repos. Weights are never redistributed in-app,
-// and every file is SHA-256 verified against ModelManifest.
+// User-initiated installs of the single-directory ONNX models (RAM++, BGE,
+// SFace, Face Mesh). The engine downloads them from their Hugging Face repos and verifies
+// every file against ModelManifest; this app opens no connection of its own.
 import Foundation
 import FileIDShared
 
@@ -169,11 +169,7 @@ final class ModelInstaller: ModelInstalling {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self, activity = spec.activity] in
             await AppSleepActivity.run(reason: activity) {
-                if EngineModelInstall.active {
-                    await self?.runEngineInstall()
-                } else {
-                    await self?.runInstall()
-                }
+                await self?.runEngineInstall()
             }
             self?.task = nil
         }
@@ -204,60 +200,11 @@ final class ModelInstaller: ModelInstalling {
         "Not enough free space: needs \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)), \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file)) free."
     }
 
-    private func runInstall() async {
-        let dir = spec.directory
-        guard (try? ReadOnlyLocations.requireWritable(dir)) != nil,
-              spec.downloads.allSatisfy({ (try? ReadOnlyLocations.requireWritable(spec.destination($0))) != nil }) else {
-            status = .installFailed(Self.protectedMessage); return
-        }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        sweepStaleStagingEntries(in: dir.appendingPathComponent(".fileid-staging", isDirectory: true))
-
-        if let free = Self.freeDiskBytes(at: dir), free < spec.approxBytes * 2 {
-            status = .installFailed(Self.notEnoughSpace(needed: spec.approxBytes * 2, available: free))
-            return
-        }
-        let remotes = spec.downloads.map { $0.manifest.flatMap { URL(string: $0.url) } }
-        guard remotes.allSatisfy({ $0 != nil }) else {
-            status = .installFailed("This download isn't available in this copy of FileID. Reinstall FileID to fix it.")
-            return
-        }
-
-        status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
-        installing = true
-        defer { installing = false }
-
-        do {
-            for (index, download) in spec.downloads.enumerated() {
-                let remote = remotes[index]!
-                let primary = index == 0
-                do {
-                    try await parallelStreamingDownload(
-                        remote: remote, dest: spec.destination(download), parts: download.parts,
-                        approxBytes: primary ? spec.approxBytes : 0,
-                        expectedSHA256: download.manifest?.sha256
-                    ) { tick in
-                        guard primary else { return }
-                        Task { @MainActor [weak self] in
-                            guard let self, self.installing else { return }
-                            self.status = .downloading(
-                                fraction: tick.total > 0 ? min(1.0, Double(tick.written) / Double(tick.total)) : 0,
-                                message: Self.progressMessage(written: tick.written, total: tick.total),
-                                bytesPerSecond: tick.bytesPerSecond, etaSeconds: tick.etaSeconds)
-                        }
-                    }
-                } catch where download.optional {
-                    continue
-                }
-            }
-        } catch {
-            status = Self.failureStatus(error)
-            return
-        }
-        refreshStatus()
-    }
-
     private func runEngineInstall() async {
+        guard EngineModelInstall.active else {
+            status = .installFailed(EngineModelInstall.notResponding)
+            return
+        }
         status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
         let outcome = await EngineModelInstall.install(kinds: [spec.engineKind], files: spec.downloads.map(spec.destination)) { [weak self] fraction, message in
             guard let self, self.task != nil else { return }
@@ -268,66 +215,6 @@ final class ModelInstaller: ModelInstalling {
         case .cancelled: status = .missing(reason: "Cancelled.")
         case .failed(let message): status = .installFailed(message)
         }
-    }
-
-    static func progressMessage(written: Int64, total: Int64, suffix: String = "") -> String {
-        let mb = Double(written) / 1_048_576.0
-        return total > 0
-            ? String(format: "Downloading… %.0f / %.0f MB%@", mb, Double(total) / 1_048_576.0, suffix)
-            : String(format: "Downloading… %.0f MB%@", mb, suffix)
-    }
-
-    static func failureStatus(_ error: Error) -> Status {
-        switch error {
-        case is CancellationError:
-            return .missing(reason: "Cancelled.")
-        default:
-            return .installFailed(failureText(error))
-        }
-    }
-
-    /// One plain sentence for a failed download. Status codes, hashes and
-    /// system error text stay out of it.
-    nonisolated static func failureText(_ error: Error) -> String {
-        switch error {
-        case StreamingDownloadError.http(let code):
-            switch code {
-            case 404, 410: return "The download is no longer on the server. Update FileID, then try again."
-            case 408, 429: return "The download server is busy. Try again in a few minutes."
-            case 500...599: return "The download server is having trouble. Try again later."
-            default: return "The download server refused the request. Try again later."
-            }
-        case StreamingDownloadError.checksumMismatch, StreamingDownloadError.sizeImplausible,
-             StreamingDownloadError.missingTempFile:
-            return "The download was damaged. Try again."
-        case StreamingDownloadError.insufficientDiskSpace(let needed, let available):
-            return notEnoughSpace(needed: needed, available: available)
-        case StreamingDownloadError.pinningFailed, StreamingDownloadError.redirectBlocked:
-            return "The connection to the download server wasn't secure, so FileID stopped. Try again on another network."
-        case StreamingDownloadError.underlying(let inner):
-            return failureText(inner)
-        default:
-            break
-        }
-        let ns = error as NSError
-        if ns.domain == NSURLErrorDomain {
-            switch URLError.Code(rawValue: ns.code) {
-            case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff,
-                 .cannotFindHost, .dnsLookupFailed:
-                return "No internet connection. Connect, then try again."
-            case .timedOut, .cannotConnectToHost:
-                return "The download server didn't answer. Check your internet connection, then try again."
-            default:
-                return "The download was interrupted. Try again."
-            }
-        }
-        if ns.domain == NSCocoaErrorDomain, ns.code == NSFileWriteOutOfSpaceError {
-            return "Not enough free space to finish the download. Free some space, then try again."
-        }
-        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(ENOSPC) {
-            return "Not enough free space to finish the download. Free some space, then try again."
-        }
-        return "The download didn't finish. Try again."
     }
 
     nonisolated static func freeDiskBytes(at url: URL) -> Int64? {

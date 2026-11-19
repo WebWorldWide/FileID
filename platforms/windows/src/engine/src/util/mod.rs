@@ -14,7 +14,7 @@ pub mod smart_name;
 pub(crate) mod smart_name_companions;
 pub(crate) mod smart_name_learning;
 pub(crate) mod smart_name_style;
-pub(crate) mod model_memory;
+pub mod model_memory;
 pub(crate) mod qos;
 pub(crate) mod vector_math;
 

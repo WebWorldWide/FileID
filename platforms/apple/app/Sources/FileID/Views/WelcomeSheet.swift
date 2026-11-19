@@ -14,7 +14,8 @@ struct WelcomeSheet: View {
     @State private var bge = ModelInstaller.bge
 
     private let recommendedFace: FaceEmbedderKind
-    private let hardwareRecommendedVLM: AIModelKind
+    @State private var hardwareRecommendedVLM: AIModelKind
+    @State private var adoptingAdvice = false
     private let availableDiskBytes: Int64?
     @State private var selectedVLM: AIModelKind
 
@@ -40,7 +41,7 @@ struct WelcomeSheet: View {
         self.availableDiskBytes = freeDisk
         let recommended = AIModelKind.safeDefaultFor(ramGB: ram,
                                                       freeDiskBytes: freeDisk)
-        self.hardwareRecommendedVLM = recommended
+        self._hardwareRecommendedVLM = State(initialValue: recommended)
         self._selectedVLM = State(initialValue: AIModelKind.onboardingSelection(
             persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
             ramGB: ram,
@@ -52,6 +53,17 @@ struct WelcomeSheet: View {
             self._vlmLockedTotalBytes = State(initialValue: 5_800_000_000)
         }
         #endif
+    }
+
+    /// The engine knows how much memory is free right now; until the user picks a model, the recommendation follows it.
+    private func adoptVLMAdvice(_ advice: VLMAdvice?) {
+        guard let advice, selectedVLM == hardwareRecommendedVLM, !ModelInstallStatus.isInstalled(kind: selectedVLM),
+              UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")?.isEmpty != false else { return }
+        let recommended = AIModelKind.recommended(ramGB: systemRAMGB, advice: advice, freeDiskBytes: availableDiskBytes)
+        guard recommended != hardwareRecommendedVLM else { return }
+        hardwareRecommendedVLM = recommended
+        adoptingAdvice = true
+        selectedVLM = recommended
     }
 
     private var systemRAMGB: Double {
@@ -185,7 +197,10 @@ struct WelcomeSheet: View {
             ramplus.refreshStatus()
             arcface.refreshStatus()
             bge.refreshStatus()
+            engine.refreshVLMAdvice()
+            adoptVLMAdvice(engine.vlmAdvice)
         }
+        .onChange(of: engine.vlmAdvice) { _, advice in adoptVLMAdvice(advice) }
         .onDisappear { installAllRequested = false }
         .onChange(of: essentialsInProgress) { _, inProgress in
             // Once everything the essentials button kicked off has settled
@@ -195,6 +210,7 @@ struct WelcomeSheet: View {
             if !inProgress && !essentialsInstalled { installAllRequested = false }
         }
         .onChange(of: selectedVLM) { _, kind in
+            if adoptingAdvice { adoptingAdvice = false; return }
             DeepAnalyzeSettings.shared.activeKind = kind
         }
         .onChange(of: vlmInstalled) { _, nowInstalled in

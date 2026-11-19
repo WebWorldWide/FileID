@@ -441,6 +441,7 @@ mod tests {
             runnable: true,
             installed: rate.is_some(),
             fits,
+            fits_now: fits,
             benchmark: rate.map(|r| ModelBenchmark {
                 measured_at: "t".into(),
                 hardware: "h".into(),

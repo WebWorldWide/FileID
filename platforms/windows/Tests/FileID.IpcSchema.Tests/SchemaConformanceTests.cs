@@ -248,10 +248,10 @@ public class SchemaConformanceTests
         {
             new LibraryRoot(1, "/Volumes/Photos", "Photos", "external", true, true, 1200, 3_400_000_000, 1_700_000_000.0, "completed"),
         })),
-        new ModelCatalogEvent(new ModelCatalog("models-1", 16, 6144, new[]
+        new ModelCatalogEvent(new ModelCatalog("models-1", 16, 9000, 6144, "qwen3_vl_2b_instruct_gguf_q4_k_m", new[]
         {
             new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",
-                "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true,
+                "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true, true,
                 new ModelBenchmark("2026-10-13T22:00:00Z", "x86_64 · 16 GB · RTX 2060 6 GB", 3.2, 900, 55, 1.4, 2.6, 0.95, 0.8, _exampleTunedArguments)),
         })),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),

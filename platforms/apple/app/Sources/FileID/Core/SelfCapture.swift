@@ -15,7 +15,7 @@
 //        actions: select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested (Suggest merges sheet), review[:faces|merges|splits] (People review sheet on that tab),
 //        models (Chat/Describe model sheets), welcome, welcome-download (Welcome with the description model mid-download); each is closed again after the capture
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
-//   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
+//   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded
 //   FILEID_SELF_SHOT_DESCRIBE=<n>  after the pages, describe the first n photos with the active model (the Library selection button's call) and capture the Describe Files page and the status pill while it runs and when it ends
 //   FILEID_SELF_SHOT_MODEL=<kind>  makes this the active description model before the Describe, Chat and Moments steps (for example qwen3_vl_2b)
 //   FILEID_SELF_SHOT_CHAT=<q>|<q>  after that, ask each question in Chat (the composer's send) and capture the answer

@@ -140,6 +140,8 @@ public final class EngineClient {
     public private(set) var benchmarkProgress: BenchmarkProgress?
     public private(set) var libraryRoots: [LibraryRoot] = []
     public private(set) var benchmarkResults: [String: ModelBenchmark] = [:]
+    /// The engine's own verdict on each vision model for this Mac and the memory free now, from the last `listModels` for the vision role.
+    public private(set) var vlmAdvice: VLMAdvice?
     public private(set) var benchmarkMessage: (modelKind: String, text: String)?
     public private(set) var benchmarkModelKind: String?
     private var benchmarkRequestID: String?
@@ -575,6 +577,7 @@ public final class EngineClient {
             restoreSavedFolderAccess()
             // Don't clear the respawn budget merely on reaching Ready: a Ready→immediate-crash flap would reset it each cycle and never trip the 3-in-60s cap. Record when we became Ready; handleEngineExit clears the budget only after `stabilitySettle`.
             lastReadyAt = Date()
+            refreshVLMAdvice()
             // Back from a wipe-and-rescan: auto-start the scan against the user's chosen root.
             if let root = pendingWipeAndRescanRoot {
                 pendingWipeAndRescanRoot = nil
@@ -695,6 +698,7 @@ public final class EngineClient {
             libraryRoots = list.roots
         case .modelCatalog(let catalog):
             for model in catalog.models { if let result = model.benchmark { benchmarkResults[model.id] = result } }
+            if catalog.requestID.hasPrefix(Self.vlmAdviceRequestPrefix) { vlmAdvice = VLMAdvice(catalog) }
         case .benchmarkProgress(let progress):
             guard progress.requestID == benchmarkRequestID else { break }
             benchmarkProgress = progress
@@ -1174,6 +1178,13 @@ public final class EngineClient {
 
     public func refreshModelCatalog() {
         send(.listModels(requestID: "catalog-" + UUID().uuidString.prefix(8).lowercased(), role: nil))
+    }
+
+    static let vlmAdviceRequestPrefix = "advice-"
+
+    /// Asks the engine which vision models this Mac can run, and which loads with the memory free right now.
+    public func refreshVLMAdvice() {
+        send(.listModels(requestID: Self.vlmAdviceRequestPrefix + UUID().uuidString.prefix(8).lowercased(), role: "vision"))
     }
 
     /// Cancels a running prewarm at the next Task.checkCancellation inside swift-transformers' Hub fetcher (typically <1 s). `nil` cancels every in-flight prewarm.

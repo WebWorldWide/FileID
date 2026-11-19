@@ -163,7 +163,7 @@ impl ResourceScheduler {
     }
     pub fn under_pressure(&self) -> bool {
         let (total, available) = (self.memory)();
-        total == 0 || available < (total / 4).clamp(2048, 8192)
+        total == 0 || available < crate::util::model_memory::reserve_mb(total)
     }
     pub fn reserve_with_accelerators(
         self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
@@ -208,10 +208,9 @@ impl ResourceScheduler {
                 crate::util::model_memory::rejection(total, available, demand.memory_mb)
             {
                 // Only a demand larger than the whole budget is permanent for a patient caller.
-                let reserve = (total / 4).clamp(2048, 8192);
-                let never_fits = total == 0 || total <= reserve || demand.memory_mb > total - reserve;
+                let never_fits = !crate::util::model_memory::fits_budget(total, demand.memory_mb);
                 if !matches!(wait, Wait::Until(_)) || never_fits {
-                    bail!("{reason}")
+                    return Err(crate::util::model_memory::MemoryShortfall(reason).into());
                 }
             }
         let mut state = self.state.lock();
@@ -242,7 +241,7 @@ impl ResourceScheduler {
                 || (crate::util::model_memory::rejection(total, available, demand.memory_mb)
                     .is_none()
                     && demand.memory_mb.saturating_add(used.memory_mb)
-                        <= total.saturating_sub((total / 4).clamp(2048, 8192)));
+                        <= total.saturating_sub(crate::util::model_memory::reserve_mb(total)));
             let used_gpu = state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.gpu_mb));
             let used_npu = state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.npu_mb));
             let accelerator_ok = (accelerators.gpu_mb == 0 || self.accelerator_capacity.gpu_mb.is_some_and(|cap| used_gpu.saturating_add(accelerators.gpu_mb) <= cap))
@@ -268,7 +267,7 @@ impl ResourceScheduler {
                 .fold(0u64, |sum, (d, _)| sum.saturating_add(d.memory_mb));
             let resident_blocks_budget = demand.memory_mb > 0
                 && demand.memory_mb.saturating_add(resident_memory)
-                    > total.saturating_sub((total / 4).clamp(2048, 8192));
+                    > total.saturating_sub(crate::util::model_memory::reserve_mb(total));
             let stuck_on_residents = (!accelerator_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
                 || resident_blocks_budget
                 || (!memory_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0));
@@ -447,6 +446,17 @@ mod tests {
         });
         assert_eq!(order.lock().first(), Some(&2));
         assert!(scheduler.state.lock().waiting.is_empty());
+    }
+    #[test]
+    fn a_load_refused_for_memory_says_so_in_a_way_a_caller_can_act_on() {
+        use crate::util::model_memory::MemoryShortfall;
+        let scheduler = ResourceScheduler::new(|| (16384, 6000), 2, 2);
+        let busy = scheduler.reserve(Demand { memory_mb: 8704, cpu: 0, io: 0 }, Priority::Interactive, || false).err().expect("9.5 GB free is needed");
+        assert!(busy.downcast_ref::<MemoryShortfall>().is_some_and(|short| short.0.contains("is available")), "{busy}");
+        let smaller = scheduler.reserve(Demand { memory_mb: 3072, cpu: 0, io: 0 }, Priority::Interactive, || false);
+        assert!(smaller.is_ok(), "a smaller model loads in the same memory");
+        let cancelled = scheduler.reserve(Demand { memory_mb: 3072, cpu: 0, io: 0 }, Priority::Interactive, || true).err();
+        assert!(cancelled.is_none_or(|error| error.downcast_ref::<MemoryShortfall>().is_none()));
     }
     #[test]
     fn patient_admission_waits_out_interactive_leases_and_low_memory() {

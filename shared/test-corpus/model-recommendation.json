@@ -1,0 +1,16 @@
+[
+  {"totalMB":8192,"availableMB":7000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"small"},
+  {"totalMB":8192,"availableMB":4000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"tiny"},
+  {"totalMB":8192,"availableMB":2000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"tiny"},
+  {"totalMB":16384,"availableMB":13000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"mid"},
+  {"totalMB":16384,"availableMB":6500,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"small"},
+  {"totalMB":16384,"availableMB":3500,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"tiny"},
+  {"totalMB":16384,"availableMB":1000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120},{"id":"tiny","requestedMB":3072}],"expected":"tiny"},
+  {"totalMB":32768,"availableMB":25000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120}],"expected":"big"},
+  {"totalMB":32768,"availableMB":12000,"ladder":[{"id":"big","requestedMB":16384},{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120}],"expected":"mid"},
+  {"totalMB":65536,"availableMB":50000,"ladder":[{"id":"huge","requestedMB":32768},{"id":"big","requestedMB":16384}],"expected":"huge"},
+  {"totalMB":4096,"availableMB":3500,"ladder":[{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120}],"expected":null},
+  {"totalMB":16384,"availableMB":0,"ladder":[{"id":"mid","requestedMB":8704},{"id":"small","requestedMB":5120}],"expected":"small"},
+  {"totalMB":0,"availableMB":8192,"ladder":[{"id":"small","requestedMB":5120}],"expected":null},
+  {"totalMB":16384,"availableMB":13000,"ladder":[],"expected":null}
+]

@@ -121,17 +121,30 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return policy.licenseURL.flatMap { URL(string: $0) }
     }
 
-    /// Top three picks for a given RAM tier, ranked best-first.
+    /// Picks for a given RAM tier, ranked best-first; the smaller Qwen3-VL models close each list so a busy Mac always has one that loads.
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
-        if ramGB >= 30       { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B] }
-        else if ramGB >= 16  { return [.qwen3VL8B, .qwen3VL4B, .qwen2VL7B] }
-        else                 { return [.qwen3VL4B, .gemma3_4B, .paligemma3B] }
+        if ramGB >= 30       { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B, .qwen3VL2B] }
+        else if ramGB >= 16  { return [.qwen3VL8B, .qwen3VL4B, .qwen2VL7B, .qwen3VL2B] }
+        else                 { return [.qwen3VL4B, .qwen3VL2B, .gemma3_4B, .paligemma3B] }
     }
 
+    /// What the engine's memory admission asks for when it loads this model.
+    public var requestedMB: UInt64 {
+        UInt64((ramBudgetGB * 1024).rounded(.up))
+    }
+
+    private static func totalMB(ramGB: Double) -> UInt64 {
+        UInt64(max(0, ramGB * 1024))
+    }
+
+    /// The engine's static rule: the model fits the installed memory after the system reserve.
     public func fits(ramGB: Double) -> Bool {
-        let reserve = max(2.0, min(8.0, ramGB * 0.35))
-        let headroom = max(0, ramGB - reserve)
-        return ramBudgetGB <= headroom
+        ModelMemoryRule.fitsBudget(totalMB: Self.totalMB(ramGB: ramGB), requestedMB: requestedMB)
+    }
+
+    /// The engine's live rule: the model would load with `availableMB` free right now.
+    public func fitsNow(ramGB: Double, availableMB: UInt64) -> Bool {
+        ModelMemoryRule.fitsNow(totalMB: Self.totalMB(ramGB: ramGB), availableMB: availableMB, requestedMB: requestedMB)
     }
 
     public var requiredFreeBytes: Int64 {
@@ -143,25 +156,32 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return freeDiskBytes >= requiredFreeBytes
     }
 
-    /// First recommendation that fits, falling back to Gemma 3 4B.
+    /// The recommendation the engine's rule accepts: the first that loads with `availableMB` free, else the smallest this Mac could ever run, falling back to Gemma 3 4B. `availableMB` nil asks only about the installed memory.
     public static func safeDefaultFor(ramGB: Double,
+                                      availableMB: UInt64? = nil,
                                       freeDiskBytes: Int64? = nil) -> AIModelKind {
-        let ranked = recommendedFor(ramGB: ramGB)
-        if let choice = ranked.first(where: {
-            $0.fits(ramGB: ramGB) && $0.fits(freeDiskBytes: freeDiskBytes)
-        }) {
-            return choice
+        let ranked = recommendedFor(ramGB: ramGB).filter { $0.fits(ramGB: ramGB) }
+        let diskOK = ranked.filter { $0.fits(freeDiskBytes: freeDiskBytes) }
+        for pool in [diskOK, ranked] where !pool.isEmpty {
+            if let availableMB {
+                let ladder = pool.map { (id: $0.rawValue, requestedMB: $0.requestedMB) }
+                if let id = ModelMemoryRule.recommend(ladder: ladder, totalMB: totalMB(ramGB: ramGB), availableMB: availableMB) {
+                    return pool.first { $0.rawValue == id } ?? pool[0]
+                }
+            }
+            return pool[0]
         }
-        return ranked.first(where: { $0.fits(ramGB: ramGB) }) ?? .gemma3_4B
+        return .gemma3_4B
     }
 
     public static func onboardingSelection(persistedRawValue: String?,
                                            ramGB: Double,
+                                           availableMB: UInt64? = nil,
                                            freeDiskBytes: Int64? = nil) -> AIModelKind {
         if let persistedRawValue, !persistedRawValue.isEmpty {
             return migrated(rawValue: persistedRawValue)
         }
-        return safeDefaultFor(ramGB: ramGB, freeDiskBytes: freeDiskBytes)
+        return safeDefaultFor(ramGB: ramGB, availableMB: availableMB, freeDiskBytes: freeDiskBytes)
     }
 
     /// Migrates a persisted rawValue that predates the commercial-clean lineup or the Windows-canonical token rename, so an old value maps to a supported model instead of failing to decode.

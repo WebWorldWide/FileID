@@ -1,5 +1,11 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-11-19 Throughput: ≥140 files/s is the Mac target, not a cross-platform claim
+
+≥140 files/s is the target for the macOS Apple-native scan path (ImageIO decode, Vision, MLX CLIP/RAM++). Windows and Linux run the portable CPU path (image-rs decode, tract), which has not been measured on Windows or Linux hardware and is not held to that number.
+
+What the portable path measured (acceptance lane F, 2026-11-18): the portable pipeline (`FILEID_APPLE_SCAN=0`, CLIP on tract, no RAM++) on an M1 Pro (10 cores, 16 GB), on a shared machine at load average 17–40, scanned 200 large Sony JPEG/ARW originals in 19.7–24.1 s, about 8–10 files/s. Decode alone cost 390–470 ms per file, 4–9× the ImageIO decode of the same files (52–133 ms), and is the ceiling. With RAM++ on tract the cost is about 2.5 s per image and 4.3–4.9 GB of memory, so the portable scan skips RAM++ below 11 GiB installed and tags with CLIP scene tags. The Mac path in the same lane scanned 300 of the same originals in 56.6 s (about 5 files/s, load 30–39), so no run on these 24 MP originals came near 140 files/s on either path. The timings are indicative only (shared machine); the memory figures are the trustworthy ones. No Windows or Linux throughput is claimed until it is measured on that hardware.
+
 ## 2026-11-15 Where the release stands
 
 Not release-ready, and closer than it has been. What is true today:

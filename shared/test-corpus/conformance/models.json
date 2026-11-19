@@ -29,6 +29,9 @@
         },
         "expect": {
           "vramMB": 0,
+          "availableMemoryMB": {
+            "$tol": "present"
+          },
           "models": {
             "$tol": "prefix",
             "value": [
@@ -47,7 +50,13 @@
                 "tier": "medium",
                 "status": "curated",
                 "runnable": true,
-                "installed": false
+                "installed": false,
+                "fits": {
+                  "$tol": "present"
+                },
+                "fitsNow": {
+                  "$tol": "present"
+                }
               },
               {
                 "id": "qwen3_vl_2b",
