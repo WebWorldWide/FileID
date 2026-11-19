@@ -35,6 +35,8 @@ public final class ReadStore: @unchecked Sendable {
     @ObservationIgnored private var retryAttempts = 0
     private let dbURL: URL
     public private(set) var version: Int = 0
+    /// Bumps each time the read connection opens. A launch before the engine has created the catalog's -wal/-shm files cannot open it read-only, so the first listing reads nothing; views reload on this.
+    public private(set) var readerEpoch: Int = 0
     public private(set) var totalFiles: Int = 0
     /// False until the first counters read lands, and again while the reader cannot open or the counters read fails;
     /// `totalFiles` is then a placeholder, not a count of an empty library.
@@ -122,6 +124,7 @@ public final class ReadStore: @unchecked Sendable {
             do {
                 try ReadOnlyLocations.requireWritable(dbURL)
                 self.queue = try Self.openReader(at: dbURL)
+                Task { @MainActor in self.readerEpoch &+= 1 }
             } catch {
                 reportError("Could not open DB: \(error)")
                 self.countersAvailable = false

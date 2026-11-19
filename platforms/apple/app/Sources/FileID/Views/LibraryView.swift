@@ -128,6 +128,7 @@ struct LibraryView: View {
                 }
             }
             .onChange(of: kindFilterRaw) { _, _ in reloadWhenShown() }
+            .onChange(of: store.readerEpoch) { _, _ in reloadWhenShown() }
             .onChange(of: similarSeed?.id) { _, _ in reloadWhenShown() }
             .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
             // Keep the tile-refresh epoch tracking store.version while idle so a
