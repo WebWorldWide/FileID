@@ -130,7 +130,7 @@ struct ChatWorkbench: View {
                         ForEach(messages) { entry in messageView(entry).id(entry.id) }
                         if !busy && !actions.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
-                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine) }
+                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine, answer: messages.last(where: { $0.role != "user" })?.text) }
                             }
                             .padding(.leading, 12)
                             .transition(.opacity)

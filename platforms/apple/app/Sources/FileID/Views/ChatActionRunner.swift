@@ -542,6 +542,8 @@ enum ChatActions {
 struct ChatActionCard: View {
     let action: ChatAction
     let engine: EngineClient
+    /// The answer printed above this card. A card whose sentence is the answer itself shows its buttons and facts without repeating it.
+    var answer: String? = nil
     @State private var runner = ChatActionRunner.shared
 
     private var phase: ChatActionRunner.Phase { runner.phase(action) }
@@ -557,7 +559,9 @@ struct ChatActionCard: View {
                 Spacer(minLength: 0)
                 if action.source == "model" { MetaText("Suggested by local AI", color: Theme.ai, size: 11.5) }
             }
-            Text(cardDetail).font(Theme.Font.body(13)).foregroundStyle(Theme.text1).fixedSize(horizontal: false, vertical: true)
+            if !ChatActionCard.repeatsAnswer(detail: cardDetail, answer: answer) {
+                Text(cardDetail).font(Theme.Font.body(13)).foregroundStyle(Theme.text1).fixedSize(horizontal: false, vertical: true)
+            }
             if action.requiresConfirmation, phase == .proposed { whatHappens }
             status
             buttons
@@ -568,6 +572,11 @@ struct ChatActionCard: View {
         .animation(Theme.springStandard, value: phase)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(action.requiresConfirmation ? "Needs your OK" : "Suggested action"): \(primaryTitle)")
+    }
+
+    static func repeatsAnswer(detail: String, answer: String?) -> Bool {
+        guard let answer else { return false }
+        return answer.trimmingCharacters(in: .whitespacesAndNewlines) == detail.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var plan: ChatActionRunner.PlanSummary? {

@@ -21,4 +21,10 @@ struct ChatTranscriptTests {
         #expect(ChatTranscriptTail(messages: answer + [message("a2")], actions: [], busy: false) != before)
         #expect(ChatTranscriptTail(messages: answer, actions: [], busy: false) == before)
     }
+
+    @Test func aCardDoesNotRepeatTheAnswerAboveIt() {
+        #expect(ChatActionCard.repeatsAnswer(detail: "Opens Duplicates.", answer: "Opens Duplicates. "))
+        #expect(!ChatActionCard.repeatsAnswer(detail: "Opens Duplicates.", answer: "Suggest a layout for 2012."))
+        #expect(!ChatActionCard.repeatsAnswer(detail: "Opens Duplicates.", answer: nil))
+    }
 }

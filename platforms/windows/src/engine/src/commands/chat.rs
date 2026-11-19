@@ -2027,22 +2027,18 @@ mod tests {
     }
 
     #[test]
-    fn an_action_answer_neither_prints_paths_nor_repeats_its_card() {
+    fn a_folder_action_answer_does_not_print_the_path_its_card_shows() {
         let mut conn = crate::db::test_support::memory_db();
         conn.execute_batch(
-            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,content_hash) VALUES
-             (1,'/lib/Eckerts 10-4-26/a.jpg',1,10,1688472000,0,'image','jpg','h'),
-             (2,'/lib/Eckerts 10-4-26/copy of a.jpg',2,10,1688472000,0,'image','jpg','h');",
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (1,'/lib/Eckerts 10-4-26/a.jpg',1,10,1688472000,0,'image','jpg');",
         )
         .unwrap();
-        for text in ["Organize my Eckerts 10-4-26 folder", "Move the extra copies to the trash"] {
-            let request = ChatRequest { request_id: "r".into(), conversation_id: uuid::Uuid::new_v4().to_string(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
-            let response = execute(&mut conn, &request).unwrap();
-            let actions = response.actions.expect(text);
-            assert_ne!(response.message, actions[0].detail, "{text}");
-            assert!(!response.message.contains("/lib"), "{text}: {}", response.message);
-            assert!(response.message.starts_with(&actions[0].title), "{text}: {}", response.message);
-        }
+        let request = ChatRequest { request_id: "r".into(), conversation_id: "c".into(), action: "send".into(), text: Some("Organize my Eckerts 10-4-26 folder".into()), use_model: Some(false), ..Default::default() };
+        let response = execute(&mut conn, &request).unwrap();
+        let actions = response.actions.unwrap();
+        assert!(actions[0].detail.contains("/lib/Eckerts 10-4-26"));
+        assert_eq!(response.message, "Suggest a layout for Eckerts 10-4-26.");
     }
 
     #[test]
