@@ -1,4 +1,4 @@
-﻿// SidebarEngineStatus code-behind. Subscribes to EngineClient lifecycle
+﻿// SidebarEngineStatus code-behind. Subscribes to EngineClient lifecycle and re-paints the status pill.
 
 using System.ComponentModel;
 using FileID.Services;

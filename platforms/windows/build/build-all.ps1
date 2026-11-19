@@ -95,6 +95,7 @@ if ($Wipe -and $WipeDbOnly) {
     exit 1
 }
 
+# -Wipe implies -Clean + -Desktop. Destructive flag -- see param block.
 if ($Wipe) { $Clean = $true; $Desktop = $true }
 
 # -Desktop implies -Release: a publish folder is what users actually want

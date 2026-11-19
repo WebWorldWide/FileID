@@ -1,4 +1,4 @@
-﻿// SidebarTab -- the pages the shell exposes, grouped into the Prototype v3
+﻿// SidebarTab -- the pages the shell exposes, grouped into the Prototype v3 areas (Browse / Analyze / Act) plus Settings.
 
 namespace FileID.ViewModels;
 

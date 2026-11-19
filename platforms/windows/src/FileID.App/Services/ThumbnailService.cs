@@ -1,4 +1,4 @@
-﻿// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with
+﻿// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with an in-process LRU cache and a disk-backed cache under thumbs.cache/. Cache keys hash path+modified-time so a file edit invalidates its thumb; a background queue drains requests so the UI thread never pays the shell-thumbnail cost.
 
 using System;
 using System.Collections.Generic;
@@ -60,6 +60,7 @@ internal sealed class ThumbnailService : IDisposable
         return output.ToArray();
     }
 
+    // Decoded-BitmapImage L1 cache, bounded by a real BYTE budget (not an entry count): each cached BitmapImage holds a DECODED bitmap (~ThumbnailRequestPx² × 4 bytes), so an entry-count cap would really be hundreds of MB of live bitmaps on a large library. Sizing each entry by its decoded cost and capping the total holds the working set bounded across a 50K-file scroll; LRU evicts the coldest thumbnails and a miss just re-decodes (no correctness hit).
     private const long L1CacheByteBudget = 128L * 1024 * 1024;
     private const long L1CacheByteBudgetHighDpi = 256L * 1024 * 1024;
     /// <summary>Shell and disk work runs on this many drains at once; every BitmapImage is still built on the UI dispatcher.</summary>
@@ -91,7 +92,7 @@ internal sealed class ThumbnailService : IDisposable
     /// <summary>captured at construction time on the UI thread so the worker (running on a thread-pool thread) always has a reliable dispatcher to marshal BitmapImage.SetSourceAsync back to.</summary>
     private readonly Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
 
-    /// <summary>Both are guarded by _videoLock (the worker thread enqueues, the engine-event handler on the UI thread completes — two threads).</summary>
+    /// <summary>VIDEO thumbnails are NOT produced in-process (the shell / Media Foundation chain native-fast-fails the whole app — see <see cref="VideoExtensions"/>). On an L1+L2 miss for a video we ask the engine to extract a keyframe out-of-process and complete the tile when the <c>thumbnailGenerated</c> event arrives. <see cref="_pendingVideo"/> maps CacheKey to the request's TCS, completed by the engine event (or the timeout) instead of null in <see cref="DrainAsync"/>; <see cref="_requestedVideo"/> holds CacheKeys already asked for this session so a re-scroll never re-sends the (expensive) command, cleared per key once the event lands so a later file edit (new modifiedAt → new key) can re-request. Both are guarded by <see cref="_videoLock"/> (the worker thread enqueues, the engine-event handler on the UI thread completes — two threads).</summary>
     private readonly Dictionary<string, TaskCompletionSource<BitmapImage?>> _pendingVideo = new();
     private readonly HashSet<string> _requestedVideo = new();
     private readonly object _videoLock = new();
@@ -176,7 +177,7 @@ internal sealed class ThumbnailService : IDisposable
                 }
                 else if (TryBeginVideoThumbnailRequest(req))
                 {
-                    // Video L1+L2 miss: RenderAsync returned null (we never invoke the in-process shell chain for video — native fast-fail hazard).
+                    // Video L1+L2 miss: RenderAsync returned null (we never invoke the in-process shell chain for video — native fast-fail hazard). The request is now PENDING on the engine's out-of-process keyframe; do NOT complete it null here. OnEngineClientChanged completes req.Completion when the `thumbnailGenerated` event arrives, or the armed timeout completes it null (placeholder) and unregisters it.
                 }
                 else
                 {
@@ -197,6 +198,7 @@ internal sealed class ThumbnailService : IDisposable
         }
     }
 
+    /// <summary>For a VIDEO file that missed L1+L2: registers the request's TCS as PENDING (unresolved until the engine event or the timeout), dedupes per (path,modifiedAt) so the expensive out-of-process extract is requested at most once per session, fires the <c>generateVideoThumbnail</c> command fire-and-forget, and arms a timeout that completes the tile null (placeholder) if no keyframe arrives. Returns true when the request was taken over (caller must NOT complete it); false for non-video, or when the service is disposed.</summary>
     private bool TryBeginVideoThumbnailRequest(ThumbnailRequest req)
     {
         if (_disposed) return false;
@@ -221,7 +223,7 @@ internal sealed class ThumbnailService : IDisposable
             }
         }
 
-        // Timeout: if no keyframe lands in VideoThumbTimeoutMs, complete the tile null (placeholder) and unregister so the dictionary doesn't grow unbounded.
+        // Timeout: if no keyframe lands in VideoThumbTimeoutMs, complete the tile null (placeholder) and unregister so the dictionary doesn't grow unbounded. The dedupe set intentionally KEEPS the key so we don't re-hammer the engine for a video it couldn't extract this session.
         _ = ArmVideoTimeoutAsync(key, req.Completion);
         return true;
     }
@@ -240,6 +242,7 @@ internal sealed class ThumbnailService : IDisposable
         }
         lock (_videoLock)
         {
+            // Only clear the dictionary entry if it's still THIS request's TCS; a newer request for the same key may have replaced it.
             if (_pendingVideo.TryGetValue(key, out var current) && ReferenceEquals(current, tcs))
             {
                 _pendingVideo.Remove(key);
@@ -343,7 +346,7 @@ internal sealed class ThumbnailService : IDisposable
         pending?.TrySetResult(null);
     }
 
-    /// <summary>Decode bytes into a BitmapImage on the CURRENT (UI) thread.</summary>
+    /// <summary>Decode bytes into a BitmapImage on the CURRENT (UI) thread; the caller MUST already be on the dispatcher (the engine-event handler enqueues this). Returns null on any decode failure.</summary>
     private static async Task<BitmapImage?> DecodeOnThisThreadAsync(byte[] bytes, CancellationToken ct)
     {
         Windows.Storage.Streams.InMemoryRandomAccessStream? stream = null;
@@ -379,7 +382,7 @@ internal sealed class ThumbnailService : IDisposable
     internal const int TilePx = 256;
     private static readonly int[] s_imagePixelBuckets = { 256, 384, 512, 768 };
 
-    /// <summary>Physical pixels asked of the shell and decoded for an image tile: the tile size times the display scale, rounded up to a bucket so the disk cache holds a handful of sizes, not one per scale.</summary>
+    /// <summary>Physical pixels asked of the shell and decoded for an image tile: the tile size times the display scale, rounded up to a bucket so the disk cache holds a handful of sizes, not one per scale. The scale is read once on the UI thread at construction: reading it from a worker drain (the WinRT window interop is UI-thread-affined) poisoned later `SetSourceAsync` calls.</summary>
     internal static int ImagePixelSize(double scale)
     {
         var factor = double.IsFinite(scale) && scale > 0 ? scale : 1;

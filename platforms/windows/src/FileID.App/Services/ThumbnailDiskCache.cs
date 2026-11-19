@@ -1,5 +1,7 @@
 ﻿// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
 // Survives app restarts so a rescan of a 50K-tile library doesn't re-render every thumbnail from scratch.
+// Layout: %LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<key>.bin. The 2-hex fanout prevents the OS dir-entry limit at 100K+ thumbnails; SHA256(path|mtime) keying invalidates on file edit; the stored payload is raw bytes (shell thumbnail or original file) that BitmapImage decodes transparently; 500 MB cap with eviction by in-memory LRU (no recurring disk walk); files > 500 KB skip disk (the in-memory LRU still serves them).
+// Concurrency: writes go temp+rename; reads are bare File.Open. The in-memory index keeps (path → size, lastAccessTicks) so eviction doesn't need to re-walk the directory on every cap trip.
 
 using System;
 using System.Collections.Concurrent;
@@ -155,6 +157,7 @@ internal static class ThumbnailDiskCache
                 }
                 catch
                 {
+                    // Don't leave an orphaned half-written .tmp behind on a failed write/move; the outer catch logs the exception.
                     try { File.Delete(tmp); } catch { /* swallow */ }
                     throw;
                 }
@@ -184,7 +187,7 @@ internal static class ThumbnailDiskCache
     {
         var cached = Interlocked.Read(ref _cachedBytes);
         if (cached <= CacheCapBytes) { return; }
-        // But once the cache has blown past a hard ceiling the cap is no longer a soft target, so we sweep regardless of how recently we last swept.
+        // The 30 s throttle bounds disk churn for the common soft-headroom trim. But once the cache has blown past a hard ceiling the cap is no longer a soft target, so we sweep regardless of how recently we last swept.
         bool overHardCeiling = cached > HardCeilingBytes;
         var now = DateTime.UtcNow;
         if (!overHardCeiling && now - _lastSweep < SweepInterval) { return; }
@@ -202,6 +205,7 @@ internal static class ThumbnailDiskCache
             long freed = 0;
             foreach (var path in evicted)
             {
+                // Best-effort race guard: a read/write between the snapshot and here may have touched this entry — don't evict a now-hot file.
                 if (_index.TryGetValue(path, out var current) &&
                     Interlocked.Read(ref current.LastAccessTicks) > sweepStartTicks)
                 {
@@ -252,6 +256,7 @@ internal static class ThumbnailDiskCache
             TaskCreationOptions.RunContinuationsAsynchronously);
         var ok = dispatcher.TryEnqueue(async () =>
         {
+            // Stream lifetime — see ThumbnailService.RunBytesSetSource: the `using var stream` form disposes too early under some SetSourceAsync timings. Pull it out and dispose in finally AFTER the await completes.
             InMemoryRandomAccessStream? stream = null;
             try
             {
@@ -293,6 +298,7 @@ internal static class ThumbnailDiskCache
         {
             if (!Directory.Exists(CacheRoot)) { return; }
             var dirInfo = new DirectoryInfo(CacheRoot);
+            // Prime runs off the UI thread, so WriteAsync can land mid-walk.
             // TryAdd (not the indexer) yields to a concurrent write's newer entry, and we Add only the bytes WE inserted (never Exchange) so a write's own Interlocked.Add isn't clobbered — no double-count, no lost total.
             long added = 0;
             foreach (var fi in dirInfo.EnumerateFiles("*.bin", SearchOption.AllDirectories))

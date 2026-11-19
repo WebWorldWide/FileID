@@ -1,4 +1,4 @@
-﻿// LibraryView code-behind. Routes search-box + kind-filter input into the
+﻿// LibraryView code-behind. Routes search-box + kind-filter input into the LibraryViewModel and drives the footer's loading/empty/error states.
 
 using System;
 using System.Collections.Generic;

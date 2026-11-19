@@ -1,4 +1,4 @@
-﻿// SidebarPipelineProgress code-behind. Five capsule segments plus a
+﻿// SidebarPipelineProgress code-behind. Five capsule segments plus a "Step N of 5 · Stage" line inside the v3 scan card (macOS PipelineBlock); the stage derivation is live engine signals over a DB-derived launch floor.
 
 using System.ComponentModel;
 using System.Threading.Tasks;

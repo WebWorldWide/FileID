@@ -1,4 +1,4 @@
-﻿// Tier -> outcome mapping guard. RestructureView and DrillDownSheet both group
+﻿// Tier -> outcome mapping guard. RestructureView and DrillDownSheet both group engine moves through RestructureGrouping.OutcomeForTier; a silent change here would mis-sort files between the Keep / Tidy / Reorganize cards.
 
 using FileID.ViewModels;
 using Xunit;

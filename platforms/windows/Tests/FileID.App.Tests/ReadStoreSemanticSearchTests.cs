@@ -1,5 +1,6 @@
 ﻿// Equivalence test for ReadStore.SemanticSearchAsync's bounded top-K scan.
-// The perf change made the loop materialize a FileRow only for rows the heap retains (instead of for every embedding row).
+// The perf change made the loop materialize a FileRow only for rows the heap retains (instead of for every embedding row). This guards that the change is byte-identical in OUTPUT: the same set of file ids in the same best→worst order as a naive full scan + sort, including the dimension-mismatch skip and the failed=0 filter.
+// Builds a throwaway SQLite DB with just the columns SemanticSearchAsync projects, then opens it through the real ReadStore (read-only).
 
 using System;
 using System.Collections.Generic;
@@ -241,7 +242,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         Assert.Empty(await store.SimilarFilesAsync(1, 10, CancellationToken.None));
     }
 
-    // Dispose must drain an in-flight thread-pool read via the gate before freeing the native connection.
+    // Dispose must drain an in-flight thread-pool read via the gate before freeing the native connection. Without draining, the concurrent reader uses the connection after sqlite3_close: an access violation that crashes the test host.
     [Fact(Timeout = 30000)]
     public async Task Dispose_DrainsInFlightRead_NoUseAfterDispose()
     {

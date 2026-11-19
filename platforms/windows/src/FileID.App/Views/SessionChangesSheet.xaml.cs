@@ -1,4 +1,4 @@
-﻿// SessionChangesSheet code-behind. Renders ChangeLog snapshots; each row
+﻿// SessionChangesSheet code-behind. Renders ChangeLog snapshots; each row owns a per-entry Undo/Retry button. Rebuild-on-Changed is safe here: the sheet is only visible inside a modal ContentDialog, Changed fires at user-action cadence, and rows re-materialize from a consistent snapshot on the dispatcher.
 
 using System;
 using System.ComponentModel;

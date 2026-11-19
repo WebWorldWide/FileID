@@ -1,4 +1,4 @@
-﻿// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses
+﻿// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses for free.
 
 using System;
 using System.Collections.Generic;

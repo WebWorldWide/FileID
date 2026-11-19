@@ -1,4 +1,4 @@
-﻿// EmptyStateView code-behind. Six DPs (Glyph / Title / Body / Secondary /
+﻿// EmptyStateView code-behind. Six DPs (Glyph / Title / Body / Secondary / ActionLabel / ActionGlyph) plus an ActionInvoked routed event.
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;

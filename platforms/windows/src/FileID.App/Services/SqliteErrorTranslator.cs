@@ -1,4 +1,4 @@
-﻿// SqliteErrorTranslator — turn raw SQLite / IO exceptions into actionable,
+﻿// SqliteErrorTranslator — turn raw SQLite / IO exceptions into actionable, jargon-free user copy.
 // Views must not surface internal messages like "database disk image is malformed" with no guidance; this maps the common failure codes to a sentence the user can act on.
 
 using System;

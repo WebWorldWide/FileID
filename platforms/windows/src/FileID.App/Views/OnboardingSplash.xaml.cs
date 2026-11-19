@@ -1,4 +1,4 @@
-﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the
+﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the "FileID" title and routes the "Choose a folder to scan" button to the same FolderPickerService the sidebar uses.
 
 using System;
 using System.ComponentModel;

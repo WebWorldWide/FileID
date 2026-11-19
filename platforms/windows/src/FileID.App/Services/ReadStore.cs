@@ -1,4 +1,6 @@
 ﻿// ReadStore — app-side read-only SQLite access.
+// The engine owns the writer connection (rusqlite, single-threaded by design); the app reads through ephemeral read-only connections that ride the same WAL, getting consistent snapshots without contending with the writer.
+// CLIP semantic search dot-products the query embedding against `clip_embeddings.vector` (BLOB of float32 little-endian, L2-normalized — same on-disk format as macOS).
 // `Open()` is async so the call site can await schema validation without blocking the UI thread.
 
 using System;
@@ -73,8 +75,10 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             {
                 return;
             }
+            // First-launch guard: the engine creates the DB on first scan; stay closed until it exists (opening a missing file read-only would throw). File.Exists is wrapped because invalid-char paths or a denied ACL on the parent dir would otherwise throw.
             // On network shares or slow USB sticks this sync call can block the UI for hundreds of ms; the cost on a local SSD is < 1 ms so there's no downside to always going async here.
             var dbPath = _dbPath;
+            // Cap the File.Exists call: on a disconnected SMB share the system call can stall for 30+ seconds.
             // We'd rather treat it as "DB not present" after a few seconds than freeze startup.
             bool dbExists;
             using (var existsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
@@ -252,6 +256,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
+    /// <summary>CLIP semantic search: dot-product of the L2-normalized query embedding against `clip_embeddings.vector`, top-`limit`. Embedding rows are pre-normalized so cosine similarity == dot product. Scans every embedding (acceptable up to ~50K files).</summary>
     public async Task<IReadOnlyList<FileRowWithScore>> SemanticSearchAsync(
         float[] queryEmbedding, int limit, CancellationToken ct, string? kind = null)
     {
@@ -869,7 +874,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        // Reads ConfigureAwait(false) throughout and never re-enter the gate, so this can't self-deadlock.
+        // Quiesce in-flight reads before freeing the native connection: every read holds `_gate` the whole time it touches `_connection`, so acquiring it guarantees none is mid-query against a connection we're about to Dispose (otherwise the close frees it out from under the reader: a use-after-dispose native crash). Reads ConfigureAwait(false) throughout and never re-enter the gate, so this can't self-deadlock.
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {

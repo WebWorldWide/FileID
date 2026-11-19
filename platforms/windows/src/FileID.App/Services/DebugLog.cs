@@ -1,5 +1,5 @@
 ﻿// DebugLog — local-only structured logging for the C# app side.
-// NEVER transmits — this is enforced by the CI binary scan privacy gate. PRIVACY: every log call site that includes a user file path MUST wrap the path in PathRedactor.Redact first.
+// Writes UTF-8 lines to %LOCALAPPDATA%\FileID\logs\app.log, truncating only when > 10 MB to bound disk usage. Debug lines need FILEID_DEBUG_LOG=1; Trace lines need TraceEnabled. NEVER transmits — this is enforced by the CI binary scan privacy gate. PRIVACY: every log call site that includes a user file path MUST wrap the path in PathRedactor.Redact first.
 
 using System.IO;
 using System.Text;
@@ -19,6 +19,7 @@ internal static class DebugLog
     private static long s_reopenAfterTick;
     private static bool s_traceEnabled;
     private static bool s_debugEnabled = ReadDebugSwitch();
+    // One persistent, unbuffered handle: each line is a single synchronous write to the OS, so it survives a NATIVE fast-fail (the OS keeps what was written when the process dies) without a per-line open, stat and close on the UI thread. A queued background writer was rejected on purpose: it loses the last lines on a fast-fail, exactly the [APPLY:N]/[ENGINE-SUB] tail this log exists to capture (CLAUDE.md marks it load-bearing).
 
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
@@ -27,7 +28,7 @@ internal static class DebugLog
     {
         if (DebugEnabled) Write("DEBUG", message);
     }
-    /// <summary>Info and above always write, so the [APPLY:N]/[ENGINE-SUB] forensic lines must stay at Info.</summary>
+    /// <summary>Debug lines are skipped unless FILEID_DEBUG_LOG=1 (or "true") is set for the app process. Info and above always write, so the [APPLY:N]/[ENGINE-SUB] forensic lines must stay at Info.</summary>
     public static bool DebugEnabled
     {
         get => Volatile.Read(ref s_debugEnabled);
@@ -136,6 +137,7 @@ internal static class DebugLog
         try
         {
             AppPaths.EnsureDirectories();
+            // bufferSize 1 disables FileStream's own buffer: every Write is handed straight to the OS.
             var stream = new FileStream(
                 path,
                 FileMode.OpenOrCreate,
@@ -260,7 +262,7 @@ internal static class DebugLog
         }
     }
 
-    // UnhandledException / AppDomain / TaskScheduler) catch every managed crash but cannot intercept a native fast-fail.
+    // Last-session breadcrumb. The managed crash sinks (Application.UnhandledException / AppDomain / TaskScheduler) catch every managed crash but cannot intercept a native fast-fail: WinUI 3's composition layer calls RaiseFailFastException on cross-thread DispatcherObject misuse, which terminates the process without unwinding the CLR, so no crash-*.txt is produced. BeginSession writes last-session.txt (start time, pid, clean_exit=false) and MarkCleanExit flips it; if the NEXT launch finds it unflipped, the previous session died without a handler (most likely a native fast-fail) and DetectPriorAbnormalExit emits session-died-without-handler-{ts}.txt.
     private const string LastSessionFileName = "last-session.txt";
     private const string PriorDeathFilePrefix = "session-died-without-handler-";
 

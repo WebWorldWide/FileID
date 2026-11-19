@@ -185,6 +185,7 @@ internal static class Program
 
     private static void ShowFatalDialog(string title, string message)
     {
+        // 0x10 = MB_ICONERROR
         _ = NativeMessageBox(System.IntPtr.Zero, message, title, 0x10u);
     }
 

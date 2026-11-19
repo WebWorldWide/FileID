@@ -1,4 +1,4 @@
-﻿// ModelDisplaySize — single source of truth for the approximate on-disk
+﻿// ModelDisplaySize — single source of truth for the approximate on-disk size of each model_kind, mirroring engine/src/models/registry.rs's `approx_bytes` totals (summed across all FileEntry rows for that kind).
 
 using System.Collections.Generic;
 

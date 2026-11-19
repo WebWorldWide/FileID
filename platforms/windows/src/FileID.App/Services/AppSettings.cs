@@ -1,5 +1,5 @@
 ﻿// AppSettings — durable user preferences.
-// Atomic writes via temp-file + File.Move so a crash mid-save doesn't corrupt the file.
+// Persisted JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic writes via temp-file + File.Move so a crash mid-save doesn't corrupt the file. Every property must default safely so older settings.json files load cleanly.
 
 using System;
 using System.IO;
@@ -153,9 +153,10 @@ internal sealed class AppSettings
         return new AppSettings();
     }
 
+    /// <summary>Current schema version this build understands. Bumped only on incompatible field renames or one-time value migrations; Sanitize() clamps loaded values to this.</summary>
     private const int CurrentSchemaVersion = 5;
 
-    /// <summary>Defensive cleanup of fields a malicious settings.json could otherwise smuggle through.</summary>
+    /// <summary>Defensive cleanup of fields a malicious settings.json could otherwise smuggle through. Currently scrubs the EP override (rejects anything outside the canonical enum so DLL paths can't be injected). Add new validations as fields are added.</summary>
     private static void Sanitize(AppSettings s)
     {
         if (s.LibraryScopeRootId is <= 0) s.LibraryScopeRootId = null;
@@ -205,11 +206,13 @@ internal sealed class AppSettings
     }
 
     private static readonly SemaphoreSlim s_writeGate = new(1, 1);
+    // Setters call Save(), which bumps a debounce timer; the write fires 200 ms after the LAST setter on a thread-pool thread, so rapid changes (tab spam, sidebar toggle, scroll-driven kind-filter changes) don't each run a synchronous WriteAllBytes + File.Move chain on the UI thread (5-15 ms of stutter per change). Writes are serialized through s_writeGate so concurrent debounced saves and the synchronous SaveImmediately path can't race.
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(200);
     private static CancellationTokenSource? s_pendingSaveCts;
 
     public void Save()
     {
+        // Cancel any pending save and replace it with this one: the async worker observes the new token, and one cancelled before its delay elapses does no IO.
         var newCts = new CancellationTokenSource();
         var prior = Interlocked.Exchange(ref s_pendingSaveCts, newCts);
         try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
@@ -229,10 +232,12 @@ internal sealed class AppSettings
         });
     }
 
+    /// <summary>Synchronous flush. Use at shutdown to make sure a pending debounced save actually lands on disk before exit.</summary>
     public void SaveImmediately()
     {
         try
         {
+            // Cancel any debounced save: this synchronous write supersedes it.
             var prior = Interlocked.Exchange(ref s_pendingSaveCts, null);
             try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
             var snapshot = CloneForWrite();
@@ -246,6 +251,7 @@ internal sealed class AppSettings
 
     private AppSettings CloneForWrite()
     {
+        // Settings are value-shaped (all primitive properties), so a shallow copy is enough for serialization; importantly, the snapshot captures state at the moment Save() was called so a setter running mid-debounce can't tear the write.
         var clone = (AppSettings)MemberwiseClone();
         clone.DeepAnalyzeExcludedFolders = [.. DeepAnalyzeExcludedFolders];
         return clone;

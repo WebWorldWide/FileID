@@ -1,4 +1,4 @@
-﻿// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
+﻿// FilePreviewSheet code-behind. Kind-dispatched preview; CloseInternal pauses the media player so audio doesn't keep playing after the sheet closes.
 
 using System;
 using System.Collections.Generic;

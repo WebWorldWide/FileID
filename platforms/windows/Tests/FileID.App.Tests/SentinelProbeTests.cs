@@ -5,7 +5,7 @@ using Xunit;
 
 namespace FileID.App.Tests;
 
-// The shared probe must latch on BOTH forms.
+// Regression for the CUDA-pack prewarm loop: the engine writes hashed `{id}-{hash}.installed` sentinels, but SettingsView + the auto-installers probed only the flat `{id}.installed` name, so an installed pack read as missing and its prewarm re-dispatched on every Settings load / engine Ready. The shared probe must latch on BOTH forms.
 public sealed class SentinelProbeTests : IDisposable
 {
     private readonly string _dir;
@@ -119,6 +119,7 @@ public sealed class SentinelProbeTests : IDisposable
     {
         CreateSized(Path.Combine("llama.cpp-cuda", "llama-server.exe"), 20_000);
         CreateSized(Path.Combine("llama.cpp-cuda", "llama-mtmd-cli.exe"), 20_000);
+        // Realistic sizes: cudart64_12.dll is CUDA's small runtime shim (~540 KB), NOT a multi-MB lib; 1 MB here would hide the bug where a 1 MB floor rejected the real, fully-installed pack.
         CreateSized(Path.Combine("llama.cpp-cuda", "cudart64_12.dll"), 540_000);
         CreateSized(Path.Combine("llama.cpp-cuda", "cublas64_12.dll"), 100_000_000);
         Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_cuda_x64"));
@@ -129,6 +130,7 @@ public sealed class SentinelProbeTests : IDisposable
     [Fact]
     public void SmallCudaDispatchShims_AreRecognizedInstalled()
     {
+        // Regression: cudart64_12.dll (~540 KB) and cudnn64_9.dll (~260 KB) are small dispatch shims. A 1 MB size floor made SentinelProbe report a fully-installed CUDA/cuDNN pack as missing, so the app re-dispatched prewarm forever and eventually surfaced "installer stopped reporting progress".
         CreateSized(Path.Combine("llama.cpp-cuda", "llama-server.exe"), 20_000);
         CreateSized(Path.Combine("llama.cpp-cuda", "llama-mtmd-cli.exe"), 20_000);
         CreateSized(Path.Combine("llama.cpp-cuda", "mtmd.dll"), 20_000);
@@ -143,11 +145,13 @@ public sealed class SentinelProbeTests : IDisposable
     [Fact]
     public void OrtCudaPack_RequiresMathRuntimeDlls()
     {
+        // The expanded CUDA pack extracts ORT + the CUDA math runtime (cudart / cublas / cublasLt / cuFFT) + NVRTC under packs\cuda. The probe must require every DLL registry.rs marks runtime-required, or a half-extracted pack reads "installed" and the CUDA EP fails to bind. Real extracts nest each archive's DLLs under its own -archive/bin dir; TreeContains searches recursively, so mirror that layout here.
         var cuda = Path.Combine("packs", "cuda");
         CreateSized(Path.Combine(cuda, "ort", "lib", "onnxruntime.dll"), 5_000_000);
         CreateSized(Path.Combine(cuda, "ort", "lib", "onnxruntime_providers_cuda.dll"), 5_000_000);
         Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "ort_cuda_x64"));
 
+        // cudart64_12.dll is CUDA's ~540 KB dispatch shim: above the 100 KB floor but well under 1 MB.
         // The rest are fake-small (above the floor, not real multi-MB sizes) — the probe only floors at 100 KB.
         CreateSized(Path.Combine(cuda, "cudart", "bin", "cudart64_12.dll"), 553_984);
         CreateSized(Path.Combine(cuda, "cublas", "bin", "cublas64_12.dll"), 200_000);
@@ -162,6 +166,7 @@ public sealed class SentinelProbeTests : IDisposable
     [Fact]
     public void OrtCudaPack_RejectsTruncatedMathShim()
     {
+        // A truncated cudart shim (below the 100 KB floor) must not count as installed even when every other required DLL is present.
         var cuda = Path.Combine("packs", "cuda");
         CreateSized(Path.Combine(cuda, "onnxruntime.dll"), 5_000_000);
         CreateSized(Path.Combine(cuda, "onnxruntime_providers_cuda.dll"), 5_000_000);

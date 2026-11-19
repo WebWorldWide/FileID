@@ -1,4 +1,4 @@
-﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage
+﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage tests, checked against the canonical contract itself. For every CommandPayload / EventPayload variant an exemplar instance is serialized through IpcCoder (the exact wire path) and asserted against shared/ipc-schema/ipc.schema.json (copied beside the test binary): exactly one variant tag per payload, serialized keys a subset of the schema variant's properties (recursively wherever it declares additionalProperties:false), all required keys present, and the C# tag set equal to the schema's oneOf tag set in BOTH directions modulo the documented platform-divergence allowlists below. When you add a payload variant, the reflection tests fail until you add an exemplar here — that is the point.
 
 using System.Text.Json;
 using Xunit;

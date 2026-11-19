@@ -1,4 +1,4 @@
-﻿// CleanupView code-behind. Trash-non-keepers walks every group, gathers
+﻿// CleanupView code-behind. Trash-non-keepers walks every group, gathers the file_ids for members where IsKeeper == false, confirms with the user, then sends one big trashFiles IPC.
 
 using System;
 using System.Collections.Generic;

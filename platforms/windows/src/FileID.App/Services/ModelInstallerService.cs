@@ -13,6 +13,7 @@ namespace FileID.Services;
 internal sealed class ModelInstallerService : INotifyPropertyChanged
 {
     // The engine writes a flat or content-hashed completion marker in `%LOCALAPPDATA%\FileID\Models\.sentinels\` for each model bundle.
+    // Static field init runs in source order, so these MUST be declared before Instance: its ctor calls SeedFromSentinels, which reads them. CLIP needs BOTH the image encoder (mobileclip_s2) and the text encoder (clip_text): separate model_kinds in the engine's registry that download from different paths, and the pre-scan validation in main.rs::handle_start_scan requires both sentinels, so the slot's "Installed" state must reflect that. DeepVlm is the optional Deep Analyze slot: any supported VLM sentinel satisfies onboarding.
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
     private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
@@ -23,8 +24,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // installed in the model lists.
     private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64", "ort_openvino_x64" };
 
+    // Time the engine has to reach Ready before an Install click gives up and surfaces "Engine not ready": cold-start model loading on slow disks / ARM64 can legitimately still be initializing well past 30 s, and failing that early left only a Retry that immediately failed again.
     private static readonly TimeSpan WaitForReadyTimeout = TimeSpan.FromSeconds(75);
 
+    // Time after which a Downloading slot with no progress events is flipped to Failed. Under multi-download contention (Install all + the background auto-installers) one model's bytes can legitimately stall >30 s while another saturates the link, so the watchdog also consults _lastAnyProgressAt and any active download keeps every slot's watchdog alive.
     private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromSeconds(60);
 
     public static ModelInstallerService Instance { get; } = new();
@@ -47,7 +50,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private int _installAllInFlight; // 0 = idle, 1 = in flight
 
-    // UI dispatcher captured from a guaranteed UI-thread entry point (the public install methods, before their first ConfigureAwait(false)).
+    // UI dispatcher captured from a guaranteed UI-thread entry point (the public install methods, before their first ConfigureAwait(false)). The no-progress watchdog runs on a thread-pool continuation where DispatcherQueue.GetForCurrentThread() returns null, so it could never marshal slot.Fail() and a genuinely stuck download would never surface.
     private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
 
     private string _deepVlmModelKind = "qwen2_5_vl_7b";
@@ -138,6 +141,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         EngineClient.Instance.PropertyChanged -= OnEngineClientChanged;
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
 
+        // Re-attached at the start of each engine spawn so a stale subscription against an orphaned EngineClient doesn't keep firing. Any in-flight download owned by the now-dead engine is unreachable: flip it to Failed so the user sees a Retry button instead of a permanent spinner. RamPlus and Accelerator are included because both reach Downloading (RamPlus gates AllInstalled/IsBusy) and SeedFromSentinels early-returns for a still-Downloading slot, so a crash mid-download would otherwise leave them spinning forever and block "Install all" and onboarding auto-dismiss.
         FailIfDownloading(Clip, "Engine restarted — please retry.");
         FailIfDownloading(Arcface, "Engine restarted — please retry.");
         FailIfDownloading(RamPlus, "Engine restarted — please retry.");
@@ -169,9 +173,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         try
         {
-            // The three TryInstallAsync calls race for EngineClient._writeLock when their IPC commands serialize; whichever loses both races looked frozen to the user until its engine "Queued" event finally landed.
+            // The three TryInstallAsync calls race for EngineClient._writeLock when their IPC commands serialize; whichever loses both races looked frozen to the user until its engine "Queued" event finally landed. Pre-stamping every not-yet-installed slot to Downloading + "Queued — starting download…" BEFORE awaiting makes the UI flip identical for all rows regardless of which IPC write wins; the engine's Queued event then overwrites with the same caption. LastProgressAt also resets so the no-progress watchdog doesn't false-fire while the slowest row waits for its IPC turn.
             var now = DateTime.UtcNow;
             var slotsToInstall = new List<ModelSlot> { Clip, Arcface, RamPlus, DeepVlm };
+            // The Accelerator is only a real install candidate for NVIDIA + NotInstalled/Failed; non-NVIDIA slots stay pseudo-Installed and are skipped.
             if (IncludeAcceleratorInInstallAll())
             {
                 slotsToInstall.Add(Accelerator);
@@ -184,6 +189,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 slot.Status = ModelInstallStatus.Downloading;
                 slot.Message = "Queued — starting download…";
                 slot.LastProgressAt = now;
+                // ResetForRetry nulled CurrentModelKind and PrewarmAsync only restamps it after WaitForReadyAsync, so during engine cold-start a pre-stamped Downloading row would be kind-less and its Cancel button would lose the cancel. PrewarmAsync overwrites with the live kind.
                 slot.CurrentModelKind = PrimaryKindFor(slot);
             }
 
@@ -225,7 +231,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
 
-    /// <summary>The explicit Install/Retry click is the ONLY place a kind's cancel mark is erased.</summary>
+    /// <summary>The explicit Install/Retry click is the ONLY place a kind's cancel mark is erased: during engine cold start the prewarm dispatch is parked in WaitForReadyAsync, so a Cancel clicked in that window would be erased by the very prewarm it should have cancelled.</summary>
     private static void ClearCancelMarks(params string[] kinds)
     {
         foreach (var k in kinds)
@@ -234,6 +240,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
     }
 
+    // Kinds installed by the SAME UI slot. A multi-kind slot's per-row Cancel must cancel ALL its sub-downloads: slot.CurrentModelKind is only the latest of two concurrent prewarms, so cancelling just that would leave the first streaming to completion.
     private static readonly string[][] SlotKindGroups =
     {
         new[] { "mobileclip_s2", "clip_text" },        // CLIP slot
@@ -257,6 +264,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         if (modelKind is null)
         {
+            // A null kind (slot never got a kind stamped) must not fall through to CancelPrewarmAsync(null), the cancel-EVERYTHING path.
             DebugLog.Warn("[INSTALL] CancelModelAsync(null) — slot has no CurrentModelKind; ignoring rather than cancelling every download.");
             return Task.CompletedTask;
         }
@@ -439,7 +447,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        // A per-row Cancel during the wait above only sets the app-side mark — its CancelPrewarm IPC faults because the engine isn't Ready, so the engine never hears about it.
+        // A per-row Cancel during the wait above only sets the app-side mark — its CancelPrewarm IPC faults because the engine isn't Ready, so the engine never hears about it. Honor the mark here instead of dispatching a download the user already cancelled; the next explicit Install/Retry click clears it (ClearCancelMarks).
         if (EngineClient.Instance.IsPrewarmCancelled(modelKind))
         {
             DebugLog.Info($"[INSTALL] {modelKind} was cancelled while waiting for engine Ready; skipping dispatch.");
@@ -447,7 +455,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        // only reset state if this slot wasn't already pre-stamped to Downloading by InstallAllAsync.
+        // only reset state if this slot wasn't already pre-stamped to Downloading by InstallAllAsync: re-running ResetForRetry after the pre-stamp would blank Fraction/Message mid-flight if the engine's first progress event arrives between pre-stamp and PrewarmAsync entry.
         if (slot.Status != ModelInstallStatus.Downloading)
         {
             slot.ResetForRetry();
@@ -476,6 +484,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
     {
         var sentAt = DateTime.UtcNow;
+        // Reached after `await ...ConfigureAwait(false)`, so the ambient DispatcherQueue.GetForCurrentThread() would be null and silently disable the watchdog. slot.Fail mutates x:Bind-observed state and must marshal to the UI thread: prefer the dispatcher captured at the public install entry points, falling back to the ctor-time capture.
         var ui = _uiDispatcher ?? _ui;
         _ = Task.Run(async () =>
         {
