@@ -174,6 +174,11 @@ fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
     (lower, cased)
 }
 
+const FOLDER_NAME_BOUNDARIES: [&str; 20] = [
+    "the", "my", "a", "whole", "entire", "our", "this", "that", "current", "in", "to", "for", "and", "of", "on", "into", "from", "at", "called",
+    "named",
+];
+
 pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Option<String> {
     if let Some(quoted) = quoted_path(text) {
         return Some(quoted);
@@ -192,8 +197,12 @@ pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Optio
             if matches!(before, Some("this" | "current" | "that")) {
                 return Some("this".into());
             }
-            if before.is_some_and(|name| !["the", "my", "a", "whole", "entire"].contains(&name)) {
-                return Some(format!("named:{}", cased[index - 1]));
+            if before.is_some_and(|name| !FOLDER_NAME_BOUNDARIES.contains(&name)) {
+                let mut start = index - 1;
+                while start > 0 && !FOLDER_NAME_BOUNDARIES.contains(&words[start - 1].as_str()) {
+                    start -= 1;
+                }
+                return Some(format!("named:{}", cased[start..index].join(" ")));
             }
             if words.get(index + 1).is_some_and(|next| !["in", "to", "for", "and"].contains(&next.as_str())) {
                 return Some(format!("named:{}", cased[index + 1]));

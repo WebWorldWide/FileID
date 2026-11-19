@@ -25,6 +25,10 @@
     {"text": "move all files to trash", "intent": {"kind": "refuse"}},
     {"text": "delete my photos", "intent": {"kind": "refuse"}},
     {"text": "organize this folder", "intent": {"kind": "suggestFolderLayout", "folder": "this"}},
+
+    {"text": "Organize my Eckerts 10-4-26 folder", "intent": {"kind": "suggestFolderLayout", "folder": "named:Eckerts 10-4-26"}},
+
+    {"text": "scan the Summer Trip 2024 folder", "intent": {"kind": "scanFolder", "folder": "named:Summer Trip 2024"}},
     {"text": "organize my Downloads", "intent": {"kind": "suggestFolderLayout", "folder": "downloads"}},
     {"text": "tidy up my library", "intent": {"kind": "suggestFolderLayout", "folder": "library"}},
     {"text": "suggest a folder layout", "intent": {"kind": "suggestFolderLayout", "folder": "library"}},
