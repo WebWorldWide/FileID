@@ -93,6 +93,10 @@ struct MainWindow: View {
             case .act:     return [.cleanup, .restructure, .tools]
             }
         }
+        static let lastUsedKey = "lastArea"
+        static func lastUsed(defaults: UserDefaults = .standard) -> Area {
+            defaults.string(forKey: lastUsedKey).flatMap(Area.init(rawValue:)) ?? .browse
+        }
         /// Switching areas returns to the page last used in that area.
         func remembered(current: Tab) -> Tab {
             if tabs.contains(current) { return current }
@@ -106,7 +110,10 @@ struct MainWindow: View {
         Binding(get: { Tab(rawValue: activeTabRaw) ?? .library },
                 set: { newValue in
                     activeTabRaw = newValue.rawValue
-                    if let area = newValue.area { UserDefaults.standard.set(newValue.rawValue, forKey: "lastTab.\(area.rawValue)") }
+                    if let area = newValue.area {
+                        UserDefaults.standard.set(newValue.rawValue, forKey: "lastTab.\(area.rawValue)")
+                        UserDefaults.standard.set(area.rawValue, forKey: Area.lastUsedKey)
+                    }
                 })
     }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .library }

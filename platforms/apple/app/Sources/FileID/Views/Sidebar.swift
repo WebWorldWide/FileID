@@ -56,8 +56,11 @@ struct Sidebar: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { shownArea = activeTab.area ?? .browse }
-        .onChange(of: activeTab) { _, tab in if let area = tab.area, area != shownArea { withAnimation(Theme.quick) { shownArea = area } } }
+        .onAppear { shownArea = Self.areaShown(activeTab: activeTab, lastUsed: .lastUsed()) }
+        .onChange(of: activeTab) { _, tab in
+            let area = Self.areaShown(activeTab: tab, lastUsed: shownArea)
+            if area != shownArea { withAnimation(Theme.quick) { shownArea = area } }
+        }
         .background(Theme.bg1.opacity(0.55), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
     }
@@ -76,7 +79,7 @@ struct Sidebar: View {
     private var areaSwitcher: some View {
         HStack(spacing: 2) {
             ForEach(MainWindow.Area.allCases) { area in
-                let on = Self.highlightedArea(activeTab: activeTab) == area
+                let on = shownArea == area
                 Button {
                     withAnimation(Theme.spring) { shownArea = area }
                     activeTab = area.remembered(current: activeTab)
@@ -106,8 +109,9 @@ struct Sidebar: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
-    /// The area whose pill is lit: the one holding the open page, none on Settings.
-    nonisolated static func highlightedArea(activeTab: MainWindow.Tab) -> MainWindow.Area? { activeTab.area }
+    /// The area whose pages the list shows and whose pill is lit: the one holding the open page; on Settings, which no
+    /// area holds, the one the person was last in.
+    nonisolated static func areaShown(activeTab: MainWindow.Tab, lastUsed: MainWindow.Area) -> MainWindow.Area { activeTab.area ?? lastUsed }
 
     /// A stopped folder plan explains itself on Organize Folders; the sidebar
     /// keeps its card for errors nothing else explains.
