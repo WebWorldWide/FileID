@@ -548,7 +548,7 @@ extension ModelInstallCard {
             installer: installer,
             title: "Documents",
             blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Without it, documents are grouped by file name.",
-            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the Neural Engine", path: installer.spec.primaryFile)],
+            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the CPU", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Documents model?",
             fallback: "Organize Folders groups documents by file name instead.")
