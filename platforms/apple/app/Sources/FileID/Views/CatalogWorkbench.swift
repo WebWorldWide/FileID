@@ -19,6 +19,7 @@ struct CatalogWorkbench: View {
     @State private var selectedIndex: Int?
     @State private var pendingID = ""
     @State private var pendingAction = ""
+    @State private var searchTask: Task<Void, Never>?
     @State private var message = ""
     @State private var title = ""
     @State private var summary = ""
@@ -572,8 +573,18 @@ struct CatalogWorkbench: View {
     }
 
     private func search() {
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        send(captureWindow.searchRequest(id: UUID().uuidString, query: query, rootID: store?.scope?.root.id))
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let id = UUID().uuidString, rootID = store?.scope?.root.id, window = captureWindow
+        pendingID = id
+        pendingAction = "search"
+        message = ""
+        searchTask?.cancel()
+        searchTask = Task { @MainActor in
+            let vector = CLIPModelInstaller.shared.textEncoderReady ? await engine.embedTextQuery(text) : nil
+            guard !Task.isCancelled, pendingID == id else { return }
+            send(window.searchRequest(id: id, query: text, rootID: rootID, vector: vector))
+        }
     }
 
     private func send(_ request: CatalogRequest) {
@@ -612,7 +623,8 @@ struct CatalogWorkbench: View {
         guard !failed else { return }
         switch action {
         case "search":
-            hits = response.hits
+            let strength = captureWindow.isActive ? nil : LibrarySearchOutcome.Strength(message: response.message)
+            hits = strength.map { Array(response.hits.prefix($0.good)) } ?? response.hits
             checkedRows = []
             resultRows = hits.enumerated().map { MomentResultRow(index: $0.offset, hit: $0.element) }
             hitFileCount = Set(hits.map(\.fileID)).count
@@ -620,7 +632,9 @@ struct CatalogWorkbench: View {
             if hits.isEmpty {
                 message = captureWindow.isActive
                     ? "No matches taken in these dates. Try a wider range, or clear the dates."
-                    : "No matches. Try another word, or describe more files so there is more to search."
+                    : (strength?.weaker ?? 0) > 0
+                        ? "No close matches. \(strength?.weaker ?? 0) weaker look-alikes left out; Library search can show them."
+                        : "No matches. Try another word, or describe more files so there is more to search."
             }
         case "jobs":
             engine.applyCatalogJobsSnapshot(response.jobs)

@@ -59,6 +59,13 @@ struct CaptureWindowTests {
         #expect(window.summary(calendar: utc, locale: Locale(identifier: "en_US")) == "Any date")
     }
 
+    @Test func aSearchWithAVectorRanksLikeLibraryAndChat() {
+        let word = CaptureWindow().searchRequest(id: "r", query: "beach", calendar: utc)
+        #expect(word.searchMode == nil && word.queryVector == nil && word.embeddingModel == nil)
+        let hybrid = CaptureWindow().searchRequest(id: "r", query: "beach", vector: [0.5, 0.5], calendar: utc)
+        #expect(hybrid.searchMode == "hybrid" && hybrid.queryVector == [0.5, 0.5] && hybrid.embeddingModel == CLIPEmbeddingSpace.modelID)
+    }
+
     @Test func boundsCoverWholeDays() {
         let window = CaptureWindow(from: day(2024, 3, 3), to: day(2024, 3, 9))
         let bounds = window.bounds(calendar: utc)
