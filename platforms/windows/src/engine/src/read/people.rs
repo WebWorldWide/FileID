@@ -63,6 +63,17 @@ pub fn active_people(conn: &Connection, limit: Option<usize>) -> rusqlite::Resul
     rows.collect()
 }
 
+pub fn active_person_count(conn: &Connection) -> rusqlite::Result<u32> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM persons p WHERE EXISTS ( \
+             SELECT 1 FROM face_prints fp JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0 \
+         )",
+        [],
+        |row| row.get(0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

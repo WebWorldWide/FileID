@@ -1271,7 +1271,6 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
                     .insert(face.file_id);
             }
         }
-        let preserved_person_count = preserve_owner_ids.len();
         let preserved_pool_face_count = faces
             .iter()
             .filter(|face| excluded_face_ids.contains(&face.face_id))
@@ -1311,6 +1310,7 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             tracing::info!(merges, splits, "[CLUSTER] stored merge and split suggestions");
         }
         let review_queued = face_review::pending_count(&tx)?;
+        let person_count = crate::read::people::active_person_count(&tx)?;
         tx.commit()?;
 
         // Faces left person_id=NULL: never clustered, or their micro-cluster was suppressed (below min size / quality).
@@ -1321,7 +1321,7 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
             preserved_pool_face_count,
         );
         Ok(FaceClusteringResult {
-            person_count: (anchors.len() + preserved_person_count) as u32,
+            person_count,
             face_count,
             unmatched_faces: face_count.saturating_sub(matched as u64),
             duration_seconds: started.elapsed().as_secs_f64(),
@@ -2363,5 +2363,24 @@ mod tests {
         let name: Option<String> = db.lock().query_row("SELECT name FROM persons WHERE id=?1", [before[0].1], |row| row.get(0)).unwrap();
         assert_eq!(name.as_deref(), Some("Ann"));
         assert!(writes(&db) <= 1, "only the new face can be written");
+    }
+
+    #[test]
+    fn person_count_matches_the_people_page() {
+        let conn = crate::db::test_support::memory_db();
+        for id in 1..=6 {
+            add_face(&conn, id, 0, 0.05);
+        }
+        for id in 7..=12 {
+            add_face(&conn, id, 1, 0.05);
+        }
+        let db = parking_lot::Mutex::new(conn);
+        let first = run_portable(&db).unwrap();
+        assert_eq!(first.person_count, 2);
+        db.lock().execute("UPDATE files SET failed=1 WHERE id<=6", []).unwrap();
+        let second = run_portable(&db).unwrap();
+        let shown = crate::read::people::active_people(&db.lock(), None).unwrap().len();
+        assert_eq!(second.person_count as usize, shown);
+        assert_eq!(second.person_count, 1);
     }
 }

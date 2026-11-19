@@ -71,27 +71,10 @@ pub fn classify_folders(
         let top = hist.values().copied().max().unwrap_or_default();
         let homogeneity = if total > 0 { top as f32 / total as f32 } else { 0.0 };
 
-        let name = folder.file_name()
+        let generic = folder
+            .file_name()
             .and_then(|s| s.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        let generic = matches!(
-            name.as_str(),
-            "downloads"
-                | "downloaded"
-                | "desktop"
-                | "unsorted"
-                | "inbox"
-                | "new folder"
-                | "untitled"
-                | "temp"
-                | "tmp"
-                | "misc"
-                | "other"
-                | "stuff"
-                | "things"
-                | "files"
-        );
+            .is_some_and(|name| !name.is_empty() && super::restructure_respect::is_generic_folder_name(name));
 
         let is_library_root = folder == library_root
             || folder
@@ -505,7 +488,7 @@ mod tests {
     #[test]
     fn desktop_unsorted_and_inbox_are_junk_folders() {
         let root = Path::new("D:/Library");
-        for name in ["Desktop", "Unsorted", "Inbox"] {
+        for name in ["Desktop", "Unsorted", "Inbox", "lib", "Photo Library", "100APPLE", "Screenshots"] {
             let folder = root.join(name);
             let moves = (1..=3)
                 .map(|file_id| ProposedMove {

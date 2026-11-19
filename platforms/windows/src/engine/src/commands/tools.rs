@@ -133,13 +133,23 @@ const UNSUPPORTED_RECIPE: &str = "Choose files, an output folder, and a supporte
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 const UNSUPPORTED_RECIPE: &str = "Unsupported export recipe";
 
-fn preview_message(count: usize) -> String {
+fn preview_message(kind: &str, count: usize) -> String {
+    let caveat = match kind {
+        "photo" => Some("Photo outputs strip metadata and normalize to 8-bit SDR."),
+        "video" => Some("Video outputs are 8-bit SDR and leave out camera and location details."),
+        _ => None,
+    };
     if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        format!("Creates {count} new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.")
+        let base = format!("Creates {count} new file(s). Originals are preserved.");
+        caveat.map_or(base.clone(), |caveat| format!("{base} {caveat}"))
     } else {
-        "Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into()
+        match caveat {
+            Some(_) => "Creates new files. Originals preserved; photo and video exports are 8-bit SDR and strip container metadata.".into(),
+            None => "Creates new files. Originals are preserved.".into(),
+        }
     }
 }
+
 fn capabilities() -> Vec<ToolCapability> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     let video = apple_video::capabilities();
@@ -514,7 +524,7 @@ fn run_action(
             db.with(|conn| Ok(conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,plan_json,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?))?;
             result.outputs = plan.items.into_iter().map(|i| i.output).collect();
             result.operation_id = Some(id);
-            result.message = preview_message(result.outputs.len());
+            result.message = preview_message(&recipe.kind, result.outputs.len());
         }
         "execute" => {
             let id = request.operation_id.as_deref().context("Preview an export first.")?;
@@ -981,6 +991,18 @@ fn foundation_standardized(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preview_message_names_only_the_caveat_of_the_recipe_kind() {
+        let photo = super::preview_message("photo", 2);
+        let video = super::preview_message("video", 1);
+        let trim = super::preview_message("trim", 1);
+        assert!(!video.contains("Photo outputs"), "{video}");
+        assert!(video.contains("ideo"), "{video}");
+        assert!(!trim.contains("SDR") && !trim.contains("hoto"), "{trim}");
+        assert!(trim.contains("Originals"), "{trim}");
+        assert!(photo.contains("hoto"), "{photo}");
+    }
+
     #[test]
     fn output_folders_are_named_as_foundation_standardizes_them() {
         use std::path::Path;

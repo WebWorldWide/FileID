@@ -56,4 +56,29 @@ public enum PerceptualGrouping {
             return ids.count >= 2 ? ids : nil
         }
     }
+
+    /// A RAW file whose same-named rendered twin (JPEG/HEIC/…, any folder, within `maxHamming` bits) sits in the same
+    /// group is the same shot, not a look-alike of it: the RAW leaves the group so it can never be offered as a copy
+    /// to trash. Groups left with fewer than two files disappear. Lockstep with Rust `read/dupes.rs` `without_raw_twins`.
+    public static func droppingRawTwins(
+        _ groups: [[Int64]], paths: [Int64: String], hashes: [Int64: Int64], maxHamming: Int
+    ) -> [[Int64]] {
+        func parts(_ path: String) -> (stem: String, isRaw: Bool) {
+            let url = URL(fileURLWithPath: path)
+            return (url.deletingPathExtension().lastPathComponent.lowercased(), SmartNameCompanions.role(url.pathExtension) == .raw)
+        }
+        return groups.compactMap { ids in
+            let rendered: [(stem: String, hash: Int64)] = ids.compactMap { id in
+                guard let path = paths[id], let hash = hashes[id], !parts(path).isRaw else { return nil }
+                return (parts(path).stem, hash)
+            }
+            let kept = ids.filter { id in
+                guard let path = paths[id], let hash = hashes[id] else { return true }
+                let part = parts(path)
+                guard part.isRaw else { return true }
+                return !rendered.contains { $0.stem == part.stem && hammingDistance($0.hash, hash) <= maxHamming }
+            }
+            return kept.count > 1 ? kept : nil
+        }
+    }
 }

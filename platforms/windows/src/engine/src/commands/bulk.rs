@@ -379,6 +379,18 @@ struct PlannedRename {
     sidecars: Vec<(PathBuf, String)>,
 }
 
+/// What a person is told when the move itself failed: the usual causes in words, anything else as the system reports it.
+fn rename_failure_text(err: &anyhow::Error, dest: &std::path::Path) -> String {
+    match err.downcast_ref::<std::io::Error>().map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::AlreadyExists) => {
+            format!("a file named {} already exists in this folder; choose a different name", file_name_of(dest))
+        }
+        Some(std::io::ErrorKind::NotFound) => "the file is no longer where FileID last saw it; refresh and try again".into(),
+        Some(std::io::ErrorKind::PermissionDenied) => "FileID doesn't have permission to rename this file".into(),
+        _ => err.to_string(),
+    }
+}
+
 fn file_name_of(path: &std::path::Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -673,8 +685,9 @@ fn rename_files_blocking(
         };
         let p = &planned[bad];
         let grouped = if unit.len() > 1 { "; its group keeps its names" } else { "" };
-        results[p.slot] = failed_item(p.file_id, format!("rename failed: {err}{grouped}"));
-        let why = format!("not renamed: {} couldn't be renamed ({err}), so its group keeps its names", file_name_of(&p.src));
+        let reason = rename_failure_text(&err, &p.dest);
+        results[p.slot] = failed_item(p.file_id, format!("rename failed: {reason}{grouped}"));
+        let why = format!("not renamed: {} couldn't be renamed ({reason}), so its group keeps its names", file_name_of(&p.src));
         for &index in moved.iter().rev() {
             let p = &planned[index];
             results[p.slot] = match crate::util::path_safety::rename_no_replace(&p.dest, &p.src) {
@@ -2206,6 +2219,11 @@ pub(crate) async fn handle_mark_persons_different(
                  face_a, face_b, file_a, bbox_a, file_b, bbox_b)
              VALUES (?1, ?2, 0, 1.0, 'user-verified', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![pa, pb, now, fa, fb, file_a, bbox_a, file_b, bbox_b],
+        )?;
+        conn.execute(
+            "DELETE FROM face_merge_suggestions \
+             WHERE (person_id = ?1 AND other_person_id = ?2) OR (person_id = ?2 AND other_person_id = ?1)",
+            rusqlite::params![pa, pb],
         )?;
         Ok(BulkActionResult {
             command_id: None,
@@ -3786,6 +3804,18 @@ mod tests {
     }
 
     #[test]
+    fn renaming_onto_an_existing_name_says_so_in_words() {
+        let (directory, db) = rename_fixture("collide", &[(1, "IMG_1.JPG"), (2, "IMG_2.JPG")]);
+        let result = rename_files_blocking(&db, &renames(&[(1, "IMG_2.JPG")]), &no_clobber_rename_bound);
+        assert_eq!((result.succeeded, result.failed), (0, 1), "{:?}", result.messages);
+        let (ok, message) = message_of(&result, 1);
+        assert!(!ok && message.contains("a file named IMG_2.JPG already exists in this folder"), "{message}");
+        assert!(!message.contains("os error"), "{message}");
+        assert_eq!(listed(&directory), ["IMG_1.JPG", "IMG_2.JPG"]);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
     fn a_failed_member_rolls_back_its_group() {
         let (directory, db) = rename_fixture("rollback", &[(1, "IMG_5.JPG"), (2, "IMG_5.ARW"), (3, "solo.txt")]);
         std::fs::write(directory.join("IMG_5.xmp"), b"x").unwrap();
@@ -3867,6 +3897,50 @@ mod tests {
         assert_eq!(result.inner.succeeded, 0);
         assert_eq!(result.inner.failed, 1);
         assert!(result.inner.messages.iter().all(|item| !item.ok));
+    }
+
+    #[tokio::test]
+    async fn mark_persons_different_clears_the_pair_from_the_merges_queue() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, file) in [(1, 10), (2, 20), (3, 30)] {
+            conn.execute("INSERT INTO persons(id, created_at) VALUES (?1, 1.0)", [id]).unwrap();
+            crate::db::test_support::insert_file(&conn, file, &format!("/fixture/{file}.jpg"), "image");
+            conn.execute(
+                "INSERT INTO face_prints(id, file_id, person_id, print_data, bbox) VALUES (?1, ?2, ?1, X'', '0,0,1,1')",
+                [id, file],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO face_merge_suggestions(person_id, other_person_id, score, namespace, created_at)
+                VALUES (1, 2, 0.8, 'ns', 1.0), (3, 1, 0.7, 'ns', 1.0);",
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_mark_persons_different(
+            sink,
+            db.clone(),
+            ipc::MarkPersonsDifferentPayload {
+                source_person_id: 2,
+                destination_person_id: 1,
+                source_anchor_face_id: 2,
+                destination_anchor_face_id: 1,
+            },
+        )
+        .await;
+        let event = events.recv().await.expect("terminal bulk event");
+        let EventPayload::BulkActionResult(result) = event.payload else {
+            panic!("expected BulkActionResult");
+        };
+        assert_eq!((result.inner.succeeded, result.inner.failed), (1, 0));
+        let pairs: Vec<(i64, i64)> = {
+            let conn = db.lock();
+            let mut statement =
+                conn.prepare("SELECT person_id, other_person_id FROM face_merge_suggestions").unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().flatten().collect()
+        };
+        assert_eq!(pairs, vec![(3, 1)]);
     }
 
     fn reassign_face_db() -> std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>> {

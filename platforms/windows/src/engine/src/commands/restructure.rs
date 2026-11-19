@@ -518,28 +518,10 @@ fn folder_tier(
     total: i64,
     top: i64,
 ) -> &'static str {
-    let name = Path::new(folder)
+    let generic = Path::new(folder)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let generic = matches!(
-        name.as_str(),
-        "downloads"
-            | "downloaded"
-            | "desktop"
-            | "unsorted"
-            | "inbox"
-            | "new folder"
-            | "untitled"
-            | "temp"
-            | "tmp"
-            | "misc"
-            | "other"
-            | "stuff"
-            | "things"
-            | "files"
-    );
+        .is_some_and(|name| !name.is_empty() && crate::pipeline::restructure_respect::is_generic_folder_name(name));
     if generic || total <= 2 {
         "Junk"
     } else if roots_equal(folder, library_root) {
@@ -2520,7 +2502,7 @@ mod tests {
             std::path::PathBuf::from("/Library")
         };
         let root_text = root.to_string_lossy();
-        for name in ["Desktop", "Unsorted", "Inbox"] {
+        for name in ["Desktop", "Unsorted", "Inbox", "lib", "Photo Library", "100APPLE", "Screenshots"] {
             let folder = root.join(name);
             assert_eq!(
                 folder_tier(&folder.to_string_lossy(), &root_text, 100, 100),

@@ -806,7 +806,7 @@ fn undo_face_in(conn: &Connection, request: &str, before: &serde_json::Value, af
     Ok(FaceReviewPage { face_id: Some(face), total: pending_count(conn)?, ..page(request, "undo", "ok") })
 }
 
-fn restore_candidate(conn: &Connection, face: i64, candidate: &serde_json::Value) -> rusqlite::Result<()> {
+pub(super) fn restore_candidate(conn: &Connection, face: i64, candidate: &serde_json::Value) -> rusqlite::Result<()> {
     let reason = candidate["reason"].as_str().unwrap_or("suggested");
     let namespace = candidate["namespace"].as_str().unwrap_or_default();
     if let Some(person) = candidate["personID"].as_i64() {

@@ -1215,13 +1215,7 @@ fn apply_revert_merge(
     }
     affected_people.sort_unstable();
     affected_people.dedup();
-    for pid in affected_people {
-        tx.execute(
-            "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
-             FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
-            [pid],
-        )?;
-    }
+    crate::db::person_counts::reconcile(&tx, &affected_people)?;
     tx.commit()?;
     Ok(RevertMergeOutcome {
         person_id: new_pid,
@@ -1286,6 +1280,7 @@ mod tests {
             "CREATE TABLE persons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_count INTEGER NOT NULL DEFAULT 0,
+                representative_face_id INTEGER,
                 created_at DOUBLE NOT NULL
              );
              CREATE TABLE face_prints (
@@ -1401,6 +1396,32 @@ mod tests {
         assert_eq!(face_owner(&conn, 102), Some(10));
         assert_eq!(merge_verification_count(&conn, 10, 20), 0);
         assert_eq!(merge_verification_count(&conn, 10, 30), 1);
+    }
+
+    fn representative(conn: &rusqlite::Connection, person_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT representative_face_id FROM persons WHERE id = ?1",
+            [person_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn revert_merge_leaves_each_person_a_representative_it_owns() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 20);
+        add_face(&conn, 101, 1, 20);
+        add_face(&conn, 102, 2, 20);
+        add_face(&conn, 103, 3, 20);
+        conn.execute("UPDATE persons SET representative_face_id = 101 WHERE id = 20", [])
+            .unwrap();
+
+        apply_revert_merge(&conn, &revert_payload(vec![101, 102]), 2.0).unwrap();
+
+        assert_eq!(face_owner(&conn, 101), Some(10));
+        assert_eq!(representative(&conn, 10), Some(101));
+        assert_eq!(representative(&conn, 20), Some(103));
     }
 
     #[test]
