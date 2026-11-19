@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use super::face_queues::{anchor, blank, id_list, journal, names, ordered, person_exists, person_json, queue_page, queue_refused};
-use super::face_review::recount;
+use super::face_review::{recount, restore_candidate};
 use crate::ipc::FaceReviewPage;
 
 pub(crate) const KIND: &str = "person_merge";
@@ -59,6 +59,34 @@ pub(crate) struct Pending {
     faces: Vec<i64>,
     anchor_file: Option<i64>,
     verdicts: Verdicts,
+    candidates: Vec<Value>,
+    runner_up_faces: Vec<i64>,
+}
+
+fn pending_candidates(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = conn.prepare(
+        "SELECT face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at \
+         FROM face_review_candidates WHERE person_id=?1 ORDER BY face_id",
+    )?;
+    statement
+        .query_map([source], |row| {
+            Ok(json!({
+                "faceID": row.get::<_, i64>(0)?,
+                "personID": row.get::<_, i64>(1)?,
+                "score": row.get::<_, f64>(2)?,
+                "reason": row.get::<_, String>(3)?,
+                "runnerUpPersonID": row.get::<_, Option<i64>>(4)?,
+                "runnerUpScore": row.get::<_, Option<f64>>(5)?,
+                "namespace": row.get::<_, String>(6)?,
+                "createdAt": row.get::<_, f64>(7)?,
+            }))
+        })?
+        .collect()
+}
+
+fn runner_up_faces(conn: &Connection, source: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut statement = conn.prepare("SELECT face_id FROM face_review_candidates WHERE runner_up_person_id=?1 ORDER BY face_id")?;
+    statement.query_map([source], |row| row.get(0))?.collect()
 }
 
 pub(crate) fn begin(conn: &Connection, target: i64, source: i64) -> rusqlite::Result<Option<Pending>> {
@@ -75,6 +103,8 @@ pub(crate) fn begin(conn: &Connection, target: i64, source: i64) -> rusqlite::Re
         faces,
         anchor_file: anchor(conn, target)?.map(|found| found.file),
         verdicts: verdicts(conn, ordered(target, source), source)?,
+        candidates: pending_candidates(conn, source)?,
+        runner_up_faces: runner_up_faces(conn, source)?,
     }))
 }
 
@@ -92,6 +122,8 @@ impl Pending {
             "keepUnknown": self.keep["is_unknown"],
             "keepRepresentative": self.keep["representative_face_id"],
             "verifications": replaced,
+            "candidates": self.candidates,
+            "runnerUpFaces": self.runner_up_faces,
         });
         let after = json!({"resolution": "merge", "personID": self.target, "otherPersonID": self.source, "faceIDs": self.faces});
         journal(conn, KIND, self.anchor_file, &before, &after, at)
@@ -211,6 +243,21 @@ pub(crate) fn undo(conn: &Connection, request: &str, before: &Value, after: &Val
                 verdict["bboxB"].as_str()
             ],
         )?;
+    }
+    for candidate in before["candidates"].as_array().into_iter().flatten() {
+        let Some(face) = candidate["faceID"].as_i64() else { continue };
+        let open: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM face_prints WHERE id=?1 AND person_id IS NULL) \
+                AND NOT EXISTS(SELECT 1 FROM face_review_candidates WHERE face_id=?1)",
+            [face],
+            |row| row.get(0),
+        )?;
+        if open {
+            restore_candidate(conn, face, candidate)?;
+        }
+    }
+    for face in id_list(&before["runnerUpFaces"]) {
+        conn.execute("UPDATE face_review_candidates SET runner_up_person_id=?1 WHERE face_id=?2 AND runner_up_person_id IS NULL", params![other, face])?;
     }
     if let Some(representative) = before["keepRepresentative"].as_i64() {
         conn.execute(

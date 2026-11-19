@@ -326,3 +326,45 @@ fn a_merge_that_changes_nothing_returns_no_operation() {
     assert_eq!((missing.failed, missing.messages[0].operation_id.as_deref()), (1, None));
     assert_eq!(offered_page(&conn).total, 0);
 }
+
+fn pending_suggestion(conn: &Connection, face_file: i64, suggested: i64, runner_up: Option<i64>) -> i64 {
+    insert_file(conn, face_file, &format!("/fixture/loose{face_file}.jpg"), "image");
+    conn.execute(
+        "INSERT INTO face_prints(file_id,print_data,bbox,arcface_embedding,face_quality) VALUES(?1,X'','0,0,1,1',X'0000803f',0.8)",
+        [face_file],
+    )
+    .unwrap();
+    let face = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO face_review_candidates(face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at) \
+         VALUES(?1,?2,0.7,'suggested',?3,0.5,'ns',9.0)",
+        params![face, suggested, runner_up],
+    )
+    .unwrap();
+    face
+}
+
+fn candidate_row(conn: &Connection, face: i64) -> Option<(i64, Option<i64>)> {
+    conn.query_row("SELECT person_id, runner_up_person_id FROM face_review_candidates WHERE face_id=?1", [face], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()
+}
+
+#[test]
+fn undo_brings_back_the_merged_away_persons_pending_suggestions() {
+    let conn = db();
+    let keep = person(&conn, Some("Ada"), None, false, 2);
+    let other = person(&conn, None, None, false, 2);
+    let third = person(&conn, None, None, false, 1);
+    let for_other = pending_suggestion(&conn, 9001, other.0, Some(keep.0));
+    let for_keep = pending_suggestion(&conn, 9002, keep.0, Some(other.0));
+    let for_third = pending_suggestion(&conn, 9003, third.0, None);
+
+    let operation = merge(&conn, other.0, keep.0);
+    assert_eq!(candidate_row(&conn, for_other), None);
+    assert_eq!(candidate_row(&conn, for_keep), Some((keep.0, None)));
+
+    assert_eq!(undo_op(&conn, &operation).status, "ok");
+    assert_eq!(candidate_row(&conn, for_other), Some((other.0, Some(keep.0))));
+    assert_eq!(candidate_row(&conn, for_keep), Some((keep.0, Some(other.0))));
+    assert_eq!(candidate_row(&conn, for_third), Some((third.0, None)));
+}
