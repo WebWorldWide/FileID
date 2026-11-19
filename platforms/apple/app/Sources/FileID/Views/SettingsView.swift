@@ -94,7 +94,7 @@ struct SettingsTab: View {
                                 infoRow("Total files",   store.totalFiles.formatted())
                                 infoRow("Photos tagged", store.totalImages.formatted())
                                 infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
-                                infoRow("Space duplicates use", ByteCountFormatter.string(fromByteCount: Int64(store.totalReclaimableMB * 1_000_000), countStyle: .file))
+                                infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableMB: store.totalReclaimableMB))
                                 infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
                                     .help(ReadStore.defaultDBURL.path)
                                 Button("Show library file in Finder") {
@@ -259,6 +259,11 @@ struct SettingsTab: View {
         }
         .font(Theme.Font.body(13.5))
     }
+    static func duplicateSpaceLabel(reclaimableMB: Double) -> String {
+        let bytes = Int64(reclaimableMB * 1_000_000)
+        return bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
 
     static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
     static var appLogURL: URL {
