@@ -19,4 +19,12 @@ struct LibraryShownSummaryTests {
         #expect(LibraryView.previewPosition(index: 1, loaded: 12, moreToLoad: false, knownTotal: nil) == "2 of 12")
         #expect(LibraryView.previewPosition(index: 1, loaded: 300, moreToLoad: true, knownTotal: 120) == "2 of 300")
     }
+
+    @Test func header_counts_the_files_the_grid_lists_and_names_the_unreadable_ones() {
+        #expect(Detail.libraryMeta(total: 472, unreadable: 3, location: nil) == "469 files · 3 couldn't be read")
+        #expect(Detail.libraryMeta(total: 20, unreadable: 16, location: nil) == "4 files · 16 couldn't be read")
+        #expect(Detail.libraryMeta(total: 472, unreadable: 0, location: "Photos") == "472 files in Photos")
+        #expect(Detail.libraryMeta(total: 10, unreadable: 10, location: "Photos") == "0 files in Photos · 10 couldn't be read")
+        #expect(Detail.libraryMeta(total: 0, unreadable: 0, location: nil) == "")
+    }
 }
