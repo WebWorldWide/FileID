@@ -228,7 +228,7 @@ enum ModelFailureText {
     static func isModelFailure(_ error: EngineError) -> Bool {
         if error.kind == "prewarm_cancelled" { return false }
         return error.kind.hasPrefix("prewarm_")
-            || ["model_integrity_failed", "deep_load_failed", "deep_model_too_big", "unknown_model"].contains(error.kind)
+            || ["model_integrity_failed", "deep_load_failed", "deep_model_too_big", "unknown_model", "vlm_model_missing"].contains(error.kind)
     }
 
     static func plain(_ error: EngineError) -> String {
@@ -236,6 +236,7 @@ enum ModelFailureText {
         case "model_integrity_failed": return "The AI model download was damaged. Try again."
         case "deep_model_too_big": return "This AI model needs more memory than this Mac has. Choose a smaller one in Settings."
         case "unknown_model": return "This copy of FileID doesn't know that AI model. Choose another one in Settings."
+        case "vlm_model_missing": return "This AI model isn't downloaded yet. Try again to download it first."
         default: break
         }
         let text = error.message.lowercased()

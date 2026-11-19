@@ -138,7 +138,8 @@ struct DeepAnalyzeModelPickerCard: View {
                         Label("Download · \(DescriptionModelStore.downloadSizeText(kind))", systemImage: "arrow.down.circle.fill")
                     }
                     .buttonStyle(.dsPrimary)
-                    .disabled(!kind.fits(ramGB: ramGB) || engine.modelDownloadProgress != nil)
+                    .disabled(!kind.fits(ramGB: ramGB) || engine.modelDownloadProgress != nil || HelperGate.isDown(engine))
+                    .help(HelperGate.isDown(engine) ? HelperGate.downloadsUnavailableNote : "")
                 }
             }
             if let failure {
@@ -147,6 +148,7 @@ struct DeepAnalyzeModelPickerCard: View {
                     Spacer()
                     if !installed {
                         Button("Try again") { startDownload(kind) }.buttonStyle(.dsSecondary)
+                            .disabled(HelperGate.isDown(engine))
                     }
                 }
             }
@@ -816,15 +818,23 @@ struct DeepAnalyzeView: View {
         return nil
     }
 
+    private var modelMissing: Bool { !ModelInstallStatus.isInstalled(kind: settings.activeKind) }
+
     private var runButton: some View {
         let count = skipExisting ? pendingTotals.pending : pendingTotals.total
         return Button {
             requestRun()
         } label: {
-            Label(count > 0 ? "Describe \(count.formatted()) file\(count == 1 ? "" : "s")" : "Describe files", systemImage: "wand.and.stars")
+            if modelMissing {
+                Label("Download model and describe\(count > 0 ? " \(count.formatted())" : "") file\(count == 1 ? "" : "s")", systemImage: "arrow.down.circle.fill")
+            } else {
+                Label(count > 0 ? "Describe \(count.formatted()) file\(count == 1 ? "" : "s")" : "Describe files", systemImage: "wand.and.stars")
+            }
         }
         .disabled(runBlocker != nil)
-        .help(runBlocker ?? "Write a description and a suggested name for each file. You can stop at any time.")
+        .help(runBlocker ?? (modelMissing
+              ? "The AI model isn't downloaded yet. This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once, then describes your files."
+              : "Write a description and a suggested name for each file. You can stop at any time."))
         .confirmationDialog("This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once. Continue?",
                             isPresented: $confirmDownload, titleVisibility: .visible) {
             Button("Download and describe") { startRun() }
