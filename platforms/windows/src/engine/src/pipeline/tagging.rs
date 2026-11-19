@@ -67,6 +67,7 @@ static STATS_CLIP_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_RAN: AtomicU64 = AtomicU64::new(0);
 static STATS_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+/// Time RAM++ runs inside the scan itself; 0 while it is deferred to the catch-up pass.
 static STATS_RAMPLUS_US: AtomicU64 = AtomicU64::new(0);
 static STATS_VISION_WAIT_US: AtomicU64 = AtomicU64::new(0);
 pub static STATS_TWIN_REUSED: AtomicU64 = AtomicU64::new(0);
@@ -1043,7 +1044,7 @@ fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
     let vision_cap = pool_size.min(VISION_CONCURRENCY);
     let clip_cap = CLIP_CONCURRENCY;
     tracing::info!(
-        backend = crate::models::runtime::inference_backend(),
+        backend = if models.apple_scan { "apple-adapters (MLX, Vision) with tract fallbacks" } else { crate::models::runtime::inference_backend() },
         pool_size,
         vision_cap,
         clip_cap,
@@ -2598,7 +2599,7 @@ pub(crate) fn catch_up_analyzer(
 ) -> Box<dyn crate::pipeline::catch_up::Analyzer + Send> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if models.apple_scan {
-        return Box::new(mac::CatchUp { _models: models });
+        return Box::new(mac::CatchUp { models });
     }
     Box::new(PortableCatchUp { models, runtime: tokio::runtime::Handle::current(), coord })
 }
