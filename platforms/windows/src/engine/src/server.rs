@@ -1621,6 +1621,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failing_or_panicking_organize_folders_move_frees_its_slot() {
+        let dir = std::env::temp_dir().join(format!("fileid-restructure-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let d = test_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+
+        d.restructure_mutation("applyRestructure", "apply_restructure", "first", (), |sink: Sink, _db, _payload: (), _cancel| async move {
+            sink.send(EngineError::event("face_cluster_no_model", "The face recognition model isn't installed.")).await;
+        })
+        .await;
+        assert!(matches!(next_event(&mut events).await, EventPayload::Error(_)));
+        d.restructure_mutation("undoRestructure", "undo_restructure", "second", (), |_sink: Sink, _db, _payload: (), _cancel| async move {
+            panic!("undo handler panics");
+        })
+        .await;
+        match next_event(&mut events).await {
+            EventPayload::Error(error) => assert_eq!(error.inner.kind, "command_handler_panic"),
+            other => panic!("the undo was refused as already moving files: {other:?}"),
+        }
+        let _ = next_event(&mut events).await;
+        d.restructure_mutation("undoRestructure", "undo_restructure", "third", (), |sink: Sink, _db, _payload: (), _cancel| async move {
+            sink.send(EngineError::event("third_ran", "ran")).await;
+        })
+        .await;
+        match next_event(&mut events).await {
+            EventPayload::Error(error) => assert_eq!(error.inner.kind, "third_ran", "a later move must run, not be refused"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn a_running_deep_analyze_still_refuses_a_second_one() {
         let dir = std::env::temp_dir().join(format!("fileid-deep-busy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
