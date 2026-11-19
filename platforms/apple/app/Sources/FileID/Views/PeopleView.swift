@@ -44,6 +44,13 @@ struct PeopleView: View {
 
     /// Single sheet driver. Three stacked .sheet modifiers wedged the
     /// view graph on macOS 26 (blanked the sidebar on tab transition).
+    #if DEBUG
+    @State private var selfShotReviewQueue: FaceQueueKind?
+    private var reviewStart: FaceQueueKind? { selfShotReviewQueue }
+    #else
+    private var reviewStart: FaceQueueKind? { nil }
+    #endif
+
     enum ActiveSheet: Identifiable, Equatable {
         case personDetail(Int64)        // person id; we look up the row
         case suggestedMerges
@@ -96,7 +103,14 @@ struct PeopleView: View {
             case "person":
                 let index = (Int(parts.last ?? "") ?? 1) - 1
                 if persons.indices.contains(index) { activeSheet = .personDetail(persons[index].id) }
-            case "review": activeSheet = .faceReview
+            case "review":
+                selfShotReviewQueue = parts.count == 2 ? FaceQueueKind(rawValue: parts[1]) : nil
+                activeSheet = .faceReview
+            case "suggested":
+                Task {
+                    suggestions = await engine.findMergeSuggestions() ?? []
+                    activeSheet = .suggestedMerges
+                }
             case "close": activeSheet = nil
             default: break
             }
@@ -226,7 +240,7 @@ struct PeopleView: View {
             case .faceReview:
                 if let review, let mergeQueue, let splitQueue {
                     FaceReviewSheet(model: review, merges: mergeQueue, splits: splitQueue, personByID: personByID,
-                                    store: store) { activeSheet = nil }
+                                    store: store, startOn: reviewStart) { activeSheet = nil }
                 }
             case .mergeTargetPicker:
                 MergeTargetPickerSheet(

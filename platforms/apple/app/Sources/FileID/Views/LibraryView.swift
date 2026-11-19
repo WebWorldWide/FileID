@@ -179,6 +179,7 @@ struct LibraryView: View {
                 case "select": if parts.count == 2, let row = rows.first(where: { $0.url.lastPathComponent == parts[1] }) { paneSelectedID = row.id }
                 case "checks": selectMode = true; for row in rows.prefix(Int(parts.last ?? "") ?? 3) { checkedFiles[row.id] = row }
                 case "close": paneSelectedID = nil; selectMode = false; checkedFiles = [:]
+            case "reset": paneSelectedID = nil; selectMode = false; checkedFiles = [:]; similarSeed = nil; if !searchText.isEmpty { searchText = "" }
                 default: break
                 }
             }
