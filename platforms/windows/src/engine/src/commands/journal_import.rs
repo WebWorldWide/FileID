@@ -160,7 +160,8 @@ mod tests {
         assert_eq!(entries[0].batch_id, BATCH);
         assert_eq!(item.file_id, 1);
         assert_eq!(item.original_path, format!("{}/tree/docs/trash me.txt", root.to_string_lossy()));
-        assert_eq!(item.trashed_path.as_deref(), Some(trashed.to_string_lossy().as_ref()));
+        let journal_trashed = format!("{}/state/Trash/trash me.txt", root.to_string_lossy());
+        assert_eq!(item.trashed_path.as_deref(), Some(journal_trashed.as_str()));
         assert_eq!(item.source_identity, Some(identity));
         assert_eq!(item.recycle_bin_id, None, "no claim: startup must never move it out of the Trash");
         assert_eq!(item.rows.len(), 2);
