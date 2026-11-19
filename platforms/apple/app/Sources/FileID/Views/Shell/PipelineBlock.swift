@@ -37,6 +37,8 @@ struct PipelineBlock: View {
         return .scan
     }
 
+    static let cpuScanNotice = "Scanning on the CPU — slower than usual. Reinstall FileID if this persists."
+
     private struct Status {
         let title: String
         let fraction: Double
@@ -147,6 +149,9 @@ struct PipelineBlock: View {
                 }
             }
             Text(s.sub).font(Theme.ChromeFont.body(12)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(2, reservesSpace: scanRunning || captionsRunning).fixedSize(horizontal: false, vertical: true)
+            if engine.scanRunsOnCPU && scanRunning {
+                Text(Self.cpuScanNotice).font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+            }
             if showsNextStep {
                 Button { openPage(.deep) } label: {
                     HStack(spacing: 4) {
