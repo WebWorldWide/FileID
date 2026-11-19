@@ -68,9 +68,9 @@ struct LibrarySearchOutcomeTests {
 
     @Test("the Moments header names the weaker look-alikes it left out, with a plus when the limit cut the list")
     func weakerLabelMarksATruncatedCount() {
-        #expect(LibrarySearchOutcome.Strength(message: "3 good matches, 1 weaker.")?.weakerLabel == "1")
+        #expect(LibrarySearchOutcome.Strength(message: "3 matches (2 strong visual), 1 weaker.")?.weakerLabel == "1")
         let limit = LibrarySearchOutcome.resultLimit
-        let cut = LibrarySearchOutcome.Strength(message: "10 good matches, \(limit - 10) weaker.")
+        let cut = LibrarySearchOutcome.Strength(message: "10 matches (4 strong visual), \(limit - 10) weaker.")
         #expect(cut?.weakerLabel == "\(limit - 10)+")
     }
 }
