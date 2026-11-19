@@ -556,6 +556,13 @@ async fn finalize_batch(
     }).await;
 }
 
+fn model_display_name(kind: &str) -> String {
+    match crate::models::registry::lookup_full(kind) {
+        crate::models::registry::LookupResult::Found(model) => model.display_name.to_owned(),
+        crate::models::registry::LookupResult::Unknown => kind.to_owned(),
+    }
+}
+
 async fn run_deep_analyze_batch(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -640,9 +647,32 @@ async fn run_deep_analyze_batch(
     // Prefer the persistent llama-server (loads the model once, ~1-3 s/file); the per-file CLI reloads the multi-GB
     // model each call, turning a library pass into hours. Retained-server cleanup is awaited before batch terminal
     // events.
+    // A model refused for memory alone gives way to the largest smaller installed one, as on the Mac.
+    let mut candidates = vec![model_kind.to_owned()];
+    candidates.extend(crate::models::resident_model::smaller_installed(model_kind));
+    let (loading, acquired) = crate::models::resident_model::load_until_one_fits(
+        &candidates,
+        |kind| {
+            let cancel = cancel.clone();
+            async move { crate::models::resident_service::ResidentService::shared().acquire(&kind, cancel).await }
+        },
+        |refused, next| {
+            let sink = sink.clone();
+            async move {
+                sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
+                    model_kind: next.clone(),
+                    phase: DeepAnalyzeStartingPhase::LoadingModel,
+                    message: format!("Not enough memory is free for {}; loading {} instead…", model_display_name(&refused), model_display_name(&next)),
+                }))))
+                .await;
+            }
+        },
+    )
+    .await;
+    let model_kind = candidates[loading].as_str();
     let mut server = match weights {
         Some(_) => {
-            match crate::models::resident_service::ResidentService::shared().acquire(model_kind, cancel.clone()).await {
+            match acquired {
                 Ok(s) => {
                     // Verify the server accepts our multimodal payload shape (e.g. a 400 on the image_url data-URI)
                     // BEFORE committing the batch; otherwise fall back to the per-file CLI.
