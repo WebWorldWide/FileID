@@ -852,22 +852,28 @@ impl ScanSession {
                         });
                         let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
                         let report_pass = report.clone();
+                        let late_root = root.to_path_buf();
                         let (conn, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
                         let pass = tokio::task::spawn_blocking(move || {
-                            crate::pipeline::catch_up::run(
+                            let summary = crate::pipeline::catch_up::run(
                                 &conn,
                                 Some(&root),
                                 analyzer.as_ref(),
                                 &|| coordinator.is_cancelled(),
                                 &|| coordinator.is_paused(),
                                 &|event| report_pass.report(event),
-                            )
+                            );
+                            (summary, analyzer)
                         });
                         let finished = pass.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
-                        if let Err(error) = finished {
-                            tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
+                        match finished {
+                            Ok((summary, analyzer)) if summary.careful_waiting && !self.coordinator.is_cancelled() => {
+                                spawn_late_careful_reads(self.db_conn.clone(), late_root, analyzer);
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(%error, "[SCAN] the catch-up pass stopped"),
                         }
                     }
                     None => tracing::warn!("[SCAN] the catch-up pass was skipped: the models did not load"),
@@ -1003,6 +1009,30 @@ impl ScanSession {
             capture_dates_current,
         })
     }
+}
+
+static LATE_CAREFUL_READS_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The careful text reader was still warming up when the scan ended, so the scan finished without it. This waits for
+/// it in the background (one at a time) and reads what was left owed.
+fn spawn_late_careful_reads(
+    db_conn: Arc<Mutex<Connection>>,
+    root: std::path::PathBuf,
+    analyzer: Box<dyn crate::pipeline::catch_up::Analyzer + Send>,
+) {
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            LATE_CAREFUL_READS_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    if LATE_CAREFUL_READS_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        let _running = Running;
+        crate::pipeline::catch_up::finish_careful_when_ready(&db_conn, Some(&root), analyzer.as_ref(), &|| false);
+    });
 }
 
 /// Progress of the catch-up pass, reported in the post-scan phase the way the
