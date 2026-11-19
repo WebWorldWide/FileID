@@ -39,7 +39,7 @@ pub(crate) struct Resolution {
 }
 
 impl Resolution {
-    fn say(message: impl Into<String>) -> Self {
+    pub(crate) fn say(message: impl Into<String>) -> Self {
         Self { message: message.into(), ..Self::default() }
     }
 }

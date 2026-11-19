@@ -151,7 +151,7 @@ fn is_path(word: &str) -> bool {
         || (word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && word.get(1..3) == Some(":\\"))
 }
 
-fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
+pub(crate) fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let mut lower: Vec<String> = raw.iter().map(|word| clean(word)).collect();
     let mut cased: Vec<String> = raw.iter().map(|word| original(word)).collect();
@@ -562,16 +562,18 @@ pub fn parse_question(text: &str) -> Question {
             }
         }
     }
-    if has(&words, &["camera", "cameras"]) && has(&words, &["which", "what", "whats", "most", "top"]) {
+    if has(&words, &["camera", "cameras"]) && has(&words, &["which", "what", "whats", "most", "top", "fewest", "least"]) {
         question.breakdown = Some("camera".into());
         if question.measure == "list" {
             question.measure = "count".into();
         }
         if has(&words, &["most", "top", "mostly", "often"]) {
             question.peak = Some("most".into());
+        } else if has(&words, &["fewest", "least"]) {
+            question.peak = Some("least".into());
         }
         for (index, word) in words.iter().enumerate() {
-            if ["camera", "cameras", "took", "take", "takes", "taken", "shot", "shoot", "use", "used", "uses", "using", "device", "devices", "do", "does", "did"].contains(&word.as_str()) {
+            if ["camera", "cameras", "fewest", "least", "took", "take", "takes", "taken", "shot", "shoot", "use", "used", "uses", "using", "device", "devices", "do", "does", "did"].contains(&word.as_str()) {
                 used.insert(index);
             }
         }
@@ -666,11 +668,17 @@ pub fn parse_question(text: &str) -> Question {
         question.max_bytes = maximum;
         used.extend(range);
     }
-    if let Some((filter, range)) = date_filter(&words) {
+    let named_folder = question_folder(&words, &raw);
+    let outside_folder: Vec<String> = words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| if named_folder.as_ref().is_some_and(|(_, range)| range.contains(&index)) { String::new() } else { word.clone() })
+        .collect();
+    if let Some((filter, range)) = date_filter(&outside_folder) {
         question.date = Some(filter);
         mark(&mut used, range);
     }
-    if let Some((folder, range)) = question_folder(&words, &raw) {
+    if let Some((folder, range)) = named_folder {
         question.folder = Some(folder);
         mark(&mut used, range);
     }
@@ -707,11 +715,12 @@ const PLACE_WORDS: &[&str] = &["photos", "pictures", "images", "library", "colle
 const COUNT_PEOPLE_TAIL: &[&str] = &[
     "in", "on", "of", "my", "our", "the", "this", "that", "whole", "entire", "library", "collection", "photos", "pictures", "images", "photo", "files",
     "there", "are", "is", "do", "i", "we", "have", "has", "got", "altogether", "overall", "total", "all", "so", "far",
-    "named", "unnamed", "grouped", "identified", "recognized", "recognised", "yet",
+    "named", "unnamed", "grouped", "identified", "recognized", "recognised", "yet", "group", "groups", "cluster", "clusters",
 ];
 const WHO_WORDS: &[&str] = &[
     "who", "whos", "is", "are", "in", "on", "my", "our", "the", "this", "all", "photos", "pictures", "images", "library", "collection", "files",
     "there", "here", "appear", "appears", "appearing", "featured", "shown", "do", "i", "we", "have", "got", "people", "persons", "everyone", "anyone",
+    "named", "unnamed",
 ];
 const LIST_LEADS: &[&str] = &["which", "what", "whats", "list", "show", "give", "tell"];
 
@@ -727,7 +736,7 @@ fn people_ask(words: &[String]) -> Option<&'static str> {
         .or_else(|| (words.first() == Some(&"count")).then_some(1));
     if let Some(start) = start {
         let mut at = start;
-        while words.get(at).is_some_and(|word| ["different", "unique", "distinct", "named", "unnamed", "separate", "total", "the", "my", "all", "of"].contains(word)) {
+        while words.get(at).is_some_and(|word| ["different", "unique", "distinct", "named", "unnamed", "separate", "total", "the", "my", "all", "of", "group", "groups", "cluster", "clusters"].contains(word)) {
             at += 1;
         }
         return (words.get(at).is_some_and(|word| is_people(word)) && words[at + 1..].iter().all(|word| COUNT_PEOPLE_TAIL.contains(word))).then_some("count");
@@ -844,9 +853,13 @@ const RAW_EXTENSIONS: [&str; 20] = [
 ];
 
 fn format_extensions(word: &str) -> Option<&'static [&'static str]> {
+    known_format(word).or_else(|| word.strip_suffix('s').and_then(known_format))
+}
+
+fn known_format(word: &str) -> Option<&'static [&'static str]> {
     Some(match word {
-        "raw" | "raws" => &RAW_EXTENSIONS,
-        "jpg" | "jpgs" | "jpeg" | "jpegs" => &["jpg", "jpeg"],
+        "raw" => &RAW_EXTENSIONS,
+        "jpg" | "jpeg" => &["jpg", "jpeg"],
         "arw" => &["arw"],
         "cr2" => &["cr2"],
         "cr3" => &["cr3"],
@@ -855,16 +868,32 @@ fn format_extensions(word: &str) -> Option<&'static [&'static str]> {
         "orf" => &["orf"],
         "raf" => &["raf"],
         "rw2" => &["rw2"],
-        "png" | "pngs" => &["png"],
-        "heic" | "heics" => &["heic", "heif"],
-        "gif" | "gifs" => &["gif"],
-        "tiff" | "tiffs" => &["tif", "tiff"],
+        "png" => &["png"],
+        "heic" => &["heic", "heif"],
+        "gif" => &["gif"],
+        "tiff" => &["tif", "tiff"],
         "webp" => &["webp"],
-        "mov" | "movs" => &["mov"],
-        "mp4" | "mp4s" => &["mp4"],
+        "mov" => &["mov"],
+        "mp4" => &["mp4"],
         "mkv" => &["mkv"],
         "avi" => &["avi"],
-        "mp3" | "mp3s" => &["mp3"],
+        "mpg" | "mpeg" => &["mpg", "mpeg"],
+        "m4v" => &["m4v"],
+        "wmv" => &["wmv"],
+        "3gp" => &["3gp", "3g2"],
+        "webm" => &["webm"],
+        "mts" | "m2ts" => &["mts", "m2ts"],
+        "flv" => &["flv"],
+        "ogv" => &["ogv"],
+        "vob" => &["vob"],
+        "mxf" => &["mxf"],
+        "bmp" => &["bmp"],
+        "avif" => &["avif"],
+        "tif" => &["tif", "tiff"],
+        "heif" => &["heic", "heif"],
+        "srw" => &["srw"],
+        "pef" => &["pef"],
+        "mp3" => &["mp3"],
         "flac" => &["flac"],
         "wav" => &["wav"],
         "m4a" => &["m4a"],
@@ -933,7 +962,7 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
 
 fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::Range<usize>)> {
     for (index, word) in words.iter().enumerate() {
-        if !["in", "inside", "under", "from"].contains(&word.as_str()) {
+        if !["in", "inside", "under", "from", "of"].contains(&word.as_str()) {
             continue;
         }
         let mut at = index + 1;
@@ -946,6 +975,9 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             return Some((cased, index..at + 1));
         }
         let folder_after = words.get(at + 1).is_some_and(|word| word == "folder" || word == "directory");
+        if word == "of" && !folder_after && target != "folder" && target != "directory" {
+            continue;
+        }
         if ["downloads", "desktop", "pictures", "movies", "music"].contains(&target.as_str()) || (folder_after && target != "folder") {
             let end = if folder_after { at + 2 } else { at + 1 };
             let mut chars = cased.chars();

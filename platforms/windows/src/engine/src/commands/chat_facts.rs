@@ -41,6 +41,7 @@ pub(crate) struct Filter {
     pub excluded_person_names: Vec<String>,
     pub min_bytes: Option<i64>,
     pub max_bytes: Option<i64>,
+    pub camera: Option<String>,
     pub root: Option<RootScope>,
 }
 
@@ -102,6 +103,10 @@ impl Filter {
             parts.push("f.id NOT IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)".into());
             args.push(json(&self.excluded_person_ids));
             args.push(json(&self.excluded_person_ids));
+        }
+        if let Some(camera) = &self.camera {
+            parts.push("lower(trim(f.camera_model))=lower(?)".into());
+            args.push(Value::Text(camera.clone()));
         }
         if let Some(min) = self.min_bytes {
             parts.push("f.size_bytes>?".into());
@@ -169,6 +174,9 @@ impl Filter {
         if !self.extensions.is_empty() {
             let _ = write!(text, " in {} format", format_label(&self.extensions));
         }
+        if let Some(camera) = &self.camera {
+            let _ = write!(text, " taken with {camera}");
+        }
         if !self.person_names.is_empty() {
             let separator = if self.all_people || self.person_names.len() == 1 { " and " } else { " or " };
             let _ = write!(text, " of {}", self.person_names.join(separator));
@@ -196,6 +204,49 @@ impl Filter {
         }
         text
     }
+}
+
+/// A camera model the catalog knows, named in the question; `rest` is the question without those words.
+pub(crate) struct CameraAsk {
+    pub model: String,
+    pub rest: String,
+}
+
+fn alphanumerics(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+const CAMERA_LEAD_WORDS: [&str; 12] = ["taken", "shot", "captured", "recorded", "made", "with", "on", "by", "using", "from", "the", "a"];
+
+pub(crate) fn camera_asked_about(conn: &Connection, text: &str) -> Result<Option<CameraAsk>> {
+    let mut statement = conn.prepare("SELECT DISTINCT trim(camera_model) FROM files WHERE failed=0 AND camera_model IS NOT NULL AND trim(camera_model)<>''")?;
+    let models = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut best: Option<(&String, usize, usize)> = None;
+    for model in &models {
+        let wanted = alphanumerics(model);
+        if wanted.len() < 3 {
+            continue;
+        }
+        for start in 0..words.len() {
+            for end in start + 1..=(start + 4).min(words.len()) {
+                if alphanumerics(&words[start..end].concat()) == wanted && best.is_none_or(|(known, _, _)| model.len() > known.len()) {
+                    best = Some((model, start, end));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(best.map(|(model, start, end)| {
+        let mut first = start;
+        while first > 0 && CAMERA_LEAD_WORDS.contains(&words[first - 1].to_lowercase().as_str()) {
+            first -= 1;
+        }
+        CameraAsk {
+            model: model.clone(),
+            rest: words.iter().enumerate().filter(|(index, _)| !(first..end).contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" "),
+        }
+    }))
 }
 
 pub(crate) fn file_name(path: &str) -> String {
