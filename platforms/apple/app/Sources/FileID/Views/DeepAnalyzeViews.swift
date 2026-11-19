@@ -26,6 +26,9 @@ struct DeepAnalyzeModelPickerCard: View {
     private var top3: [AIModelKind] {
         AIModelKind.recommendedFor(ramGB: ramGB)
     }
+    private var recommendation: VLMRecommendation {
+        VLMRecommendation(ramGB: ramGB, advice: engine.vlmAdvice, freeDiskBytes: DescriptionModelStore.freeDiskBytes())
+    }
 
     var body: some View {
         Panel(padding: 16) {
@@ -33,11 +36,14 @@ struct DeepAnalyzeModelPickerCard: View {
                 HStack {
                     Text("Descriptions and Chat").font(Theme.Font.body(14, .semibold))
                     Spacer()
-                    Text("Suggested for this Mac (\(Int(ramGB)) GB memory)")
+                    Text("This Mac has \(Int(ramGB)) GB memory")
                         .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                 }
                 Text("The AI that writes descriptions and suggested names, and answers Chat. Bigger models write better but need more memory.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
+                if let reason = recommendation.reason {
+                    Text(reason).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                }
                 Divider().opacity(0.3)
                 if !AIModelKind.favorites.contains(settings.activeKind) {
                     Text("Selected model").font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.ai)
@@ -78,6 +84,7 @@ struct DeepAnalyzeModelPickerCard: View {
             onDiskBytes = await Task.detached(priority: .utility) { DescriptionModelStore.sizeOnDisk(kind) }.value
         }
         .onChange(of: settings.activeKind.rawValue) { _, _ in failure = nil }
+        .onAppear { engine.refreshVLMAdvice() }
         .onChange(of: engine.lastErrorSignal) { _, _ in
             guard requested != nil, let error = engine.lastError else { return }
             if error.kind == "prewarm_cancelled" { requested = nil; return }
@@ -192,6 +199,7 @@ struct DeepAnalyzeModelPickerCard: View {
             isActive: settings.activeKind == kind,
             installed: ModelInstallStatus.isInstalled(kind: kind),
             fits: kind.fits(ramGB: ramGB),
+            recommended: recommendation.kind == kind,
             ramGB: ramGB,
             onPick: { settings.activeKind = kind }
         )
@@ -205,6 +213,7 @@ private struct ModelOptionRow: View {
     let isActive: Bool
     let installed: Bool
     let fits: Bool
+    let recommended: Bool
     let ramGB: Double
     let onPick: () -> Void
 

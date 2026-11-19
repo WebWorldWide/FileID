@@ -66,6 +66,10 @@ struct WelcomeSheet: View {
         selectedVLM = recommended
     }
 
+    private var recommendation: VLMRecommendation {
+        VLMRecommendation(ramGB: systemRAMGB, advice: engine.vlmAdvice, freeDiskBytes: availableDiskBytes)
+    }
+
     private var systemRAMGB: Double {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
     }
@@ -147,9 +151,10 @@ struct WelcomeSheet: View {
                 .accessibilityValue(Self.shortName(selectedVLM))
             }
             .padding(.horizontal, 22).padding(.top, 12)
-            Text(selectedVLM == hardwareRecommendedVLM
-                 ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
-                 : "Your choice. FileID uses it to describe files and answer Chat.")
+            Text([selectedVLM == recommendation.kind
+                  ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
+                  : "Your choice. FileID uses it to describe files and answer Chat.",
+                  recommendation.reason].compactMap { $0 }.joined(separator: " "))
                 .font(Theme.Font.meta)
                 .foregroundStyle(Theme.text3)
                 .padding(.horizontal, 22).padding(.bottom, 4)
@@ -453,7 +458,7 @@ struct WelcomeSheet: View {
     }
 
     static func shortName(_ kind: AIModelKind) -> String {
-        kind.displayName.replacingOccurrences(of: #"\s*\([^)]*bit\)$"#, with: "", options: .regularExpression)
+        kind.shortName
     }
 
     private func vlmChoiceBlocker(_ kind: AIModelKind) -> String? {
