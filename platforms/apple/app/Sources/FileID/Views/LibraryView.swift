@@ -822,6 +822,21 @@ struct LibraryView: View {
         return short ? "\(rows.formatted())/\(total.formatted())" : "\(rows.formatted()) of \(total.formatted()) shown"
     }
 
+    /// "3 of 472" once the listing's size is known; "3 of 300+" while more pages remain unloaded and the size isn't.
+    static func previewPosition(index: Int, loaded: Int, moreToLoad: Bool, knownTotal: Int?) -> String {
+        let position = (index + 1).formatted()
+        guard moreToLoad else { return "\(position) of \(loaded.formatted())" }
+        if let knownTotal { return "\(position) of \(max(knownTotal, loaded).formatted())" }
+        return "\(position) of \(loaded.formatted())+"
+    }
+
+    /// The whole listing's size when it is the plain kind listing: a search, similarity seed or narrowed kind has no cheap total.
+    private var listingTotal: Int? {
+        guard similarSeed == nil, searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              kindFilter == nil || kindFilter == ReadStore.unreadableFilter else { return nil }
+        return shownTotal
+    }
+
     /// Files the current listing draws from: unreadable files appear only under their own filter.
     private var shownTotal: Int {
         kindFilter == ReadStore.unreadableFilter ? store.scopedUnreadableFiles : max(0, store.scopedTotalFiles - store.scopedUnreadableFiles)
@@ -931,6 +946,7 @@ struct LibraryView: View {
             FilePreviewSheet(siblings: previewSiblings,
                               indexByID: previewIndex,
                               selectedID: $previewSelectedID,
+                              moreToLoad: canLoadMore, knownTotal: listingTotal,
                               store: store, engine: engine,
                               onEdit: { editEpoch += 1; refreshBulkState() },
                               onNearEnd: { loadMore() })
@@ -1143,6 +1159,10 @@ private struct FilePreviewSheet: View {
     /// Position of each sibling, built once when the list changes.
     let indexByID: [Int64: Int]
     @Binding var selectedID: Int64?
+    /// True while the grid has more pages than the siblings loaded so far.
+    let moreToLoad: Bool
+    /// The listing's real size when the library already knows it.
+    let knownTotal: Int?
     let store: ReadStore
     let engine: EngineClient
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
@@ -1330,7 +1350,7 @@ private struct FilePreviewSheet: View {
             if siblings.count > 1, let index = siblingIndex {
                 HStack(spacing: 2) {
                     iconButton("chevron.left", "Previous file (←)") { step(-1) }.disabled(index <= 0)
-                    Text("\(index + 1) of \(siblings.count)")
+                    Text(LibraryView.previewPosition(index: index, loaded: siblings.count, moreToLoad: moreToLoad, knownTotal: knownTotal))
                         .font(Theme.Font.body(12.5)).monospacedDigit().foregroundStyle(Theme.text2)
                         .frame(minWidth: 70)
                     iconButton("chevron.right", "Next file (→)") { step(1) }.disabled(index >= siblings.count - 1)
