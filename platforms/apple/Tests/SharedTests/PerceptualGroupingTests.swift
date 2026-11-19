@@ -90,4 +90,15 @@ struct PerceptualGroupingTests {
         #expect(PerceptualGrouping.groupByHamming([], maxHamming: 8).isEmpty)
         #expect(PerceptualGrouping.groupByHamming([(1, i(0x0))], maxHamming: 8).isEmpty)
     }
+
+    @Test("A RAW and its rendered twin are one shot, never look-alikes of each other")
+    func rawTwinsLeaveTheGroup() {
+        let paths: [Int64: String] = [
+            1: "/lib/DSC1.ARW", 2: "/lib/DSC1.JPG", 3: "/lib/DSC2.ARW", 4: "/lib/DSC2.JPG",
+            5: "/lib/other.jpg", 6: "/lib/sub/DSC1.jpg", 7: "/lib/lonely.ARW", 8: "/lib/lonely.JPG",
+            9: "/lib/solo.ARW",
+        ]
+        let groups = PerceptualGrouping.droppingRawTwins([[1, 2, 3, 4, 5, 6], [7, 8], [9, 5]], paths: paths)
+        #expect(groups == [[2, 4, 5, 6], [9, 5]])
+    }
 }

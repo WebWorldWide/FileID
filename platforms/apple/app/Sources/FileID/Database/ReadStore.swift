@@ -753,10 +753,13 @@ public final class ReadStore: @unchecked Sendable {
             if let ch: Data = r["content_hash"] { contentHashByID[fr.id] = ch }
             items.append((id: fr.id, phash: ph))
         }
+        let pathByID = fileByID.mapValues(\.pathText)
 
         var groups: [DuplicateGroup] = []
         var remaining = Self.cleanupMaxVisibleMembers
-        for ids in PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming) {
+        for ids in PerceptualGrouping.droppingRawTwins(
+            PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming), paths: pathByID
+        ) {
             var files = ids.compactMap { fileByID[$0] }
             guard files.count > 1 else { continue }
             // Drop pure byte-exact clusters — already shown under "Exact".
