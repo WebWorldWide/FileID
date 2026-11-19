@@ -978,7 +978,13 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let (people, events) = super::catalog_retrieval::known(conn)?;
     let root = super::roots::RootScope::load(conn, request.context.as_ref().and_then(|chat| chat.root_id))?;
     let history = user_history(conn, &request.conversation_id)?;
-    prepare_turn(conn, request, semantic, text, &history, &people, &events, root.as_ref())
+    let mut prepared = prepare_turn(conn, request, semantic, text, &history, &people, &events, root.as_ref())?;
+    if prepared.actions.is_empty()
+        && let Some(note) = chat_facts::unreadable_files_note(conn, root.as_ref())?
+    {
+        prepared.message = format!("{} {note}", prepared.message);
+    }
+    Ok(prepared)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1309,6 +1315,34 @@ mod tests {
         let (prompts, complete) = scripted(&["<actions>[]</actions>", "unused"]);
         answer_or_retry_plainly("evidence", &cancel, complete).await.unwrap();
         assert_eq!(prompts.lock().len(), 1, "a cancelled summary is not asked again");
+    }
+
+    #[test]
+    fn an_answer_says_how_many_files_could_not_be_read_yet() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'/lib/birthday.mov',1,100,0,'video','mov','Birthday gift opening')", []).unwrap();
+        for (id, message) in [(2, "Vision pass timed out"), (3, "per-file timeout after 60s"), (4, crate::scan_session::HIDDEN_ROW_MESSAGE)] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,error_message) VALUES(?1,'/lib/slow'||?1||'.jpg',?1+10,100,0,'image','jpg',1,?2)",
+                params![id, message],
+            )
+            .unwrap();
+        }
+        let request = ChatRequest {
+            request_id: "r".into(),
+            conversation_id: "c".into(),
+            action: "send".into(),
+            text: Some("Please find my birthday videos".into()),
+            ..Default::default()
+        };
+        let answer = execute(&mut conn, &request).unwrap().message;
+        assert!(answer.ends_with("2 files couldn't be read yet — they're not in these results."), "{answer}");
+        conn.execute("DELETE FROM files WHERE id = 3", []).unwrap();
+        let answer = execute(&mut conn, &request).unwrap().message;
+        assert!(answer.ends_with("1 file couldn't be read yet — it's not in these results."), "{answer}");
+        conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
+        let answer = execute(&mut conn, &request).unwrap().message;
+        assert!(!answer.contains("couldn't be read"), "{answer}");
     }
 
     #[test]
