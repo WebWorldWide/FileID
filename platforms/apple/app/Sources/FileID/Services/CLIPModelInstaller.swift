@@ -97,6 +97,9 @@ final class CLIPModelInstaller: ModelInstalling {
             status = .missing(reason: ModelInstaller.notDownloaded)
         } else {
             for dir in Self.modelDirectories { totalSize += ModelInstaller.diskSize(of: dir) }
+            for file in Self.requiredFiles where !FileManager.default.fileExists(atPath: file.path) {
+                if let other = ModelFileLayout.installedFile(file, in: Self.modelsRoot) { totalSize += ModelInstaller.diskSize(of: other) }
+            }
             status = .installed(sizeBytes: totalSize)
         }
     }
@@ -108,7 +111,7 @@ final class CLIPModelInstaller: ModelInstalling {
     /// call this instead to keep the per-file Settings rows accurate. (R7 delta)
     private func recomputePresentFiles() {
         var present: Set<String> = []
-        for f in Self.requiredFiles where FileManager.default.fileExists(atPath: f.path) {
+        for f in Self.requiredFiles where ModelFileLayout.installedFile(f, in: Self.modelsRoot) != nil {
             present.insert(f.path)
         }
         presentFilePaths = present
@@ -153,6 +156,9 @@ final class CLIPModelInstaller: ModelInstalling {
         task = nil
         for d in Self.modelDirectories {
             try? FileManager.default.removeItem(at: d)
+        }
+        for f in Self.requiredFiles {
+            if let other = ModelFileLayout.alternate(of: f, in: Self.modelsRoot) { try? FileManager.default.removeItem(at: other) }
         }
         // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
         // and falls back to keyword-only search. (Install→Remove leaked it true.)
