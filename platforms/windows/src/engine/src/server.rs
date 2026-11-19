@@ -627,6 +627,37 @@ impl Drop for FaceClusterActiveGuard {
     }
 }
 
+/// Files this scan could not read in time are scanned again at the next idle moment, as a normal incremental scan of the same folder.
+fn retry_timed_out_files_when_idle(d: Dispatcher, payload: ipc::StartScanPayload, busy: Arc<dyn Fn() -> bool + Send + Sync>) {
+    let (Some(db), Some(claim)) = (d.db.clone(), commands::timeout_retry::claim(&payload.root_path)) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _claim = claim;
+        let root = std::path::PathBuf::from(&payload.root_path);
+        let owed = commands::timeline::with_db(&db, move |conn| Ok(commands::timeout_retry::owed(conn, &root))).await;
+        if !matches!(owed, Ok(true)) {
+            return;
+        }
+        let scan_active = d.scan_active.clone();
+        let idle = commands::timeout_retry::wait_until_idle(commands::timeout_retry::IDLE_POLL, commands::timeout_retry::IDLE_ATTEMPTS, || {
+            !scan_active.load(std::sync::atomic::Ordering::Acquire) && !busy()
+        })
+        .await;
+        if !idle {
+            return;
+        }
+        tracing::info!("[SCAN] reading timed-out files again now that the machine is idle");
+        let command = IpcCommand { id: uuid::Uuid::new_v4().to_string(), payload: CommandPayload::StartScan(ipc::StartScanPayload { rescan: false, ..payload }) };
+        let Ok(line) = serde_json::to_string(&command) else { return };
+        handle_scan_line(d, line).await;
+    });
+}
+
+fn handle_scan_line(d: Dispatcher, line: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move { handle_line(&d, &line).await })
+}
+
 async fn emit_scan_busy(sink: &Sink) {
     sink.send(EngineError::event(
         "scan_already_running",
@@ -1225,6 +1256,8 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let db_c = db.clone();
             let state_c = scan_state.clone();
             let pending_cancel = scan_cancel_requested.clone();
+            let retry_payload = payload.clone();
+            let retry_dispatcher = d.clone();
             let other_heavy_work: Arc<dyn Fn() -> bool + Send + Sync> = {
                 let (jobs, deep, faces, restructure) =
                     (jobs.clone(), deep_analyze_active.clone(), face_cluster_active.clone(), restructure_active.clone());
@@ -1254,9 +1287,12 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     payload,
                     pending_cancel,
                     Some(Box::new(active_guard)),
-                    Some(other_heavy_work),
+                    Some(other_heavy_work.clone()),
                 )
                 .await;
+                if completed {
+                    retry_timed_out_files_when_idle(retry_dispatcher, retry_payload, other_heavy_work);
+                }
                 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
                 if completed {
                     after_scan.group_faces().await;

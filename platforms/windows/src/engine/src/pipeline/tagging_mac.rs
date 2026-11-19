@@ -3,10 +3,10 @@
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
-    claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
+    claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, video_capture_fields, Arc,
     DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
     PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES, STATS_RAMPLUS_US,
-    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US, VISION_TIMEOUT_MESSAGE,
+    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US, TIMED_OUT_MESSAGE,
 };
 use crate::apple::scan;
 use crate::pipeline::catch_up;
@@ -174,6 +174,7 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinR
     let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
     let exif = match bytes.as_deref() {
         Some(bytes) if awaits_twin => Some(parse_exif_fields(bytes).unwrap_or((None, None, None, None))),
+        _ if file.kind == FileKind::Video && !file.online_only => video_capture_fields(&file.path),
         _ => None,
     };
     let mut frame = Frame { image: None, audio: AudioTags::default(), large_pdf: false };
@@ -306,6 +307,10 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
         FileKind::Video => {
             row.tags = vec![("Video".into(), None)];
             row.tags_evaluated = true;
+            if let Some(captured) = exif.and_then(|fields| fields.3) {
+                row.created_unix = Some(captured);
+                row.captured_from_exif = true;
+            }
             if let Some(image) = frame.image {
                 let models = models.clone();
                 let clip_started = Instant::now();
@@ -461,7 +466,7 @@ async fn image_row(
     STATS_CLIP_US.fetch_add(clip_elapsed.as_micros() as u64, Ordering::Relaxed);
     let Some((pass, ram, read, text_tags, dhash)) = analysis else {
         row.failed = true;
-        row.error_message = Some(VISION_TIMEOUT_MESSAGE.into());
+        row.error_message = Some(TIMED_OUT_MESSAGE.into());
         return;
     };
     if read.ran {
@@ -610,6 +615,29 @@ mod tests {
             assert_eq!(decode_failure(&broken), PERMISSION_DENIED);
         }
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_video_row_takes_the_container_creation_time_not_the_file_system_time() {
+        let dir = std::env::temp_dir().join(format!("fileid-video-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("C0029.mp4");
+        std::fs::write(&clip, crate::util::video_creation_date::tests::synthetic_mp4(1_791_128_655)).unwrap();
+        let copied_on = 1_795_118_879.0;
+        let file = DiscoveredFile {
+            path: clip,
+            kind: FileKind::Video,
+            size_bytes: 4_000,
+            modified_unix: copied_on,
+            created_unix: Some(copied_on),
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        };
+        let row = process(predecode(file, false, None, false), &Arc::new(ModelStack::empty())).await;
+        assert_eq!(row.created_unix, Some(1_791_128_655.0));
+        assert!(row.captured_from_exif, "the writer must replace the file-system date with the capture date");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -55,6 +55,45 @@ pub struct SessionResult {
     /// Every photo's stored date already came from its EXIF in this scan (a
     /// forced rescan, or a root with no catalog rows when it started).
     pub capture_dates_current: bool,
+    pub progress_floor: ProgressFloor,
+}
+
+/// The largest counts the scan has shown so far. A follow-up pass restarts its own counters, so each of its snapshots
+/// is lifted to at least this much and the bar never moves backwards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProgressFloor {
+    total: u64,
+    discovered: u64,
+    processed: u64,
+}
+
+impl ProgressFloor {
+    fn raised_to(self, other: Self) -> Self {
+        Self {
+            total: self.total.max(other.total),
+            discovered: self.discovered.max(other.discovered),
+            processed: self.processed.max(other.processed),
+        }
+    }
+}
+
+/// Turns a follow-up pass's own counts into the scan's: what earlier passes finished is added and nothing falls below
+/// what was already shown. For the first pass it changes nothing.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProgressLift {
+    carried_processed: u64,
+    carried_failed: u64,
+    floor: ProgressFloor,
+}
+
+impl ProgressLift {
+    fn apply(&self, progress: &mut ScanProgress) {
+        progress.discovered = (progress.discovered + self.carried_processed).max(self.floor.discovered);
+        progress.processed = (progress.processed + self.carried_processed).max(self.floor.processed);
+        progress.failed += self.carried_failed;
+        let total = if progress.total > 0 { progress.total + self.carried_processed } else { 0 };
+        progress.total = total.max(self.floor.total);
+    }
 }
 
 pub struct ScanSession {
@@ -82,6 +121,7 @@ pub struct ScanSession {
     carried: (u64, u64, f64),
     /// Decided by the first pass; a follow-up starts with that pass's rows.
     capture_dates_current: Option<bool>,
+    progress_floor: ProgressFloor,
 }
 
 /// True when a directory the walk read was modified after `since` or is gone.
@@ -119,6 +159,7 @@ impl ScanSession {
             root_display: None,
             carried: (0, 0, 0.0),
             capture_dates_current: None,
+            progress_floor: ProgressFloor::default(),
         }
     }
 
@@ -149,7 +190,12 @@ impl ScanSession {
             self.worker_count = (self.worker_count >> round.min(16)).max(1);
         }
         self.capture_dates_current = Some(previous.capture_dates_current);
+        self.progress_floor = previous.progress_floor;
         self
+    }
+
+    fn progress_lift(&self) -> ProgressLift {
+        ProgressLift { carried_processed: self.carried.0, carried_failed: self.carried.1, floor: self.progress_floor }
     }
 
     /// Run an end-to-end scan against `root`. Returns when DBWriter has
@@ -471,6 +517,7 @@ impl ScanSession {
         let errors_for_tick = discovered_errors.clone();
         let cloud_only_for_tick = discovered_cloud_only.clone();
         let discovered_count_for_tick = discovered_count.clone();
+        let lift_for_tick = self.progress_lift();
         // Single-shot guard shared with the post-drain fallback below: the tick
         // sleeps 250 ms before its first wake-up, so a folder that discovers and
         // drains faster than that (empty folder / fully-current rescan) would be
@@ -497,20 +544,20 @@ impl ScanSession {
                 }
                 let count = discovered_count_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                 let finished = discovered_done.load(std::sync::atomic::Ordering::Acquire);
-                let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(
-                    ScanProgress {
-                        session_id: session_id_for_tick.clone(),
-                        phase: ScanPhase::Discovering,
-                        total: 0,
-                        discovered: count,
-                        processed: 0,
-                        failed: 0,
-                        files_per_second: 0.0,
-                        eta_seconds: None,
-                        resident_mb: crate::platform::process_memory_mb(),
-                        available_mb: 0,
-                    },
-                ))));
+                let mut progress = ScanProgress {
+                    session_id: session_id_for_tick.clone(),
+                    phase: ScanPhase::Discovering,
+                    total: 0,
+                    discovered: count,
+                    processed: 0,
+                    failed: 0,
+                    files_per_second: 0.0,
+                    eta_seconds: None,
+                    resident_mb: crate::platform::process_memory_mb(),
+                    available_mb: 0,
+                };
+                lift_for_tick.apply(&mut progress);
+                let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
                 if finished {
                     // IPC parity with macOS (FileIDEngineMain.swift:486):
                     // announce the discovery total once the walk ends —
@@ -594,6 +641,7 @@ impl ScanSession {
         let cursor_db = self.db_conn.clone();
         let cursor_session = session_id.clone();
         let cursor_carried = self.carried.0;
+        let lift_for_batch = self.progress_lift();
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
@@ -616,6 +664,7 @@ impl ScanSession {
                     discovered,
                     heavy,
                     walk_done,
+                    &lift_for_batch,
                 );
             })
             .await;
@@ -789,6 +838,12 @@ impl ScanSession {
                 needs_follow_up: true,
                 timed_out,
                 capture_dates_current,
+                progress_floor: ProgressFloor {
+                    total: total.max(discovered_count.load(std::sync::atomic::Ordering::Relaxed)) + self.carried.0,
+                    discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                    processed: total + self.carried.0,
+                }
+                .raised_to(self.progress_floor),
             });
         }
         // A root that is gone, empty or an unmounted drive's leftover folder lists nothing,
@@ -880,9 +935,10 @@ impl ScanSession {
                         let report = Arc::new(CatchUpProgress {
                             sink: sink.clone(),
                             session_id: session_id.clone(),
-                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
-                            processed: total,
-                            failed,
+                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                            processed: total + self.carried.0,
+                            failed: failed + self.carried.1,
+                            lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
                             state: Mutex::new((0, 0, Instant::now())),
                         });
                         let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
@@ -1043,6 +1099,7 @@ impl ScanSession {
             needs_follow_up: false,
             timed_out: 0,
             capture_dates_current,
+            progress_floor: self.progress_floor,
         })
     }
 }
@@ -1061,21 +1118,21 @@ pub fn timeout_retry_backoff(round: u32) -> Duration {
 }
 
 /// Rows under `root` this scan (written at or after `since`) stored as failed because a read timed out and whose retries are not used up.
-fn count_retryable_timeouts(conn: &Connection, root: &Path, since: f64) -> u64 {
+pub(crate) fn count_retryable_timeouts(conn: &Connection, root: &Path, since: f64) -> u64 {
     let lo = root_descendant_prefix(root);
     let hi = prefix_upper_bound(&lo);
-    let [per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
-    let base = "SELECT COUNT(*) FROM files f WHERE f.failed = 1 AND f.error_message IN (?1, ?2) AND f.scanned_at >= ?3 \
-                AND f.path_text >= ?4 \
-                AND COALESCE((SELECT c.attempts FROM scan_failures c WHERE c.file_id = f.id), 0) < ?5";
+    let [current, per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
+    let base = "SELECT COUNT(*) FROM files f WHERE f.failed = 1 AND f.error_message IN (?1, ?2, ?3) AND f.scanned_at >= ?4 \
+                AND f.path_text >= ?5 \
+                AND COALESCE((SELECT c.attempts FROM scan_failures c WHERE c.file_id = f.id), 0) < ?6";
     let limit = crate::pipeline::catch_up::FAILURE_RETRY_LIMIT;
     let count = match &hi {
         Some(hi) => conn.query_row(
-            &format!("{base} AND f.path_text < ?6"),
-            rusqlite::params![per_file, vision, since, lo, limit, hi],
+            &format!("{base} AND f.path_text < ?7"),
+            rusqlite::params![current, per_file, vision, since, lo, limit, hi],
             |row| row.get::<_, i64>(0),
         ),
-        None => conn.query_row(base, rusqlite::params![per_file, vision, since, lo, limit], |row| row.get::<_, i64>(0)),
+        None => conn.query_row(base, rusqlite::params![current, per_file, vision, since, lo, limit], |row| row.get::<_, i64>(0)),
     };
     count.unwrap_or(0).max(0) as u64
 }
@@ -1113,6 +1170,7 @@ struct CatchUpProgress {
     discovered: u64,
     processed: u64,
     failed: u64,
+    lift: ProgressLift,
     /// (owed, done, started)
     state: Mutex<(u64, u64, Instant)>,
 }
@@ -1148,7 +1206,7 @@ impl CatchUpProgress {
         let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
         let seconds = started.elapsed().as_secs_f64();
         let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
-        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
+        let mut progress = ScanProgress {
             session_id: self.session_id.clone(),
             phase: ScanPhase::PostScan,
             total,
@@ -1159,7 +1217,9 @@ impl CatchUpProgress {
             eta_seconds: (rate > 0.01).then(|| (owed - done) as f64 / rate),
             resident_mb: crate::platform::process_memory_mb(),
             available_mb: 0,
-        }))));
+        };
+        self.lift.apply(&mut progress);
+        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
     }
 }
 
@@ -1974,6 +2034,7 @@ fn maybe_emit_progress(
     discovered_total: u64,
     discovered_heavy: u64,
     discovery_done: bool,
+    lift: &ProgressLift,
 ) {
     let now = Instant::now();
     let should_emit = {
@@ -2021,7 +2082,7 @@ fn maybe_emit_progress(
         0
     };
     let eta_seconds = if total > 0 { eta_kind_aware } else { None };
-    let progress = ScanProgress {
+    let mut progress = ScanProgress {
         session_id: session_id.into(),
         phase: ScanPhase::Tagging,
         total,
@@ -2033,6 +2094,7 @@ fn maybe_emit_progress(
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
+    lift.apply(&mut progress);
     // Intentional try_send. Progress events are throttled to 10 Hz / 1k
     // files, so dropping is rare in practice — and the next emit (≤100ms
     // later) brings the UI back in sync.
@@ -2162,7 +2224,7 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         let sep = std::path::MAIN_SEPARATOR;
         let path = |name: &str| format!("{sep}lib{sep}{name}");
-        let [per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
+        let [current, per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
         let add = |id: i64, name: &str, message: &str, scanned_at: f64, attempts: Option<i64>| {
             crate::db::test_support::insert_file(&conn, id, &path(name), "image");
             conn.execute(
@@ -2184,10 +2246,78 @@ mod tests {
         add(4, "given-up.jpg", vision, 500.0, Some(3));
         add(5, "earlier-scan.jpg", vision, 100.0, Some(1));
         add(6, "corrupt.jpg", "Could not decode image", 500.0, Some(1));
+        add(9, "ran-out-of-time.jpg", current, 500.0, Some(1));
         crate::db::test_support::insert_file(&conn, 7, &path("fine.jpg"), "image");
         crate::db::test_support::insert_file(&conn, 8, &format!("{sep}elsewhere{sep}slow.jpg"), "image");
         conn.execute("UPDATE files SET failed = 1, error_message = ?1, scanned_at = 500.0 WHERE id = 8", [vision]).unwrap();
-        assert_eq!(count_retryable_timeouts(&conn, Path::new(&format!("{sep}lib")), 400.0), 3);
+        assert_eq!(count_retryable_timeouts(&conn, Path::new(&format!("{sep}lib")), 400.0), 4);
+    }
+
+    fn tagging_snapshot(total: u64, discovered: u64, processed: u64, failed: u64) -> ScanProgress {
+        ScanProgress {
+            session_id: "s".into(),
+            phase: ScanPhase::Tagging,
+            total,
+            discovered,
+            processed,
+            failed,
+            files_per_second: 0.0,
+            eta_seconds: None,
+            resident_mb: 0,
+            available_mb: 0,
+        }
+    }
+
+    #[test]
+    fn the_first_pass_shows_its_own_counts() {
+        let mut snapshot = tagging_snapshot(4, 4, 3, 1);
+        ProgressLift::default().apply(&mut snapshot);
+        assert_eq!((snapshot.total, snapshot.discovered, snapshot.processed, snapshot.failed), (4, 4, 3, 1));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_retry_round_continues_the_scans_counts_instead_of_restarting_them() {
+        let first = SessionResult {
+            processed: 4,
+            failed: 2,
+            elapsed_seconds: 1.0,
+            needs_follow_up: true,
+            timed_out: 2,
+            capture_dates_current: true,
+            progress_floor: ProgressFloor { total: 4, discovered: 4, processed: 4 },
+        };
+        let (sink, _writer) = crate::ipc::sink::Sink::spawn();
+        let session = ScanSession::new(
+            ScanCoordinator::new(),
+            Arc::new(Mutex::new(crate::db::test_support::memory_db())),
+            8,
+            sink,
+            ModelSource::lazy(|| unreachable!("no model is needed to plan a follow-up")),
+            false,
+            Vec::new(),
+        )
+        .follow_up(&first, 1);
+        let lift = session.progress_lift();
+        let mut last = (4, 4, 4);
+        for (total, discovered, processed) in [(0, 0, 0), (0, 2, 0), (2, 2, 0), (2, 2, 1), (2, 2, 2)] {
+            let mut snapshot = tagging_snapshot(total, discovered, processed, 0);
+            lift.apply(&mut snapshot);
+            assert!(snapshot.discovered >= last.0 && snapshot.processed >= last.2, "{snapshot:?} fell below {last:?}");
+            assert!(snapshot.total == 0 || snapshot.total >= last.1, "{snapshot:?} fell below {last:?}");
+            if total == 0 {
+                assert_eq!(snapshot.total, 4, "the total shown before stays shown while the pass walks the folder");
+            }
+            last = (snapshot.discovered, snapshot.total, snapshot.processed);
+        }
+        assert_eq!(last, (4, 4, 4), "two files read again finish the four of the scan");
+    }
+
+    #[test]
+    fn a_later_round_with_more_new_files_raises_the_total() {
+        let lift = ProgressLift { carried_processed: 2, carried_failed: 0, floor: ProgressFloor { total: 4, discovered: 4, processed: 4 } };
+        let mut snapshot = tagging_snapshot(5, 5, 5, 0);
+        lift.apply(&mut snapshot);
+        assert_eq!((snapshot.total, snapshot.discovered, snapshot.processed), (7, 7, 7));
     }
 
     #[test]
@@ -2206,6 +2336,7 @@ mod tests {
             needs_follow_up: true,
             timed_out: 12,
             capture_dates_current: true,
+            progress_floor: ProgressFloor::default(),
         };
         let (sink, _writer) = crate::ipc::sink::Sink::spawn();
         let session = ScanSession::new(
@@ -3048,6 +3179,7 @@ mod tests {
             discovered: 100,
             processed: 100,
             failed: 2,
+            lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
         });
         let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(20));
@@ -3083,6 +3215,7 @@ mod tests {
             discovered: 10,
             processed: 10,
             failed: 0,
+            lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
         });
         let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
@@ -3124,6 +3257,7 @@ mod tests {
             discovered: 10,
             processed: 10,
             failed: 0,
+            lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
         });
         let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
