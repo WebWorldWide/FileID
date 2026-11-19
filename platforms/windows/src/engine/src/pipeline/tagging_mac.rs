@@ -21,6 +21,7 @@ const EMBEDDING_CHARS: usize = 4000;
 const VIDEO_KEYFRAME_EDGE: u32 = 512;
 const VIDEO_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(6);
 const DECODE_FAILED: &str = "Could not decode image";
+const CUT_OFF_IMAGE: &str = "The image file is cut off: it ends before the picture does";
 const PERMISSION_DENIED: &str = "FileID isn't allowed to read this file";
 const PDF_OPEN_FAILED: &str = "Could not open PDF (will retry next scan)";
 
@@ -181,6 +182,9 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinR
     if !file.online_only {
         match file.kind {
             FileKind::Image if awaits_twin => {}
+            FileKind::Image if bytes.as_deref().is_some_and(crate::util::jpeg_complete::is_cut_off) => {
+                decoded = Some(Err(anyhow::anyhow!(CUT_OFF_IMAGE)));
+            }
             FileKind::Image => match scan::decode_image(&file.path, file.size_bytes) {
                 Some(image) => frame.image = Some(Arc::new(image)),
                 None => decoded = Some(Err(anyhow::anyhow!(decode_failure(&file.path)))),

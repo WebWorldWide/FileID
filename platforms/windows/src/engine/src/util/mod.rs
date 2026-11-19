@@ -1,4 +1,5 @@
 pub mod content_hash;
+pub(crate) mod jpeg_complete;
 pub mod display;
 pub(crate) mod hmac;
 pub(crate) mod hnsw_index;
