@@ -245,9 +245,26 @@ public final class ThumbnailService {
             if let engineData { return engineData }
         }
         await thumbDecodeGate.acquire()
-        let jpegData = Task.isCancelled ? nil : await quickLook(url, size, scale)
+        var jpegData = Task.isCancelled ? nil : await quickLook(url, size, scale)
+        if jpegData == nil, !Task.isCancelled {
+            jpegData = contentThumbnailJPEG(url: url, size: size, scale: scale)
+        }
         await thumbDecodeGate.release()
         return jpegData
+    }
+
+    /// Quick Look picks its decoder from the file name's extension, so a JPEG named .png comes back empty. ImageIO reads the
+    /// bytes, whatever the name.
+    nonisolated static func contentThumbnailJPEG(url: URL, size: CGFloat, scale: CGFloat) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(quickLookSide(size: size, scale: scale) * scale)
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return jpegData(image)
     }
 
     /// `generateBestRepresentation` (single-callback) — the plural

@@ -32,6 +32,8 @@ fn restore_disposition(allowed: bool, occupied: bool) -> RestoreDisposition {
 #[derive(Debug)]
 enum RestoreOutcome {
     Restored(crate::platform::FileIdentity, Option<std::path::PathBuf>),
+    /// An earlier put back already finished: the file is back and the catalog row exists again.
+    AlreadyPutBack,
     Conflict,
     Refused(String),
     Failed(String),
@@ -387,6 +389,25 @@ fn already_restored_outcome(
     })
 }
 
+/// A put back that crashed after moving the file leaves no catalog row, so a retry still finishes it. With the row
+/// already back the batch was put back before, and a second request must say so instead of succeeding again.
+fn catalog_holds(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)",
+        rusqlite::params![item.file_id, item.original_path],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+fn occupied_outcome(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem, original: &std::path::Path) -> RestoreOutcome {
+    match already_restored_outcome(item, original) {
+        Some(_) if catalog_holds(conn, item) => RestoreOutcome::AlreadyPutBack,
+        Some(restored) => restored,
+        None => RestoreOutcome::Conflict,
+    }
+}
+
 /// One item's catalog changes are all-or-nothing, so a bad snapshot row can't leave a
 /// half-restored file behind while the rest of the batch commits.
 fn reconcile_restored_catalog(
@@ -565,7 +586,6 @@ pub(crate) async fn handle_restore_from_trash(
                 .iter()
                 .any(|root| candidate.starts_with(root));
             let occupied = original.symlink_metadata().is_ok();
-            let already_restored = already_restored_outcome(item, original);
             match restore_disposition(allowed, occupied) {
                 RestoreDisposition::Refused => {
                     outcomes[index] = Some(RestoreOutcome::Refused(
@@ -573,7 +593,7 @@ pub(crate) async fn handle_restore_from_trash(
                     ));
                 }
                 RestoreDisposition::Conflict => {
-                    outcomes[index] = Some(already_restored.unwrap_or(RestoreOutcome::Conflict));
+                    outcomes[index] = Some(occupied_outcome(&db.lock(), item, original));
                 }
                 RestoreDisposition::Restore => {
                     #[cfg(windows)]
@@ -682,6 +702,16 @@ pub(crate) async fn handle_restore_from_trash(
                             "the restored object is no longer present at {}",
                             item.original_path
                         )),
+                        reason: None,
+                        operation_id: None,
+                    });
+                }
+                RestoreOutcome::AlreadyPutBack => {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: false,
+                        message: Some(format!("{} was already put back.", item.original_path)),
                         reason: None,
                         operation_id: None,
                     });
@@ -1609,6 +1639,36 @@ mod tests {
         };
         assert!(reconcile_restored_catalog(&tx, &conflicting, identity).is_err());
         tx.commit().unwrap();
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_second_put_back_of_a_finished_batch_is_refused_but_an_unfinished_one_completes() {
+        let base = std::env::temp_dir().join(format!("fileid-restore-twice-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("back.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        let identity = crate::platform::file_identity(&path).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let item = trash_log::TrashLogItem {
+            file_id: 9,
+            original_path: path.to_string_lossy().into_owned(),
+            source_identity: Some(identity),
+            ..Default::default()
+        };
+        assert!(
+            matches!(occupied_outcome(&conn, &item, &path), RestoreOutcome::Restored(recovered, _) if recovered == identity),
+            "the file is back but the catalog never got its row: the retry finishes the put back"
+        );
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, has_faces, has_text, failed) \
+             VALUES (9, ?1, 'h', ?1, 7, 1, 'other', 'bin', 0, 0, 0)",
+            [&item.original_path],
+        )
+        .unwrap();
+        assert!(matches!(occupied_outcome(&conn, &item, &path), RestoreOutcome::AlreadyPutBack));
+        let stranger = trash_log::TrashLogItem { source_identity: None, ..item };
+        assert!(matches!(occupied_outcome(&conn, &stranger, &path), RestoreOutcome::Conflict));
         std::fs::remove_dir_all(base).ok();
     }
 

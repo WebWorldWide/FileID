@@ -99,6 +99,27 @@
     ]
   },
   {
+    "name": "files-second-put-back-of-the-same-batch-is-refused",
+    "description": "restoreFromTrash for a batch already put back changes nothing and reports the file as already put back (failed), never a second success.",
+    "requiresTestTrashRoot": ["darwin"],
+    "knownDivergences": [
+      {"engine": "rust", "os": ["windows"], "run": false, "reason": "trashFiles uses the per-volume Recycle Bin, which the fixture cannot confine to its state directory (the self-hosted runner's bin is a real user's)"}
+    ],
+    "tree": [
+      {"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}}
+    ],
+    "sql": [
+      "INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')"
+    ],
+    "steps": [
+      {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "restore", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
+      {"label": "restore again", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 0, "failed": 1, "messages": [{"fileID": 1, "ok": false}]}},
+      {"label": "file and row untouched", "fs": {"contents": {"docs/trash me.txt": "recoverable\n"}}},
+      {"label": "row still there", "db": "SELECT id,path_text FROM files ORDER BY id", "expect": [[1, "{path:docs/trash me.txt}"]]}
+    ]
+  },
+  {
     "name": "files-trash-recounts-people",
     "description": "Trashing a file recounts the people whose faces were on it: persons.file_count drops and a representative face on that file moves to a surviving face, or to none.",
     "requiresTestTrashRoot": ["darwin"],

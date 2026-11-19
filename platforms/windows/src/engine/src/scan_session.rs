@@ -46,9 +46,12 @@ pub struct SessionResult {
     pub processed: u64,
     pub failed: u64,
     pub elapsed_seconds: f64,
-    /// Files under the root were added, renamed or deleted while this pass ran;
-    /// the caller runs one incremental follow-up pass, which reports the totals.
-    pub changed_during_scan: bool,
+    /// The caller runs one incremental follow-up pass, which reports the totals: files under the root
+    /// were added, renamed or deleted while this pass ran, or some files timed out and are read again.
+    pub needs_follow_up: bool,
+    /// Files this pass stored as failed only because a read timed out and that the follow-up pass reads again;
+    /// the follow-up's totals replace theirs.
+    pub timed_out: u64,
     /// Every photo's stored date already came from its EXIF in this scan (a
     /// forced rescan, or a root with no catalog rows when it started).
     pub capture_dates_current: bool,
@@ -69,6 +72,10 @@ pub struct ScanSession {
     excluded_paths: Vec<String>,
     /// False for the follow-up pass, so a folder that keeps changing cannot loop.
     allow_follow_up: bool,
+    /// The follow-up reads timed-out files again, which a busy machine failed the first time.
+    retrying_timeouts: bool,
+    /// The label the app gave the folder (`startScan.rootDisplay`); Locations shows it instead of the folder's name.
+    root_display: Option<String>,
     /// Counts from the pass this one follows up, added to its final totals.
     carried: (u64, u64, f64),
     /// Decided by the first pass; a follow-up starts with that pass's rows.
@@ -105,6 +112,8 @@ impl ScanSession {
             rescan,
             excluded_paths,
             allow_follow_up: true,
+            retrying_timeouts: false,
+            root_display: None,
             carried: (0, 0, 0.0),
             capture_dates_current: None,
         }
@@ -116,11 +125,24 @@ impl ScanSession {
         self
     }
 
+    pub fn with_root_display(mut self, label: Option<String>) -> Self {
+        self.root_display = label.map(|label| label.trim().to_owned()).filter(|label| !label.is_empty());
+        self
+    }
+
     /// The incremental pass that follows a pass during which files changed.
     pub fn follow_up(mut self, previous: &SessionResult) -> Self {
         self.rescan = false;
         self.allow_follow_up = false;
-        self.carried = (previous.processed, previous.failed, previous.elapsed_seconds);
+        self.carried = (
+            previous.processed.saturating_sub(previous.timed_out),
+            previous.failed.saturating_sub(previous.timed_out),
+            previous.elapsed_seconds,
+        );
+        if previous.timed_out > 0 {
+            self.retrying_timeouts = true;
+            self.worker_count = (self.worker_count / 2).max(1);
+        }
         self.capture_dates_current = Some(previous.capture_dates_current);
         self
     }
@@ -196,8 +218,9 @@ impl ScanSession {
             let root_text = root.to_string_lossy();
             let kind = if root_text.starts_with("\\\\") { "network" } else if root_text.starts_with("/Volumes/") { "external" } else { "internal" };
             let _ = conn.execute(
-                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,?1,?2,?3,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'",
-                rusqlite::params![root_text, kind, started_unix],
+                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,COALESCE(?4,?1),?2,?3,'running') \
+                 ON CONFLICT(path) DO UPDATE SET last_status='running', display=COALESCE(?4,display)",
+                rusqlite::params![root_text, kind, started_unix, self.root_display],
             );
         }
 
@@ -537,6 +560,7 @@ impl ScanSession {
         };
         let tagger = Tagger::with_model_source(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
+            .with_retrying_failures(self.retrying_timeouts)
             .with_legacy_hashes(
                 writer.rename_heal_enabled()
                     && legacy_hash_rows_possible(&self.db_conn.lock(), crate::paths::root().ok().as_deref()),
@@ -735,10 +759,15 @@ impl ScanSession {
         if clean_walk {
             mark_heal_done(&CRASH_HEALED_ROOTS, &root_descendant_prefix(root));
         }
-        if clean_walk
-            && self.allow_follow_up
-            && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started)
-        {
+        // Files a busy machine timed out are read again once, with fewer workers, before the scan reports its totals.
+        let timed_out = if self.allow_follow_up && !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+            count_retryable_timeouts(&self.db_conn.lock(), root, started_unix)
+        } else {
+            0
+        };
+        let files_changed =
+            clean_walk && self.allow_follow_up && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started);
+        if files_changed || timed_out > 0 {
             // Rows of files deleted after they were processed are in the seen set,
             // and renamed files were never visited, so the missing-file pass below
             // would be wrong. Hand over to the follow-up pass, which owns the
@@ -747,12 +776,13 @@ impl ScanSession {
                 .db_conn
                 .lock()
                 .execute("DELETE FROM scan_sessions WHERE id = ?1", rusqlite::params![session_id]);
-            tracing::info!(processed = total, "[SCAN] files changed during the scan; running a follow-up pass");
+            tracing::info!(processed = total, files_changed, timed_out, "[SCAN] running a follow-up pass");
             return Ok(SessionResult {
                 processed: total,
                 failed,
                 elapsed_seconds: started.elapsed().as_secs_f64(),
-                changed_during_scan: true,
+                needs_follow_up: true,
+                timed_out,
                 capture_dates_current,
             });
         }
@@ -852,22 +882,28 @@ impl ScanSession {
                         });
                         let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
                         let report_pass = report.clone();
+                        let late_root = root.to_path_buf();
                         let (conn, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
                         let pass = tokio::task::spawn_blocking(move || {
-                            crate::pipeline::catch_up::run(
+                            let summary = crate::pipeline::catch_up::run(
                                 &conn,
                                 Some(&root),
                                 analyzer.as_ref(),
                                 &|| coordinator.is_cancelled(),
                                 &|| coordinator.is_paused(),
                                 &|event| report_pass.report(event),
-                            )
+                            );
+                            (summary, analyzer)
                         });
                         let finished = pass.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
-                        if let Err(error) = finished {
-                            tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
+                        match finished {
+                            Ok((summary, analyzer)) if summary.careful_waiting && !self.coordinator.is_cancelled() => {
+                                spawn_late_careful_reads(self.db_conn.clone(), late_root, analyzer);
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(%error, "[SCAN] the catch-up pass stopped"),
                         }
                     }
                     None => tracing::warn!("[SCAN] the catch-up pass was skipped: the models did not load"),
@@ -999,10 +1035,55 @@ impl ScanSession {
             processed: total + self.carried.0,
             failed: failed + self.carried.1,
             elapsed_seconds: elapsed + self.carried.2,
-            changed_during_scan: false,
+            needs_follow_up: false,
+            timed_out: 0,
             capture_dates_current,
         })
     }
+}
+
+/// Rows under `root` this scan (written at or after `since`) stored as failed because a read timed out and whose retries are not used up.
+fn count_retryable_timeouts(conn: &Connection, root: &Path, since: f64) -> u64 {
+    let lo = root_descendant_prefix(root);
+    let hi = prefix_upper_bound(&lo);
+    let [per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
+    let base = "SELECT COUNT(*) FROM files f WHERE f.failed = 1 AND f.error_message IN (?1, ?2) AND f.scanned_at >= ?3 \
+                AND f.path_text >= ?4 \
+                AND COALESCE((SELECT c.attempts FROM scan_failures c WHERE c.file_id = f.id), 0) < ?5";
+    let limit = crate::pipeline::catch_up::FAILURE_RETRY_LIMIT;
+    let count = match &hi {
+        Some(hi) => conn.query_row(
+            &format!("{base} AND f.path_text < ?6"),
+            rusqlite::params![per_file, vision, since, lo, limit, hi],
+            |row| row.get::<_, i64>(0),
+        ),
+        None => conn.query_row(base, rusqlite::params![per_file, vision, since, lo, limit], |row| row.get::<_, i64>(0)),
+    };
+    count.unwrap_or(0).max(0) as u64
+}
+
+static LATE_CAREFUL_READS_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The careful text reader was still warming up when the scan ended, so the scan finished without it. This waits for
+/// it in the background (one at a time) and reads what was left owed.
+fn spawn_late_careful_reads(
+    db_conn: Arc<Mutex<Connection>>,
+    root: std::path::PathBuf,
+    analyzer: Box<dyn crate::pipeline::catch_up::Analyzer + Send>,
+) {
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            LATE_CAREFUL_READS_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    if LATE_CAREFUL_READS_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        let _running = Running;
+        crate::pipeline::catch_up::finish_careful_when_ready(&db_conn, Some(&root), analyzer.as_ref(), &|| false);
+    });
 }
 
 /// Progress of the catch-up pass, reported in the post-scan phase the way the
@@ -1666,7 +1747,7 @@ fn soft_hide_missing_rows(
 /// end of the scan that hid the row, as the Swift engine does).
 pub(crate) const HIDDEN_ROW_RETENTION_DAYS: f64 = 30.0;
 const HIDDEN_PURGE_BATCH: usize = 200;
-const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
+pub(crate) const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
 
 pub(crate) fn hidden_retention_days() -> f64 {
     parse_retention_days(std::env::var("FILEID_HIDDEN_RETENTION_DAYS").ok().as_deref())
@@ -2056,6 +2137,65 @@ mod tests {
 
         let mut everywhere = std::collections::HashMap::new();
         assert_eq!(add_given_up_failures(&conn, &mut everywhere, "", None), 2);
+    }
+
+    #[test]
+    fn only_this_scans_timed_out_files_with_retries_left_are_read_again() {
+        let conn = crate::db::test_support::memory_db();
+        let sep = std::path::MAIN_SEPARATOR;
+        let path = |name: &str| format!("{sep}lib{sep}{name}");
+        let [per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
+        let add = |id: i64, name: &str, message: &str, scanned_at: f64, attempts: Option<i64>| {
+            crate::db::test_support::insert_file(&conn, id, &path(name), "image");
+            conn.execute(
+                "UPDATE files SET failed = 1, error_message = ?2, scanned_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, message, scanned_at],
+            )
+            .unwrap();
+            if let Some(attempts) = attempts {
+                conn.execute(
+                    "INSERT INTO scan_failures (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) VALUES (?1, 100, 10, 'build', ?2, 0)",
+                    rusqlite::params![id, attempts],
+                )
+                .unwrap();
+            }
+        };
+        add(1, "vision.jpg", vision, 500.0, Some(1));
+        add(2, "per-file.jpg", per_file, 500.0, Some(2));
+        add(3, "transient.jpg", vision, 500.0, None);
+        add(4, "given-up.jpg", vision, 500.0, Some(3));
+        add(5, "earlier-scan.jpg", vision, 100.0, Some(1));
+        add(6, "corrupt.jpg", "Could not decode image", 500.0, Some(1));
+        crate::db::test_support::insert_file(&conn, 7, &path("fine.jpg"), "image");
+        crate::db::test_support::insert_file(&conn, 8, &format!("{sep}elsewhere{sep}slow.jpg"), "image");
+        conn.execute("UPDATE files SET failed = 1, error_message = ?1, scanned_at = 500.0 WHERE id = 8", [vision]).unwrap();
+        assert_eq!(count_retryable_timeouts(&conn, Path::new(&format!("{sep}lib")), 400.0), 3);
+    }
+
+    #[tokio::test]
+    async fn the_follow_up_replaces_the_timed_out_files_counts_and_uses_fewer_workers() {
+        let first = SessionResult {
+            processed: 40,
+            failed: 14,
+            elapsed_seconds: 30.0,
+            needs_follow_up: true,
+            timed_out: 12,
+            capture_dates_current: true,
+        };
+        let (sink, _writer) = crate::ipc::sink::Sink::spawn();
+        let session = ScanSession::new(
+            ScanCoordinator::new(),
+            Arc::new(Mutex::new(crate::db::test_support::memory_db())),
+            8,
+            sink,
+            ModelSource::lazy(|| unreachable!("no model is needed to plan a follow-up")),
+            true,
+            Vec::new(),
+        )
+        .follow_up(&first);
+        assert_eq!((session.carried.0, session.carried.1), (28, 2));
+        assert_eq!(session.worker_count, 4);
+        assert!(session.retrying_timeouts && !session.allow_follow_up && !session.rescan);
     }
 
     #[test]

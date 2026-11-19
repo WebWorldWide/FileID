@@ -332,6 +332,30 @@ struct VideoThumbnailSourceTests {
         #expect(calls.value == 1)
     }
 
+    @Test func aJPEGNamedPNGStillGetsAThumbnailWhenQuickLookCannotReadIt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("thumb-sniff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try #require(CGContext(data: nil, width: 64, height: 48, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(),
+                                             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(red: 0.8, green: 0.2, blue: 0.2, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
+        let image = try #require(context.makeImage())
+        let jpeg = try #require(ThumbnailService.jpegData(image))
+        let misnamed = directory.appendingPathComponent("hangout_snapshot_0.png")
+        try jpeg.write(to: misnamed)
+        let data = await ThumbnailService.render(url: misnamed, size: 256, scale: 2, modifiedAt: nil, videoSource: nil) { _, _, _ in nil }
+        let thumbnail = try #require(data)
+        let decoded = try #require(CGImageSourceCreateWithData(thumbnail as CFData, nil))
+        #expect(CGImageSourceGetCount(decoded) == 1)
+
+        let notAnImage = directory.appendingPathComponent("notes.png")
+        try Data("not an image".utf8).write(to: notAnImage)
+        let none = await ThumbnailService.render(url: notAnImage, size: 256, scale: 2, modifiedAt: nil, videoSource: nil) { _, _, _ in nil }
+        #expect(none == nil)
+    }
+
     @Test func noEngineMeansQuickLook() async {
         let calls = QuickLookCalls()
         #expect(await render(URL(fileURLWithPath: "/v/photo.jpg"), source: nil, calls: calls) == Self.quickLookJPEG)

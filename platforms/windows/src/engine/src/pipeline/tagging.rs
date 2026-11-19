@@ -628,6 +628,7 @@ pub struct Tagger {
     legacy_hashes: bool,
     scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
     twins: Arc<TwinRegistry>,
+    retrying_failures: bool,
 }
 
 pub(crate) fn apple_scan_enabled() -> bool {
@@ -648,6 +649,11 @@ fn twin_reuse_enabled() -> bool {
 }
 
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const PER_FILE_TIMEOUT_MESSAGE: &str = "per-file timeout after 60s";
+/// The Mac scan's Vision pass for one image did not answer in time.
+pub(crate) const VISION_TIMEOUT_MESSAGE: &str = "Vision pass timed out";
+/// Stored `error_message` of a row that failed only because the machine was too busy, so a retry may succeed.
+pub(crate) const TIMEOUT_MESSAGES: [&str; 2] = [PER_FILE_TIMEOUT_MESSAGE, VISION_TIMEOUT_MESSAGE];
 
 /// Wait for the first copy's analysis before analyzing itself; shorter than `PER_FILE_TIMEOUT` and spent before that timer starts, so waiting never fails the copy.
 const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(45);
@@ -710,7 +716,14 @@ impl Tagger {
             legacy_hashes: false,
             scheduler: crate::resource_scheduler::ResourceScheduler::shared(),
             twins: TwinRegistry::new(),
+            retrying_failures: false,
         }
+    }
+
+    /// The pass that retries what failed earlier in the same scan: a failure here is not remembered as another attempt, so one busy moment cannot use up a file's retries.
+    pub fn with_retrying_failures(mut self, retrying: bool) -> Self {
+        self.retrying_failures = retrying;
+        self
     }
 
     pub fn with_known_twins(self, hashes: impl IntoIterator<Item = [u8; 32]>) -> Self {
@@ -887,6 +900,7 @@ impl Tagger {
             let twins = self.twins.clone();
             let budget = byte_budget.clone();
             let legacy = self.legacy_hashes;
+            let retrying = self.retrying_failures;
 
             let worker = async move {
                 // Sleep briefly every YIELD_AFTER files to give foreground apps and DWM breathing room (<1 % cost).
@@ -966,7 +980,7 @@ impl Tagger {
                                     path = %crate::platform::redact_path_for_log(path_for_timeout),
                                     "per-file timeout after 60s; marking failed and continuing"
                                 );
-                                Err(("per-file timeout after 60s".to_string(), 60000.0))
+                                Err((PER_FILE_TIMEOUT_MESSAGE.to_string(), 60000.0))
                             }
                         }
                     };
@@ -989,6 +1003,7 @@ impl Tagger {
                     }
                     if tagged.failed && !tagged.failure_is_transient {
                         tagged.failure_is_transient = transient
+                            || retrying
                             || coord.is_cancelled()
                             || coord.is_gpu_dead()
                             || !crate::pipeline::catch_up::failure_is_about_the_file(&tagged.path);
@@ -3369,6 +3384,13 @@ mod tests {
     #[test]
     fn a_waiting_copy_gives_up_before_the_per_file_timeout() {
         assert!(TWIN_WAIT_PATIENCE < PER_FILE_TIMEOUT);
+    }
+
+    #[test]
+    fn a_timeout_failure_reads_as_unreadable_in_the_library_not_as_waiting_for_a_retry() {
+        for message in TIMEOUT_MESSAGES {
+            assert!(!message.contains("will retry"), "the Library leaves rows saying \"will retry\" out of its Unreadable count: {message}");
+        }
     }
 
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]

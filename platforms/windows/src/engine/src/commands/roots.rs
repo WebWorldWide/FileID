@@ -1,5 +1,6 @@
 //! `listRoots`: library locations the catalog has scanned, with current reachability and file count (a nested
-//! location's files count only there). Read-only.
+//! location's files count only there; the count includes unreadable files and leaves out the rows the engine hid, so it
+//! adds up to the Library total). Read-only.
 
 use std::sync::Arc;
 
@@ -15,19 +16,23 @@ pub(crate) fn is_online(path: &str) -> bool {
     path.is_dir() && std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }
 
-/// Half-open range matching every stored path under `root`: `root/` up to `root0` (`0` follows `/`; `]` follows `\`).
-/// Scans record the full path as the display name; show the folder's own name instead.
+/// A label the user chose shows as given; a path (what a scan records when none was chosen) shows as the folder's own name.
 fn display_name(path: &str, stored: String) -> String {
-    if stored != path {
+    let is_path = stored == path
+        || stored.starts_with(['/', '\\'])
+        || stored.as_bytes().get(1..3).is_some_and(|rest| rest[0] == b':' && (rest[1] == b'\\' || rest[1] == b'/'));
+    if !is_path {
         return stored;
     }
-    path.trim_end_matches(['/', '\\'])
+    stored
+        .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
         .filter(|name| !name.is_empty())
         .map_or(stored.clone(), str::to_owned)
 }
 
+/// Half-open range matching every stored path under `root`: `root/` up to `root0` (`0` follows `/`; `]` follows `\`).
 fn subtree_bounds(root: &str) -> (String, String, String) {
     let (separator, next) = if root.contains('\\') && !root.contains('/') { ('\\', ']') } else { ('/', '0') };
     let trimmed = root.trim_end_matches(separator);
@@ -116,7 +121,7 @@ pub fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
     let mut roots = Vec::with_capacity(rows.len());
     let paths: Vec<(i64, String)> = rows.iter().map(|row| (row.0, row.1.clone())).collect();
     let totals = format!(
-        "SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM files WHERE failed=0 AND (path_text=?1 OR (path_text>=?2 AND path_text<?3)) AND {}",
+        "SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM files WHERE COALESCE(error_message,'') NOT IN (?5,?6) AND (path_text=?1 OR (path_text>=?2 AND path_text<?3)) AND {}",
         clause("path_text", "?4")
     );
     for (id, path, display, kind, enabled, last_scan_at, last_status) in rows {
@@ -125,7 +130,7 @@ pub fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
         let scope = RootScope::new(&path, &others);
         let (file_count, total_bytes): (i64, i64) = conn.query_row(
             &totals,
-            rusqlite::params![exact, low, high, scope.param()],
+            rusqlite::params![exact, low, high, scope.param(), crate::scan_session::HIDDEN_ROW_MESSAGE, crate::db::zero_byte::ZERO_BYTE_REASON],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let online = is_online(&path);
@@ -177,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_files_under_each_root_and_not_in_lookalike_siblings() {
+    fn counts_the_files_the_library_counts_under_each_root_and_not_in_lookalike_siblings() {
         let conn = conn();
         conn.execute_batch(
             "INSERT INTO library_roots(path,display,kind,added_at,last_scan_at,last_status) VALUES('/Volumes/__fileid_test_absent__/Camera','Camera','external',1,5,'completed'),('/Volumes/__fileid_test_absent__/Camera2','Camera2','external',2,NULL,NULL);
@@ -185,13 +190,22 @@ mod tests {
               (1,'/Volumes/__fileid_test_absent__/Camera/a.jpg',1,100,0,'image','jpg',0),
               (2,'/Volumes/__fileid_test_absent__/Camera/sub/b.jpg',2,200,0,'image','jpg',0),
               (3,'/Volumes/__fileid_test_absent__/Camera/c.jpg',3,400,0,'image','jpg',1),
+              (6,'/Volumes/__fileid_test_absent__/Camera/gone.jpg',6,3200,0,'image','jpg',1),
+              (7,'/Volumes/__fileid_test_absent__/Camera/empty.txt',7,0,0,'doc','txt',1),
               (4,'/Volumes/__fileid_test_absent__/Camera2/d.jpg',4,800,0,'image','jpg',0),
               (5,'/Volumes/__fileid_test_absent__/Cameras/e.jpg',5,1600,0,'image','jpg',0);",
         )
         .unwrap();
+        conn.execute("UPDATE files SET error_message = ?1 WHERE id = 6", [crate::scan_session::HIDDEN_ROW_MESSAGE]).unwrap();
+        conn.execute("UPDATE files SET error_message = ?1 WHERE id = 7", [crate::db::zero_byte::ZERO_BYTE_REASON]).unwrap();
+        conn.execute("UPDATE files SET error_message = 'Could not decode image' WHERE id = 3", []).unwrap();
         let roots = list(&conn).unwrap();
         assert_eq!(roots.len(), 2);
-        assert_eq!((roots[0].file_count, roots[0].total_bytes), (2, 300), "failed rows and sibling folders are excluded");
+        assert_eq!(
+            (roots[0].file_count, roots[0].total_bytes),
+            (3, 700),
+            "an unreadable file counts like the Library counts it; rows the engine hid and sibling folders do not"
+        );
         assert_eq!((roots[1].file_count, roots[1].total_bytes), (1, 800));
         assert_eq!(roots[0].last_status.as_deref(), Some("completed"));
         assert_eq!(roots[1].last_scan_at, None);
@@ -233,6 +247,8 @@ mod tests {
         assert_eq!(display_name(r"D:\Photos\2024", r"D:\Photos\2024".into()), "2024");
         assert_eq!(display_name("/Volumes/Adlon", "Camera".into()), "Camera");
         assert_eq!(display_name("/", "/".into()), "/");
+        assert_eq!(display_name("/Volumes/Adlon/Ryan 2012", "Ryan 2012".into()), "Ryan 2012");
+        assert_eq!(display_name("/private/tmp/Photos", "/tmp/Photos".into()), "Photos", "a path as typed still shows as the folder name");
     }
 
     #[test]

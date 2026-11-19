@@ -343,12 +343,13 @@ pub(crate) async fn handle_start_scan(
         payload.rescan,
         payload.excluded_paths.clone().unwrap_or_default(),
     )
-    .with_session_id(session_id.clone());
+    .with_session_id(session_id.clone())
+    .with_root_display(payload.root_display.clone());
     let root = PathBuf::from(payload.root_path.clone());
 
     let models_for_keep = models.clone();
     let outcome = match session.run(&root, |_| {}).await {
-        Ok(first) if first.changed_during_scan => {
+        Ok(first) if first.needs_follow_up => {
             ScanSession::new(
                 coord,
                 db,
@@ -359,6 +360,7 @@ pub(crate) async fn handle_start_scan(
                 payload.excluded_paths.clone().unwrap_or_default(),
             )
             .with_session_id(session_id)
+            .with_root_display(payload.root_display.clone())
             .follow_up(&first)
             .run(&root, |_| {})
             .await
