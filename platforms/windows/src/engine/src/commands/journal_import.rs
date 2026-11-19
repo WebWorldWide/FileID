@@ -140,7 +140,6 @@ mod tests {
     #[test]
     fn swift_trash_batch_imports_once_with_identity_and_snapshot() {
         let root = scratch("trash");
-        let original = root.join("tree/docs/trash me.txt");
         let trashed = root.join("state/Trash/trash me.txt");
         std::fs::create_dir_all(trashed.parent().unwrap()).unwrap();
         std::fs::write(&trashed, b"trash me\n").unwrap();
@@ -160,7 +159,7 @@ mod tests {
         let item = &entries[0].items[0];
         assert_eq!(entries[0].batch_id, BATCH);
         assert_eq!(item.file_id, 1);
-        assert_eq!(item.original_path, original.to_string_lossy());
+        assert_eq!(item.original_path, format!("{}/tree/docs/trash me.txt", root.to_string_lossy()));
         assert_eq!(item.trashed_path.as_deref(), Some(trashed.to_string_lossy().as_ref()));
         assert_eq!(item.source_identity, Some(identity));
         assert_eq!(item.recycle_bin_id, None, "no claim: startup must never move it out of the Trash");
