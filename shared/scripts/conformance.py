@@ -49,7 +49,8 @@ times, removed files, saved step values and chat conversation), laid out in the 
 /private/tmp/fileid-conformance-fixture/<case name> it was captured in, so the paths
 inside the catalog stay true; the file identities the Swift run recorded are
 refreshed to the replayed files. Such cases are macOS-only ("os": ["darwin"]) and
-must not run alongside another conformance run.
+must not run alongside another conformance run. A fixture case's "sql" runs after the
+fixture is laid out (e.g. to move a journaled time to now for a time-limited undo).
 A case with "model": {"repo": "<org>/<name>"} needs that MLX model installed
 ($FILEID_CONFORMANCE_MODELS, else ~/Documents/huggingface, read only) and is skipped
 without it: a real model is too large to ship in the repo and no engine may download
@@ -861,10 +862,10 @@ def run_case(case, flavor, binary, os_name, parent):
             rows = build_tree(ctx, case.get("tree", []))
             if rows:
                 insert_rows(ctx, rows)
-            if case.get("sql"):
-                with connect(ctx.database) as database:
-                    for statement in case["sql"]:
-                        database.execute(ctx.expand(statement))
+        if case.get("sql"):
+            with connect(ctx.database) as database:
+                for statement in case["sql"]:
+                    database.execute(ctx.expand(statement))
         engine = start(binary, ctx)
         try:
             for index, step in enumerate(case["steps"]):
