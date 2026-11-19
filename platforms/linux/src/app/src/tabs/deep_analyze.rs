@@ -35,7 +35,9 @@ struct VlmKind {
     license: &'static str,
 }
 
-const VLMS: [VlmKind; 3] = [
+const SMALL_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_SMALL_KIND;
+
+const VLMS: [VlmKind; 4] = [
     VlmKind {
         key: "qwen2_5_vl_7b",
         display: "Qwen2.5-VL 7B",
@@ -57,6 +59,13 @@ const VLMS: [VlmKind; 3] = [
         secs_per_image: 14.0,
         license: "Apache-2.0",
     },
+    VlmKind {
+        key: SMALL_VLM_KIND,
+        display: "Qwen3-VL 2B",
+        ram_gb: 3.0,
+        secs_per_image: 3.0,
+        license: "Apache-2.0",
+    },
 ];
 
 fn vlm_by_key(key: &str) -> &'static VlmKind {
@@ -69,11 +78,11 @@ fn recommended_vlm_kind(
     free_disk_bytes: Option<u64>,
 ) -> &'static str {
     let order: &[&str] = if total_ram_gb >= 47.5 {
-        &["mistral_small_3_2", "qwen2_5_vl_7b", "gemma_3_4b"]
+        &["mistral_small_3_2", "qwen2_5_vl_7b", SMALL_VLM_KIND]
     } else if total_ram_gb >= 15.0 {
-        &["qwen2_5_vl_7b", "gemma_3_4b"]
+        &["qwen2_5_vl_7b", SMALL_VLM_KIND]
     } else {
-        &["gemma_3_4b"]
+        &[SMALL_VLM_KIND]
     };
     order
         .iter()
@@ -85,7 +94,21 @@ fn recommended_vlm_kind(
                 .copied()
                 .find(|kind| vlm_fits(kind, total_ram_gb, available_ram_gb, None))
         })
-        .unwrap_or("gemma_3_4b")
+        .unwrap_or(SMALL_VLM_KIND)
+}
+
+thread_local! {
+    static ENGINE_RECOMMENDED_KIND: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// The engine's listModels pick among the choices on offer, or none when it is
+/// absent, not on offer, or under terms the user has not accepted.
+fn engine_recommended_kind(shown: &[VlmChoice], recommended_id: Option<&str>) -> Option<&'static str> {
+    let id = recommended_id?;
+    shown
+        .iter()
+        .find(|choice| choice.id == id && !choice.terms_required)
+        .map(|choice| choice.id)
 }
 
 fn vlm_fits(
@@ -122,6 +145,9 @@ pub fn recommended_vlm_display() -> &'static str {
 }
 
 pub(super) fn host_recommended_vlm_kind() -> &'static str {
+    if let Some(kind) = ENGINE_RECOMMENDED_KIND.with(Cell::get) {
+        return kind;
+    }
     let total = fileid_engine::platform::physical_memory_gb();
     let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
     let free = fileid_engine::paths::models_dir()
@@ -330,6 +356,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         apply_in_flight: Cell::new(false),
         apply_generation: Cell::new(0),
         active_kind: Cell::new(default_kind),
+        user_picked: Cell::new(false),
         counts: Cell::new(StatusCounts::default()),
         tip_dismissed: Cell::new(false),
         lbl_active,
@@ -435,6 +462,7 @@ struct DeepUi {
     apply_in_flight: Cell<bool>,
     apply_generation: Cell<u64>,
     active_kind: Cell<&'static str>,
+    user_picked: Cell<bool>,
     counts: Cell<StatusCounts>,
     tip_dismissed: Cell<bool>,
 
@@ -1008,7 +1036,15 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
                 fileid_engine::models::license::policy_for(id).is_some()
             });
             if !shown.is_empty() {
+                let recommended = engine_recommended_kind(&shown, catalog.recommended_id.as_deref());
+                if recommended.is_some() {
+                    ENGINE_RECOMMENDED_KIND.with(|cell| cell.set(recommended));
+                }
                 ui.choices.replace(shown);
+                if let Some(kind) = recommended.filter(|_| !ui.user_picked.get()) {
+                    ui.active_kind.set(kind);
+                    ui.skip_check.set_tooltip_text(Some(&skip_tooltip(&active_display(ui))));
+                }
                 render_picker(ui);
                 refresh(ui);
             }
@@ -1372,6 +1408,7 @@ fn pick_row(ui: &Rc<DeepUi>, choice: &VlmChoice) -> gtk::Button {
         ui,
         move |_| {
             ui.active_kind.set(key);
+            ui.user_picked.set(true);
             for row in ui.pick_rows.borrow().iter() {
                 let active = row.key == key;
                 if active {
@@ -1930,8 +1967,45 @@ mod recommendation_tests {
     }
 
     #[test]
-    fn low_ram_uses_gemma() {
-        assert_eq!(recommended_vlm_kind(8.0, 6.0, Some(PLENTY)), "gemma_3_4b");
+    fn low_ram_default_is_never_terms_gated() {
+        for (total, available) in [(8.0, 6.0), (4.0, 3.0), (15.5, 2.0), (64.0, 1.0)] {
+            let kind = recommended_vlm_kind(total, available, Some(PLENTY));
+            assert!(
+                fileid_engine::models::license::policy_for(kind).is_none(),
+                "{kind} is terms-gated at {total} GB"
+            );
+        }
+        assert_eq!(recommended_vlm_kind(8.0, 6.0, Some(PLENTY)), SMALL_VLM_KIND);
+    }
+
+    fn choice(id: &'static str, terms_required: bool) -> VlmChoice {
+        VlmChoice {
+            id,
+            name: id.to_owned(),
+            license: String::new(),
+            terms_required,
+            resident_gb: 1.0,
+            download_gb: 1.0,
+            installed: false,
+            curated: false,
+            fits: true,
+            measured_secs_per_image: None,
+        }
+    }
+
+    #[test]
+    fn default_follows_the_engines_recommended_id() {
+        let shown = [choice("qwen2_5_vl_7b", false), choice("gemma_3_4b", true), choice(SMALL_VLM_KIND, false)];
+        assert_eq!(engine_recommended_kind(&shown, Some(SMALL_VLM_KIND)), Some(SMALL_VLM_KIND));
+        assert_eq!(engine_recommended_kind(&shown, Some("qwen2_5_vl_7b")), Some("qwen2_5_vl_7b"));
+        assert_eq!(engine_recommended_kind(&shown, None), None);
+        assert_eq!(engine_recommended_kind(&shown, Some("not_offered")), None);
+    }
+
+    #[test]
+    fn engine_recommendation_is_never_a_terms_gated_model() {
+        let shown = [choice("gemma_3_4b", true), choice("qwen2_5_vl_7b", false)];
+        assert_eq!(engine_recommended_kind(&shown, Some("gemma_3_4b")), None);
     }
 
     #[test]
