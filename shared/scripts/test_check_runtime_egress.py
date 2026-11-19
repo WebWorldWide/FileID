@@ -387,8 +387,6 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-            "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-            "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
         })
 
     def test_string_decoys_cannot_replace_live_downloader_contracts(self) -> None:

@@ -63,7 +63,7 @@ final class CLIPModelInstaller: ModelInstalling {
             .reduce(0) { $0 + $1.approxBytes }
     }()
 
-    private static var fetchPlan: [(remote: URL, dest: URL, sha256: String?)] {
+    private static var fetchPlan: [(dest: URL, sha256: String?)] {
         let m = modelsRoot
         let txtDir = m.appendingPathComponent("clip_text")
         let plan: [(String, URL)] = [
@@ -73,8 +73,8 @@ final class CLIPModelInstaller: ModelInstalling {
             ("clip_bpe_merges", txtDir.appendingPathComponent("merges.txt")),
         ]
         return plan.compactMap { id, dest in
-            guard let artifact = ModelManifest.artifact(id: id), let remote = URL(string: artifact.url) else { return nil }
-            return (remote: remote, dest: dest, sha256: artifact.sha256)
+            guard let artifact = ModelManifest.artifact(id: id) else { return nil }
+            return (dest: dest, sha256: artifact.sha256)
         }
     }
 
@@ -120,11 +120,7 @@ final class CLIPModelInstaller: ModelInstalling {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self] in
             await AppSleepActivity.run(reason: "Install CLIP models") {
-                if EngineModelInstall.active {
-                    await self?.runEngineInstall()
-                } else {
-                    await self?.runHubFetch()
-                }
+                await self?.runEngineInstall()
             }
             self?.task = nil
         }
@@ -167,76 +163,11 @@ final class CLIPModelInstaller: ModelInstalling {
 
     // MARK: - Implementation
 
-    /// Concurrent per-file fetch from HF (3 streams). Each file's
-    /// tick lands in the shared tracker; the global Status.downloading
-    /// reads sum-of-writtens / sum-of-totals + summed bandwidth.
-    /// Files stage into a sibling dir and atomic-promote on full
-    /// success — a partial install never poisons the production tree.
-    private func runHubFetch() async {
-        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
-        installing = true
-        defer { installing = false }
-        Self.sweepOrphanedStagingRoots()
-        let approxBytes = Self.approxDownloadBytes
-        try? FileManager.default.createDirectory(at: Self.modelsRoot, withIntermediateDirectories: true)
-        if let free = ModelInstaller.freeDiskBytes(at: Self.modelsRoot), free < approxBytes * 2 {
-            status = .installFailed(ModelInstaller.notEnoughSpace(needed: approxBytes * 2, available: free))
-            return
-        }
-
-        let modelsRoot = Self.modelsRoot
-        let stagingRoot = modelsRoot
-            .appendingPathComponent(".clip-staging-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: stagingRoot) }
-
-        let plan = Self.fetchPlan
-        let stagedPlan: [(remote: URL, staged: URL, finalDest: URL, sha256: String?)] = plan.map { item in
-            let rel = item.dest.path.dropFirst(modelsRoot.path.count + 1)
-            let staged = stagingRoot.appendingPathComponent(String(rel))
-            return (item.remote, staged, item.dest, item.sha256)
-        }
-
-        status = .downloading(fraction: 0, message: "Connecting…",
-                              bytesPerSecond: 0, etaSeconds: 0)
-        let tracker = ProgressTracker(fileCount: plan.count)
-
-        do {
-            try await runParallelDownloads(
-                plan: stagedPlan.map { (remote: $0.remote, dest: $0.staged, sha256: $0.sha256) },
-                // Each file uses up to 8-way ranged GETs internally,
-                // so 2 concurrent files = ~16 TCP connections to HF.
-                // More than that and Cloudflare starts rate-limiting.
-                tracker: tracker, maxConcurrency: 2
-            )
-        } catch {
-            status = ModelInstaller.failureStatus(error)
-            return
-        }
-
-        status = .extracting
-        do {
-            try promoteStaged(stagedPlan.map { (staged: $0.staged, finalDest: $0.finalDest) })
-        } catch {
-            status = .installFailed("FileID couldn't save the downloaded files. Try again.")
-            recomputePresentFiles()
-            return
-        }
-
-        for f in Self.requiredFiles {
-            if !FileManager.default.fileExists(atPath: f.path) {
-                status = .installFailed("The download didn't finish. Try again.")
-                recomputePresentFiles()
-                return
-            }
-        }
-
-        // The engine embeds search text; marking ready lets search use it now.
-        markTextEncoderReady()
-        refreshStatus()
-    }
-
     private func runEngineInstall() async {
+        guard EngineModelInstall.active else {
+            status = .installFailed(EngineModelInstall.notResponding)
+            return
+        }
         installing = true
         defer { installing = false }
         status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
@@ -271,146 +202,12 @@ final class CLIPModelInstaller: ModelInstalling {
         }
     }
 
-    /// Body lives outside the TaskGroup closure so the Swift 6 region
-    /// isolation checker sees Sendable parameters instead of capture
-    /// inference on the closure's implicit set.
-    private func runParallelDownloads(
-        plan: [(remote: URL, dest: URL, sha256: String?)],
-        tracker: ProgressTracker,
-        maxConcurrency: Int
-    ) async throws {
-        let count = plan.count
-        let remotes: [URL] = plan.map(\.remote)
-        let dests:   [URL] = plan.map(\.dest)
-        let hashes:  [String?] = plan.map(\.sha256)
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            var inFlight = 0
-            var i = 0
-            while i < count {
-                if inFlight >= maxConcurrency {
-                    try await group.next()
-                    inFlight -= 1
-                }
-                let idx = i
-                let remote = remotes[idx]
-                let dest = dests[idx]
-                let sha256 = hashes[idx]
-                group.addTask {
-                    try await Self.runOneFile(index: idx, remote: remote,
-                                              dest: dest, sha256: sha256,
-                                              tracker: tracker)
-                }
-                inFlight += 1
-                i += 1
-            }
-            try await group.waitForAll()
-        }
-    }
-
-    private static func runOneFile(
-        index: Int, remote: URL, dest: URL, sha256: String?, tracker: ProgressTracker
-    ) async throws {
-        try Task.checkCancellation()
-        try FileManager.default.createDirectory(
-            at: dest.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        // parallelStreamingDownload HEADs first, decides parts based
-        // on Content-Length, and falls back to single-stream when the
-        // host doesn't expose ranges or the file is small. weight.bin
-        // (~80 MB) gets 8-way; Manifest.json (~few KB) stays single.
-        try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12,
-                                            expectedSHA256: sha256) { tick in
-            tracker.update(index: index, tick: tick)
-            Task { @MainActor in
-                Self.shared.publishFromTracker(tracker)
-            }
-        }
-        tracker.markComplete(index: index)
-        await MainActor.run { Self.shared.publishFromTracker(tracker) }
-    }
-
-    @MainActor
-    private func publishFromTracker(_ tracker: ProgressTracker) {
-        guard installing else { return }
-        let snap = tracker.snapshot()
-        let total = snap.totalBytes
-        let written = snap.writtenBytes
-        let frac = total > 0 ? min(1.0, Double(written) / Double(total)) : 0
-        let activeCount = snap.activeFiles
-        let msg = ModelInstaller.progressMessage(
-            written: written, total: total,
-            suffix: activeCount > 1 ? " (\(activeCount) files in parallel)" : "")
-        status = .downloading(
-            fraction: frac, message: msg,
-            bytesPerSecond: snap.combinedBytesPerSec,
-            etaSeconds: snap.combinedETASec
-        )
-    }
-
-    /// Lock-protected aggregator. NSLock + `@unchecked Sendable` rather
-    /// than `@MainActor` because Swift 6's region isolation checker
-    /// can't see through the `addTask { @MainActor in … }` closure.
-    private final class ProgressTracker: @unchecked Sendable {
-        struct FileState { var written: Int64; var total: Int64; var bps: Double; var done: Bool }
-        struct Snapshot {
-            let writtenBytes: Int64
-            let totalBytes: Int64
-            let combinedBytesPerSec: Double
-            let combinedETASec: Double
-            let activeFiles: Int
-        }
-        private let lock = NSLock()
-        private var states: [FileState]
-
-        init(fileCount: Int) {
-            self.states = Array(repeating: FileState(written: 0, total: 0, bps: 0, done: false),
-                                count: fileCount)
-        }
-
-        func update(index: Int, tick: DownloadTick) {
-            lock.lock(); defer { lock.unlock() }
-            guard states.indices.contains(index) else { return }
-            states[index].written = tick.written
-            if tick.total > 0 { states[index].total = tick.total }
-            states[index].bps = tick.bytesPerSecond
-        }
-
-        func markComplete(index: Int) {
-            lock.lock(); defer { lock.unlock() }
-            guard states.indices.contains(index) else { return }
-            states[index].done = true
-            if states[index].total > 0 {
-                states[index].written = states[index].total
-            }
-            states[index].bps = 0
-        }
-
-        func snapshot() -> Snapshot {
-            lock.lock(); defer { lock.unlock() }
-            var written: Int64 = 0
-            var total: Int64 = 0
-            var bps: Double = 0
-            var active = 0
-            for s in states {
-                written += s.written
-                total += s.total
-                if !s.done && s.bps > 0 { bps += s.bps; active += 1 }
-                if !s.done && s.bps == 0 && s.written > 0 { active += 1 }
-            }
-            let remaining = max(0, total - written)
-            let eta = bps > 0 ? Double(remaining) / bps : 0
-            return Snapshot(writtenBytes: written, totalBytes: total,
-                            combinedBytesPerSec: bps, combinedETASec: eta,
-                            activeFiles: active)
-        }
-    }
-
     private func runExtract(zipAt zipURL: URL, deleteZipAfter: Bool) async {
         guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
         status = .extracting
         let modelsRoot = Self.modelsRoot
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
+        Self.sweepOrphanedStagingRoots()
 
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: zipURL.path, isDirectory: &isDir),

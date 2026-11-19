@@ -124,9 +124,9 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "49ab265bda91f9c72bdff23211af0fa190a2fa6ffefb92a3807a37b43e067785",
   "platforms/windows/src/engine/src/commands/video_export.rs": "95b83f52ddf1ac261daabe0157a4ba4cece7e53a814bb8398929efc07b190c3d",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "eff38092668e6886b61f1956479ae6bb43f15b8cf80ee7d8f6a9ab7896ec2346",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "dbafbf68cfcc101f9750a24e9f165f56f00908d5b982e58c93f84e1b1c4f37d9",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f551ebd6a8a17a39619436c62d7e3b463a9527cd37060b7b1c4e1058707db541",
-  "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "4e4010f0331c6471ffd0fa9ddb118cd8ab3dbb351e17b52fb464e78ffb11f7c9",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "c0fc7fe55ce5d6bf86e920b066036dd1fcbdd993bfbf9124b4503637e015ebac",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "0b6c28cd3b5ea50b608cb494defd87be612a26fa8f36e904da18a768501049a2",
+  "platforms/apple/shared/Sources/FileIDVLMCore/DeepAnalyze.swift": "e6886afc9abe3caffbf1de191eb3e48975b53f6ae67a056f60d17387af4ad961",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDModelInfo/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "c937536bd5342569378b3dfc42a3b7e47f9cdf522ea73ed7e5add0a6d8e2d8d8",
@@ -155,7 +155,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "a5e0f2e939dc670ff3b53559b22c5df9768d7617071837f4bd420e60c8140cc9",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "b615a018b7a432860437f1a31e0c18f92a69d4ec70d00cb3de0e7821077838f2",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "7100eaa0fdfd2ff2051659a5416e98ac563ccd01760c0e9506fd738a52a3e3b1",
-  "platforms/windows/src/engine/src/platform.rs": "2be8129c33d2790767c25409cfab5c38103a49fa10bb827fc53ade35272b9884",
+  "platforms/windows/src/engine/src/platform.rs": "339c2e5beb9265a46db2d1d5f98b2dbc2553830cae3c991a7a2c3e643f48444b",
   "platforms/windows/src/engine/src/shell/heic.rs": "747e17bbfd709aa20558018bfa3b13c42107902837229826f79fc01695c961bb",
   "platforms/windows/src/engine/src/shell/mod.rs": "9764c853e6b3c7181bd2cfaac7b1752849d0a75cb83889390459c9acf21697f2",
   "platforms/windows/src/engine/src/shell/ocr.rs": "8360b4a7d6ca7f4bbc676be053647f42004f499f135fe0eabadac2f22d38fc84",
@@ -170,8 +170,6 @@ SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
-    "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-    "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
 }
 RAW_NETWORK_PATTERNS = {
     ".rs": re.compile(
