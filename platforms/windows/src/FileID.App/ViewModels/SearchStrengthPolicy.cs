@@ -11,7 +11,7 @@ internal static partial class SearchStrengthPolicy
 
     private const int MaxLength = 80;
 
-    [GeneratedRegex(@"^(No matches\.|No good matches, \d{1,9} weaker\.|\d{1,9} good match(es)?(, \d{1,9} weaker)?\.)$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^(No matches\.|No good matches, \d{1,9} weaker\.|\d{1,9} match(es)? \(\d{1,9} strong visual\)(, \d{1,9} weaker)?\.)$", RegexOptions.CultureInvariant)]
     private static partial Regex SummaryShape();
 
     public static string? Label(string? query, string? message)
@@ -25,7 +25,7 @@ internal static partial class SearchStrengthPolicy
     [GeneratedRegex(@"^No good matches, (\d{1,9}) weaker\.$", RegexOptions.CultureInvariant)]
     private static partial Regex WeakerOnlyShape();
 
-    [GeneratedRegex(@"^(\d{1,9}) good match(?:es)?(?:, (\d{1,9}) weaker)?\.$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^(\d{1,9}) match(?:es)? \(\d{1,9} strong visual\)(?:, (\d{1,9}) weaker)?\.$", RegexOptions.CultureInvariant)]
     private static partial Regex GoodShape();
 
     public static (int Good, int Weaker)? Counts(string? message)

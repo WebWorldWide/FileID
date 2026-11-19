@@ -772,7 +772,7 @@ fn visual_wanted(query: &str) -> bool {
     query.trim().chars().count() >= 3
 }
 
-/// The engine's result summary ("3 good matches, 1 weaker."), shown in place
+/// The engine's result summary ("3 matches (2 strong visual), 1 weaker."), shown in place
 /// of the file count; nothing when the engine sent none.
 fn strength_label(message: Option<&str>) -> Option<String> {
     message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned)
@@ -798,7 +798,9 @@ fn parse_strength(message: Option<&str>) -> Option<(u64, u64)> {
         Some((head, tail)) => (head, Some(tail.strip_suffix(" weaker")?)),
         None => (body, None),
     };
-    let good = head.strip_suffix(" good matches").or_else(|| head.strip_suffix(" good match"))?;
+    let (counted, strong) = head.split_once(" (")?;
+    count(strong.strip_suffix(" strong visual)")?)?;
+    let good = counted.strip_suffix(" matches").or_else(|| counted.strip_suffix(" match"))?;
     let weaker = match weak {
         Some(digits) => count(digits)?,
         None => 0,
@@ -2061,13 +2063,13 @@ mod tests {
     #[test]
     fn summary_text_matches_the_mac_wording() {
         use fileid_engine::models::search_strength::summary;
-        let shown = |good, weak| strength_label(Some(&summary(good, weak)));
-        assert_eq!(shown(1, 0).as_deref(), Some("1 good match."));
-        assert_eq!(shown(3, 0).as_deref(), Some("3 good matches."));
-        assert_eq!(shown(1, 2).as_deref(), Some("1 good match, 2 weaker."));
-        assert_eq!(shown(4, 1).as_deref(), Some("4 good matches, 1 weaker."));
-        assert_eq!(shown(0, 5).as_deref(), Some("No good matches, 5 weaker."));
-        assert_eq!(shown(0, 0).as_deref(), Some("No matches."));
+        let shown = |good, strong, weak| strength_label(Some(&summary(good, strong, weak)));
+        assert_eq!(shown(1, 1, 0).as_deref(), Some("1 match (1 strong visual)."));
+        assert_eq!(shown(3, 0, 0).as_deref(), Some("3 matches (0 strong visual)."));
+        assert_eq!(shown(1, 1, 2).as_deref(), Some("1 match (1 strong visual), 2 weaker."));
+        assert_eq!(shown(4, 2, 1).as_deref(), Some("4 matches (2 strong visual), 1 weaker."));
+        assert_eq!(shown(0, 0, 5).as_deref(), Some("No good matches, 5 weaker."));
+        assert_eq!(shown(0, 0, 0).as_deref(), Some("No matches."));
     }
 
     #[test]
@@ -2082,8 +2084,8 @@ mod tests {
 
     #[test]
     fn parses_the_engines_sentences() {
-        assert_eq!(parse_strength(Some("3 good matches, 1 weaker.")), Some((3, 1)));
-        assert_eq!(parse_strength(Some("1 good match.")), Some((1, 0)));
+        assert_eq!(parse_strength(Some("3 matches (2 strong visual), 1 weaker.")), Some((3, 1)));
+        assert_eq!(parse_strength(Some("1 match (1 strong visual).")), Some((1, 0)));
         assert_eq!(parse_strength(Some("No good matches, 60 weaker.")), Some((0, 60)));
         assert_eq!(parse_strength(Some("No matches.")), Some((0, 0)));
         assert_eq!(parse_strength(Some("Matches by name, text and what's in the picture.")), None);
@@ -2093,10 +2095,10 @@ mod tests {
 
     #[test]
     fn good_matches_show_the_engines_list_and_summary() {
-        let d = decided(Some("4 good matches, 20 weaker."), 2, false);
+        let d = decided(Some("4 matches (3 strong visual), 20 weaker."), 2, false);
         assert_eq!(d.source, SearchSource::Engine);
         assert_eq!(d.hidden_weaker, 0);
-        assert_eq!(d.label.as_deref(), Some("4 good matches, 20 weaker."));
+        assert_eq!(d.label.as_deref(), Some("4 matches (3 strong visual), 20 weaker."));
     }
 
     #[test]
@@ -2141,7 +2143,7 @@ mod tests {
 
     #[test]
     fn only_the_engines_list_decisions_add_keyword_rows() {
-        assert!(decided(Some("4 good matches, 20 weaker."), 2, false).add_keyword_rows);
+        assert!(decided(Some("4 matches (3 strong visual), 20 weaker."), 2, false).add_keyword_rows);
         assert!(decided(Some("No good matches, 60 weaker."), 0, true).add_keyword_rows);
         assert!(decided(Some("Matches by name, text and what's in the picture."), 0, false).add_keyword_rows);
         assert!(decided(None, 0, false).add_keyword_rows);

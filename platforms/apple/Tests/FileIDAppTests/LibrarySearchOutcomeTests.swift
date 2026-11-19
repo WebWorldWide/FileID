@@ -8,9 +8,9 @@ struct LibrarySearchOutcomeTests {
     }
 
     @Test func parsesTheEnginesSentences() {
-        let both = LibrarySearchOutcome.Strength(message: "3 good matches, 1 weaker.")
-        #expect(both?.good == 3 && both?.weaker == 1 && both?.text == "3 good matches, 1 weaker.")
-        #expect(LibrarySearchOutcome.Strength(message: "1 good match.")?.good == 1)
+        let both = LibrarySearchOutcome.Strength(message: "3 matches (2 strong visual), 1 weaker.")
+        #expect(both?.good == 3 && both?.strong == 2 && both?.weaker == 1 && both?.text == "3 matches (2 strong visual), 1 weaker.")
+        #expect(LibrarySearchOutcome.Strength(message: "1 match (1 strong visual).")?.good == 1)
         #expect(LibrarySearchOutcome.Strength(message: "No good matches, 60 weaker.")?.weaker == 60)
         #expect(LibrarySearchOutcome.Strength(message: "No matches.")?.good == 0)
         #expect(LibrarySearchOutcome.Strength(message: "Matches by name, text and what's in the picture.") == nil)
@@ -19,16 +19,16 @@ struct LibrarySearchOutcomeTests {
     }
 
     @Test func goodMatchesShowTheEnginesListAndSummary() {
-        let d = decide("4 good matches, 20 weaker.", keywords: 2)
-        #expect(d.source == .engine && d.addKeywordRows && d.hiddenWeaker == 0 && d.label == "4 good matches, 20 weaker.")
+        let d = decide("4 matches (3 strong visual), 20 weaker.", keywords: 2)
+        #expect(d.source == .engine && d.addKeywordRows && d.hiddenWeaker == 0 && d.label == "4 matches (3 strong visual), 20 weaker.")
     }
 
     @Test func aSummaryThatFillsTheRequestLimitSaysItWasCut() {
-        #expect(decide("60 good matches.").label == "60+ good matches.")
-        #expect(decide("45 good matches, 15 weaker.").label == "45 good matches, 15+ weaker.")
-        #expect(decide("8 good matches, 51 weaker.").label == "8 good matches, 51 weaker.")
+        #expect(decide("60 matches (7 strong visual).").label == "60+ matches (7+ strong visual).")
+        #expect(decide("45 matches (7 strong visual), 15 weaker.").label == "45 matches (7 strong visual), 15+ weaker.")
+        #expect(decide("8 matches (2 strong visual), 51 weaker.").label == "8 matches (2 strong visual), 51 weaker.")
         #expect(decide("No good matches, 60 weaker.", showWeaker: true).label == "No good matches, 60+ weaker.")
-        #expect(decide("59 good matches.").label == "59 good matches.")
+        #expect(decide("59 matches (0 strong visual).").label == "59 matches (0 strong visual).")
     }
 
     @Test func keywordMatchesOnlyKeepWeakerBehindTheAction() {
@@ -55,13 +55,13 @@ struct LibrarySearchOutcomeTests {
     }
     @Test func aKindFilterRecountsTheSummaryForTheRowsItKeeps() {
         let hits: [Int64] = [1, 2, 3, 4, 5, 6]
-        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [2, 5]) == "1 good match, 1 weaker.")
-        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [1, 2]) == "2 good matches.")
-        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: [6]) == "No good matches, 1 weaker.")
-        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: hits, keptIDs: []) == "No matches.")
-        #expect(LibrarySearchOutcome.narrowed(message: "3 good matches, 3 weaker.", hitIDs: [1, 1, 2, 4, 4, 5], keptIDs: [1, 4]) == "1 good match, 1 weaker.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 matches (2 strong visual), 3 weaker.", hitIDs: hits, keptIDs: [2, 5]) == "1 match, 1 weaker.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 matches (2 strong visual), 3 weaker.", hitIDs: hits, keptIDs: [1, 2]) == "2 matches.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 matches (2 strong visual), 3 weaker.", hitIDs: hits, keptIDs: [6]) == "No good matches, 1 weaker.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 matches (2 strong visual), 3 weaker.", hitIDs: hits, keptIDs: []) == "No matches.")
+        #expect(LibrarySearchOutcome.narrowed(message: "3 matches (2 strong visual), 3 weaker.", hitIDs: [1, 1, 2, 4, 4, 5], keptIDs: [1, 4]) == "1 match, 1 weaker.")
         #expect(LibrarySearchOutcome.narrowed(message: "Something else", hitIDs: hits, keptIDs: [1]) == nil)
-        let filtered = LibrarySearchOutcome.decide(message: LibrarySearchOutcome.narrowed(message: "8 good matches, 52 weaker.", hitIDs: hits, keptIDs: []),
+        let filtered = LibrarySearchOutcome.decide(message: LibrarySearchOutcome.narrowed(message: "8 matches (3 strong visual), 52 weaker.", hitIDs: hits, keptIDs: []),
                                                    keywordCount: 0, showWeaker: false)
         #expect(filtered.label == "No matches" && filtered.hiddenWeaker == 0)
     }
