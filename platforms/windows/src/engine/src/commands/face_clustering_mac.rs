@@ -1708,7 +1708,7 @@ fn finish(conn: &mut Connection, pool: &[i64], held: &HashSet<i64>, space: &Spac
 }
 
 fn person_count(conn: &Connection) -> u32 {
-    conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get::<_, i64>(0)).map_or(0, |count| count as u32)
+    crate::read::people::active_person_count(conn).unwrap_or(0)
 }
 
 fn result(person_count: u32, face_count: usize, unmatched: usize, started: Instant) -> FaceClusteringResult {

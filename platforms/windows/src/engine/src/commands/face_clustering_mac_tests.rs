@@ -120,6 +120,26 @@ fn a_swift_catalog_keeps_person_ids_names_and_unknowns() {
 }
 
 #[test]
+fn person_count_is_the_number_of_people_the_page_shows() {
+    let catalog = Catalog::new();
+    catalog.person(10, Some("Alex"), false);
+    catalog.person(20, None, false);
+    catalog.person(40, None, false);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 1, 0.6, Some(20));
+    }
+    let (catalog, outcome) = catalog.run();
+    let stored: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+    let shown = crate::read::people::active_people(&catalog.conn, None).unwrap().len();
+    assert_eq!(stored, 3, "the emptied person stays in the catalog");
+    assert_eq!(shown, 2);
+    assert_eq!(outcome.result.person_count as usize, shown);
+}
+
+#[test]
 fn fresh_faces_form_people_and_small_low_quality_groups_stay_unassigned() {
     let catalog = Catalog::new();
     for face in 1..=4 {
