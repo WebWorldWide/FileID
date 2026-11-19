@@ -58,13 +58,16 @@ pub(crate) fn fits(format: &str, download_bytes: u64, resident_gb: f64, memory: 
     (model_memory::fits_budget(memory.total_mb, requested), model_memory::fits_now(memory.total_mb, memory.available_mb, requested))
 }
 
+const MAC_LADDER: [&str; 4] = ["mistral_small_3_2", "qwen3_vl_8b", "qwen3_vl_4b", "qwen3_vl_2b"];
+
+/// The 2B-class end of the portable ladder is the catalog's Qwen3-VL 2B (Apache-2.0, ggml-org, pinned revision), the only vetted GGUF of that size.
+pub(crate) const PORTABLE_SMALL_KIND: &str = "qwen3_vl_2b_instruct_gguf_q8_0";
+
+const PORTABLE_LADDER: [&str; 4] = ["qwen2_5_vl_7b", "qwen3_vl_8b", "qwen3_vl_4b", PORTABLE_SMALL_KIND];
+
 /// Best first. Models under separate terms (Gemma) are opt-in, never a default.
-fn default_ladder() -> &'static [&'static str] {
-    if crate::paths::APP_HOSTED {
-        &["mistral_small_3_2", "qwen3_vl_8b", "qwen3_vl_4b", "qwen3_vl_2b"]
-    } else {
-        &["qwen2_5_vl_7b", "qwen3_vl_8b", "qwen3_vl_4b"]
-    }
+pub(crate) fn default_ladder() -> &'static [&'static str] {
+    if crate::paths::APP_HOSTED { &MAC_LADDER } else { &PORTABLE_LADDER }
 }
 
 pub(crate) fn recommended_vision(items: &[ModelCatalogItem], memory: Memory) -> Option<String> {
@@ -216,6 +219,29 @@ mod tests {
         assert_eq!(pick(16384, 6500).as_deref(), Some(third));
         assert_eq!(pick(65536, 50000).as_deref(), Some(best));
         assert_eq!(pick(2048, 2000), None);
+    }
+
+    #[test]
+    fn an_8_gb_windows_or_linux_pc_has_a_2b_model_to_fall_back_to() {
+        let small = catalog::runnable_vision(PORTABLE_SMALL_KIND).expect("the portable 2B model is a runnable catalog vision model");
+        assert_eq!((small.license.as_str(), small.terms_required), ("Apache-2.0", false));
+        assert!(small.platforms.iter().any(|p| p == "windows") && small.platforms.iter().any(|p| p == "linux"));
+        assert!(!MAC_LADDER.contains(&PORTABLE_SMALL_KIND) && PORTABLE_LADDER.last() == Some(&PORTABLE_SMALL_KIND));
+        if crate::paths::APP_HOSTED {
+            return;
+        }
+        let eight_gb = |available_mb| {
+            let memory = Memory { total_mb: 8192, available_mb };
+            (recommended_vision(&build(Some("vision"), memory), memory), build(Some("vision"), memory).into_iter().find(|m| m.id == PORTABLE_SMALL_KIND))
+        };
+        let (recommended, small) = eight_gb(7000);
+        assert_eq!(recommended.as_deref(), Some("qwen3_vl_4b"));
+        assert!(small.is_some_and(|m| m.fits && m.fits_now));
+        let (recommended, small) = eight_gb(4600);
+        assert_eq!(recommended.as_deref(), Some(PORTABLE_SMALL_KIND), "the 4B needs 5.5 GB free; the 2B loads in 4.6 GB");
+        assert!(small.is_some_and(|m| m.fits && m.fits_now));
+        let (recommended, _) = eight_gb(2000);
+        assert_eq!(recommended.as_deref(), Some(PORTABLE_SMALL_KIND), "nothing loads now: the smallest model that could ever run");
     }
 
     #[test]
