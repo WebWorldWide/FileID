@@ -166,13 +166,13 @@ fn favorites_follow_the_manifest_in_swift_order() {
 #[test]
 fn list_items_follow_the_swift_engine() {
     let _scratch = Scratch::new("list");
-    let items = catalog_items(None, 16.0, &HashMap::new());
+    let items = catalog_items(None, crate::commands::models::Memory { total_mb: 16384, available_mb: 12000 }, &HashMap::new());
     assert_eq!(items.len(), listed().count());
     let first = &items[0];
     assert_eq!((first.id.as_str(), first.name.as_str(), first.format.as_str()), ("qwen2_5_vl_7b", "Qwen2.5-VL 7B (4-bit)", "mlx"));
     assert_eq!((first.status.as_str(), first.role.as_str(), first.tier.as_str()), ("curated", "vision", "medium"));
     assert_eq!(first.family, "Qwen2.5-VL-7B-Instruct-4bit");
-    assert!(first.fits && first.runnable && !first.installed && first.parameters_billion.is_none());
+    assert!(first.fits && first.fits_now && first.runnable && !first.installed && first.parameters_billion.is_none());
     let gemma = items.iter().find(|item| item.id == "gemma_3_4b").unwrap();
     assert!(gemma.terms_required);
     assert_eq!((gemma.license.as_str(), gemma.quantization.as_str(), gemma.upstream.as_str()), ("Gemma", "4bit", "mlx-community/gemma-3-4b-it-qat-4bit"));
@@ -189,8 +189,8 @@ fn list_items_follow_the_swift_engine() {
         assert_eq!(item.license, "Apache-2.0");
         assert_eq!(item.name, entry.repo.rsplit('/').next().unwrap().replace('-', " "));
     }
-    assert!(catalog_items(Some("text"), 16.0, &HashMap::new()).iter().all(|item| item.role == "text"));
-    assert!(catalog_items(Some("embedding"), 16.0, &HashMap::new()).is_empty());
+    assert!(catalog_items(Some("text"), crate::commands::models::Memory { total_mb: 16384, available_mb: 12000 }, &HashMap::new()).iter().all(|item| item.role == "text"));
+    assert!(catalog_items(Some("embedding"), crate::commands::models::Memory { total_mb: 16384, available_mb: 12000 }, &HashMap::new()).is_empty());
 }
 
 #[test]

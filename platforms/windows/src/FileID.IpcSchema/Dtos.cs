@@ -39,7 +39,9 @@ public sealed record RootsList(
 public sealed record ModelCatalog(
     [property: JsonPropertyName("requestID")] string RequestId,
     double PhysicalMemoryGB,
+    long AvailableMemoryMB,
     long VramMB,
+    [property: JsonPropertyName("recommendedID")] [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RecommendedId,
     IReadOnlyList<ModelCatalogItem> Models);
 
 public sealed record ModelCatalogItem(
@@ -60,6 +62,7 @@ public sealed record ModelCatalogItem(
     bool Runnable,
     bool Installed,
     bool Fits,
+    bool FitsNow,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
 
 public sealed record BenchmarkProgress(

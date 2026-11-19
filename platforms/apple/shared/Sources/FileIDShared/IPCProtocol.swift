@@ -254,13 +254,17 @@ public struct RootsList: Codable, Sendable, Equatable {
 public struct ModelCatalog: Codable, Sendable {
     public let requestID: String
     public let physicalMemoryGB: Double
+    public let availableMemoryMB: Int64
     public let vramMB: Int64
+    public let recommendedID: String?
     public let models: [ModelCatalogItem]
 
-    public init(requestID: String, physicalMemoryGB: Double, vramMB: Int64, models: [ModelCatalogItem]) {
+    public init(requestID: String, physicalMemoryGB: Double, availableMemoryMB: Int64, vramMB: Int64, recommendedID: String? = nil, models: [ModelCatalogItem]) {
         self.requestID = requestID
         self.physicalMemoryGB = physicalMemoryGB
+        self.availableMemoryMB = availableMemoryMB
         self.vramMB = vramMB
+        self.recommendedID = recommendedID
         self.models = models
     }
 }
@@ -283,12 +287,13 @@ public struct ModelCatalogItem: Codable, Sendable, Equatable {
     public let runnable: Bool
     public let installed: Bool
     public let fits: Bool
+    public let fitsNow: Bool
     public let benchmark: ModelBenchmark?
 
     public init(id: String, name: String, family: String, upstream: String, role: String, format: String,
                 quantization: String, license: String, termsRequired: Bool, parametersBillion: Double?,
                 downloadBytes: Int64, estimatedResidentGB: Double, tier: String, status: String,
-                runnable: Bool, installed: Bool, fits: Bool, benchmark: ModelBenchmark? = nil) {
+                runnable: Bool, installed: Bool, fits: Bool, fitsNow: Bool, benchmark: ModelBenchmark? = nil) {
         self.id = id
         self.name = name
         self.family = family
@@ -306,6 +311,7 @@ public struct ModelCatalogItem: Codable, Sendable, Equatable {
         self.runnable = runnable
         self.installed = installed
         self.fits = fits
+        self.fitsNow = fitsNow
         self.benchmark = benchmark
     }
 
@@ -1180,4 +1186,22 @@ public struct ThumbnailGenerated: Codable, Sendable {
         self.modifiedAt = modifiedAt
         self.bytes = bytes
     }
+}
+
+/// The engine's answer to "which vision model fits this Mac right now": what the model picker and the first-run choice show instead of a rule of their own.
+public struct VLMAdvice: Sendable, Equatable {
+    public let availableMB: Int64
+    public let recommendedID: String?
+    private let fits: [String: Bool]
+    private let fitsNow: [String: Bool]
+
+    public init(_ catalog: ModelCatalog) {
+        availableMB = catalog.availableMemoryMB
+        recommendedID = catalog.recommendedID
+        fits = Dictionary(catalog.models.map { ($0.id, $0.fits) }, uniquingKeysWith: { first, _ in first })
+        fitsNow = Dictionary(catalog.models.map { ($0.id, $0.fitsNow) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    public func fits(_ id: String) -> Bool? { fits[id] }
+    public func fitsNow(_ id: String) -> Bool? { fitsNow[id] }
 }

@@ -167,6 +167,15 @@ pub fn budget_mb(kind: &str) -> Option<u64> {
     MODELS.iter().find(|(id, _, _)| *id == kind).map(|(_, _, gb)| (gb * 1024.0).ceil() as u64)
 }
 
+/// Every installed model this Mac may run, with the memory its load asks for.
+pub fn installed_budgets() -> Vec<(String, u64)> {
+    MODELS
+        .iter()
+        .filter(|(kind, _, _)| installed(kind) && license_accepted(kind))
+        .filter_map(|(kind, _, _)| budget_mb(kind).map(|mb| ((*kind).to_owned(), mb)))
+        .collect()
+}
+
 pub fn is_small(kind: &str) -> bool {
     MODELS.iter().find(|(id, _, _)| *id == kind).is_some_and(|(_, _, gb)| *gb < 4.0)
 }

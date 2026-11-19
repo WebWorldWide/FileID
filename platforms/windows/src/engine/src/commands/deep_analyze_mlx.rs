@@ -77,7 +77,11 @@ pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-/// Emits the failure and terminal complete itself and returns `None` when the batch can't start.
+fn display_name(kind: &str) -> String {
+    vlm::model_spec(kind).ok().and_then(|spec| spec["displayName"].as_str().map(str::to_owned)).unwrap_or_else(|| kind.to_owned())
+}
+
+/// Emits the failure and terminal complete itself and returns `None` when the batch can't start. A model refused for memory alone gives way to the largest smaller installed one, so a busy Mac runs the batch with what fits.
 async fn start(sink: &Sink, model_kind: &str, cancel: &Arc<AtomicBool>, started: Instant) -> Option<MlxLease> {
     if !vlm::installed(model_kind) {
         sink.send(
@@ -92,25 +96,35 @@ async fn start(sink: &Sink, model_kind: &str, cancel: &Arc<AtomicBool>, started:
         send_complete(sink, complete(model_kind, 0, 0, started, false)).await;
         return None;
     }
-    let display = vlm::model_spec(model_kind).ok().and_then(|spec| spec["displayName"].as_str().map(str::to_owned)).unwrap_or_else(|| model_kind.to_owned());
-    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
-        model_kind: model_kind.to_owned(),
-        phase: DeepAnalyzeStartingPhase::LoadingModel,
-        message: format!("Loading {display}…"),
-    }))))
-    .await;
-    match Resident::shared().acquire(model_kind, cancel, load_progress(sink, model_kind)).await {
-        Ok(lease) => Some(lease),
-        Err(_) if cancel.load(Ordering::Relaxed) => {
-            send_complete(sink, complete(model_kind, 0, 0, started, true)).await;
-            None
-        }
-        Err(error) => {
-            sink.send(EngineError::new("deep_load_failed", format!("Could not load {display}: {error:#}")).into_event()).await;
-            send_complete(sink, complete(model_kind, 0, 0, started, false)).await;
-            None
+    let mut candidates = vec![model_kind.to_owned()];
+    candidates.extend(crate::models::resident_model::smaller_installed(model_kind));
+    for (index, kind) in candidates.iter().enumerate() {
+        let display = display_name(kind);
+        let message = match index {
+            0 => format!("Loading {display}…"),
+            _ => format!("Not enough memory is free for {}; loading {display} instead…", display_name(&candidates[index - 1])),
+        };
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
+            model_kind: kind.clone(),
+            phase: DeepAnalyzeStartingPhase::LoadingModel,
+            message,
+        }))))
+        .await;
+        match Resident::shared().acquire(kind, cancel, load_progress(sink, kind)).await {
+            Ok(lease) => return Some(lease),
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                send_complete(sink, complete(model_kind, 0, 0, started, true)).await;
+                return None;
+            }
+            Err(error) if index + 1 < candidates.len() && error.downcast_ref::<crate::util::model_memory::MemoryShortfall>().is_some() => {}
+            Err(error) => {
+                sink.send(EngineError::new("deep_load_failed", format!("Could not load {display}: {error:#}")).into_event()).await;
+                send_complete(sink, complete(model_kind, 0, 0, started, false)).await;
+                return None;
+            }
         }
     }
+    None
 }
 
 fn already_done(db: &Mutex<rusqlite::Connection>, file_id: i64, model_kind: &str, tags_only: bool) -> bool {
@@ -213,6 +227,8 @@ pub(crate) async fn run_batch(
         AnalyzeMode::CaptionAndTags
     };
     let Some(mut lease) = start(&sink, model_kind, &cancel, started).await else { return };
+    let running = lease.kind().to_owned();
+    let model_kind = running.as_str();
 
     let total = file_ids.len() as u64;
     let grouping = crate::pipeline::near_duplicate_grouping::plan(&db.lock(), &file_ids);

@@ -793,18 +793,21 @@
     },
     "ModelCatalog": {
       "type": "object", "additionalProperties": false,
-      "required": ["requestID", "physicalMemoryGB", "vramMB", "models"],
+      "description": "recommendedID is the engine's pick among the vision models: the best one that loads with the memory free right now, else the smallest this machine could ever run. Clients show it as the default and never apply their own memory rule.",
+      "required": ["requestID", "physicalMemoryGB", "availableMemoryMB", "vramMB", "models"],
       "properties": {
         "requestID": { "$ref": "#/$defs/HealthRequestID" },
         "physicalMemoryGB": { "type": "number", "minimum": 0 },
+        "availableMemoryMB": { "type": "integer", "minimum": 0 },
         "vramMB": { "type": "integer", "minimum": 0 },
+        "recommendedID": { "type": ["string", "null"], "maxLength": 128 },
         "models": { "type": "array", "maxItems": 4000, "items": { "$ref": "#/$defs/ModelCatalogItem" } }
       }
     },
     "ModelCatalogItem": {
       "type": "object", "additionalProperties": false,
-      "description": "status is `curated` for the shipped defaults, `candidate` for catalog entries not yet benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this engine can load it on this platform today; fits compares the resident estimate with this machine's memory.",
-      "required": ["id", "name", "family", "upstream", "role", "format", "quantization", "license", "termsRequired", "downloadBytes", "estimatedResidentGB", "tier", "status", "runnable", "installed", "fits"],
+      "description": "status is `curated` for the shipped defaults, `candidate` for catalog entries not yet benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this engine can load it on this platform today; fits means the engine's memory admission could ever accept it on this machine (installed memory less the system reserve), and fitsNow that it would be accepted with the memory free right now.",
+      "required": ["id", "name", "family", "upstream", "role", "format", "quantization", "license", "termsRequired", "downloadBytes", "estimatedResidentGB", "tier", "status", "runnable", "installed", "fits", "fitsNow"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "name": { "type": "string", "maxLength": 200 },
@@ -823,6 +826,7 @@
         "runnable": { "type": "boolean" },
         "installed": { "type": "boolean" },
         "fits": { "type": "boolean" },
+        "fitsNow": { "type": "boolean" },
         "benchmark": { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/ModelBenchmark" } ] }
       }
     },

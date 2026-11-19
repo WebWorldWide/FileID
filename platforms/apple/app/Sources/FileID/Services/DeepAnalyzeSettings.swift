@@ -94,3 +94,13 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
         excludedFolders.removeAll { $0 == path }
     }
 }
+
+extension AIModelKind {
+    /// The engine's pick for this Mac and the memory free right now, else the mirrored rule on the installed memory alone.
+    static func recommended(ramGB: Double, advice: VLMAdvice?, freeDiskBytes: Int64?) -> AIModelKind {
+        if let id = advice?.recommendedID, let kind = AIModelKind(rawValue: id), kind.fits(freeDiskBytes: freeDiskBytes) {
+            return kind
+        }
+        return safeDefaultFor(ramGB: ramGB, availableMB: advice.map { UInt64(max(0, $0.availableMB)) }, freeDiskBytes: freeDiskBytes)
+    }
+}

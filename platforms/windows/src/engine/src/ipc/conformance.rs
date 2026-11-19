@@ -496,12 +496,14 @@ fn event_exemplars() -> Vec<EventPayload> {
         EventPayload::ModelCatalog(Wrap::new(ModelCatalog {
             request_id: "models-1".into(),
             physical_memory_gb: 16.0,
+            available_memory_mb: 9000,
             vram_mb: 6144,
+            recommended_id: Some("qwen3_vl_2b_instruct_gguf_q4_k_m".into()),
             models: vec![ModelCatalogItem {
                 id: "qwen3_vl_2b_instruct_gguf_q4_k_m".into(), name: "Qwen3-VL-2B-Instruct".into(), family: "Qwen3".into(),
                 upstream: "Qwen/Qwen3-VL-2B-Instruct".into(), role: "vision".into(), format: "gguf".into(), quantization: "Q4_K_M".into(),
                 license: "Apache-2.0".into(), terms_required: false, parameters_billion: Some(2.0), download_bytes: 1_500_000_000,
-                estimated_resident_gb: 2.3, tier: "tiny".into(), status: "verified".into(), runnable: true, installed: true, fits: true,
+                estimated_resident_gb: 2.3, tier: "tiny".into(), status: "verified".into(), runnable: true, installed: true, fits: true, fits_now: true,
                 benchmark: Some(ModelBenchmark {
                     measured_at: "2026-10-13T22:00:00Z".into(), hardware: "x86_64 · 16 GB · RTX 2060 6 GB".into(), load_seconds: 3.2,
                     prompt_tokens_per_second: Some(900.0), generated_tokens_per_second: Some(55.0), seconds_per_image: Some(1.4),

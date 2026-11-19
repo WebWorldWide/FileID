@@ -403,6 +403,7 @@ public actor DeepAnalyze {
         ScanModelResidency.shared.releaseForOtherModel()
         let totalMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
         let requestedMB = UInt64((kind.ramBudgetGB * 1024).rounded(.up))
+        // Free memory is the engine's check, made when it reserves the load; this one only refuses a model over the Mac's budget.
         if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: totalMB, requestedMB: requestedMB) {
             loadState = .failed(reason)
             throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
@@ -468,11 +469,6 @@ public actor DeepAnalyze {
                 .appending(component: kind.sourceRepo)
             guard MLXKernels.available else { throw MLXKernelsUnavailable() }
             Memory.cacheLimit = Self.mlxCacheLimitMB(for: kind) * 1_048_576
-            // Checked after the download so busy memory delays loading, not fetching.
-            let initialAvailableMB = UInt64(max(0, Hardware.availableMemoryMB()))
-            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: initialAvailableMB, requestedMB: requestedMB) {
-                throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
-            }
             let waitingMessage = "Waiting for memory and processing capacity…"
             loadState = .loading(progress: 0.99, message: waitingMessage)
             progress?(0.99, waitingMessage, 0, 0)
@@ -480,10 +476,6 @@ public actor DeepAnalyze {
                 ResourceScheduler.Demand(memoryMB: requestedMB, cpuUnits: 1, ioUnits: 1),
                 priority: .interactive
             )
-            let availableMB = UInt64(max(0, Hardware.availableMemoryMB()))
-            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: availableMB, requestedMB: requestedMB) {
-                throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
-            }
             let loaded: ModelContainer
             let downloader = LocalVLMDownloader(repo: kind.sourceRepo, directory: modelDirectory)
             if kind.supportsVision {
