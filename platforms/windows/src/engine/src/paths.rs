@@ -146,12 +146,12 @@ pub const SWIFT_MODEL_LAYOUT: &[(&str, &str)] = &[
     ("mobileclip/mobileclip_s2_image.onnx", "mobileclip_image/clip_vitb32_image.onnx"),
 ];
 
-/// On macOS a missing Rust-layout file falls back to the Swift app's copy of the same artifact, so models installed
-/// once serve both engines.
+/// On macOS a model file missing from the layout asked for falls back to the same artifact under the other layout
+/// (Rust or Swift), so models installed once serve both engines.
 pub fn installed_model_file(path: &Path) -> PathBuf {
     if cfg!(target_os = "macos")
         && !path.exists()
-        && let Some(alias) = swift_layout_alias(path)
+        && let Some(alias) = other_layout_alias(path)
         && alias.is_file()
     {
         return alias;
@@ -159,7 +159,7 @@ pub fn installed_model_file(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn swift_layout_alias(path: &Path) -> Option<PathBuf> {
+fn other_layout_alias(path: &Path) -> Option<PathBuf> {
     let root = models_dir().ok()?;
     let relative = path
         .strip_prefix(&root)
@@ -170,8 +170,12 @@ fn swift_layout_alias(path: &Path) -> Option<PathBuf> {
         .join("/");
     SWIFT_MODEL_LAYOUT
         .iter()
-        .find(|(rust, _)| *rust == relative)
-        .map(|(_, swift)| swift.split('/').fold(root, |path, part| path.join(part)))
+        .find_map(|&(rust, swift)| match relative.as_str() {
+            name if name == rust => Some(swift),
+            name if name == swift => Some(rust),
+            _ => None,
+        })
+        .map(|other| other.split('/').fold(root, |path, part| path.join(part)))
 }
 
 pub fn hf_cache_dir() -> Result<PathBuf> { Ok(models_dir()?.join("HuggingFace")) }
@@ -328,6 +332,23 @@ mod tests {
         for (key, value) in saved {
             restore(key, value);
         }
+    }
+
+    #[test]
+    fn rust_model_layout_is_found_when_the_swift_path_is_asked_for_on_macos() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let dir = std::env::temp_dir().join(format!("fileid-rust-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sface")).unwrap();
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+        let rust = dir.join("sface").join("face_recognition_sface_2021dec.onnx");
+        let swift = dir.join("face_recognition_sface_2021dec.onnx");
+        std::fs::write(&rust, b"sface").unwrap();
+        let expected = if cfg!(target_os = "macos") { &rust } else { &swift };
+        assert_eq!(&installed_model_file(&swift), expected);
+        restore("FILEID_MODELS_DIR", saved);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
