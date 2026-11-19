@@ -64,6 +64,8 @@ pub struct Question {
     pub folder: Option<String>,
     pub duplicates: bool,
     pub undescribed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub faces: bool,
     pub reduced: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formats: Option<Vec<String>>,
@@ -91,6 +93,7 @@ impl Default for Question {
             folder: None,
             duplicates: false,
             undescribed: false,
+            faces: false,
             reduced: String::new(),
             formats: None,
             limit: None,
@@ -105,7 +108,7 @@ impl Default for Question {
 
 impl Question {
     pub fn structured(&self) -> bool {
-        self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
+        self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.faces || self.formats.is_some()
             || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some() || self.breakdown.is_some() || self.people.is_some()
     }
 }
@@ -174,6 +177,11 @@ fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
     (lower, cased)
 }
 
+const FOLDER_NAME_BOUNDARIES: [&str; 20] = [
+    "the", "my", "a", "whole", "entire", "our", "this", "that", "current", "in", "to", "for", "and", "of", "on", "into", "from", "at", "called",
+    "named",
+];
+
 pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Option<String> {
     if let Some(quoted) = quoted_path(text) {
         return Some(quoted);
@@ -192,8 +200,12 @@ pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Optio
             if matches!(before, Some("this" | "current" | "that")) {
                 return Some("this".into());
             }
-            if before.is_some_and(|name| !["the", "my", "a", "whole", "entire"].contains(&name)) {
-                return Some(format!("named:{}", cased[index - 1]));
+            if before.is_some_and(|name| !FOLDER_NAME_BOUNDARIES.contains(&name)) {
+                let mut start = index - 1;
+                while start > 0 && !FOLDER_NAME_BOUNDARIES.contains(&words[start - 1].as_str()) {
+                    start -= 1;
+                }
+                return Some(format!("named:{}", cased[start..index].join(" ")));
             }
             if words.get(index + 1).is_some_and(|next| !["in", "to", "for", "and"].contains(&next.as_str())) {
                 return Some(format!("named:{}", cased[index + 1]));
@@ -321,7 +333,15 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         });
     }
     if ["find", "show", "list", "check", "look", "any", "search", "detect"].contains(&verb) && duplicates {
-        return Some(Intent { scope: rest_text(&words, 1), ..Intent::new("findDuplicates") });
+        let removes = (0..rest.len()).find(|&at| {
+            let after = rest[at + 1..].iter().find(|word| word.as_str() != "then");
+            ["and", "then"].contains(&rest[at].as_str())
+                && after.is_some_and(|word| ["move", "delete", "remove", "trash", "put", "send", "throw", "erase", "discard"].contains(&word.as_str()))
+        });
+        return Some(match removes {
+            Some(at) => Intent { scope: rest_text(&words[..=at], 1), ..Intent::new("moveDuplicatesToTrash") },
+            None => Intent { scope: rest_text(&words, 1), ..Intent::new("findDuplicates") },
+        });
     }
     if ["open", "go", "switch", "take", "view", "show"].contains(&verb)
         && let Some(page) = page_for(rest) {
@@ -534,6 +554,28 @@ pub fn parse_question(text: &str) -> Question {
             }
         }
     }
+    if has(&words, &["face", "faces"]) && !has(&words, &["people", "persons", "person", "named", "unnamed"]) {
+        question.faces = true;
+        for (index, word) in words.iter().enumerate() {
+            if ["face", "faces", "with", "contain", "contains", "containing", "show", "showing", "visible", "any"].contains(&word.as_str()) {
+                used.insert(index);
+            }
+        }
+    }
+    if has(&words, &["camera", "cameras"]) && has(&words, &["which", "what", "whats", "most", "top"]) {
+        question.breakdown = Some("camera".into());
+        if question.measure == "list" {
+            question.measure = "count".into();
+        }
+        if has(&words, &["most", "top", "mostly", "often"]) {
+            question.peak = Some("most".into());
+        }
+        for (index, word) in words.iter().enumerate() {
+            if ["camera", "cameras", "took", "take", "takes", "taken", "shot", "shoot", "use", "used", "uses", "using", "device", "devices", "do", "does", "did"].contains(&word.as_str()) {
+                used.insert(index);
+            }
+        }
+    }
     let mut formats: Vec<String> = Vec::new();
     for (index, word) in words.iter().enumerate() {
         if let Some(extensions) = format_extensions(word) {
@@ -647,6 +689,11 @@ pub fn parse_question(text: &str) -> Question {
                 used.insert(index);
             }
         }
+        for (index, pair) in words.windows(2).enumerate() {
+            if pair[1] == "one" && points_back(pair) {
+                used.insert(index + 1);
+            }
+        }
         question.reduced = raw.iter().enumerate().filter(|(index, _)| !used.contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" ");
     } else {
         text.clone_into(&mut question.reduced);
@@ -654,7 +701,7 @@ pub fn parse_question(text: &str) -> Question {
     question
 }
 
-const SINGULAR_FILE_WORDS: &[&str] = &["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording"];
+const SINGULAR_FILE_WORDS: &[&str] = &["video", "photo", "picture", "image", "file", "document", "clip", "pdf", "pic", "recording", "one"];
 
 const PLACE_WORDS: &[&str] = &["photos", "pictures", "images", "library", "collection", "files"];
 const COUNT_PEOPLE_TAIL: &[&str] = &[
@@ -1226,6 +1273,69 @@ pub fn spoken_name(text: &str) -> Option<String> {
     let run: Vec<&str> = words[lead + 1..].iter().copied().take_while(|word| capitalised_word(word)).collect();
     let first = run.first()?.to_lowercase();
     ((1..=2).contains(&run.len()) && !NOT_NAMES.contains(&first.as_str())).then(|| run.join(" "))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reference {
+    Nth(usize),
+    Last,
+    Single,
+}
+
+const ORDINALS: [(&str, usize); 10] = [
+    ("first", 1), ("second", 2), ("third", 3), ("fourth", 4), ("fifth", 5), ("sixth", 6), ("seventh", 7), ("eighth", 8), ("ninth", 9), ("tenth", 10),
+];
+const REFERENCE_FILLER: [&str; 36] = [
+    "show", "me", "tell", "about", "what", "whats", "is", "are", "was", "how", "the", "a", "an", "that", "this", "it", "one", "of", "details", "detail",
+    "info", "more", "please", "give", "which", "and", "then", "just", "result", "file", "item", "photo", "video", "picture", "image", "clip",
+];
+
+fn ordinal(word: &str) -> Option<usize> {
+    if let Some((_, n)) = ORDINALS.iter().find(|(name, _)| *name == word) {
+        return Some(*n);
+    }
+    let digits = word.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &word[digits.len()..];
+    (["st", "nd", "rd", "th"].contains(&suffix))
+        .then(|| digits.parse::<usize>().ok())
+        .flatten()
+        .filter(|n| (1..=50).contains(n))
+}
+
+/// "the second one", "tell me about it": a message that only points at something the previous answer listed.
+pub fn reference_ask(text: &str) -> Option<Reference> {
+    let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).filter(|word| !word.is_empty()).collect();
+    if words.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for word in &words {
+        if let Some(n) = ordinal(word) {
+            found = Some(Reference::Nth(n));
+        } else if word == "last" || word == "final" {
+            found = Some(Reference::Last);
+        } else if !REFERENCE_FILLER.contains(&word.as_str()) {
+            return None;
+        }
+    }
+    if found.is_some() {
+        return found;
+    }
+    let single = has(&words, &["it"]) || words.windows(2).any(|pair| matches!(pair, [a, b] if ["that", "this", "the"].contains(&a.as_str()) && b == "one"));
+    single.then_some(Reference::Single)
+}
+
+const ORDER_WORDS: [&str; 12] = [
+    "biggest", "largest", "heaviest", "smallest", "tiniest", "newest", "latest", "oldest", "earliest", "recent", "first", "last",
+];
+
+/// The message refers back to the previous answer ("those", "the biggest one") instead of naming a new subject.
+pub fn points_back(words: &[String]) -> bool {
+    has(words, &["those", "these", "them", "they", "ones"])
+        || words.windows(2).any(|pair| {
+            pair[1] == "one"
+                && (["the", "this", "that", "which"].contains(&pair[0].as_str()) || ORDER_WORDS.contains(&pair[0].as_str()) || ordinal(&pair[0]).is_some())
+        })
 }
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];

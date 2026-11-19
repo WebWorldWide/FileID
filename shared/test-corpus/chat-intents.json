@@ -18,6 +18,8 @@
     {"text": "stop everything", "intent": {"kind": "stopJob", "job": "all"}},
     {"text": "stop", "intent": null},
     {"text": "find duplicates", "intent": {"kind": "findDuplicates", "scope": "duplicates"}},
+    {"text": "Find duplicates and move them to Trash", "intent": {"kind": "moveDuplicatesToTrash", "scope": "duplicates"}},
+    {"text": "find the duplicate photos in Downloads and then delete them", "intent": {"kind": "moveDuplicatesToTrash", "scope": "the duplicate photos in downloads"}},
     {"text": "show duplicate photos in Downloads", "intent": {"kind": "findDuplicates", "scope": "duplicate photos in downloads"}},
     {"text": "move the extra copies to the trash", "intent": {"kind": "moveDuplicatesToTrash", "scope": "the extra copies to the trash"}},
     {"text": "delete duplicates", "intent": {"kind": "moveDuplicatesToTrash", "scope": "duplicates"}},
@@ -25,6 +27,10 @@
     {"text": "move all files to trash", "intent": {"kind": "refuse"}},
     {"text": "delete my photos", "intent": {"kind": "refuse"}},
     {"text": "organize this folder", "intent": {"kind": "suggestFolderLayout", "folder": "this"}},
+
+    {"text": "Organize my Eckerts 10-4-26 folder", "intent": {"kind": "suggestFolderLayout", "folder": "named:Eckerts 10-4-26"}},
+
+    {"text": "scan the Summer Trip 2024 folder", "intent": {"kind": "scanFolder", "folder": "named:Summer Trip 2024"}},
     {"text": "organize my Downloads", "intent": {"kind": "suggestFolderLayout", "folder": "downloads"}},
     {"text": "tidy up my library", "intent": {"kind": "suggestFolderLayout", "folder": "library"}},
     {"text": "suggest a folder layout", "intent": {"kind": "suggestFolderLayout", "folder": "library"}},

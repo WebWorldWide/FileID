@@ -390,8 +390,12 @@ final class ChatActionRunner {
         }
         if outcome.engineUnavailable { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
         if outcome.timedOut { phases[action.id] = .failed("Moving to Trash didn't finish. Check the Trash before trying again."); return }
-        let freed = ByteCountFormatter.string(fromByteCount: outcome.trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
         let changed = outcome.verificationFailed + missing
+        if outcome.trashed.isEmpty {
+            phases[action.id] = .failed(ExactDuplicateVerifier.nothingMovedSummary(outcome, skippedAsChanged: changed))
+            return
+        }
+        let freed = ByteCountFormatter.string(fromByteCount: outcome.trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
         var summary = "Moved \(outcome.trashed.count.formatted()) \(outcome.trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
         if changed > 0 { summary += " · \(changed.formatted()) skipped because the file changed since the scan" }
         if outcome.protectedLocation > 0 { summary += " · \(outcome.protectedLocation.formatted()) left alone in a protected location, such as a Photos library" }
@@ -538,6 +542,8 @@ enum ChatActions {
 struct ChatActionCard: View {
     let action: ChatAction
     let engine: EngineClient
+    /// The answer printed above this card. A card whose sentence is the answer itself shows its buttons and facts without repeating it.
+    var answer: String? = nil
     @State private var runner = ChatActionRunner.shared
 
     private var phase: ChatActionRunner.Phase { runner.phase(action) }
@@ -553,7 +559,9 @@ struct ChatActionCard: View {
                 Spacer(minLength: 0)
                 if action.source == "model" { MetaText("Suggested by local AI", color: Theme.ai, size: 11.5) }
             }
-            Text(cardDetail).font(Theme.Font.body(13)).foregroundStyle(Theme.text1).fixedSize(horizontal: false, vertical: true)
+            if !ChatActionCard.repeatsAnswer(detail: cardDetail, answer: answer) {
+                Text(cardDetail).font(Theme.Font.body(13)).foregroundStyle(Theme.text1).fixedSize(horizontal: false, vertical: true)
+            }
             if action.requiresConfirmation, phase == .proposed { whatHappens }
             status
             buttons
@@ -564,6 +572,11 @@ struct ChatActionCard: View {
         .animation(Theme.springStandard, value: phase)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(action.requiresConfirmation ? "Needs your OK" : "Suggested action"): \(primaryTitle)")
+    }
+
+    static func repeatsAnswer(detail: String, answer: String?) -> Bool {
+        guard let answer else { return false }
+        return answer.trimmingCharacters(in: .whitespacesAndNewlines) == detail.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var plan: ChatActionRunner.PlanSummary? {

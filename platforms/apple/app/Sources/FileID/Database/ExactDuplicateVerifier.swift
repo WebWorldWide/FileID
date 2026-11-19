@@ -225,6 +225,7 @@ struct DuplicateTrashOutcome: Sendable {
     var verificationFailed = 0
     var protectedLocation = 0
     var failed = 0
+    var failureMessage: String?
     var batchID: String?
     var engineUnavailable = false
     var timedOut = false
@@ -290,11 +291,22 @@ extension ExactDuplicateVerifier {
             switch trashRefusal(refusal) {
             case "protected": outcome.protectedLocation += 1
             case "changed": outcome.verificationFailed += 1
-            default: outcome.failed += 1
+            default:
+                outcome.failed += 1
+                if outcome.failureMessage == nil, let text = refusal.message, !text.isEmpty, !Sidebar.looksTechnical(text) { outcome.failureMessage = text }
             }
         }
         outcome.batchID = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         return outcome
+    }
+
+    /// Why a batch that moved nothing says so plainly: the card must not show a success for an empty move.
+    nonisolated static func nothingMovedSummary(_ outcome: DuplicateTrashOutcome, skippedAsChanged: Int) -> String {
+        var reasons: [String] = []
+        if skippedAsChanged > 0 { reasons.append("\(skippedAsChanged.formatted()) changed since the scan, so FileID left \(skippedAsChanged == 1 ? "it" : "them") alone") }
+        if outcome.protectedLocation > 0 { reasons.append("\(outcome.protectedLocation.formatted()) \(outcome.protectedLocation == 1 ? "is" : "are") in a protected location, such as a Photos library") }
+        if outcome.failed > 0 { reasons.append(outcome.failureMessage ?? "\(outcome.failed.formatted()) couldn't be moved to the Trash") }
+        return reasons.isEmpty ? "Nothing was moved to the Trash. Your files are untouched." : "Nothing was moved to the Trash: " + reasons.joined(separator: "; ") + ". Your files are untouched."
     }
 
     /// The helper's reason code; a helper that sends none is read from its fixed

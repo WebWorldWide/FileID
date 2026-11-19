@@ -3,6 +3,20 @@ import AppKit
 import AVKit
 import FileIDShared
 
+/// What puts new content at the end of the transcript: a message, a confirmation card, or the working row.
+struct ChatTranscriptTail: Equatable {
+    static let bottomID = "chat-transcript-bottom"
+    let lastMessageID: String?
+    let actionIDs: [String]
+    let busy: Bool
+
+    init(messages: [ChatMessage], actions: [ChatAction], busy: Bool) {
+        lastMessageID = messages.last?.id
+        actionIDs = actions.map(\.id)
+        self.busy = busy
+    }
+}
+
 struct ChatWorkbench: View {
     @Bindable var engine: EngineClient
     let store: ReadStore
@@ -116,7 +130,7 @@ struct ChatWorkbench: View {
                         ForEach(messages) { entry in messageView(entry).id(entry.id) }
                         if !busy && !actions.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
-                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine) }
+                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine, answer: messages.last(where: { $0.role != "user" })?.text) }
                             }
                             .padding(.leading, 12)
                             .transition(.opacity)
@@ -129,19 +143,30 @@ struct ChatWorkbench: View {
                             .accessibilityElement(children: .combine)
                             if hasSelectionResults { selectionStrip.padding(.leading, 12) }
                         }
+                        Color.clear.frame(height: 1).id(ChatTranscriptTail.bottomID).accessibilityHidden(true)
                     }
                     .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16)
                     .padding(.vertical, isPage ? Theme.Metrics.pageInsetY : 16)
                     .frame(maxWidth: isPage ? 760 + Theme.Metrics.pageInsetX * 2 : .infinity, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .onChange(of: messages.last?.id) { _, id in
-                    if let id { withAnimation(Theme.springStandard) { scroll.scrollTo(id, anchor: .bottom) } }
-                }
+                .onChange(of: ChatTranscriptTail(messages: messages, actions: actions, busy: busy)) { _, _ in scrollToEnd(scroll) }
+                .onAppear { scrollToEnd(scroll) }
             }
             if !isPage && !hits.isEmpty { inspectorSources }
             Hairline()
             composer
+        }
+    }
+
+    /// The cards and the busy row are laid out after the answer, and the lazy stack only estimates rows it has not drawn, so
+    /// a second jump follows the first once they have their real height.
+    private func scrollToEnd(_ scroll: ScrollViewProxy) {
+        Task { @MainActor in
+            for delay in [0, 150] {
+                if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) }
+                withAnimation(Theme.springStandard) { scroll.scrollTo(ChatTranscriptTail.bottomID, anchor: .bottom) }
+            }
         }
     }
 
@@ -224,7 +249,7 @@ struct ChatWorkbench: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Find the moment.").font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
+            Text("Ask your library.").font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
             Text("Ask about files, people and moments in this library, or ask FileID to do something. Answers cite the files they come from, and anything that moves or deletes files waits for your OK.")
                 .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)

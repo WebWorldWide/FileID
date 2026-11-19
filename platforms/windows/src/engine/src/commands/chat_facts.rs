@@ -32,6 +32,7 @@ pub(crate) struct Filter {
     pub date: Option<DateFilter>,
     pub folder: Option<String>,
     pub undescribed: bool,
+    pub faces: bool,
     pub ids: Option<Vec<i64>>,
     pub extensions: Vec<String>,
     pub all_people: bool,
@@ -149,6 +150,9 @@ impl Filter {
         if self.undescribed {
             parts.push("(f.vlm_description IS NULL OR trim(f.vlm_description)='')".into());
         }
+        if self.faces {
+            parts.push("f.has_faces=1".into());
+        }
         if let Some(root) = &self.root {
             parts.push(super::roots::clause("f.path_text", "?"));
             args.push(Value::Text(root.param().to_owned()));
@@ -186,6 +190,9 @@ impl Filter {
         }
         if self.undescribed {
             text += " not described yet";
+        }
+        if self.faces {
+            text += " with faces";
         }
         text
     }
@@ -509,7 +516,8 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
     let dated: Vec<(&str, i64)> = groups.iter().filter_map(|group| group.0.as_deref().map(|label| (label, metric(group)))).collect();
     let target = if peak == "least" { dated.iter().map(|group| group.1).min() } else { dated.iter().map(|group| group.1).max() };
     let Some(target) = target else {
-        return format!("None of these files has a capture date, so I can't rank them by {unit}.");
+        let missing = if unit == "camera" { "a camera recorded" } else { "a capture date" };
+        return format!("None of these files has {missing}, so I can't rank them by {unit}.");
     };
     let label = |text: &str| match (unit, text.split_once('-')) {
         ("month", Some((year, month))) => month.parse::<usize>().ok().and_then(|n| MONTH_NAMES.get(n.wrapping_sub(1))).map_or_else(|| text.to_owned(), |name| format!("{name} {year}")),
@@ -552,6 +560,67 @@ pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootSco
     Ok(Some((format!("“{name}” holds {} {files} ({}): {}.", count_label(count), bytes_label(bytes), kinds.join(", ")), hits)))
 }
 
+/// "Photos" can name several folders (one per scanned location); say so instead of silently merging their files.
+pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Option<&RootScope>) -> Result<Option<String>> {
+    let Some(name) = folder.strip_prefix("named:") else { return Ok(None) };
+    let filter = Filter { folder: Some(folder.to_owned()), root: root.cloned(), ..Filter::default() };
+    let mut args = vec![Value::Text(format!("/{name}/")), Value::Text(format!("/{name}/"))];
+    let clause = filter.clause(&mut args);
+    let mut statement = conn.prepare(&format!(
+        "SELECT substr(f.path_text,1,instr(lower(replace(f.path_text,char(92),'/')),lower(?))+length(?)-2) AS folder,COUNT(*) AS c FROM files f WHERE {clause} GROUP BY folder ORDER BY c DESC,folder ASC LIMIT 6"
+    ))?;
+    let found = statement
+        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if found.len() < 2 {
+        return Ok(None);
+    }
+    let places: Vec<String> = found
+        .iter()
+        .map(|(path, count)| {
+            let parts: Vec<&str> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+            let shown = parts[parts.len().saturating_sub(2)..].join("/");
+            format!("{shown} ({})", plural_files(*count))
+        })
+        .collect();
+    Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
+}
+
+fn plural_files(count: i64) -> String {
+    format!("{} {}", count_label(count), if count == 1 { "file" } else { "files" })
+}
+
+pub(crate) fn reference_answer(reference: &super::chat_intent::Reference, hits: Vec<CatalogHit>) -> (String, Vec<CatalogHit>) {
+    use super::chat_intent::Reference;
+    if hits.is_empty() {
+        return ("There is no earlier list to pick from yet. Ask a question first, then say “the second one”.".into(), vec![]);
+    }
+    let count = hits.len();
+    let describe = |hit: &CatalogHit| format!("{} ({})", file_name(&hit.path), hit.text);
+    let pick = match reference {
+        Reference::Nth(n) => hits.get(n - 1).cloned().ok_or_else(|| format!("The last answer showed {} {}, so there is no number {n}.", count_label(count as i64), if count == 1 { "file" } else { "files" })),
+        Reference::Last => Ok(hits[count - 1].clone()),
+        Reference::Single if count == 1 => Ok(hits[0].clone()),
+        Reference::Single => Err(format!("The last answer showed {} files. Say which one, like “the first one” or “the biggest one”.", count_label(count as i64))),
+    };
+    match pick {
+        Ok(hit) => {
+            let which = match reference {
+                Reference::Nth(n) => format!("The {} one", ordinal_label(*n)),
+                Reference::Last => "The last one".into(),
+                Reference::Single => "That".into(),
+            };
+            (format!("{which} is {}.", describe(&hit)), vec![hit])
+        }
+        Err(message) => (message, vec![]),
+    }
+}
+
+fn ordinal_label(n: usize) -> String {
+    const NAMES: [&str; 10] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+    NAMES.get(n - 1).map_or_else(|| format!("{n}th"), |name| (*name).to_owned())
+}
+
 /// The library records positions, not place names, so say how many files carry one (Swift `ChatFacts.placesAnswer`).
 pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&RootScope>) -> Result<String> {
     let filter = Filter { kinds: kinds.to_vec(), root: root.cloned(), ..Filter::default() };
@@ -579,7 +648,7 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     }
     let qualifiers = filter.qualifiers();
     if let (Some(unit), Some(_)) = (&question.breakdown, &question.peak)
-        && !["year", "month"].contains(&unit.as_str())
+        && !["year", "month", "camera"].contains(&unit.as_str())
     {
         return Ok((format!("I can't rank {} by {unit} yet. I can count them by year or month, for example “which month has the most {}?”", noun(&filter.kinds, 2), noun(&filter.kinds, 2)), vec![]));
     }
@@ -618,9 +687,15 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     if let Some(unit) = &question.breakdown {
         let mut args = Vec::new();
         let clause = filter.clause(&mut args);
-        let format = if unit == "year" { "%Y" } else { "%Y-%m" };
+        let (group, order) = match unit.as_str() {
+            "camera" => ("NULLIF(trim(f.camera_model),'')".to_owned(), "c DESC,g ASC".to_owned()),
+            _ => (
+                format!("strftime('{}',{TAKEN},'unixepoch','localtime')", if unit == "year" { "%Y" } else { "%Y-%m" }),
+                "g DESC".to_owned(),
+            ),
+        };
         let mut statement = conn.prepare(&format!(
-            "SELECT strftime('{format}',{TAKEN},'unixepoch','localtime') AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,g DESC"
+            "SELECT {group} AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,{order}"
         ))?;
         let groups = statement
             .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))?
@@ -629,7 +704,7 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
             .iter()
             .take(24)
             .map(|(label, n, b)| {
-                let label = label.as_deref().unwrap_or("no date");
+                let label = label.as_deref().unwrap_or(if unit == "camera" { "no camera recorded" } else { "no date" });
                 if question.measure == "size" { format!("{label}: {}", bytes_label(*b)) } else { format!("{label}: {}", count_label(*n)) }
             })
             .collect();

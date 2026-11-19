@@ -35,9 +35,11 @@ struct CaptureWindow: Equatable, Sendable {
         }
     }
 
-    func searchRequest(id: String, query: String, rootID: Int64? = nil, calendar: Calendar = .current) -> CatalogRequest {
+    /// With a CLIP text vector the engine ranks like Library and Chat (words plus picture match); without one it matches words only.
+    func searchRequest(id: String, query: String, rootID: Int64? = nil, vector: [Float]? = nil, calendar: Calendar = .current) -> CatalogRequest {
         let window = bounds(calendar: calendar)
-        return CatalogRequest(requestID: id, action: "search", query: query, capturedFrom: window.from, capturedTo: window.to, rootID: rootID)
+        return CatalogRequest(requestID: id, action: "search", query: query, searchMode: vector == nil ? nil : "hybrid", queryVector: vector,
+                              embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, capturedFrom: window.from, capturedTo: window.to, rootID: rootID)
     }
 }
 
