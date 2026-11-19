@@ -74,6 +74,8 @@ pub struct ScanSession {
     allow_follow_up: bool,
     /// The follow-up reads timed-out files again, which a busy machine failed the first time.
     retrying_timeouts: bool,
+    /// The label the app gave the folder (`startScan.rootDisplay`); Locations shows it instead of the folder's name.
+    root_display: Option<String>,
     /// Counts from the pass this one follows up, added to its final totals.
     carried: (u64, u64, f64),
     /// Decided by the first pass; a follow-up starts with that pass's rows.
@@ -111,6 +113,7 @@ impl ScanSession {
             excluded_paths,
             allow_follow_up: true,
             retrying_timeouts: false,
+            root_display: None,
             carried: (0, 0, 0.0),
             capture_dates_current: None,
         }
@@ -119,6 +122,11 @@ impl ScanSession {
     /// Runs under the id the app was already shown (the baseline progress and a follow-up pass use the same one).
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = session_id;
+        self
+    }
+
+    pub fn with_root_display(mut self, label: Option<String>) -> Self {
+        self.root_display = label.map(|label| label.trim().to_owned()).filter(|label| !label.is_empty());
         self
     }
 
@@ -210,8 +218,9 @@ impl ScanSession {
             let root_text = root.to_string_lossy();
             let kind = if root_text.starts_with("\\\\") { "network" } else if root_text.starts_with("/Volumes/") { "external" } else { "internal" };
             let _ = conn.execute(
-                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,?1,?2,?3,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'",
-                rusqlite::params![root_text, kind, started_unix],
+                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,COALESCE(?4,?1),?2,?3,'running') \
+                 ON CONFLICT(path) DO UPDATE SET last_status='running', display=COALESCE(?4,display)",
+                rusqlite::params![root_text, kind, started_unix, self.root_display],
             );
         }
 
@@ -1738,7 +1747,7 @@ fn soft_hide_missing_rows(
 /// end of the scan that hid the row, as the Swift engine does).
 pub(crate) const HIDDEN_ROW_RETENTION_DAYS: f64 = 30.0;
 const HIDDEN_PURGE_BATCH: usize = 200;
-const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
+pub(crate) const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
 
 pub(crate) fn hidden_retention_days() -> f64 {
     parse_retention_days(std::env::var("FILEID_HIDDEN_RETENTION_DAYS").ok().as_deref())
