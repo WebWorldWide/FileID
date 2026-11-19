@@ -1,6 +1,6 @@
 //! Undo journal for ordinary People merges: one catalog operation of kind person_merge written in the merge's
 //! transaction and undone through undoFaceReview. The JSON matches Swift's `PersonMergeJournal` so either engine can
-//! undo the other's merge.
+//! undo the other's merge; `candidates` and `runnerUpFaces` are additions Swift's reader ignores.
 
 use std::collections::BTreeMap;
 

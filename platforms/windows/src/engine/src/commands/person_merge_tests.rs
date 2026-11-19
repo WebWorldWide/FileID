@@ -245,7 +245,7 @@ fn journal_rows_use_the_swift_field_names() {
     let keys = |text: &str| -> Vec<String> { serde_json::from_str::<Value>(text).unwrap().as_object().unwrap().keys().cloned().collect() };
     let mut before_keys = keys(&before);
     before_keys.sort();
-    assert_eq!(before_keys, ["keepNames", "keepRepresentative", "keepUnknown", "other", "otherPersonID", "personID", "resolution", "verifications"]);
+    assert_eq!(before_keys, ["candidates", "keepNames", "keepRepresentative", "keepUnknown", "other", "otherPersonID", "personID", "resolution", "runnerUpFaces", "verifications"]);
     let mut after_keys = keys(&after);
     after_keys.sort();
     assert_eq!(after_keys, ["faceIDs", "otherPersonID", "personID", "resolution"]);
