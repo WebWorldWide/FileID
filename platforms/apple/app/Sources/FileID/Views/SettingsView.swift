@@ -162,7 +162,7 @@ struct SettingsTab: View {
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
-                                Text("Permanently erase FileID's library, local models, settings, and caches.")
+                                Text("Permanently erase FileID's library, settings, caches and small helper models. The large description models are kept.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 Button(role: .destructive) {
                                     confirmFactoryReset = true
@@ -180,7 +180,7 @@ struct SettingsTab: View {
                                     }
                                     Button("Cancel", role: .cancel) { }
                                 } message: {
-                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, downloaded models and caches. The large description models are kept. Your own files are not touched. This can't be undone.")
+                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, caches and the small downloaded helper models. The large description models are kept; remove them under Settings ▸ AI models. Your own files are not touched. This can't be undone.")
                                 }
                             }
                         }

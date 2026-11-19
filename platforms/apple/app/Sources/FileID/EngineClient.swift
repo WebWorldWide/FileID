@@ -982,13 +982,13 @@ public final class EngineClient {
         }
     }
 
-    /// Factory Reset: terminate the engine, wipe the Application Support folder, purge all UserDefaults, and quit.
+    /// Factory Reset: terminate the engine, wipe the Application Support folder except the downloaded description models, purge all UserDefaults, and quit.
     public func factoryResetAndQuit() {
         terminateRunningEngine()
         SpotlightIndexer.wipe()
         let fm = FileManager.default
         if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
-            try? fm.removeItem(at: AppSupportPath.fileID)
+            FactoryReset.erase(root: AppSupportPath.fileID, keeping: [ModelCachePaths.huggingFaceRoot], fileManager: fm)
         }
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
