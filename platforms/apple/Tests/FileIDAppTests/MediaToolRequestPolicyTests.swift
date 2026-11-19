@@ -102,6 +102,18 @@ struct MediaToolRequestPolicyTests {
         #expect(session.hits.isEmpty)
         #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
     }
+    @Test func aVideoSearchKeepsMp4AndMovHitsInVideoMode() {
+        let session = ToolsSession()
+        session.allHits = [
+            CatalogHit(fileID: 1, path: "/v/C0029.mp4", kind: "video", text: ""),
+            CatalogHit(fileID: 2, path: "/v/C0030.MOV", kind: "video", text: ""),
+            CatalogHit(fileID: 3, path: "/v/still.jpg", kind: "image", text: ""),
+        ]
+        session.kind = "video"
+        session.applyKindFilter()
+        #expect(session.hits.map(\.fileID) == [1, 2])
+    }
+
     @Test func aPreviewSaysWhatExportWillDoInPlainWords() {
         let photoCaveat = " Photo copies leave out details such as location and use standard 8-bit colors."
         func plain(_ action: String = "preview", _ status: String = "ok", outputs: Int, kind: String?, _ message: String) -> String {
