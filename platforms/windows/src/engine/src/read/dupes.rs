@@ -118,7 +118,8 @@ pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> boo
 
 /// Connected components of files whose dHashes differ by at most `threshold` bits (transitively chained); ids sorted,
 /// components by smallest id. `None` when no file has a perceptual hash; `phash = 0` means "no hash". A RAW file whose
-/// same-named rendered twin is in its component is the same shot, so it never counts as a look-alike of that twin.
+/// same-named rendered twin (any folder, within `threshold` bits) is in its component is the same shot, so it never
+/// counts as a look-alike of that twin.
 pub fn similar_groups(conn: &Connection, threshold: u32, cancel: impl Fn() -> bool) -> Result<Option<Vec<Vec<i64>>>> {
     let mut stmt = conn.prepare("SELECT id, phash, path_text FROM files WHERE failed = 0 AND phash IS NOT NULL AND phash != 0 ORDER BY id")?;
     let mut paths: HashMap<i64, String> = HashMap::new();
@@ -135,23 +136,28 @@ pub fn similar_groups(conn: &Connection, threshold: u32, cancel: impl Fn() -> bo
         return Ok(None);
     }
     let groups = similar_components(&rows, threshold, &cancel)?.0;
-    Ok(Some(without_raw_twins(groups, &paths)))
+    let hashes: HashMap<i64, i64> = rows.into_iter().collect();
+    Ok(Some(without_raw_twins(groups, &paths, &hashes, threshold)))
 }
 
-fn shot_key(path: &str) -> (Option<PathBuf>, String) {
-    (std::path::Path::new(path).parent().map(PathBuf::from), crate::pipeline::near_duplicate_grouping::stem(path))
-}
-
-fn without_raw_twins(groups: Vec<Vec<i64>>, paths: &HashMap<i64, String>) -> Vec<Vec<i64>> {
-    use crate::pipeline::near_duplicate_grouping::is_raw;
+fn without_raw_twins(groups: Vec<Vec<i64>>, paths: &HashMap<i64, String>, hashes: &HashMap<i64, i64>, threshold: u32) -> Vec<Vec<i64>> {
+    use crate::pipeline::near_duplicate_grouping::{is_raw, stem};
     groups
         .into_iter()
         .filter_map(|ids| {
-            let rendered: HashSet<(Option<PathBuf>, String)> =
-                ids.iter().filter_map(|id| paths.get(id)).filter(|path| !is_raw(path)).map(|path| shot_key(path)).collect();
+            let rendered: Vec<(String, i64)> = ids
+                .iter()
+                .filter_map(|id| Some((paths.get(id)?, hashes.get(id)?)))
+                .filter(|(path, _)| !is_raw(path))
+                .map(|(path, hash)| (stem(path), *hash))
+                .collect();
             let kept: Vec<i64> = ids
                 .into_iter()
-                .filter(|id| paths.get(id).is_none_or(|path| !is_raw(path) || !rendered.contains(&shot_key(path))))
+                .filter(|id| {
+                    let (Some(path), Some(hash)) = (paths.get(id), hashes.get(id)) else { return true };
+                    !is_raw(path)
+                        || !rendered.iter().any(|(twin, twin_hash)| *twin == stem(path) && ((*hash ^ twin_hash) as u64).count_ones() <= threshold)
+                })
                 .collect();
             (kept.len() > 1).then_some(kept)
         })
@@ -459,12 +465,12 @@ mod tests {
     fn similar_groups_treat_a_raw_and_its_rendered_twin_as_one_shot() {
         let conn = library();
         for (path, phash) in [
-            ("/lib/DSC1.ARW", 0b1),
-            ("/lib/DSC1.JPG", 0b1),
+            ("/ev/Photos/RAWs/DSC1.ARW", 0b1),
+            ("/ev/Photos/JPEGs/DSC1.JPG", 0b1),
             ("/lib/DSC2.ARW", 0b1),
             ("/lib/DSC2.JPG", 0b11),
             ("/lib/other.jpg", 0b111),
-            ("/lib/sub/DSC1.jpg", 0b1),
+            ("/lib/solo.ARW", 0b11),
             ("/lib/lonely.ARW", 0xFFFF_0000_0000_0000u64 as i64),
             ("/lib/lonely.JPG", 0xFFFF_0000_0000_0000u64 as i64),
         ] {
