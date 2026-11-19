@@ -200,7 +200,8 @@ struct Sidebar: View {
     }
 
     /// Readable titles for engine notices; the code stays in the log line, not on screen.
-    nonisolated static func errorTitle(_ kind: String) -> String {
+    nonisolated static func errorTitle(_ kind: String, message: String = "") -> String {
+        if isMemoryShortage(kind: kind, message: message) { return "This Mac is short on memory" }
         switch kind {
         case "discovery_partial": return "Some files were left out"
         case "empty_folder": return "No files to scan"
@@ -254,6 +255,7 @@ struct Sidebar: View {
     /// The sentence under the title. Known kinds get fixed wording; anything
     /// else shows FileID's own message unless it reads like a log line.
     nonisolated static func errorText(kind: String, message: String) -> String {
+        if isMemoryShortage(kind: kind, message: message) { return "Close a few apps, then try again. The model is installed." }
         switch kind {
         case "scan_failed": return "Press Scan again. Files already read are skipped."
         case "db_unavailable", "db_failed", "db_open_failed", "db_integrity_check_failed", "plan_restructure_db_unavailable":
@@ -295,6 +297,11 @@ struct Sidebar: View {
         }
     }
 
+    /// A model that is installed but was refused for lack of free memory: reinstalling would not help.
+    nonisolated static func isMemoryShortage(kind: String, message: String) -> Bool {
+        ["model_load_failed", "deep_load_failed"].contains(kind) && message.lowercased().contains("memory")
+    }
+
     nonisolated static func looksTechnical(_ message: String) -> Bool {
         if message.isEmpty || message.count > 220 { return true }
         let lowered = message.lowercased()
@@ -309,7 +316,7 @@ struct Sidebar: View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
-                Text(Self.errorTitle(err.kind)).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
+                Text(Self.errorTitle(err.kind, message: err.message)).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
                 Text(Self.errorText(kind: err.kind, message: err.message)).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
