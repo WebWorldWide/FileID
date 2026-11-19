@@ -692,7 +692,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     }
                     EngineEvent::FaceClusteringCancelled(message) => {
                         if ui.face_clustering.borrow_mut().finish_active().is_some() {
-                            set_status(&ui, message);
+                            set_status(&ui, message.clone());
                         }
                         refresh_view(&ui);
                     }
