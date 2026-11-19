@@ -83,7 +83,7 @@ struct WelcomeSheet: View {
                 title: "Search by description",
                 detail: "Find photos by typing what's in them",
                 technical: "CLIP ViT-B/32",
-                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
+                size: "~\(ModelSize.label(Int64(CLIPModelInstaller.approxDownloadBytes)))",
                 status: clip.status,
                 action: { clip.install() },
                 cancel: { clip.cancel() }
@@ -92,7 +92,7 @@ struct WelcomeSheet: View {
                 title: "Photo tags",
                 detail: "Labels what's in each photo",
                 technical: "RAM++",
-                size: "~\(ByteCountFormatter.string(fromByteCount: ramplus.spec.approxBytes, countStyle: .file))",
+                size: "~\(ModelSize.label(ramplus.spec.approxBytes))",
                 status: ramplus.status,
                 action: { ramplus.install() },
                 cancel: { ramplus.cancel() }
@@ -101,7 +101,7 @@ struct WelcomeSheet: View {
                 title: "Faces",
                 detail: "Groups photos by person",
                 technical: recommendedFace.displayName,
-                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
+                size: "~\(ModelSize.label(Int64(recommendedFace.approxBytes)))",
                 status: arcface.status,
                 action: { arcface.install() },
                 cancel: { arcface.cancel() }
@@ -110,7 +110,7 @@ struct WelcomeSheet: View {
                 title: "Documents",
                 detail: "Understands what documents are about",
                 technical: "BGE-small",
-                size: "~\(ByteCountFormatter.string(fromByteCount: bge.spec.approxBytes, countStyle: .file))",
+                size: "~\(ModelSize.label(bge.spec.approxBytes))",
                 status: bge.status,
                 action: { bge.install() },
                 cancel: { bge.cancel() }
@@ -293,6 +293,9 @@ struct WelcomeSheet: View {
     private func footerNote(stacked: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
+            if helperDown && !essentialsInstalled {
+                MetaText(HelperGate.downloadsUnavailableNote, color: Theme.warning)
+            }
             if let free = availableDiskBytes {
                 MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac")
             }
@@ -320,8 +323,8 @@ struct WelcomeSheet: View {
                 }
                 .buttonStyle(DSPrimaryButtonStyle(height: 32))
                 .fixedSize()
-                .disabled(installAllRequested)
-                .help("Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
+                .disabled(HelperGate.downloadDisabled(inProgress: installAllRequested, helperDown: helperDown))
+                .help(helperDown ? HelperGate.downloadsUnavailableNote : "Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
             }
             .fixedSize()
         }
@@ -360,7 +363,8 @@ struct WelcomeSheet: View {
                 } else {
                     MetaText(size)
                     Button("Download", action: action).buttonStyle(.dsSecondary)
-                        .help("Download \(technical) (\(size))")
+                        .disabled(helperDown)
+                        .help(helperDown ? HelperGate.downloadsUnavailableNote : "Download \(technical) (\(size))")
                 }
             }
             // The hidden description sizes the line, so a download's progress text or a failure message takes its place without moving the rows below.
@@ -530,8 +534,7 @@ struct WelcomeSheet: View {
     }
 
     private var vlmSizeLabel: String {
-        let gb = Double(resolvedVLMTotalBytes) / 1_073_741_824.0
-        return String(format: "~%.1f GB", gb)
+        "~\(ModelSize.label(resolvedVLMTotalBytes))"
     }
 
     private var vlmRateETA: String? {
@@ -594,6 +597,8 @@ struct WelcomeSheet: View {
         vlmLastProgressAt = nil
         vlmLastError = nil
     }
+
+    private var helperDown: Bool { HelperGate.isDown(engine) }
 
     private var essentialsDownloadLabel: String {
         var bytes: Int64 = 0

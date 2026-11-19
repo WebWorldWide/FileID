@@ -554,6 +554,10 @@ final class LibraryTileItem: NSCollectionViewItem {
         else if changedFile || reloadImage { loadThumbnail(for: row, keepCurrent: !changedFile) }
     }
 
+    #if DEBUG
+    var isFinishedLoading: Bool { thumbLayer.contents != nil || !kindGlyph.isHidden || !unreadableGlyph.isHidden }
+    #endif
+
     private func loadThumbnail(for row: FileRow, keepCurrent: Bool) {
         thumbTask?.cancel()
         if !keepCurrent { thumbLayer.contents = nil; thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1); kindGlyph.isHidden = true }

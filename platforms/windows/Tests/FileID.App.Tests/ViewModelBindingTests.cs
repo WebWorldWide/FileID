@@ -689,6 +689,8 @@ public class EngineWarningClassificationTests
 {
     [Theory]
     [InlineData("face_clustering_busy")]
+    [InlineData("face_clustering_cancelled")]
+    [InlineData("scan_slower_path")]
     [InlineData("deep_analyze_already_running")]
     [InlineData("rescan_no_changes")]
     [InlineData("stages_skipped_missing_models")]

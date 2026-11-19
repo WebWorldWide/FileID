@@ -1851,7 +1851,7 @@ private struct FaceModelInstallPanel: View {
     }
 
     private var downloadSize: String {
-        "about \(Int((Double(kind.approxBytes) / 1_048_576).rounded())) MB"
+        "about \(ModelSize.label(Int64(kind.approxBytes)))"
     }
 
     @ViewBuilder

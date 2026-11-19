@@ -123,12 +123,14 @@ final class ModelInstaller: ModelInstalling {
     private init(_ spec: Spec) { self.spec = spec }
 
     func refreshStatus() {
-        let fm = FileManager.default
-        presentFilePaths = Set(spec.downloads.map { spec.destination($0).path }.filter { fm.fileExists(atPath: $0) })
+        let found = spec.downloads.map(spec.destination).compactMap { destination in
+            ModelFileLayout.installedFile(destination).map { (destination: destination, installed: $0) }
+        }
+        presentFilePaths = Set(found.map(\.destination.path))
         if spec.requiredFiles.allSatisfy({ presentFilePaths.contains($0.path) }) {
             let size = spec.ownsDirectory
                 ? Self.diskSize(of: spec.directory)
-                : spec.downloads.reduce(Int64(0)) { $0 + Self.diskSize(of: spec.destination($1)) }
+                : found.reduce(Int64(0)) { $0 + Self.diskSize(of: $1.installed) }
             status = .installed(sizeBytes: size)
         } else {
             if status.inProgress, task != nil { return }
@@ -190,6 +192,11 @@ final class ModelInstaller: ModelInstalling {
             status = .installFailed(Self.protectedMessage); return
         }
         for target in targets { try? FileManager.default.removeItem(at: target) }
+        if !spec.ownsDirectory {
+            for target in targets {
+                if let other = ModelFileLayout.alternate(of: target, in: AppSupportPath.models) { try? FileManager.default.removeItem(at: other) }
+            }
+        }
         status = .unknown
         refreshStatus()
     }

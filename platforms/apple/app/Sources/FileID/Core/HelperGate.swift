@@ -19,6 +19,10 @@ enum HelperGate {
     /// Model downloads are the helper's job, so they stay off while it is down.
     static let downloadsUnavailableNote = "FileID's helper isn't running, so models can't download yet. Restart the helper first."
 
+    static func downloadDisabled(inProgress: Bool, helperDown: Bool) -> Bool {
+        inProgress || helperDown
+    }
+
     static func scanDisabled(startRequested: Bool, helperDown: Bool) -> Bool {
         startRequested || helperDown
     }

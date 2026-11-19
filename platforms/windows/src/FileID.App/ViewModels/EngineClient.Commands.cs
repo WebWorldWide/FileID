@@ -249,6 +249,9 @@ internal sealed partial class EngineClient
         "deep_analyze_already_running" => true,
         // A concurrent RunFaceClustering bounced off the engine's single-flight guard: a benign "already busy" notice.
         "face_clustering_busy" => true,
+        // A grouping pass that a scan took over runs again after that scan, and a scan that fell back to the slower CPU path still completes: notices, not failures.
+        "face_clustering_cancelled" => true,
+        "scan_slower_path" => true,
         // IPC parity: the engine reports undecodable command frames (as macOS always has). Diagnostic, not actionable.
         "command_decode_failed" => true,
         _ => false,

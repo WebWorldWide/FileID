@@ -45,6 +45,7 @@ pub enum EngineState {
     FaceClusteringComplete(fileid_engine::ipc::FaceClusteringResult),
     FaceClusteringFailed(String),
     FaceClusteringBusy(String),
+    FaceClusteringCancelled(String),
     BulkActionResult(fileid_engine::ipc::BulkActionResult),
     MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
     FaceReview(fileid_engine::ipc::FaceReviewPage),
@@ -875,6 +876,7 @@ fn map_engine_payload(payload: EventPayload) -> Option<RawEvent> {
         EventPayload::Error(error) => match error.inner.kind.as_str() {
             "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
             "face_clustering_busy" => EngineState::FaceClusteringBusy(error.inner.message),
+            "face_clustering_cancelled" => EngineState::FaceClusteringCancelled(error.inner.message),
             _ => EngineState::Error {
                 kind: error.inner.kind,
                 message: error.inner.message,
@@ -1501,6 +1503,19 @@ mod tests {
         assert!(matches!(&events[4], RawEvent::State(EngineState::FaceClusteringBusy(m)) if m == "busy"));
         assert!(matches!(events[5], RawEvent::State(EngineState::Exited)));
         assert_eq!(events.len(), 6);
+    }
+
+    #[test]
+    fn a_taken_over_grouping_pass_is_not_an_engine_error() {
+        let cancelled = IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "face_clustering_cancelled".to_owned(),
+            message: "FileID will finish grouping faces after the scan.".to_owned(),
+            path: None,
+            model_kind: None,
+        })));
+        let events = drain(format!("{}\n", serde_json::to_string(&cancelled).unwrap()));
+        assert!(matches!(&events[0], RawEvent::State(EngineState::FaceClusteringCancelled(m))
+            if m == "FileID will finish grouping faces after the scan."));
     }
 
     #[test]

@@ -269,6 +269,7 @@ fn journal_rows_use_the_swift_field_names() {
 fn a_merge_journaled_by_the_swift_engine_is_undone_here() {
     let catalog = crate::db::test_support::swift_catalog("swift-written-people-merge");
     let conn = &catalog.conn;
+    conn.execute("UPDATE catalog_operations SET created_at=?1", [crate::commands::face_review::now()]).unwrap();
     let id: String = conn.query_row("SELECT id FROM catalog_operations", [], |row| row.get(0)).unwrap();
 
     let page = offered_page(conn);

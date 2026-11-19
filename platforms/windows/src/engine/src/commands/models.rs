@@ -61,7 +61,7 @@ pub(crate) fn fits(format: &str, download_bytes: u64, resident_gb: f64, memory: 
 const MAC_LADDER: [&str; 4] = ["mistral_small_3_2", "qwen3_vl_8b", "qwen3_vl_4b", "qwen3_vl_2b"];
 
 /// The 2B-class end of the portable ladder is the catalog's Qwen3-VL 2B (Apache-2.0, ggml-org, pinned revision), the only vetted GGUF of that size.
-pub(crate) const PORTABLE_SMALL_KIND: &str = "qwen3_vl_2b_instruct_gguf_q8_0";
+pub const PORTABLE_SMALL_KIND: &str = "qwen3_vl_2b_instruct_gguf_q8_0";
 
 const PORTABLE_LADDER: [&str; 4] = ["qwen2_5_vl_7b", "qwen3_vl_8b", "qwen3_vl_4b", PORTABLE_SMALL_KIND];
 
