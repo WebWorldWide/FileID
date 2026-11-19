@@ -238,26 +238,3 @@ A surface passes when, on its OS, against an isolated DB/corpus:
 8. Telemetry scan is clean.
 
 Record results in `STATE.md` (newest on top); file regressions in `NEXT.md`.
-
-## Explicit macOS significant-moment model evaluation
-
-Default Swift tests never download or load evaluation weights. Obtain the owner's download approval before enabling the download test. The 2026-10-07 session approval covered only the already registered Apache-2.0 Qwen3-VL 4B model. Its pinned MLX revision is `552af30c9952c44f1e1a27c7c5810ded58e892bc`; the existing downloader verifies the installed manifest and weight integrity.
-
-```bash
-cd platforms/apple
-FILEID_HF_CACHE_ROOT=/tmp/FileIDMomentQAData/huggingface \
-FILEID_DOWNLOAD_EVALUATION_MODEL=1 \
-swift test --scratch-path /tmp/fileid-next-build --jobs 4 \
-  --filter VisualModelEvaluationTests.downloadRegisteredModel
-```
-
-For inference, build the pinned Metal library with `FILEID_METALLIB_CACHE=/tmp/FileIDMomentQAData/mlx.metallib bash scripts/ensure_mlx_metallib.sh`. With the documented scratch path, the actual executable is `out/Products/Debug/EngineTests.xctest/Contents/MacOS/EngineTests`; the aggregate `FileIDPackageTests.xctest` is not the executable SwiftPM launches. Place the Metal library beside the EngineTests executable only after the test bundle has been built and signed, then use `swift test --skip-build` for the opt-in run. Copying a new library into the bundle before a normal build causes Xcode's ad-hoc codesign step to reject the unsigned subcomponent. For worker-backed media tests, set `FILEID_TEST_ENGINE_PATH` to the freshly built `out/Products/Debug/FileIDEngine` and run Swift tests without test parallelism; otherwise the test runner can launch itself instead of the engine worker. Supply an internal fixture directory containing `frame-0.png` through `frame-7.png` and `metadata.json`, the ordered metadata array returned by the native `--sample-video-sequence` worker. The test uses actual decoded timestamps and removes duplicate presentation times before inference. The 2026-10-08 16 GB Mac run reached `FileID.ModelMemoryAdmission` and safely declined model loading because available memory was below its existing reservation; no recognition quality was measured.
-
-```bash
-FILEID_HF_CACHE_ROOT=/tmp/FileIDMomentQAData/huggingface \
-FILEID_EVALUATION_FRAMES=/tmp/FileIDMomentQAData/model-sequence-fixture \
-swift test --scratch-path /tmp/fileid-next-build --jobs 4 \
-  --filter VisualModelEvaluationTests.evaluateMomentFrames
-```
-
-The existing available-memory safeguard must pass; do not weaken it for a test. This opt-in test checks the real multi-image path and bounded response format. Generated test patterns do not measure sports outcomes, gift appearances, faces or broad-event recognition. Those require consented, labeled positive/negative/uncertain fixtures and human review against the NEXT_VERSION.md acceptance criteria. Keep all media outputs, catalog data, models and logs internal; do not mount or access Adlon.

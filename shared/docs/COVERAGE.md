@@ -83,7 +83,7 @@ on-hardware runs rather than unit tests.
 
 ## Swift (macOS engine + app)
 
-`swift test` runs `SharedTests` + `EngineTests` (the macos.yml gate). Corpus-dependent tests skip
+`swift test` runs `AppleKitTests`, `SharedTests` and `FileIDAppTests` (the macos.yml gate). Corpus-dependent tests skip
 themselves when `Tests/Corpus/` is absent (it's fetched locally, too slow/fragile for CI). The macOS
 side is the reference implementation but the Windows port currently carries the broader unit suite;
 macOS coverage is not separately tracked here.

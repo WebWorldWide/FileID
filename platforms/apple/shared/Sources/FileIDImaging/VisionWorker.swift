@@ -140,7 +140,7 @@ public final class VisionWorker: @unchecked Sendable {
             pass.faceYaws.reserveCapacity(sortedFaces.count)
             pass.facePitches.reserveCapacity(sortedFaces.count)
             pass.faceMinDimPx.reserveCapacity(sortedFaces.count)
-            // Vision's boundingBox is normalized to the decoded cgImage (long edge capped by FILEID_SCAN_MAX_PIXELS), so cgImage.width/height give absolute pixels.
+            // Vision's boundingBox is normalized to the decoded cgImage (long edge capped by FILEID_SCAN_MAX_PIXELS; a different downscale regime than the Windows decoder's, see FACE_MIN_BBOX_MIN_DIM_PX in tagging.rs), so cgImage.width/height give absolute pixels.
             let imgWidthPx = Double(cgImage.width)
             let imgHeightPx = Double(cgImage.height)
             for obs in sortedFaces {

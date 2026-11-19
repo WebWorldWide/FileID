@@ -177,7 +177,7 @@
   },
   {
     "name": "people-clustering-mac-face-space-follows-the-swift-engine",
-    "description": "A catalog whose faces all sit in the macOS face space (Vision landmarks, the Swift alignment) is clustered the way the Swift engine clusters it: person rows and ids, names, Unknown and the different-people verdict stay; new faces are held out and assessed; the pass reports deferredFaces. Swift needs the installed face model, so this runs on Rust only; people_parity.py checks the same against the Swift engine on real faces.",
+    "description": "A catalog whose faces all sit in the macOS face space (Vision landmarks, the Swift alignment) is clustered the way the Swift engine clusters it: person rows and ids, names, Unknown and the different-people verdict stay; new faces are held out and assessed; the pass reports deferredFaces. This needs the installed face model, so it runs on Rust only.",
     "tree": [
         {"path": "1.jpg", "content": "photo 1", "mtime": 1700000000, "row": {"id": 1, "kind": "image", "modified_at": 1700000000}},
         {"path": "2.jpg", "content": "photo 2", "mtime": 1700000000, "row": {"id": 2, "kind": "image", "modified_at": 1700000000}},

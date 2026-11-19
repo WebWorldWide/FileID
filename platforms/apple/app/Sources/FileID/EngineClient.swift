@@ -103,14 +103,17 @@ public final class EngineClient {
 
     private let queryReplies = EngineQueryReplies()
 
+    /// Nil when the engine is down, fails, restarts or doesn't answer in time.
     public func findMergeSuggestions() async -> [MergeSuggestionPair]? {
         await queryReplies.mergeSuggestions { send(.findMergeSuggestions) }
     }
 
+    /// One face review reply (list, resolve or undo); nil when the engine is down or doesn't answer in time.
     public func faceReview(_ command: (String) -> IPCCommand.Payload) async -> FaceReviewPage? {
         await queryReplies.faceReview { send(command($0)) }
     }
 
+    /// Nil when the engine has no CLIP text encoder or can't answer.
     public func embedTextQuery(_ query: String) async -> [Float]? {
         await queryReplies.textEmbedding { send(.embedTextQuery(query: query, queryID: $0)) }
     }
@@ -935,7 +938,6 @@ public final class EngineClient {
                         kind: "bookmark_unavailable",
                         message: "FileID couldn't retain access to that folder. Choose the folder again."
                     )
-                    client.cancelAutoPilot()
                 }
                 return
                 #else
@@ -953,28 +955,25 @@ public final class EngineClient {
                         kind: "engine_exited",
                         message: "The scan couldn't start because FileID's helper isn't running. Wait a moment and press Scan again."
                     )
-                    client.cancelAutoPilot()
                 }
             }
         }
     }
 
-    public func cancelAutoPilot() {}
-
     public func pause()    { isPaused = true;  send(.pauseScan)  }
     public func resume()   { isPaused = false; send(.resumeScan) }
+    /// Stops the scan only; a folder move or Describe Files run keeps going.
     public func cancelScan() {
         isPaused = false
         send(.cancelScan)
-        cancelAutoPilot()
     }
 
+    /// Stops everything the engine is doing (Chat's "stop all").
     public func cancel() {
         isPaused = false
         send(.cancelScan)
         send(.cancelRestructure)
         send(.deepAnalyzeCancel)
-        cancelAutoPilot()
     }
     public func shutdown() {
         // Latch the expected-exit suppression only when the shutdown command actually left the app; otherwise a genuine crash racing the respawn window would be masked as a clean exit and skip the error pill.

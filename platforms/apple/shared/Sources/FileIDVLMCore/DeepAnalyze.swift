@@ -1502,6 +1502,7 @@ public actor DeepAnalyze {
                 out = String(out[..<idx])
             }
         }
+        // Empty → literal "untitled" (NOT nil); callers flatMap over a non-nil value, so the signature stays String?.
         return out.isEmpty ? "untitled" : out
     }
 

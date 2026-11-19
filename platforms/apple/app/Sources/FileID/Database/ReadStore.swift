@@ -587,7 +587,7 @@ public final class ReadStore: @unchecked Sendable {
         }
         do {
             return try q.read { db in
-                // Candidate selection is recipe-agnostic: membership is the whole same-size class, since stored hashes are never byte-proof. The stored hash only ranks classes so near-certain duplicates load first; memberCap stops a dominant non-duplicate class from starving real groups out of candidateCap. candidateCount is uncapped so the partial-preview disclosure fires whenever a backstop drops candidates.
+                // Candidate selection is recipe-agnostic: membership is the whole same-size class, since stored hashes are never byte-proof (legacy BLAKE3 and current SHA-256 rows and stale hashes must still meet in one class so verify()'s live read can pair them). The stored hash only ranks classes so near-certain duplicates load first, with same-hash twins ranked adjacently so memberCap can't split a pair; memberCap stops a dominant non-duplicate class from starving real groups out of candidateCap. candidateCount is uncapped so the partial-preview disclosure fires whenever a backstop drops candidates.
                 let candidateCount = try Int.fetchOne(db, sql: """
                     WITH candidate_sizes AS (
                         SELECT COUNT(*) AS n FROM files
