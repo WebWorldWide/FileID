@@ -1,4 +1,4 @@
-//! `fileid scan --models`: the full ML pipeline, driven by spawning the engine binary over newline-delimited JSON IPC (the engine owns its async/ORT lifecycle). Pre-flights check the models and engine binary before spawning. Post-scan hints add `--db` when reads would open a different library (macOS desktop app).
+//! `fileid scan --models`: the full ML pipeline, driven by spawning the engine binary over newline-delimited JSON IPC (the engine owns its async runtime lifecycle). Pre-flights check the models and engine binary before spawning. Post-scan hints add `--db` when reads would open a different library (macOS desktop app).
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;

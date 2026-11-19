@@ -130,23 +130,11 @@ pub struct FolderPrototype {
     pub name_tokens: std::collections::HashSet<String>,
 }
 
-/// Name-routing thresholds, overlap coefficient =
-/// a∩b
-/// / min(
-/// a
-/// ,
-/// b
-/// ). At/above AUTO the cluster's filenames agree strongly enough with the target folder to upgrade a thin-margin content match to Auto; at/above REASON the "filenames fit" note is added.
+/// Name-routing thresholds, overlap coefficient = |a∩b| / min(|a|,|b|). At/above AUTO the cluster's filenames agree strongly enough with the target folder to upgrade a thin-margin content match to Auto; at/above REASON the "filenames fit" note is added.
 const NAME_AGREE_AUTO: f32 = 0.30;
 const NAME_AGREE_REASON: f32 = 0.20;
 
-/// Overlap coefficient
-/// a∩b
-/// / min(
-/// a
-/// ,
-/// b
-/// ), 0 when either is empty. Less penalized by union size than Jaccard, so a cluster sharing a folder's few distinctive tokens scores high.
+/// Overlap coefficient |a∩b| / min(|a|,|b|), 0 when either is empty. Less penalized by union size than Jaccard, so a cluster sharing a folder's few distinctive tokens scores high.
 fn overlap_coefficient(
     a: &std::collections::HashSet<String>,
     b: &std::collections::HashSet<String>,

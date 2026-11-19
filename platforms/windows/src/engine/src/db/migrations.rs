@@ -163,6 +163,7 @@ impl std::fmt::Display for NewerThanEngine {
 
 impl std::error::Error for NewerThanEngine {}
 
+/// Applies every registered migration not yet applied, in registration order, each in its own transaction.
 pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_TABLE_DDL).context("creating grdb_migrations")?;
 

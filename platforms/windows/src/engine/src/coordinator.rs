@@ -89,10 +89,12 @@ impl ScanCoordinator {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// True once any worker has marked the GPU as device-removed; workers should treat this as a hard stop.
     pub fn is_gpu_dead(&self) -> bool {
         self.inner.gpu_failure_latch.is_dead()
     }
 
+    /// Latches the process-wide GPU failure and wakes this scan's workers. Returns true once per coordinator so racing workers emit one diagnostic.
     pub fn mark_gpu_dead(&self) -> bool {
         self.inner.gpu_failure_latch.mark_dead();
         let first_for_scan = !self.inner.gpu_dead_observed.swap(true, Ordering::AcqRel);

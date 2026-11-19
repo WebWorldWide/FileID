@@ -75,13 +75,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+/// Applied at every connection open: WAL + NORMAL sync + 256 MB mmap + 64 MB cache.
 pub const SETUP_PRAGMAS: &[&str] = &[
     "PRAGMA journal_mode = WAL",
     "PRAGMA synchronous = NORMAL",
     "PRAGMA temp_store = MEMORY",
-    "PRAGMA mmap_size = 268435456",
-    "PRAGMA cache_size = -65536", // (negative = KB)
-    "PRAGMA wal_autocheckpoint = 10000",
+    "PRAGMA mmap_size = 268435456", // 256 MB
+    "PRAGMA cache_size = -65536", // 64 MB (negative = KB)
+    "PRAGMA wal_autocheckpoint = 10000", // ~40 MB before checkpoint
     // Pin the page cache in memory instead of spilling to a temp file mid-transaction; the worst transaction (a 100-row
     // tagged-file batch) fits well under it.
     "PRAGMA cache_spill = 0",
@@ -289,6 +290,7 @@ pub fn close_readers() {
     READERS.clear();
 }
 
+/// `Err(detail)` carries the first problem SQLite reports; bounded to `quick_check(1)` so a badly corrupted large library can't hang startup enumerating every fault.
 pub fn quick_check(conn: &Connection) -> std::result::Result<(), String> {
     match conn.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
         Ok(s) if s.eq_ignore_ascii_case("ok") => Ok(()),
@@ -411,7 +413,7 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         rows.filter_map(|r| r.ok()).filter(|n| !is_shadow(n)).collect()
     };
 
-// foreign_keys is per-connection and must be toggled outside a transaction: re-enable on every exit path.
+    // foreign_keys is per-connection and must be toggled outside a transaction: re-enable on every exit path.
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     let wipe = (|| -> Result<()> {
         let tx = conn.unchecked_transaction()?;

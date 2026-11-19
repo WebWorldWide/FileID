@@ -984,6 +984,7 @@ async fn scan_signals(
             Ok(chunk) => chunk,
             Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
             Err(_) => {
+                // Uniform sampling still covers the file; the unscanned span stays recorded as incomplete signal coverage.
                 complete = false;
                 break;
             }
@@ -1191,6 +1192,7 @@ fn decode_window<D: FrameDecoder>(
 }
 
 fn window_plan(window: &analysis::Window, duration: f64, frames: &Path) -> Result<(Vec<f64>, Vec<(f64, PathBuf)>)> {
+    // Requests past the last decodable frame resolve to that frame; the distinct-index pass collapses such repeats before inference.
     let times: Vec<f64> = window.times.iter().map(|t| t.min((duration - 0.05).max(0.0))).collect();
     let distinct = analysis::distinct_frame_indices(&times, window)?;
     let kept: Vec<f64> = distinct.iter().map(|&i| times[i]).collect();

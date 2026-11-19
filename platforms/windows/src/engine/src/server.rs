@@ -292,6 +292,7 @@ async fn async_main() -> Result<()> {
                             }
                         }
                         Ok(BoundedRead::Oversized(seen)) => {
+                            // SEC: rejected mid-read, never allocated past the cap.
                             tracing::warn!(bytes_seen = seen, "oversized ipc frame; rejecting");
                             d.sink.send(EngineError::event(
                                 "oversized_ipc_frame",
@@ -413,6 +414,7 @@ fn process_creation_time(handle: windows::Win32::Foundation::HANDLE) -> Option<u
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
+    // SAFETY: handle is a live process handle opened with PROCESS_QUERY_LIMITED_INFORMATION; all four out-params are owned locals.
     let ok = unsafe {
         GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user)
     };
@@ -461,6 +463,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
         tracing::warn!(
             "parent PID changed (was {ppid}, now {current}); treating original parent as gone"
         );
+        // SAFETY: handle was a live, owned handle from OpenProcess above.
         unsafe { let _ = CloseHandle(handle); }
         shutdown.notify_waiters();
         return;
@@ -469,6 +472,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
         tracing::warn!(
             "parent identity re-sample inconclusive (pid={ppid}); falling back to unpinned watch"
         );
+        // SAFETY: handle was a live, owned handle from OpenProcess above.
         unsafe { let _ = CloseHandle(handle); }
         platform::watch_parent(ppid, shutdown).await;
         return;
@@ -477,6 +481,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     // HANDLE wraps *mut c_void, which the windows crate doesn't mark Send, so we carry it across the closure as the `handle_addr` usize. SAFETY: a Win32 HANDLE is opaque and CloseHandle / WaitForSingleObject may run on any thread; this task is its sole owner.
     let wait = tokio::task::spawn_blocking(move || {
         let h = HANDLE(handle_addr as *mut core::ffi::c_void);
+        // SAFETY: h is the pinned parent handle smuggled across threads.
         let r = unsafe { WaitForSingleObject(h, u32::MAX) };
         unsafe { let _ = CloseHandle(h); }
         r

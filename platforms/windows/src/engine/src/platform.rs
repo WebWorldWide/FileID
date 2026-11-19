@@ -332,6 +332,7 @@ pub fn performance_core_count() -> usize {
     {
         let mut value: u32 = 0;
         let mut size = std::mem::size_of::<u32>();
+        // SAFETY: `value` and `size` outlive the call and `size` is the buffer's size.
         let status = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&raw mut value).cast(), &raw mut size, std::ptr::null_mut(), 0) };
         if status == 0 && value > 0 {
             return value as usize;

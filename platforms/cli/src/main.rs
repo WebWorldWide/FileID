@@ -1,4 +1,4 @@
-//! `fileid` CLI. Reads and apply paths run in-process on `fileid-engine`; `scan --models` spawns the engine binary because it owns the async/ORT lifecycle.
+//! `fileid` CLI. Reads and apply paths run in-process on `fileid-engine`; `scan --models` spawns the engine binary because it owns the async runtime lifecycle.
 
 mod context;
 mod dedupe;

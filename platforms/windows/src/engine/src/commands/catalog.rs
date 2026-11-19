@@ -118,6 +118,7 @@ fn execute_with_index(
             return Ok(result);
         }
     }
+    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
     if ["search", "detail", "jobs"].contains(&request.action.as_str())
         && let Some(mut reader) = crate::db::reader_for(&database)?
     {
@@ -302,6 +303,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         }
         "jobs" => result.jobs = jobs(conn)?,
         "pauseJob" | "resumeJob" | "cancelJob" => {
+            // Only jobs with a worker in this engine can change state.
             let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
             if !is_job_of_kind(&tx, id, super::timeline::JOB_KIND)?

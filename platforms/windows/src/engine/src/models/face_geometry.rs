@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone)]
 pub struct Detection {
     pub bbox: [f32; 4],

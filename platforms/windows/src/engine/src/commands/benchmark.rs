@@ -1,4 +1,3 @@
-
 use crate::ipc::sink::Sink;
 use crate::ipc::{BenchmarkModelPayload, BenchmarkProgress, BenchmarkResult, EventPayload, IpcEvent, Wrap};
 use parking_lot::Mutex;

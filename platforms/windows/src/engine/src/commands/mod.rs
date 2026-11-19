@@ -1,4 +1,3 @@
-
 pub(crate) mod bulk;
 pub(crate) mod deep_analyze;
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]

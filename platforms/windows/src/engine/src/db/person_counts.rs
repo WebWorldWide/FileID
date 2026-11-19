@@ -6,6 +6,7 @@ use rusqlite::{Connection, params};
 const COUNT: &str = "(SELECT COUNT(DISTINCT file_id) FROM face_prints \
                       WHERE person_id = persons.id AND COALESCE(excluded,0)=0)";
 
+/// Corrects every stored count that differs from the live one, including a person left with no counted face. Returns the number of rows changed.
 pub fn recount_stale(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(
         &format!("UPDATE persons SET file_count = {COUNT} WHERE file_count IS NOT {COUNT}"),

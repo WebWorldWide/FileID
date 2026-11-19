@@ -243,7 +243,7 @@ pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExc
     out
 }
 
-/// Maps a string to a filename component safe on NTFS, Linux and BSD, byte-faithful with macOS `FilesystemNameSafe.componentSafe` so the restructure planner produces IDENTICAL folder names on every platform (else learn-your-style prototypes never match cross-platform). Replaces illegal/control chars with `_`, trims trailing dots/spaces, suffixes Windows reserved basenames, caps length, never returns empty.
+/// Maps a string to a filename component safe on NTFS, Linux and BSD, so the restructure planner produces IDENTICAL folder names on every platform (else learn-your-style prototypes never match cross-platform). Replaces illegal/control chars with `_`, trims trailing dots/spaces, suffixes Windows reserved basenames, caps length, never returns empty.
 pub fn safe_filename_component(raw: &str) -> String {
     safe_filename_component_max(raw, 200)
 }
@@ -743,7 +743,7 @@ mod tests {
         }
     }
 
-    /// Cross-platform pin: the macOS engine re-implements this in Swift (FileIDShared/StablePathHash.swift, mirrored vectors in StablePathHashTests) so `files.path_hash` matches in both engines' DBs; this fails if DefaultHasher's algorithm ever changes.
+    /// Pin: `files.path_hash` values already stored in users' catalogs depend on DefaultHasher's algorithm; this fails if it ever changes.
     ///
     /// Linux is excluded: its case-sensitive filesystems make `stable_path_hash` preserve case (see `stable_path_hash_case_sensitivity`), and DBs are never shared across OSes.
     #[test]

@@ -1,4 +1,3 @@
-
 #![allow(clippy::needless_return)]
 
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]

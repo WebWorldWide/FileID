@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -314,7 +313,6 @@ pub(crate) async fn handle_start_scan(
     }))))
     .await;
 
-
     // Models load when the scan first has a file to analyse and stay loaded between scans (pipeline/scan_models.rs); a
     // rescan that finds nothing new loads nothing.
     let models_worker_count = platform::default_worker_cap() as usize;
@@ -597,6 +595,7 @@ mod tests {
     }
 }
 
+/// Removes cataloged rows under the excluded folders; files on disk are untouched. Sent when the user adds an exclusion, and the same purge runs at every scan start as the durable backstop.
 pub(crate) async fn handle_purge_excluded(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,

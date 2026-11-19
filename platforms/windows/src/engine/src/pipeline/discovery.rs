@@ -28,7 +28,7 @@ pub(crate) fn path_fingerprint_text(path: &str) -> SkipFingerprint {
 }
 
 
-/// Bounded mpsc capacity (Discovery → Tagging), floor value (MemoryTier::Low). Once the channel fills, `blocking_send` stalls the walker and the discovered counter, `done` flag and DiscoveryComplete advance in lockstep with ML throughput.
+/// Bounded mpsc capacity (Discovery → Tagging), floor value (MemoryTier::Low). Once the channel fills, `blocking_send` stalls the walker and the discovered counter, `done` flag and DiscoveryComplete advance in lockstep with ML throughput. Per-entry cost is a DiscoveredFile (~300 B with its PathBuf), so even the High-tier cap bounds queue memory at ~300 MB, and only while ML is far behind.
 const DISCOVERY_CHANNEL_CAP_LOW: usize = 32_768;
 const DISCOVERY_CHANNEL_CAP_BALANCED: usize = 262_144;
 const DISCOVERY_CHANNEL_CAP_HIGH: usize = 1_048_576;
@@ -770,6 +770,7 @@ fn is_non_unicode_path(path: &std::path::Path) -> bool {
 
 /// Directory names whose entire subtree is skipped, decided once per directory in `process_read_dir`.
 fn is_noise_directory(name: &str) -> bool {
+    // Case-insensitive: Windows lists System Volume Information / $RECYCLE.BIN mixed-case at the root.
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),

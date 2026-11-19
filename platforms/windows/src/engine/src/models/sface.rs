@@ -55,6 +55,7 @@ impl SFace {
         self.embed(&rgb)
     }
 
+    /// Embeds an aligned 112×112 RGB8 face crop (37632 bytes); returns 128 floats, L2-normalized.
     pub fn embed(&mut self, rgb_112: &[u8]) -> Result<Vec<f32>> {
         if rgb_112.len() != 3 * 112 * 112 {
             anyhow::bail!("SFace embed expects 37632 RGB8 bytes, got {}", rgb_112.len());

@@ -1,4 +1,3 @@
-
 use std::io::IsTerminal;
 use std::path::PathBuf;
 

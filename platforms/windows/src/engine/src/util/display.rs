@@ -1,4 +1,3 @@
-
 /// Finder's decimal units (`ByteCountFormatter` `.file`): 1000-based, KB whole, MB one decimal, GB and up two.
 pub fn file_size(bytes: u64) -> String {
     const UNITS: [(&str, f64, usize); 4] = [("TB", 1e12, 2), ("GB", 1e9, 2), ("MB", 1e6, 1), ("KB", 1e3, 0)];

@@ -1,4 +1,3 @@
-
 use crate::ipc::sink::Sink;
 use crate::ipc::{EngineError, EventPayload, IpcEvent, ListModelsPayload, ModelCatalog, ModelCatalogItem, Wrap};
 use crate::models::{catalog, registry};
