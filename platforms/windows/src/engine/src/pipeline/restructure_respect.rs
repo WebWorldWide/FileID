@@ -28,7 +28,7 @@ const GENERIC_FOLDERS: &[&str] = &[
     "downloads", "downloaded", "new folder", "untitled folder", "untitled", "temp", "tmp", "misc",
     "miscellaneous", "other", "others", "stuff", "things", "files", "unsorted", "desktop", "dump", "inbox",
     "to sort", "to-sort", "import", "imports", "camera uploads", "dcim", "export", "exports", "screenshots",
-    "screen shots",
+    "screen shots", "lib", "photo library", "camera roll",
 ];
 
 pub fn kill_switch_off() -> bool {
