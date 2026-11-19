@@ -21,6 +21,7 @@ const EMBEDDING_CHARS: usize = 4000;
 const VIDEO_KEYFRAME_EDGE: u32 = 512;
 const VIDEO_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(6);
 const DECODE_FAILED: &str = "Could not decode image";
+const PERMISSION_DENIED: &str = "FileID isn't allowed to read this file";
 const PDF_OPEN_FAILED: &str = "Could not open PDF (will retry next scan)";
 
 pub(super) fn enabled() -> bool {
@@ -110,6 +111,15 @@ fn read_for_hash(file: &DiscoveredFile, legacy: bool) -> (Option<Vec<u8>>, Optio
     (None, hash, legacy)
 }
 
+/// An image the decoder gave up on is unreadable for the reason the operating system gives when it is opened: a file
+/// FileID may not read is not a damaged image.
+fn decode_failure(path: &Path) -> &'static str {
+    match std::fs::File::open(crate::util::path_safety::to_extended_length(path)) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => PERMISSION_DENIED,
+        _ => DECODE_FAILED,
+    }
+}
+
 fn stored_text(text: Option<String>) -> Option<String> {
     let trimmed = text?.trim().to_string();
     (!trimmed.is_empty()).then(|| trimmed.chars().take(STORED_TEXT_CHARS).collect())
@@ -135,7 +145,7 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinR
             FileKind::Image if awaits_twin => {}
             FileKind::Image => match scan::decode_image(&file.path, file.size_bytes) {
                 Some(image) => frame.image = Some(Arc::new(image)),
-                None => decoded = Some(Err(anyhow::anyhow!(DECODE_FAILED))),
+                None => decoded = Some(Err(anyhow::anyhow!(decode_failure(&file.path)))),
             },
             FileKind::Video => {
                 frame.image = scan::video_keyframe(&file.path, VIDEO_KEYFRAME_EDGE, VIDEO_KEYFRAME_TIMEOUT).map(Arc::new);
@@ -541,6 +551,24 @@ impl catch_up::Analyzer for CatchUp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_the_decoder_gave_up_on_is_reported_for_the_reason_the_file_cannot_be_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fileid-decode-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.jpg");
+        std::fs::write(&broken, b"not a jpeg").unwrap();
+        assert_eq!(decode_failure(&broken), DECODE_FAILED);
+        assert_eq!(decode_failure(&dir.join("missing.jpg")), DECODE_FAILED);
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::File::open(&broken).is_err();
+        if denied {
+            assert_eq!(decode_failure(&broken), PERMISSION_DENIED);
+        }
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn aesthetic_matches_the_swift_proxy() {
