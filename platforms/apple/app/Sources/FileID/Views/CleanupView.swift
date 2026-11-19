@@ -203,6 +203,12 @@ struct CleanupView: View {
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
     }
 
+    static func exactSummary(groups: Int, extraCopies: Int, bytes: Int64) -> String {
+        if groups == 0 { return "No extra copies found" }
+        let freed = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "\(extraCopies.formatted()) extra cop\(extraCopies == 1 ? "y" : "ies") in \(groups.formatted()) group\(groups == 1 ? "" : "s") · \(freed) can be freed"
+    }
+
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
         if store.totalFiles == 0 { return "Nothing scanned yet" }
         let g = visible.count
@@ -214,9 +220,8 @@ struct CleanupView: View {
                 : "\(g) group\(g == 1 ? "" : "s") of look-alikes · check each before removing"
         } else {
             let bytes = visible.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
-            base = g == 0
-                ? "No extra copies found"
-                : "\(g.formatted()) file\(g == 1 ? "" : "s") with extra copies · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) can be freed"
+            let extraCopies = visible.reduce(0) { $0 + max(0, $1.totalFileCount - 1) }
+            base = Self.exactSummary(groups: g, extraCopies: extraCopies, bytes: bytes)
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
