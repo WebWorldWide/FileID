@@ -41,7 +41,7 @@ public sealed record ModelCatalog(
     double PhysicalMemoryGB,
     long AvailableMemoryMB,
     long VramMB,
-    [property: JsonPropertyName("recommendedID")] [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RecommendedId,
+    [property: JsonPropertyName("recommendedID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RecommendedId,
     IReadOnlyList<ModelCatalogItem> Models);
 
 public sealed record ModelCatalogItem(
