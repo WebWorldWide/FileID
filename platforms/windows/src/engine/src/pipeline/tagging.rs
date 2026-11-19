@@ -651,7 +651,7 @@ fn twin_reuse_enabled() -> bool {
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const PER_FILE_TIMEOUT_MESSAGE: &str = "per-file timeout after 60s";
 /// The Mac scan's Vision pass for one image did not answer in time.
-pub(crate) const VISION_TIMEOUT_MESSAGE: &str = "Vision pass timed out (will retry next scan)";
+pub(crate) const VISION_TIMEOUT_MESSAGE: &str = "Vision pass timed out";
 /// Stored `error_message` of a row that failed only because the machine was too busy, so a retry may succeed.
 pub(crate) const TIMEOUT_MESSAGES: [&str; 2] = [PER_FILE_TIMEOUT_MESSAGE, VISION_TIMEOUT_MESSAGE];
 
@@ -3384,6 +3384,13 @@ mod tests {
     #[test]
     fn a_waiting_copy_gives_up_before_the_per_file_timeout() {
         assert!(TWIN_WAIT_PATIENCE < PER_FILE_TIMEOUT);
+    }
+
+    #[test]
+    fn a_timeout_failure_reads_as_unreadable_in_the_library_not_as_waiting_for_a_retry() {
+        for message in TIMEOUT_MESSAGES {
+            assert!(!message.contains("will retry"), "the Library leaves rows saying \"will retry\" out of its Unreadable count: {message}");
+        }
     }
 
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
