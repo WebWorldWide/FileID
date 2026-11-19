@@ -64,6 +64,8 @@ pub struct Question {
     pub folder: Option<String>,
     pub duplicates: bool,
     pub undescribed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub faces: bool,
     pub reduced: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formats: Option<Vec<String>>,
@@ -91,6 +93,7 @@ impl Default for Question {
             folder: None,
             duplicates: false,
             undescribed: false,
+            faces: false,
             reduced: String::new(),
             formats: None,
             limit: None,
@@ -105,7 +108,7 @@ impl Default for Question {
 
 impl Question {
     pub fn structured(&self) -> bool {
-        self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
+        self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.faces || self.formats.is_some()
             || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some() || self.breakdown.is_some() || self.people.is_some()
     }
 }
@@ -539,6 +542,28 @@ pub fn parse_question(text: &str) -> Question {
                 .contains(&word.as_str())
                 || described.contains(&word.as_str())
             {
+                used.insert(index);
+            }
+        }
+    }
+    if has(&words, &["face", "faces"]) && !has(&words, &["people", "persons", "person", "named", "unnamed"]) {
+        question.faces = true;
+        for (index, word) in words.iter().enumerate() {
+            if ["face", "faces", "with", "contain", "contains", "containing", "show", "showing", "visible", "any"].contains(&word.as_str()) {
+                used.insert(index);
+            }
+        }
+    }
+    if has(&words, &["camera", "cameras"]) && has(&words, &["which", "what", "whats", "most", "top"]) {
+        question.breakdown = Some("camera".into());
+        if question.measure == "list" {
+            question.measure = "count".into();
+        }
+        if has(&words, &["most", "top", "mostly", "often"]) {
+            question.peak = Some("most".into());
+        }
+        for (index, word) in words.iter().enumerate() {
+            if ["camera", "cameras", "took", "take", "takes", "taken", "shot", "shoot", "use", "used", "uses", "using", "device", "devices", "do", "does", "did"].contains(&word.as_str()) {
                 used.insert(index);
             }
         }

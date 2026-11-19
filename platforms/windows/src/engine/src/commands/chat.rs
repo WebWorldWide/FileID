@@ -914,6 +914,7 @@ fn plan_for(
         question.min_bytes = question.min_bytes.or(before.min_bytes);
         question.max_bytes = question.max_bytes.or(before.max_bytes);
         question.undescribed |= before.undescribed;
+        question.faces |= before.faces;
     }
     if previous.is_some()
         && bare
@@ -1039,6 +1040,7 @@ fn prepare_turn(
         date: question.date.clone(),
         folder: question.folder.clone(),
         undescribed: question.undescribed,
+        faces: question.faces,
         extensions: question.formats.clone().unwrap_or_default(),
         all_people: plan.all_people,
         excluded_person_ids: plan.excluded_person_ids.clone(),
@@ -1089,6 +1091,7 @@ fn prepare_turn(
         date: question.date.clone(),
         folder: question.folder.clone(),
         undescribed: question.undescribed,
+        faces: question.faces,
         extensions: question.formats.clone().unwrap_or_default(),
         all_people: plan.all_people,
         excluded_person_ids: plan.excluded_person_ids.clone(),
@@ -1971,6 +1974,28 @@ mod tests {
         ask("constraints", "show me my videos from 2012");
         let (message, hits) = ask("constraints", "How many of those are bigger than 200 B?");
         assert_eq!((message.as_str(), hits.len()), ("Found 2 videos over 200 bytes from 2012, using 1.4 KB.", 2));
+    }
+
+    #[test]
+    fn face_and_camera_questions_read_the_catalog_not_keywords() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,has_faces,camera_model) VALUES
+             (1,'/lib/a.jpg',1,10,1688472000,0,'image','jpg',1,'ILCE-7M5'),
+             (2,'/lib/b.jpg',2,10,1688472000,0,'image','jpg',1,'ILCE-7M5'),
+             (3,'/lib/c.jpg',3,10,1688472000,0,'image','jpg',0,'DMC-FH22'),
+             (4,'/lib/d.mov',4,10,1688472000,0,'video','mov',1,NULL);",
+        )
+        .unwrap();
+        let mut ask = |text: &str| {
+            let request = ChatRequest { request_id: uuid::Uuid::new_v4().to_string(), conversation_id: uuid::Uuid::new_v4().to_string(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            let response = execute(&mut conn, &request).unwrap();
+            (response.message, response.hits.len())
+        };
+        assert_eq!(ask("Show me photos with faces"), ("Found 2 photos with faces.".into(), 2));
+        assert_eq!(ask("How many photos have faces?").0, "Found 2 photos with faces, using 20 bytes.");
+        assert_eq!(ask("How many files have faces?").0, "Found 3 files with faces, using 30 bytes.");
+        assert_eq!(ask("Which camera took the most photos?").0, "ILCE-7M5 has the most photos (2). Photos by camera: ILCE-7M5: 2, DMC-FH22: 1.");
     }
 
     #[test]

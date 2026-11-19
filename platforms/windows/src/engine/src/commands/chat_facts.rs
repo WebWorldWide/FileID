@@ -32,6 +32,7 @@ pub(crate) struct Filter {
     pub date: Option<DateFilter>,
     pub folder: Option<String>,
     pub undescribed: bool,
+    pub faces: bool,
     pub ids: Option<Vec<i64>>,
     pub extensions: Vec<String>,
     pub all_people: bool,
@@ -149,6 +150,9 @@ impl Filter {
         if self.undescribed {
             parts.push("(f.vlm_description IS NULL OR trim(f.vlm_description)='')".into());
         }
+        if self.faces {
+            parts.push("f.has_faces=1".into());
+        }
         if let Some(root) = &self.root {
             parts.push(super::roots::clause("f.path_text", "?"));
             args.push(Value::Text(root.param().to_owned()));
@@ -186,6 +190,9 @@ impl Filter {
         }
         if self.undescribed {
             text += " not described yet";
+        }
+        if self.faces {
+            text += " with faces";
         }
         text
     }
@@ -509,7 +516,8 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
     let dated: Vec<(&str, i64)> = groups.iter().filter_map(|group| group.0.as_deref().map(|label| (label, metric(group)))).collect();
     let target = if peak == "least" { dated.iter().map(|group| group.1).min() } else { dated.iter().map(|group| group.1).max() };
     let Some(target) = target else {
-        return format!("None of these files has a capture date, so I can't rank them by {unit}.");
+        let missing = if unit == "camera" { "a camera recorded" } else { "a capture date" };
+        return format!("None of these files has {missing}, so I can't rank them by {unit}.");
     };
     let label = |text: &str| match (unit, text.split_once('-')) {
         ("month", Some((year, month))) => month.parse::<usize>().ok().and_then(|n| MONTH_NAMES.get(n.wrapping_sub(1))).map_or_else(|| text.to_owned(), |name| format!("{name} {year}")),
@@ -610,7 +618,7 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     }
     let qualifiers = filter.qualifiers();
     if let (Some(unit), Some(_)) = (&question.breakdown, &question.peak)
-        && !["year", "month"].contains(&unit.as_str())
+        && !["year", "month", "camera"].contains(&unit.as_str())
     {
         return Ok((format!("I can't rank {} by {unit} yet. I can count them by year or month, for example “which month has the most {}?”", noun(&filter.kinds, 2), noun(&filter.kinds, 2)), vec![]));
     }
@@ -649,9 +657,15 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     if let Some(unit) = &question.breakdown {
         let mut args = Vec::new();
         let clause = filter.clause(&mut args);
-        let format = if unit == "year" { "%Y" } else { "%Y-%m" };
+        let (group, order) = match unit.as_str() {
+            "camera" => ("NULLIF(trim(f.camera_model),'')".to_owned(), "c DESC,g ASC".to_owned()),
+            _ => (
+                format!("strftime('{}',{TAKEN},'unixepoch','localtime')", if unit == "year" { "%Y" } else { "%Y-%m" }),
+                "g DESC".to_owned(),
+            ),
+        };
         let mut statement = conn.prepare(&format!(
-            "SELECT strftime('{format}',{TAKEN},'unixepoch','localtime') AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,g DESC"
+            "SELECT {group} AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,{order}"
         ))?;
         let groups = statement
             .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))?
@@ -660,7 +674,7 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
             .iter()
             .take(24)
             .map(|(label, n, b)| {
-                let label = label.as_deref().unwrap_or("no date");
+                let label = label.as_deref().unwrap_or(if unit == "camera" { "no camera recorded" } else { "no date" });
                 if question.measure == "size" { format!("{label}: {}", bytes_label(*b)) } else { format!("{label}: {}", count_label(*n)) }
             })
             .collect();
