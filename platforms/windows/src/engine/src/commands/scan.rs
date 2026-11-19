@@ -348,7 +348,7 @@ pub(crate) async fn handle_start_scan(
 
     let models_for_keep = models.clone();
     let outcome = match session.run(&root, |_| {}).await {
-        Ok(first) if first.changed_during_scan => {
+        Ok(first) if first.needs_follow_up => {
             ScanSession::new(
                 coord,
                 db,

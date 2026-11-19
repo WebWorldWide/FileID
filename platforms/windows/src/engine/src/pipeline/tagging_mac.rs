@@ -6,7 +6,7 @@ use super::{
     claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
     DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
     PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES,
-    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US,
+    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US, VISION_TIMEOUT_MESSAGE,
 };
 use crate::apple::scan;
 use crate::pipeline::catch_up;
@@ -21,7 +21,6 @@ const EMBEDDING_CHARS: usize = 4000;
 const VIDEO_KEYFRAME_EDGE: u32 = 512;
 const VIDEO_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(6);
 const DECODE_FAILED: &str = "Could not decode image";
-const VISION_TIMEOUT: &str = "Vision pass timed out (will retry next scan)";
 const PDF_OPEN_FAILED: &str = "Could not open PDF (will retry next scan)";
 
 pub(super) fn enabled() -> bool {
@@ -409,7 +408,7 @@ async fn image_row(
     STATS_CLIP_US.fetch_add(clip_elapsed.as_micros() as u64, Ordering::Relaxed);
     let Some((pass, ram, read, text_tags, dhash)) = analysis else {
         row.failed = true;
-        row.error_message = Some(VISION_TIMEOUT.into());
+        row.error_message = Some(VISION_TIMEOUT_MESSAGE.into());
         return;
     };
     if read.ran {
