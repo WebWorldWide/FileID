@@ -29,7 +29,7 @@ Storage: SQLite WAL written only by the Rust engine (migrations in `../windows/s
 
 ## AI models (commercial-clean target)
 
-Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/huggingface` (an existing `~/Documents/huggingface/models` from older Developer ID installs stays in use). The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
+Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/huggingface`; the engine (`models/mlx.rs` `cache_root`) and `ModelCachePaths.swift` apply one rule: an existing non-empty `~/Documents/huggingface/models` from older Developer ID installs stays in use, every new install lands in Application Support. Factory reset keeps that folder. The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
 - **Faces** — SFace embedder (Apache, 128-d ONNX run by the shared Rust engine on tract, CPU) + 5-point alignment; detection stays Apple Vision.
 - **CLIP** — OpenAI/OpenCLIP ViT-B/32 (MIT) image + text, 512-d.
 - **Tagging** — RAM++ primary, CLIP zero-shot scene tags as fallback.
