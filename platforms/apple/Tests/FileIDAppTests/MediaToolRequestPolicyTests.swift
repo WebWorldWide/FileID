@@ -102,7 +102,7 @@ struct MediaToolRequestPolicyTests {
         #expect(session.hits.isEmpty)
         #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
     }
-    @Test func aVideoSearchKeepsMp4AndMovHitsInVideoMode() {
+    @MainActor @Test func aVideoSearchKeepsMp4AndMovHitsInVideoMode() {
         let session = ToolsSession()
         session.allHits = [
             CatalogHit(fileID: 1, path: "/v/C0029.mp4", kind: "video", text: ""),
