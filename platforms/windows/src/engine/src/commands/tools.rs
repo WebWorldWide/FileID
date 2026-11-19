@@ -851,7 +851,7 @@ fn validate_image(path: &Path) -> Result<()> {
         .format()
         .context("Unknown image format")?;
     if ![ImageFormat::Png, ImageFormat::Jpeg].contains(&format) {
-        bail!("Only single-image PNG and JPEG inputs are supported by this adapter")
+        bail!("Only JPEG and PNG photos can be exported here. For a RAW photo, choose the JPEG.")
     }
     if format == ImageFormat::Png {
         let mut file = File::open(path)?;
@@ -1142,6 +1142,19 @@ mod tests {
         let request = fixture.request("jpeg");
         let message = execute(&mut fixture.conn, &request).err().map(|e| e.to_string()).unwrap_or_default();
         assert!(message.contains("100 megapixels"), "{message}");
+    }
+
+    #[test]
+    fn a_photo_in_another_format_is_refused_in_plain_words() {
+        let mut fixture = Fixture::new();
+        let mut gif = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut gif)
+            .encode(&[200u8; 4 * 4 * 4], 4, 4, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        fs::write(&fixture.source, gif).unwrap();
+        let request = fixture.request("jpeg");
+        let message = execute(&mut fixture.conn, &request).err().map(|e| e.to_string()).unwrap_or_default();
+        assert_eq!(message, "Only JPEG and PNG photos can be exported here. For a RAW photo, choose the JPEG.");
     }
 
     #[test]
