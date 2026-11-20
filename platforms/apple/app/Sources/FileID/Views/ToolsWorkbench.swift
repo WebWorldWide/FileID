@@ -210,6 +210,7 @@ struct ToolsWorkbench: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var session: ToolsSession
     var inline = false
+    @State private var rootWidth: CGFloat = 0
     @State private var previewImage: NSImage?
     @State private var player: AVPlayer?
     @State private var clock = PlayheadClock()
@@ -257,12 +258,13 @@ struct ToolsWorkbench: View {
                 .focusSection()
                 VHairline()
                 previewPane
-                    .frame(width: 380)
+                    .frame(width: rootWidth > 0 && rootWidth < 860 ? 320 : 380)
                     .background(Theme.pane, ignoresSafeAreaEdges: [])
                     .focusSection()
             }
         }
         .frame(minWidth: inline ? nil : 900, minHeight: inline ? nil : 650)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rootWidth = $0 }
         .tint(Theme.gold)
         .onAppear {
             consume(); consumeSearch()

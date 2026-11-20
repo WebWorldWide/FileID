@@ -125,7 +125,7 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 16, height: 16)
                 .background(Circle().fill(tint))
-            Text(label).font(Theme.Font.body(11)).foregroundStyle(Theme.text2)
+            Text(label).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2)
         }
     }
 
@@ -139,7 +139,7 @@ struct TreeDiffView: View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
-                Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(subtitle).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
@@ -169,7 +169,7 @@ struct TreeDiffView: View {
         .onHover { hovering in
             hoverBus.set(hovering ? .sourceFolder(row.folder) : nil)
         }
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(Theme.quick, value: isHighlighted)
     }
 
     @ViewBuilder
@@ -182,7 +182,7 @@ struct TreeDiffView: View {
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
             Image(systemName: "folder.fill")
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
             Text(row.displayName)
                 .font(Theme.Font.mono(11))
@@ -217,7 +217,7 @@ struct TreeDiffView: View {
         .onHover { hovering in
             hoverBus.set(hovering ? .destBucket(row.bucket) : nil)
         }
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(Theme.quick, value: isHighlighted)
     }
 
     @ViewBuilder
@@ -230,7 +230,7 @@ struct TreeDiffView: View {
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
             Image(systemName: bucketIconName(row.bucket))
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
             Text(row.bucket)
                 .font(Theme.Font.mono(11))

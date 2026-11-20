@@ -137,7 +137,7 @@ struct PipelineBlock: View {
                 Text(stepText).font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.text2)
                 Spacer(minLength: 4)
                 if let p = progress, p.phase != .idle {
-                    Button { withAnimation(Theme.spring) { showDetails.toggle() } } label: {
+                    Button { withAnimation(Theme.springStandard) { showDetails.toggle() } } label: {
                         Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
                             .rotationEffect(.degrees(showDetails ? 180 : 0))
                             .foregroundStyle(Theme.text3)

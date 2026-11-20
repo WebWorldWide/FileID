@@ -231,6 +231,13 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     }
 }
 
+/// Width an always-visible (legacy) scroller takes from the content, so a scrolled grid ends where the pinned toolbar above it does.
+enum LegacyScroller {
+    static var width: CGFloat {
+        NSScroller.preferredScrollerStyle == .legacy ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+    }
+}
+
 /// Columns of 160–220 pt with 12 pt gaps and 20 pt insets, like the SwiftUI grid.
 final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
     private(set) var columnCount = 1
@@ -245,6 +252,7 @@ final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
     required init?(coder: NSCoder) { fatalError() }
 
     override func prepare() {
+        sectionInset.right = Theme.Metrics.pageInsetX - LegacyScroller.width
         if let width = collectionView?.enclosingScrollView?.contentView.bounds.width, width > 0 {
             let usable = width - sectionInset.left - sectionInset.right
             let columns = max(1, Int((usable + minimumInteritemSpacing) / (160 + minimumInteritemSpacing)))

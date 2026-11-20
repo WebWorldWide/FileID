@@ -1089,7 +1089,7 @@ private struct PersonDetailSheet: View {
                         Text("I don't know who this is")
                             .font(Theme.Font.body(13.5))
                         Text("Hides this person and leaves them out of descriptions. Their photos stay in the library.")
-                            .font(Theme.Font.body(11))
+                            .font(Theme.Font.body(11.5))
                             .foregroundStyle(Theme.text3)
                     }
                 }
@@ -1265,7 +1265,7 @@ private struct PersonDetailSheet: View {
                 }
             }
             if let s = tagBatchStatus {
-                Text(s).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(s).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
         }
     }
@@ -1395,7 +1395,7 @@ private struct PersonFileTile: View {
                                 lineWidth: isChecked ? 2 : 0)
                 )
             Text(file.url.lastPathComponent)
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1704,7 +1704,7 @@ private struct SuggestedMergesSheet: View {
                     .font(Theme.Font.body(13.5, .semibold))
                     .lineLimit(1)
                 Text("\(p.fileCount) photo\(p.fileCount == 1 ? "" : "s")")
-                    .font(Theme.Font.body(11))
+                    .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
         }

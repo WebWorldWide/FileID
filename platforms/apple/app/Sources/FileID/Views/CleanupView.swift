@@ -807,8 +807,7 @@ private struct CopyTile: View {
                         .stroke(borderColor, lineWidth: borderWidth)
                 )
                 .overlay(badgeOverlay)
-                .scaleEffect(hovering ? 1.02 : 1.0)
-                .animation(.easeInOut(duration: 0.12), value: hovering)
+                .animation(Theme.quick, value: hovering)
                 .contentShape(Rectangle())
                 .onTapGesture { onToggle() }
                 .contextMenu {

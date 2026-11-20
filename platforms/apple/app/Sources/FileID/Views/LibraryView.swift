@@ -315,7 +315,7 @@ struct LibraryView: View {
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .animation(Theme.spring, value: paneRow == nil)
+                .animation(Theme.springStandard, value: paneRow == nil)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1052,7 +1052,7 @@ struct LibraryView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(Theme.spring, value: newFilesWaiting)
+        .animation(Theme.springStandard, value: newFilesWaiting)
         // One stable sheet. `isPresented` stays true across navigation so the
         // sheet keeps identity; the displayed file is driven by selectedID.
         .sheet(isPresented: Binding(
@@ -1397,7 +1397,7 @@ private struct FilePreviewSheet: View {
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            .animation(Theme.spring, value: showInfo)
+            .animation(Theme.springStandard, value: showInfo)
         }
         .frame(minWidth: 1040, idealWidth: 1280, minHeight: 680, idealHeight: 820)
         .background(Theme.canvas, ignoresSafeAreaEdges: [])

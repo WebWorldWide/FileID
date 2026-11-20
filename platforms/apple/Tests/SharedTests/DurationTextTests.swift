@@ -13,6 +13,17 @@ struct DurationTextTests {
         #expect(DurationText.short(.nan) == "—")
     }
 
+    @Test("approximate form reads as an estimate in words, never as 35m 0s")
+    func approximate() {
+        #expect(DurationText.approximate(1) == "about 1 second")
+        #expect(DurationText.approximate(40) == "about 40 seconds")
+        #expect(DurationText.approximate(2_097) == "about 35 minutes")
+        #expect(DurationText.approximate(5_400) == "about 1.5 hours")
+        #expect(DurationText.approximate(7_200) == "about 2 hours")
+        #expect(DurationText.approximate(.nan) == "—")
+        #expect(DurationText.approximate(-5) == "about 1 second")
+    }
+
     @Test("clock and spoken forms round down")
     func clock() {
         #expect(DurationText.clock(65.9) == "1:05")

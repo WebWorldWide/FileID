@@ -37,7 +37,7 @@ struct DeepAnalyzeModelPickerCard: View {
                     Text("Descriptions and Chat").font(Theme.Font.body(14, .semibold))
                     Spacer()
                     Text("This Mac has \(Int(ramGB)) GB memory")
-                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                 }
                 Text("The AI that writes descriptions and suggested names, and answers Chat. Bigger models write better but need more memory.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
@@ -294,7 +294,7 @@ private struct ModelOptionRow: View {
     @ViewBuilder
     private var statsLine: some View {
         Text("Needs about \(String(format: "%.1f", kind.ramBudgetGB)) GB memory · " + (kind.secondsPerImage > 0 ? "about \(String(format: "%.0f", kind.secondsPerImage)) s a photo" : "speed not measured yet"))
-            .font(Theme.Font.mono(10.5))
+            .font(Theme.Font.body(11.5))
             .foregroundStyle(Theme.text3)
     }
 
@@ -529,6 +529,7 @@ struct DeepAnalyzeView: View {
                 Text("Add what FileID found to the files themselves as Finder tags, so Finder and Spotlight can find them too. Your own tags are kept.")
                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 760, alignment: .leading)
                 HStack(spacing: 10) {
                     secondaryApplyButton("Add tags to files…", systemImage: "tag",
                                          disabled: applyInFlight) { prepareApply(.tags) }
@@ -536,6 +537,7 @@ struct DeepAnalyzeView: View {
                                          disabled: applyInFlight || !hasNamedAnyone) { prepareApply(.people) }
                         .help(hasNamedAnyone ? "Tag each photo with the names of the people in it. You confirm first." : "Name someone on the People page first")
                 }
+                .frame(maxWidth: 760, alignment: .leading)
                 Button {
                     prepareApply(.all)
                 } label: {
@@ -545,6 +547,7 @@ struct DeepAnalyzeView: View {
                 .buttonStyle(DSSecondaryButtonStyle(height: 30))
                 .help(pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names in your Name style. You see the counts and confirm first." : "Adds tags and people's names to the files. You confirm first.")
                 .disabled(applyInFlight)
+                .frame(maxWidth: 760, alignment: .leading)
                 .confirmationDialog(
                     applyConfirm?.title ?? "",
                     isPresented: Binding(get: { applyConfirm != nil }, set: { if !$0 { applyConfirm = nil } }),
@@ -770,6 +773,7 @@ struct DeepAnalyzeView: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 14) {
             MetaText("FileID's local AI looks at each file, writes a sentence about it and suggests a clearer name. Nothing is renamed until you approve it.", color: Theme.text2)
+                .frame(maxWidth: 760, alignment: .leading)
             Spacer(minLength: 0)
         }
     }
@@ -810,7 +814,7 @@ struct DeepAnalyzeView: View {
                     if totals.pending > 0 {
                         GridRow {
                             Text("Time needed").foregroundStyle(Theme.text3)
-                            Text(perFile > 0 ? "about \(DurationText.short(Double(totals.pending) * perFile))" : "Not measured yet")
+                            Text(perFile > 0 ? DurationText.approximate(Double(totals.pending) * perFile) : "Not measured yet")
                                 .font(Theme.Font.body(13, .medium)).monospacedDigit()
                         }
                     }
@@ -990,7 +994,7 @@ struct DeepAnalyzeView: View {
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                             .contentTransition(.opacity)
-                            .animation(.easeInOut(duration: 0.18),
+                            .animation(Theme.quick,
                                        value: engine.deepAnalyzeStarting?.message)
                     }
                     Spacer()
@@ -1056,7 +1060,7 @@ struct DeepAnalyzeView: View {
                             .lineLimit(3)
                             .multilineTextAlignment(.leading)
                             .padding(.top, 4)
-                            .animation(.easeInOut(duration: 0.15), value: cap)
+                            .animation(Theme.quick, value: cap)
                     }
                 }
             }

@@ -547,7 +547,7 @@ struct GrainProgressBar: View {
             }
         }
         .frame(height: height)
-        .animation(.easeOut(duration: 0.3), value: progress)
+        .animation(Theme.springStandard, value: progress)
         .accessibilityElement()
         .accessibilityValue(Text("\(Int((progress.isFinite ? progress : 0) * 100)) percent"))
     }

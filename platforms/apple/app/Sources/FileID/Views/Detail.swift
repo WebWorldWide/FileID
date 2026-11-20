@@ -125,7 +125,7 @@ private struct PageStack: View {
             }
         }
         .background { PageAreaProbe(focus: focus).allowsHitTesting(false).accessibilityHidden(true) }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: activeTab)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: activeTab)
         .onChange(of: activeTab, initial: true) { old, new in
             if old != new { focus.release() }
             kept.visit(new)

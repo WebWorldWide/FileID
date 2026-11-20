@@ -280,7 +280,7 @@ struct MainWindow: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: toasts.current?.id)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: toasts.current?.id)
         .environment(\.atmospherePaused, atmospherePaused)
         .onDrop(of: [.fileURL], isTargeted: $isDragHovering) { providers in
             guard let provider = providers.first else { return false }

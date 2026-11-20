@@ -133,7 +133,7 @@ struct SelectionResultsStrip: View {
                 .disabled(target.count < 2)
                 .help(target.count < 2 ? "Choose at least two files" : "Save these as a group in Best Takes")
             Button(chosen.count == hits.count ? "Clear" : "Select all") {
-                withAnimation(Theme.springStandard) { chosen = chosen.count == hits.count ? [] : Set(hits.map(\.fileID)) }
+                withAnimation(Theme.spring) { chosen = chosen.count == hits.count ? [] : Set(hits.map(\.fileID)) }
             }
             .buttonStyle(.dsGhost)
             .accessibilityLabel(chosen.count == hits.count ? "Clear the selection" : "Select every file in this answer")
@@ -141,7 +141,7 @@ struct SelectionResultsStrip: View {
     }
 
     private func toggle(_ id: Int64) {
-        withAnimation(Theme.springStandard) { if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) } }
+        withAnimation(Theme.spring) { if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) } }
     }
 }
 

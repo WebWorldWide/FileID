@@ -72,7 +72,7 @@ struct LibraryListTable: NSViewRepresentable {
         add(Self.dateColumn, title: "Date taken", width: 130, min: 110, sortKey: "date")
         add(Self.sizeColumn, title: "Size", width: 96, min: 80, sortKey: "size")
         add(Self.kindColumn, title: "Kind", width: 110, min: 90, sortKey: "kind")
-        add(Self.trailingGutter, title: "", width: Self.gutter, min: Self.gutter)
+        add(Self.trailingGutter, title: "", width: max(0, Self.gutter - LegacyScroller.width), min: 0)
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
         table.onKey = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
