@@ -13,6 +13,29 @@ fn request(value: serde_json::Value) -> CatalogRequest {
 }
 
 #[test]
+fn a_timeline_model_refused_for_memory_hands_the_job_to_the_smaller_one_that_ran() {
+    let mut conn = database();
+    let queued = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"moments"}));
+    let (id, _) = enqueue(&mut conn, &queued, Some("qwen3_vl_4b"), true).unwrap();
+    let mut recipe: Recipe = serde_json::from_str(
+        &conn.query_row("SELECT recipe_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get::<_, String>(0)).unwrap(),
+    )
+    .unwrap();
+    let note = adopt_smaller_model(&conn, &id, &mut recipe, "qwen3_vl_2b").unwrap();
+    assert!(note.contains(&model_label("qwen3_vl_4b")) && note.contains(&model_label("qwen3_vl_2b")), "{note}");
+    assert!(note.starts_with("Not enough memory is free for"));
+    let stored: Recipe = serde_json::from_str(
+        &conn.query_row("SELECT recipe_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get::<_, String>(0)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored, recipe);
+    assert_eq!(stored.model_kind, "qwen3_vl_2b");
+    assert_eq!(stored.model_version, frame_model_version("qwen3_vl_2b"));
+    assert!(stored.model_version.contains("qwen3_vl_2b"));
+    assert_eq!(stored.timeline_mode.as_deref(), Some("moments"));
+}
+
+#[test]
 fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     let mut conn = database();
     let ok = request(

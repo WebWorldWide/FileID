@@ -39,6 +39,7 @@ pub(crate) mod timeout_retry;
 
 pub mod chat;
 mod chat_search;
+pub(crate) mod chat_commands;
 pub(crate) mod chat_intent;
 pub(crate) mod chat_facts;
 mod chat_actions;

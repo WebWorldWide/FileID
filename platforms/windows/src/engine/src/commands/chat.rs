@@ -243,8 +243,14 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
         summarize(model, &plain, cancel.clone()).await
     };
     let cancelled = cancel.load(Ordering::Acquire);
+    let echoed = matches!(&answer, Ok(answer) if echoes_prompt(answer));
+    if echoed {
+        tracing::warn!("chat summary repeated its prompt; answering with catalog evidence");
+        smaller_model = None;
+    }
     let (status, message) = match answer {
         _ if cancelled => ("cancelled", prepared.message.clone()),
+        Ok(_) if echoed => ("completed", prepared.message.clone()),
         Ok(answer) if !answer.trim().is_empty() => ("completed", answer.trim().to_owned()),
         Ok(_) => ("completed", prepared.message.clone()),
         Err(Summary::NotStarted(error)) => {
@@ -405,6 +411,11 @@ where
         Ok(retry) if !retry.trim().is_empty() => Ok(retry),
         _ => Ok(first),
     }
+}
+
+/// A model that repeats its instructions or the evidence block back has not answered.
+fn echoes_prompt(answer: &str) -> bool {
+    answer.contains("<evidence>") || answer.contains("</evidence>") || answer.trim_start().starts_with("Request:") || answer.contains("Matches found:")
 }
 
 fn recent_turns(conn: &Connection, conversation_id: &str) -> Result<Vec<(String, String)>> {
@@ -935,6 +946,7 @@ struct Prepared {
 struct Earlier {
     question: super::chat_intent::Question,
     plan: SearchPlan,
+    camera: Option<String>,
 }
 
 fn plan_for(
@@ -1020,10 +1032,12 @@ fn earlier_turn(
     for text in history.iter().filter(|text| parse_intent(text).is_none()) {
         if let Some(name) = folder_asked_about(conn, text, root)? {
             let question = super::chat_intent::Question { folder: Some(format!("named:{name}")), ..Default::default() };
-            earlier = Some(Earlier { question, plan: SearchPlan::default() });
+            earlier = Some(Earlier { question, plan: SearchPlan::default(), camera: None });
         } else if !answers_without_search(conn, text, root)? {
-            let (question, plan) = plan_for(text, earlier.as_ref(), people, events);
-            earlier = Some(Earlier { question, plan });
+            let camera = chat_facts::camera_asked_about(conn, text)?;
+            let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
+            let (question, plan) = plan_for(planned, earlier.as_ref(), people, events);
+            earlier = Some(Earlier { question, plan, camera: camera.map(|ask| ask.model) });
         }
     }
     Ok(earlier)
@@ -1104,6 +1118,12 @@ fn prepare_turn(
         let Resolution { message, hits, actions } = chat_actions::resolve(conn, &intent, &context)?;
         return Ok(Prepared { text, message, hits, actions, summarize: false });
     }
+    {
+        let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), root: root.as_ref(), people: &people, events: &events, source: "parser" };
+        if let Some(Resolution { message, hits, actions }) = super::chat_commands::resolve(conn, &text, history, &context)? {
+            return Ok(Prepared { text, message, hits, actions, summarize: false });
+        }
+    }
     if off_topic(&text) {
         let message = format!("{OFF_TOPIC_REPLY} Try “How many photos do I have?” or “Find photos of a beach”.");
         return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false });
@@ -1138,7 +1158,14 @@ fn prepare_turn(
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
     let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
-    let (question, plan) = plan_for(&text, previous.as_ref(), people, events);
+    let camera = chat_facts::camera_asked_about(conn, &text)?;
+    let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
+    let (question, plan) = plan_for(planned, previous.as_ref(), people, events);
+    let camera = camera.map(|ask| ask.model).or_else(|| {
+        let words: Vec<String> = text.to_lowercase().split(|c: char| !c.is_alphabetic()).map(str::to_owned).collect();
+        let continues = super::chat_intent::follow_up_rest(&text).is_some() || super::chat_intent::points_back(&words);
+        previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())
+    });
     let mut structured = Filter {
         kinds: plan.kinds.clone(),
         person_ids: plan.person_ids.clone(),
@@ -1153,11 +1180,12 @@ fn prepare_turn(
         excluded_person_names: plan.excluded_person_names.clone(),
         min_bytes: question.min_bytes,
         max_bytes: question.max_bytes,
+        camera: camera.clone(),
         root: root.clone(),
         ..Filter::default()
     };
     let wants_all = question.measure != "list" || question.explicit_order || question.duplicates;
-    if question.structured() && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (plan.query.is_empty() || wants_all) {
+    if (question.structured() || camera.is_some()) && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (plan.query.is_empty() || wants_all) {
         if !plan.query.is_empty()
             && let Some(ids) = chat_facts::subject_ids(conn, &plan.query)?
         {
@@ -1198,7 +1226,7 @@ fn prepare_turn(
             hits = fuse(lists);
         }
     }
-    let extra_filter = (question.structured() || plan.all_people || !plan.excluded_person_ids.is_empty()).then(|| Filter {
+    let extra_filter = (question.structured() || camera.is_some() || plan.all_people || !plan.excluded_person_ids.is_empty()).then(|| Filter {
         person_ids: if plan.all_people { plan.person_ids.clone() } else { vec![] },
         date: question.date.clone(),
         folder: question.folder.clone(),
@@ -1210,6 +1238,7 @@ fn prepare_turn(
         excluded_person_names: plan.excluded_person_names.clone(),
         min_bytes: question.min_bytes,
         max_bytes: question.max_bytes,
+        camera: camera.clone(),
         root: root.clone(),
         ..Filter::default()
     });
@@ -1276,7 +1305,7 @@ fn prepare_turn(
     {
         "Add a subject, event, time, or media type such as videos or photos. No search was run.".into()
     } else if shown_weak > 0 {
-        format!("{}{sample_note}", weak_summary(hits.len(), shown_strong, shown_weak, similar, &plan.query, &qualifiers))
+        format!("{}{sample_note}", weak_summary(hits.len(), shown_strong, shown_weak, similar, visual_noun(&plan.kinds), &plan.query, &qualifiers))
     } else if hits.is_empty() {
         format!("No matches {scope}{qualifiers}. Try names or a few descriptive words; files that haven't been analyzed may still contain it.")
     } else {
@@ -1306,12 +1335,23 @@ fn with_unnamed_people_note(conn: &Connection, text: &str, plan: &SearchPlan, ro
 }
 
 /// `strong` of the `found` matches have a strong picture score; the rest were found by name, tag, text or description.
-pub(crate) fn weak_summary(found: usize, strong: usize, weak: usize, similar: bool, subject: &str, qualifiers: &str) -> String {
+/// What a picture-score summary calls the files it looked at: videos when only videos were asked for, files when the kinds mix, photos otherwise.
+fn visual_noun(kinds: &[String]) -> &'static str {
+    if !kinds.is_empty() && kinds.iter().all(|kind| kind == "video") {
+        "videos"
+    } else if kinds.iter().all(|kind| kind == "image") {
+        "photos"
+    } else {
+        "files"
+    }
+}
+
+pub(crate) fn weak_summary(found: usize, strong: usize, weak: usize, similar: bool, things: &str, subject: &str, qualifiers: &str) -> String {
     let looks = if weak == 1 { "look-alike" } else { "look-alikes" };
     if similar {
         let good = found - weak.min(found);
         if good == 0 {
-            return format!("No photos clearly show “{subject}”{qualifiers}; showing the {weak} closest.");
+            return format!("No {things} clearly show “{subject}”{qualifiers}; showing the {weak} closest.");
         }
         let strong = strong.min(good);
         let mut parts = Vec::new();
@@ -1325,7 +1365,7 @@ pub(crate) fn weak_summary(found: usize, strong: usize, weak: usize, similar: bo
         return format!("Found {found} matches for “{subject}”{qualifiers}: {}.", parts.join(", "));
     }
     if found == 0 {
-        format!("No photos clearly show “{subject}”{qualifiers}. {weak} weaker {looks} left out; ask for the closest to see them.")
+        format!("No {things} clearly show “{subject}”{qualifiers}. {weak} weaker {looks} left out; ask for the closest to see them.")
     } else {
         let noun = if found == 1 { "match" } else { "matches" };
         format!("Found {found} {noun} ({} strong visual) for “{subject}”{qualifiers}; {weak} weaker {looks} left out.", strong.min(found))
@@ -1672,7 +1712,7 @@ mod tests {
         let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../../../../shared/test-corpus/search-strength.json")).unwrap();
         for case in fixture["chat"].as_array().unwrap() {
             let count = |key: &str| usize::try_from(case[key].as_u64().unwrap()).unwrap();
-            let text = weak_summary(count("found"), count("strong"), count("weak"), case["similar"].as_bool().unwrap(), case["subject"].as_str().unwrap(), case["qualifiers"].as_str().unwrap());
+            let text = weak_summary(count("found"), count("strong"), count("weak"), case["similar"].as_bool().unwrap(), "photos", case["subject"].as_str().unwrap(), case["qualifiers"].as_str().unwrap());
             assert_eq!(text, case["text"].as_str().unwrap());
         }
     }
@@ -2238,6 +2278,153 @@ mod tests {
         assert_eq!(ask("How many photos have faces?").0, "Found 2 photos with faces, using 20 bytes.");
         assert_eq!(ask("How many files have faces?").0, "Found 3 files with faces, using 30 bytes.");
         assert_eq!(ask("Which camera took the most photos?").0, "ILCE-7M5 has the most photos (2). Photos by camera: ILCE-7M5: 2, DMC-FH22: 1.");
+    }
+
+    #[test]
+    fn a_video_or_image_format_question_counts_that_extension_not_names_containing_it() {
+        let mut conn = crate::db::test_support::memory_db();
+        for (id, name, kind, ext) in [
+            (1, "a.mpg", "video", "mpg"),
+            (2, "a.mpg.moff", "other", "moff"),
+            (3, "a.mpg.modd", "other", "modd"),
+            (4, "b.mpeg", "video", "mpeg"),
+            (5, "c.m4v", "video", "m4v"),
+            (6, "d.wmv", "video", "wmv"),
+            (7, "e.3gp", "video", "3gp"),
+            (8, "f.avi", "video", "avi"),
+            (9, "g.mkv", "video", "mkv"),
+            (10, "h.webm", "video", "webm"),
+            (11, "i.heic", "image", "heic"),
+            (12, "j.tif", "image", "tif"),
+        ] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,10,0,?3,?4)",
+                rusqlite::params![id, format!("/lib/{name}"), kind, ext],
+            )
+            .unwrap();
+        }
+        for (text, expected) in [
+            ("How many MPG files do I have?", 2),
+            ("how many mpeg videos are there", 2),
+            ("How many M4V files?", 1),
+            ("How many WMV files do I have?", 1),
+            ("How many 3GP files do I have?", 1),
+            ("How many AVI files?", 1),
+            ("How many MKV files?", 1),
+            ("How many WEBM files?", 1),
+            ("How many HEIC photos do I have?", 1),
+            ("How many TIF files do I have?", 1),
+            ("how many mpgs", 2),
+        ] {
+            let found = ask(&mut conn, text);
+            assert_eq!(found.hits.len(), expected, "{text}: {}", found.message);
+            assert!(found.message.starts_with(&format!("Found {expected} ")), "{text}: {}", found.message);
+            assert!(!found.message.contains("matching"), "{text}: {}", found.message);
+        }
+    }
+
+    #[test]
+    fn a_camera_model_in_the_question_filters_by_that_camera_and_fewest_ranks_the_other_end() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,camera_model) VALUES
+             (1,'/lib/a.jpg',1,10,1688472000,0,'image','jpg','ILCE-7M5'),
+             (2,'/lib/b.jpg',2,10,1688472000,0,'image','jpg','ILCE-7M5'),
+             (3,'/lib/c.jpg',3,10,1688472000,0,'image','jpg','DMC-FH22'),
+             (4,'/lib/d.jpg',4,10,1688472000,0,'image','jpg','LG-840G'),
+             (5,'/lib/e.mov',5,10,1688472000,0,'video','mov','ILCE-7M5');",
+        )
+        .unwrap();
+        let counted = ask(&mut conn, "How many photos were taken with the ILCE-7M5?");
+        assert_eq!((counted.message.as_str(), counted.hits.len()), ("Found 2 photos taken with ILCE-7M5, using 20 bytes.", 2));
+        assert_eq!(ask(&mut conn, "How many photos did the DMC-FH22 take?").message, "Found 1 photo taken with DMC-FH22, using 10 bytes.");
+        assert_eq!(ask(&mut conn, "show me videos shot on the ilce 7m5").message, "Found 1 video taken with ILCE-7M5.");
+        let fewest = ask(&mut conn, "Which camera took the fewest photos?").message;
+        assert!(fewest.starts_with("DMC-FH22 and LG-840G are tied for the fewest photos (1 each)."), "{fewest}");
+        assert!(ask(&mut conn, "Which camera took the most photos?").message.starts_with("ILCE-7M5 has the most photos (2)."));
+        ask_in(&mut conn, "cameras", "How many photos were taken with the ILCE-7M5?");
+        assert_eq!(ask_in(&mut conn, "cameras", "And videos?").message, "Found 1 video taken with ILCE-7M5.");
+    }
+
+    #[test]
+    fn apply_it_acts_on_the_card_just_proposed_and_other_commands_are_never_searched_as_pictures() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (1,'/lib/Photos/a.jpg',1,10,1688472000,0,'image','jpg'),
+             (2,'/lib/Photos/b.mov',2,10,1688472000,0,'video','mov');",
+        )
+        .unwrap();
+        let idle = ask_in(&mut conn, "idle", "Apply it");
+        assert!(idle.message.starts_with("There's nothing waiting for your OK"), "{}", idle.message);
+        assert!(idle.hits.is_empty() && idle.actions.is_none());
+        let card = ask_in(&mut conn, "card", "Organize the Photos folder");
+        assert_eq!(card.actions.unwrap()[0].kind, "suggestFolderLayout");
+        for text in ["Apply it", "do it", "Go ahead", "yes"] {
+            let applied = ask_in(&mut conn, "card", text);
+            let actions = applied.actions.unwrap_or_else(|| panic!("{text}: {}", applied.message));
+            assert_eq!((actions[0].kind.as_str(), actions[0].requires_confirmation, actions[0].path.as_deref()), ("applyFolderLayout", true, Some("/lib/Photos")), "{text}");
+            assert!(applied.hits.is_empty(), "{text}");
+        }
+        for text in ["Name person 1 Alex", "Who is person 1?", "Merge the people", "What are the longest videos?"] {
+            let said = ask_in(&mut conn, "commands", text);
+            assert!(said.hits.is_empty() && said.actions.is_none(), "{text}");
+            assert!(!said.message.contains("strong visual") && !said.message.contains("matches"), "{text}: {}", said.message);
+        }
+    }
+
+    #[test]
+    fn a_no_match_summary_names_what_was_asked_about() {
+        assert_eq!(visual_noun(&["video".to_owned()]), "videos");
+        assert_eq!(visual_noun(&["image".to_owned()]), "photos");
+        assert_eq!(visual_noun(&[]), "photos");
+        assert_eq!(visual_noun(&["image".to_owned(), "video".to_owned()]), "files");
+        assert_eq!(
+            weak_summary(0, 0, 11, false, visual_noun(&["video".to_owned()]), "happens scooter", " (videos)"),
+            "No videos clearly show “happens scooter” (videos). 11 weaker look-alikes left out; ask for the closest to see them."
+        );
+    }
+
+    #[test]
+    fn the_size_of_a_named_folder_is_not_also_a_year() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (1,'/lib/2012/a.jpg',1,100,1688472000,0,'image','jpg'),
+             (2,'/lib/2012/b.jpg',2,200,1688472000,0,'image','jpg'),
+             (3,'/lib/Other/c.jpg',3,4000,1688472000,0,'image','jpg');",
+        )
+        .unwrap();
+        let said = ask(&mut conn, "What is the total size of the 2012 folder?").message;
+        assert_eq!(said, "Files in 2012 use 300 bytes (2 files).", "{said}");
+        assert_eq!(ask(&mut conn, "How many files are in the 2012 folder?").message, "Found 2 files in 2012, using 300 bytes.");
+    }
+
+    #[test]
+    fn groups_of_people_is_a_people_count() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES (1,'/p/1.jpg',1,1,0,'image','jpg'),(2,'/p/2.jpg',2,1,0,'image','jpg');\
+             INSERT INTO persons(id,name,created_at,is_unknown) VALUES (1,NULL,0,0),(2,NULL,0,0);\
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES (1,1,x'00','',0),(2,2,x'00','',0);",
+        )
+        .unwrap();
+        let expected = ask(&mut conn, "How many people are in my library?").message;
+        assert!(expected.starts_with("Your library has 2 groups of people"), "{expected}");
+        for text in ["How many groups of people are there?", "How many groups of people do I have?", "how many people groups are there", "Show me unnamed people"] {
+            let said = ask(&mut conn, text);
+            assert!(said.message.starts_with("Your library has 2 groups of people") || said.message.starts_with("People in your library"), "{text}: {}", said.message);
+        }
+    }
+
+    #[test]
+    fn a_summary_that_repeats_the_evidence_block_is_not_an_answer() {
+        let hit = document_hit(1, "/lib/child-scooter.jpg".into(), "Tags: child, scooter".into());
+        let prompt = evidence_prompt("Which photos show a child on a scooter?", &[hit], 8, &HashMap::new());
+        assert!(echoes_prompt(&prompt));
+        assert!(echoes_prompt("Matches found: 2 (showing 2) <evidence> [1] child-scooter-04-15.jpg (image, taken 2012-11-04): Tags: child </evidence>"));
+        assert!(echoes_prompt("Request: Which photos show a child on a scooter?"));
+        assert!(!echoes_prompt("Two photos show a child on a scooter: child-scooter-04-15.jpg [1] and another [2]."));
     }
 
     #[test]
