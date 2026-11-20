@@ -763,16 +763,32 @@ final class ToastCenter {
     private(set) var current: Toast?
     private var dismissTask: Task<Void, Never>?
 
+    private var shownDuration = 5.0
+
     func show(_ text: String, actionLabel: String? = nil, duration: Double = 5, action: (() -> Void)? = nil) {
-        dismissTask?.cancel()
         current = Toast(text: text, actionLabel: actionLabel, action: action)
+        shownDuration = duration
+        scheduleDismiss(after: duration)
+        NSAccessibility.post(element: NSApp.mainWindow as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: text])
+    }
+    func dismiss() { dismissTask?.cancel(); current = nil }
+
+    /// A toast with an action stays while the pointer is on it, then gets a fresh short window.
+    func hold() { dismissTask?.cancel() }
+    func release() {
+        guard current != nil else { return }
+        scheduleDismiss(after: min(shownDuration, 4))
+    }
+
+    private func scheduleDismiss(after seconds: Double) {
+        dismissTask?.cancel()
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(duration))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.current = nil
         }
     }
-    func dismiss() { dismissTask?.cancel(); current = nil }
 }
 
 struct ToastView: View {
@@ -790,6 +806,7 @@ struct ToastView: View {
         .background(.ultraThinMaterial, in: rounded(Theme.Radius.l))
         .background(Theme.popoverFill, in: rounded(Theme.Radius.l))
         .overlay(rounded(Theme.Radius.l).stroke(Color.white.opacity(0.14), lineWidth: 1))
+        .onHover { $0 ? ToastCenter.shared.hold() : ToastCenter.shared.release() }
         .shadow(color: .black.opacity(0.45), radius: 20, y: 12)
     }
 }
