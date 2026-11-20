@@ -1,5 +1,76 @@
 # Models — canonical registry
 
+## 2026-11-19 — About-100B models at the top of the ladders, and a smaller Win/Linux 2B
+
+The owner asked for much bigger models above the current ladders for machines that can hold them, and for a Qwen3-VL 2B Q4_K_M at the end of the Windows/Linux ladder. **The big models are vetted and wired, but not run on hardware.** No weights were downloaded: the checks below read Hugging Face model cards, file lists and LFS digests (metadata only), GitHub source at the pinned runtime versions, and the GitHub releases list. The `web_search` and `fetch_content` tools were not available to this lane. Nothing here is a speed or quality claim.
+
+**What was added**
+
+| Platform | Model | Build | Download | Memory the engine asks for | Installed memory needed (fits) | Free memory needed to load now |
+|---|---|---|---|---|---|---|
+| Mac | Qwen3.5 122B-A10B (`qwen3_5_122b`) | MLX 4-bit, `mlx-community/Qwen3.5-122B-A10B-4bit` @ `e9c67b08899964be5fdd069bb1b4bc8907fe68f5` | 69,593,636,939 bytes (14 files) | 72 GB (73,728 MB) | 80 GB or more, so 96, 128 and 192 GB Macs | 74 GB |
+| Windows/Linux | GLM-4.6V (`glm_4_6v_gguf_q4_k_m`) | llama.cpp GGUF Q4_K_M + Q8_0 projector, `ggml-org/GLM-4.6V-GGUF` @ `7de678a269f576ae4090efbf59b558a993386fff` | 71,392,337,408 bytes (two files) | 86,132 MB (84.1 GB) | about 92 GB or more, so 96 GB PCs and up | 86.1 GB |
+| Windows/Linux | Qwen3-VL 2B Q4_K_M (`qwen3_vl_2b_instruct_gguf_q4_k_m`) | llama.cpp GGUF Q4_K_M + Q8_0 projector, `Qwen/Qwen3-VL-2B-Instruct-GGUF` @ `52d6c8ffea26cc873ac5ad116f8631268d7eb503` | 1,552,463,168 bytes | 2,876 MB (2.8 GB) | 4.8 GB | 3.3 GB |
+
+The engine's one fits rule (`util/model_memory.rs`: reserve a quarter of installed memory, 2–8 GB, plus a free-memory floor) decides where they are recommended; nothing else names a machine size. With memory free at idle, the first rung that fits now wins, and when nothing fits now the smallest model the machine could ever run is recommended.
+
+| Rung | Mac ladder (MLX) | Needs installed memory of | Windows/Linux ladder (GGUF) | Needs installed memory of |
+|---|---|---|---|---|
+| 1 | **Qwen3.5 122B-A10B** (new) | 80 GB | **GLM-4.6V** (new) | 92 GB |
+| 2 | Mistral Small 3.2 24B | 21.3 GB | Qwen2.5-VL 7B | 10.8 GB |
+| 3 | Qwen3-VL 8B | 11.3 GB | Qwen3-VL 8B | 10.9 GB |
+| 4 | Qwen3-VL 4B | 7.0 GB | Qwen3-VL 4B | 6.9 GB |
+| 5 | Qwen3-VL 2B | 5.0 GB | Qwen3-VL 2B Q8_0 | 5.7 GB |
+| 6 | | | **Qwen3-VL 2B Q4_K_M** (new) | 4.8 GB |
+
+On the Mac, 64 GB machines stay on Mistral Small 3.2: the 4-bit 122B needs 80 GB installed. On Windows/Linux, a 64 GB PC stays on Qwen2.5-VL 7B.
+
+**Candidates checked** (every figure from the Hugging Face API at the revision shown, 2026-11-19; "split" means the GGUF is more than one shard, which the engine cannot install: its catalog layout is one `model.gguf` plus one `mmproj.gguf`)
+
+| Model | Parameters | Licence | MLX (mlx-swift-lm 3.32.3) | GGUF (llama.cpp b9254) | 4-bit size | Verdict |
+|---|---|---|---|---|---|---|
+| [Qwen3.5-122B-A10B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B) `dc4d3484…` | 122B, 10B active | Apache-2.0 (`LICENSE` file is the Apache text; card says `apache-2.0`) | Supported: `qwen3_5_moe` is in both the VLM and LLM registries; [mlx-community 4-bit](https://huggingface.co/mlx-community/Qwen3.5-122B-A10B-4bit) holds the vision tower (333 tensors) | Architecture `qwen35moe` is supported, but every build is split: [lmstudio-community](https://huggingface.co/lmstudio-community/Qwen3.5-122B-A10B-GGUF) Q4_K_M 2 shards 74.2 GB, [bartowski](https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF) 2 shards 77.6 GB, [unsloth](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-GGUF) 3 shards | MLX 69.6 GB; GGUF 74–78 GB | **Added on the Mac.** Not added on Windows/Linux until the engine can install split GGUFs |
+| [GLM-4.6V](https://huggingface.co/zai-org/GLM-4.6V) `4e2d47eb…` | 106B, 12B active | MIT (card `license: mit`; the [GLM-V](https://github.com/zai-org/GLM-V) code repository is Apache-2.0) | **Not supported**: its type `glm4v_moe` is in neither factory of 3.32.3, and also not in 3.33.0 (2026-11-17) | `glm4moe` architecture and the `GLM4V` projector are in b9254; [ggml-org](https://huggingface.co/ggml-org/GLM-4.6V-GGUF) Q4_K_M is one 70.4 GB file | GGUF 70.4 GB + 0.94 GB projector | **Added on Windows/Linux.** Not on the Mac |
+| [GLM-4.5V](https://huggingface.co/zai-org/GLM-4.5V) `ed47433b…` | 106B, 12B active | MIT | Same missing `glm4v_moe` | [ggml-org](https://huggingface.co/ggml-org/GLM-4.5V-GGUF) Q4_K_M is split in two (9 MB + 63.6 GB) | 63.6 GB | Not added: split, and GLM-4.6V is its successor |
+| [Qwen3-VL-235B-A22B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct) `710c1386…` | 235B, 22B active | Apache-2.0 (card) | `qwen3_vl_moe` is supported, but the only 4-bit build, [mlx-community](https://huggingface.co/mlx-community/Qwen3-VL-235B-A22B-Instruct-4bit) (133.4 GB), has no model card, no licence field and no declared base model, so its lineage can't be verified by the catalog rules | Official [Qwen GGUF](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-GGUF) Q4_K_M is split in three (142 GB) | 133–142 GB | Not added: no verifiable Mac build, split GGUF. Qwen's Qwen3.5 card claims Qwen3.5 outperforms the Qwen3-VL models on visual understanding, so the 122B is the better pick for the same machines |
+| [Mistral-Small-4-119B-2603](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603) `a11f36be…` | 119B | Apache-2.0 (card) | **Not supported**: its text config is `mistral4` (a MoE with latent attention); the `mistral3` VLM in 3.32.3 implements a dense transformer only, and `mistral4` appears nowhere in the package | `mistral4` is in b9254; [lmstudio-community](https://huggingface.co/lmstudio-community/Mistral-Small-4-119B-2603-GGUF) Q4_K_M is split in two (72 GB) | 67.8 GB MLX | Not added |
+| [Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) | 397B, 17B active | Apache-2.0 | Supported (`qwen3_5_moe`) | Supported, split (7 shards at Q4_K_M) | MLX 223.9 GB | Not added: needs more than a 192 GB Mac can give |
+| [InternVL3.5-241B-A28B](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B) | 241B | Apache-2.0 (card) | No `internvl_chat` type; no MLX build | Only third-party split GGUFs | — | Not added |
+| Qwen2.5-VL-72B | 72B | `other` / Qwen licence | — | — | — | **Rejected:** not permissive (already on the denylist) |
+| [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) | 180B | `other` / `qwen-community-1.0` | — | — | — | **Rejected:** custom licence |
+| [Nemotron 3.5 Super VL 120B-A12B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16) | 120B | `other` / `openmdw-1.1` | — | — | — | **Rejected:** custom licence, not Apache-2.0 or MIT |
+| Llama-4-Scout, Mistral-Large-3, Pixtral-Large, Devstral-2-123B | 109–675B | Llama 4, Mistral research or revenue-capped terms | — | — | — | **Rejected:** on the denylist |
+
+No training dataset is named on any card of the added models, and none of them names a non-commercial dataset. That is the same evidence level as the Qwen3-VL models already shipped; a card that names none is not proof that none was used.
+
+**Qwen3.5 122B-A10B (Mac).** [Qwen/Qwen3.5-122B-A10B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B) at `dc4d348443bc740c68e2d77492492c11606384d5`: `LICENSE` is Apache-2.0 (11,544 bytes, SHA-256 `bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a`) and the card says `license: apache-2.0`. The mlx-community conversion's card says it was converted from that repository with mlx-vlm 0.3.12 and declares Apache-2.0 with the same `license_link`; its `config.json` is 4-bit affine, group size 64, with no per-layer overrides and `model_type: qwen3_5_moe`. `model-catalog.json` now holds the entry with the pinned revision, the 14 safetensors files with LFS SHA-256 and sizes, and `Qwen/Qwen3.5-122B-A10B` as the base; the manifest pins the same revision, so the downloader verifies it as it does Mistral Small 3.2. The 72 GB figure is the weights (64.8 GiB) plus about 7 GiB for the vision tower, cache and activations, and is an estimate: it was not measured. macOS commonly caps the GPU's wired memory at about three quarters of installed memory (about 72 GB on a 96 GB Mac, from general knowledge, not measured here), so the 122B on a 96 GB Mac may need the limit raised (`iogpu.wired_limit_mb`) or may refuse to load; a 128 GB Mac is comfortably above it. The Mac engine passes `enable_thinking: false` to every MLX model.
+
+**GLM-4.6V (Windows/Linux).** [zai-org/GLM-4.6V](https://huggingface.co/zai-org/GLM-4.6V) at `4e2d47eb0b41c5280d8294b17cef9e94fdcfff46`: the card says `license: mit`; the repository has no `LICENSE` file; the GLM-V code repository's `LICENSE` is Apache-2.0 (SHA-256 `086c6e7f5082b4640dfb03a892f32504f24afd247c702c38a3aae8c3474c54f0`). Both are on the allowed list. [ggml-org/GLM-4.6V-GGUF](https://huggingface.co/ggml-org/GLM-4.6V-GGUF) at `7de678a269f576ae4090efbf59b558a993386fff` has no licence field and names `zai-org/GLM-4.6V` as its base (it was converted with `convert_hf_to_gguf.py`). Files, checked against the `X-Linked-Etag` and size headers of the resolve URLs:
+
+| File | Bytes | SHA-256 |
+|---|---|---|
+| `GLM-4.6V-Q4_K_M.gguf` | 70,448,211,840 | `09a6f00ed07552a0187c2271019509260639e95671bbef55b2b77e0f77a74ed2` |
+| `mmproj-GLM-4.6V-Q8_0.gguf` | 944,125,568 | `ad7f4a9d50ec3041ca795fec69f39c1cb75af107ea46dd1dc055eca210ba8ccc` |
+
+Risk: GLM-4.6V is a model that thinks by default, and the engine's llama.cpp requests do not switch thinking off (the Mac path does). Unmeasured, so it may spend many tokens before answering. Check this on the first hardware run, together with seconds per photo (the Linux picker's 30 s is a guess). The generator's default 80 GB ceiling had excluded it (82.7 GB estimated); it is now in `REVIEWED_BUILDS`.
+
+**Qwen3-VL 2B Q4_K_M (Windows/Linux).** [Qwen/Qwen3-VL-2B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF) at `52d6c8ffea26cc873ac5ad116f8631268d7eb503` (Qwen's own repository; the card says `license: apache-2.0` and `base_model: Qwen/Qwen3-VL-2B-Instruct`, itself Apache-2.0; the [Qwen3-VL code repository](https://github.com/QwenLM/Qwen3-VL) is Apache-2.0). The repository has no `LICENSE` file.
+
+| File | Bytes | SHA-256 |
+|---|---|---|
+| `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | 1,107,409,952 | `089d75c52f4b7ffc56ba998ffc50aae89fcafc755f9e7208aacca281dca6c2ae` |
+| `mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf` | 445,053,216 | `f9a68fabba69c3b81e153367b2c7521030b0fa8bb0de400c9599c8e6725f9c82` |
+
+It is the same model as the Q8_0 build already vetted, at a smaller quantization, with the Q8_0 projector (the F16 projector would add 374 MB and push the free-memory need above what a typical 8 GB PC has). On an 8 GB PC with 45% free (3.7 GB), the Q8_0 build needs 4.25 GB free and is refused; the Q4_K_M build needs 3.3 GB and loads. Test `a_typical_8_gb_pc_is_recommended_a_model_that_fits_right_now` shows that. Not measured: caption quality of Q4_K_M against Q8_0. It stays last on the ladder, so it is recommended only when the Q8_0 build won't load.
+
+**Why the catalog entries look the way they do.** `build_model_catalog.py --reviewed-builds` adds `REVIEWED_BUILDS` (the two GGUF entries above) to the existing catalog without regenerating the other 309 entries, running every licence, lineage and identity check on each. The Mac entry was written by hand into `model-catalog.json` (that catalog has no generator) and checked by `check_model_catalog.py` and `check_model_license_policy.py`.
+
+**What it would take to add the rest**
+- Qwen3.5 122B-A10B on Windows/Linux (and Qwen3-VL-235B, Mistral-Small-4, GLM-4.5V): the engine must install split GGUFs. That means downloading every shard into one folder under llama.cpp's `-NNNNN-of-NNNNN.gguf` names, passing the first shard to `llama-server`, summing all shards for memory admission (admission today reads one file), and hashing each shard. This changes `models/registry.rs`, `vlm.rs`, `vlm_server.rs`, `util/model_memory.rs` and the catalog schema, and needs the owner's approval.
+- GLM-4.6V / GLM-4.5V on the Mac: an `mlx-swift-lm` release that registers `glm4v_moe`. None of 3.32.3 or 3.33.0 does, so this means upstream work or our own port.
+- Mistral-Small-4 on the Mac: `mlx-swift-lm` support for the `mistral4` text model.
+- Qwen3-VL-235B on the Mac: a 4-bit conversion whose card names its base model and licence.
+
 ## 2026-11-08 — Qwen3.5 0.8B for tag/rename passes: measured, not adopted
 
 The owner approved downloading Qwen3.5 0.8B to see whether tag and rename passes could run on a smaller model to save memory. It lost a blinded comparison to the current default (Qwen3-VL 2B), so nothing was added to the manifest or the app. It stays in the Mac catalog as an opt-in candidate (`hf:mlx-community/Qwen3.5-0.8B-MLX-4bit`), as before.

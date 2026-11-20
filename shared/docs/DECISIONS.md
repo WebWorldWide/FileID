@@ -5162,3 +5162,16 @@ The default ladder on Windows/Linux is now Qwen2.5-VL 7B → Qwen3-VL 8B → 4B 
 
 A Describe load that admission refuses for memory alone now falls back through the installed smaller models, largest first, on every platform (`resident_model::load_until_one_fits`, same `smaller_installed` the Mac path uses), and the stream says "Not enough memory is free for X; loading Y instead…". `require_model_headroom` returns `MemoryShortfall` (as the resource scheduler already did), so any other failure (cancel, corrupt weights) still ends the batch. The Qwen3-VL 2B GGUF has not been run by FileID on Windows/Linux; its speed and caption quality there are unmeasured.
 
+
+## 2026-11-19 — About-100B models lead the ladders; one model per platform; no split GGUFs yet
+
+The owner approved adding much bigger models at the top of the ladders for machines that can hold them. Evidence and the full candidate table are in `MODELS.md` (2026-11-19). Calls made:
+
+- **Different models on the two ladders, because the runtimes support different ones.** The Mac gets Qwen3.5 122B-A10B (MLX 4-bit, Apache-2.0): the pinned `mlx-swift-lm` 3.32.3 registers `qwen3_5_moe`. Windows/Linux get GLM-4.6V (106B MoE, MIT): its GGUF is one 70 GB file, and llama.cpp b9254 supports `glm4moe` and the GLM-4V projector. The other way round is not possible today: `mlx-swift-lm` (3.32.3 and 3.33.0) has no `glm4v_moe`, and every Qwen3.5-122B GGUF is split into shards.
+- **Split GGUFs are not supported, so no split build was added.** The catalog installs one `model.gguf` plus one `mmproj.gguf`, and admission reads one file's size, so a split model would be admitted at a fraction of its real size. Supporting shards is an engine change the owner has not approved.
+- **The Mac model is a favourite, not an `hf:` catalog model,** so it carries an explicit memory figure (72 GB) instead of the catalog's 1.5 × weights + 2 GB, which would put the 4-bit 122B at 99.7 GB and make it fit only 128 GB Macs. Its catalog entry (hashes, lineage) is there too, as for Mistral Small 3.2.
+- **Only the engine's fits rule names a machine size.** The Swift `recommendedFor` threshold (80 GB) is the smallest total where that rule admits the 72 GB figure, and a test pins it.
+- **`build_model_catalog.py --reviewed-builds`** adds the reviewed GGUF builds to the existing catalog without regenerating the other 309 entries. The generator's 80 GB resident ceiling and its one-entry-per-upstream rule would otherwise have excluded both.
+- **Qwen3-VL 2B Q4_K_M ships with the Q8_0 projector,** so an 8 GB PC at 45% free (3.7 GB) can load it; the F16 projector would need more than that free.
+
+Not measured, and the first things to check on hardware: that a 96 GB Mac loads the 122B within its GPU wired-memory limit; whether GLM-4.6V's default thinking mode wastes tokens under FileID's llama.cpp requests; seconds per photo for both.
