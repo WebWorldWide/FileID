@@ -51,7 +51,7 @@ struct TakeReview: View {
                 if loading {
                     loadingState
                 } else if let failure {
-                    DashedNotice(title: "Couldn't compare these \(noun.many)", subtitle: failure)
+                    DashedNotice(title: "Couldn’t compare these \(noun.many)", subtitle: failure)
                 } else if !qualities.isEmpty {
                     compare
                     filmstrip
@@ -160,7 +160,7 @@ struct TakeReview: View {
     private var confirmMessage: String {
         let files = victims.reduce(0) { $0 + $1.fileIDs.count }
         let kept = qualities.filter { keep.contains($0.primaryFileID) }.map { URL(fileURLWithPath: $0.path).lastPathComponent }
-        let extra = files > victims.count ? " (\(files) files, including RAW copies)" : ""
+        let extra = files > victims.count ? " (\(Plural.noun(files, "file", "files")), including RAW copies)" : ""
         return "Keeps \(kept.joined(separator: ", ")). The others\(extra) go to the Trash. Put back last move in Best Takes returns them."
     }
 
@@ -401,7 +401,7 @@ struct TakeReview: View {
         player?.pause(); player = nil; playingID = nil
         let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "scoreTakes", fileIDs: group.fileIDs), timeout: 180)
         guard let response, response.status == "ok", let scored = response.takeQualities, !scored.isEmpty else {
-            failure = response?.message ?? "FileID didn't answer in time. Try again in a moment."
+            failure = response?.message ?? "FileID didn’t answer in time. Try again in a moment."
             loading = false
             return
         }
@@ -422,7 +422,7 @@ struct TakeReview: View {
         let order = qualities.sorted { $0.rank < $1.rank }.map(\.primaryFileID)
         let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "rankTakesWithGoal", query: text, fileIDs: order), timeout: 300)
         guard let response, response.status == "ok", let result = response.takeGoalRanking else {
-            ToastCenter.shared.show(response?.message ?? "The goal check didn't finish. The ranking stays on photo quality.")
+            ToastCenter.shared.show(response?.message ?? "The goal check didn’t finish. The ranking stays on photo quality.")
             return
         }
         withAnimation(Theme.springStandard) {
@@ -439,11 +439,11 @@ struct TakeReview: View {
         let request = CatalogRequest(requestID: UUID().uuidString, action: "decideTakeGroup",
                                      takeDecision: CatalogTakeDecision(groupKey: group.groupKey, decision: decision, fileIDs: group.fileIDs))
         guard let response = await TakeRequests.send(engine, request, timeout: 30), response.status == "ok" else {
-            ToastCenter.shared.show("That didn't save. Try again.")
+            ToastCenter.shared.show("That didn’t save. Try again.")
             return
         }
         let group = self.group, engine = self.engine, onResolved = self.onResolved
-        let text = decision == "keepAll" ? "Kept all \(group.shots.count). This group won't be suggested again." : "Skipped. It's at the bottom of the list."
+        let text = decision == "keepAll" ? "Kept all \(group.shots.count). This group won’t be suggested again." : "Skipped. It’s at the bottom of the list."
         ToastCenter.shared.show(text, actionLabel: "Undo", duration: 8) {
             Task {
                 _ = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "decideTakeGroup",
@@ -470,7 +470,7 @@ struct TakeReview: View {
         }
         let commandID = engine.lastSentCommandID
         guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", commandID: commandID, timeout: 120) else {
-            trashProblem = "Moving to Trash took too long, so FileID can't tell how many moved. Check the Trash before trying again."
+            trashProblem = "Moving to Trash took too long, so FileID can’t tell how many moved. Check the Trash before trying again."
             return
         }
         let keptIDs = keptShots.flatMap(\.fileIDs)
@@ -483,7 +483,7 @@ struct TakeReview: View {
         let movedShots = doomed.filter { !moved.isDisjoint(with: $0.fileIDs) }.count
         let batch = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         var text = "Moved \(movedShots) \(movedShots == 1 ? noun.one : noun.many) to Trash"
-        if result.failed > 0 { text += " · \(result.failed) couldn't be moved" }
+        if result.failed > 0 { text += " · \(result.failed.formatted()) couldn’t be moved" }
         let engine = self.engine, onResolved = self.onResolved, group = self.group, keepAllShots = keptShots.count >= 2
         if let batch {
             UserDefaults.standard.set(batch, forKey: TakeRequests.lastTrashBatchKey)
@@ -629,7 +629,7 @@ private struct FilmstripTile: View {
         .accessibilityLabel("\(noun.capitalized) \(index) of \(count), \(URL(fileURLWithPath: quality.path).lastPathComponent)\(best ? ", recommended" : "")\(kept ? ", keep" : ""), looks \(TakeReview.scoreWord(quality.score).lowercased())")
         .accessibilityHint(quality.reasons.joined(separator: ", "))
         .accessibilityAddTraits(focused ? .isSelected : [])
-        .accessibilityAction(named: kept ? "Don't keep" : "Keep", onToggleKeep)
+        .accessibilityAction(named: kept ? "Don’t keep" : "Keep", onToggleKeep)
     }
 }
 

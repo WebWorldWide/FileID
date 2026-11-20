@@ -58,5 +58,5 @@ enum EngineModelInstall {
         }
     }
 
-    static let notResponding = "FileID isn't responding. Quit and reopen FileID, then try again."
+    static let notResponding = "FileID isn’t responding. Quit and reopen FileID, then try again."
 }

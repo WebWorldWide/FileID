@@ -45,7 +45,10 @@ fn message(event: u32, bytes: &[u8]) -> Message {
         ffi::VLM_PROGRESS => Message::Event(Event::Progress(serde_json::from_slice(bytes).unwrap_or(Value::Null))),
         ffi::VLM_DONE => match serde_json::from_slice(bytes) {
             Ok(value) => Message::Done(value),
-            Err(error) => Message::Failed { message: format!("Unreadable model reply: {error}"), cancelled: false },
+            Err(error) => {
+                tracing::warn!(%error, "description model reply could not be parsed");
+                Message::Failed { message: "The description model returned a reply FileID couldn’t use. Try again.".to_string(), cancelled: false }
+            }
         },
         ffi::VLM_FAILED => {
             let value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
@@ -86,7 +89,7 @@ pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut
     if handle == 0 {
         // SAFETY: a refused request never calls back, so the box is still ours.
         drop(unsafe { Box::from_raw(context.cast::<ffi::VlmReceiver>()) });
-        bail!("The model adapter refused the request");
+        bail!("The description model didn’t accept this request. Try again.");
     }
     let mut submitted = Submitted { handle, finished: false };
     let mut forwarded = false;
@@ -118,7 +121,7 @@ pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut
             }
             None => {
                 submitted.finished = true;
-                bail!("The model adapter ended the request without a reply");
+                bail!("The description model stopped without an answer. Try again.");
             }
         }
     }
@@ -192,8 +195,8 @@ pub fn model_spec(kind: &str) -> Result<Value> {
     let (_, display, ram) = MODELS
         .iter()
         .find(|(id, _, _)| *id == kind)
-        .ok_or_else(|| anyhow!("{kind} isn't an MLX model on this Mac"))?;
-    let repo = repo(kind).ok_or_else(|| anyhow!("{kind} has no pinned MLX repository"))?;
+        .ok_or_else(|| anyhow!("This description model can’t run on this Mac."))?;
+    let repo = repo(kind).ok_or_else(|| anyhow!("This description model isn’t available to download yet."))?;
     let license_name = match repo.license.as_str() {
         "Apache-2.0" => "Apache License 2.0",
         "Gemma" => "Gemma Terms of Use",

@@ -5183,3 +5183,10 @@ Not measured, and the first things to check on hardware: that a 96 GB Mac loads 
 - **Library sort and list layout are in v1.**
 - **Minimum window 1000×700**; the first-launch window stays large.
 - **Organize Folders never renames or moves the folder the user chose.** When the folders inside it are already well organised the plan is empty and says why (supervisor's call, delegated by the owner).
+
+## 2026-11-19 — Copy rules for counts, quotes and engine messages (lane PC)
+
+- Counts always go through `Plural.noun` (Swift) or `util::display::count_noun` (Rust). A string builder that appends "s" or writes "file(s)" is a defect.
+- User-visible text uses ’ and “ ”. The conformance corpus and the Windows and Linux text that matched engine wording (`Creates 1 new file.`, `Exports moved to FileID’s recovery folder`) were updated with it.
+- Engine messages that reach the UI carry no internal words and no raw OS or SQLite text; the error is logged and the sentence names the cause and what to do. Disk full gets its own error kinds (`db_disk_full`, `scan_disk_full`) instead of a text match, so the apps can title them without parsing.
+- Organize Folders keeps "nothing to move" for a well-organized root and says why (owner decision 6); the folder the user chose is never renamed or moved.

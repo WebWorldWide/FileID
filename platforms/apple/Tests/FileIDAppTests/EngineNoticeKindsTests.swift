@@ -20,7 +20,7 @@ struct EngineNoticeKindsTests {
         let kinds = ["db_open_failed", "db_integrity_check_failed", "plan_restructure_db_unavailable", "list_roots_failed",
                      "plan_restructure_root", "plan_restructure_library_busy", "apply_restructure", "undo_restructure",
                      "models_not_installed", "vlm_model_missing", "models_dir_unavailable", "llama_cpp_missing",
-                     "model_download_disk_full", "deep_analyze_failed", "face_clustering_failed",
+                     "model_download_disk_full", "db_disk_full", "scan_disk_full", "deep_analyze_failed", "face_clustering_failed",
                      "face_clustering_aborted", "face_clustering_start_failed", "find_merge_suggestions_failed",
                      "engine_output_error", "scan_already_running"]
         for kind in kinds {
@@ -28,10 +28,10 @@ struct EngineNoticeKindsTests {
             let text = Sidebar.errorText(kind: kind, message: "raw::engine_message {x}")
             #expect(!text.contains("raw::"), "\(kind)")
         }
-        #expect(Sidebar.errorTitle("plan_restructure_root") == "This folder isn't available")
+        #expect(Sidebar.errorTitle("plan_restructure_root") == "This folder isn’t available")
         #expect(Sidebar.errorText(kind: "plan_restructure_root", message: "") == "Reconnect it, then try again.")
-        #expect(Sidebar.errorTitle("face_cluster_no_model") == "Faces can't be grouped yet")
-        #expect(Sidebar.errorTitle("face_cluster_embedder_load_failed") == "Faces can't be grouped yet")
+        #expect(Sidebar.errorTitle("face_cluster_no_model") == "Faces can’t be grouped yet")
+        #expect(Sidebar.errorTitle("face_cluster_embedder_load_failed") == "Faces can’t be grouped yet")
         #expect(Sidebar.errorTitle("never_heard_of_it") == "Something went wrong")
     }
 
@@ -39,7 +39,7 @@ struct EngineNoticeKindsTests {
     func undoJournalWording() {
         #expect(Sidebar.errorTitle("restructure_undo_journal") == "The folder move stopped")
         #expect(Sidebar.errorText(kind: "restructure_undo_journal", message: "x")
-                == "Some files may already have moved. Undo them from Organize Folders, check there is free disk space, then try again.")
+                == "Some files may already have moved. Undo them from Organize Folders, check that there’s free disk space, then try again.")
     }
 
     @Test("Describe, model install, plan and save failures from either engine have their own title and sentence")
@@ -57,8 +57,8 @@ struct EngineNoticeKindsTests {
             let text = Sidebar.errorText(kind: kind, message: "Could not load qwen3_vl_2b: mlx::core error {x}")
             #expect(!text.contains("mlx::"), "\(kind)")
         }
-        #expect(Sidebar.errorTitle("deep_load_failed") == "An AI model didn't load")
-        #expect(Sidebar.errorTitle("vlm_model_missing") == "This AI model isn't installed")
+        #expect(Sidebar.errorTitle("deep_load_failed") == "An AI model didn’t load")
+        #expect(Sidebar.errorTitle("vlm_model_missing") == "This AI model isn’t installed")
         #expect(Sidebar.errorText(kind: "vlm_model_missing", message: "") == "Install it from Describe Files, then try again.")
     }
 

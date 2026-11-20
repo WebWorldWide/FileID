@@ -22,10 +22,10 @@ struct LibraryReadinessTests {
         #expect(LibraryReadiness.scanButtonTitle(chosenFolder: "Eckerts 10-4-26") == "Scan Eckerts 10-4-26")
         #expect(LibraryReadiness.scanButtonTitle(chosenFolder: nil) == "Choose a folder to scan")
         let chosen = LibraryReadiness.needsScan.chatMessage(chosenFolder: "Eckerts 10-4-26")
-        #expect(chosen.contains("FileID hasn't read Eckerts 10-4-26 yet."))
+        #expect(chosen.contains("FileID hasn’t read Eckerts 10-4-26 yet."))
         #expect(chosen.hasPrefix("Chat answers questions about the files FileID has scanned."))
         let none = LibraryReadiness.needsScan.chatMessage(chosenFolder: nil)
-        #expect(none.contains("Choose a folder") && !none.contains("hasn't read"))
+        #expect(none.contains("Choose a folder") && !none.contains("hasn’t read"))
     }
 
     @Test("the first scan with nothing read yet waits, then opens on the first files")

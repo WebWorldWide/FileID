@@ -128,7 +128,7 @@ struct DeepAnalyzeModelPickerCard: View {
                     Button("Remove…") { removeTarget = kind }
                         .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                         .disabled(engine.deepAnalyzeInFlight || engine.modelDownloadProgress != nil)
-                        .help(engine.deepAnalyzeInFlight ? "Wait until FileID finishes describing files" : "Delete this model's files to free space. Your own files are not touched.")
+                        .help(engine.deepAnalyzeInFlight ? "Wait until FileID finishes describing files" : "Delete this model’s files to free space. Your own files are not touched.")
                 }
             } else if requested == kind.rawValue {
                 HStack(spacing: 8) {
@@ -139,7 +139,7 @@ struct DeepAnalyzeModelPickerCard: View {
                 }
             } else {
                 HStack(spacing: 8) {
-                    MetaText("The selected model isn't downloaded yet. It downloads once from the internet (huggingface.co).", size: 11.5)
+                    MetaText("The selected model isn’t downloaded yet. It downloads once from the internet (huggingface.co).", size: 11.5)
                     Spacer()
                     Button { startDownload(kind) } label: {
                         Label("Download · \(DescriptionModelStore.downloadSizeText(kind))", systemImage: "arrow.down.circle.fill")
@@ -172,7 +172,7 @@ struct DeepAnalyzeModelPickerCard: View {
         if engine.prewarmModel(kind.rawValue) {
             requested = kind.rawValue
         } else if ModelLicenseAcceptance.isAccepted(for: kind) {
-            failure = ("FileID's helper isn't running. Quit and reopen FileID, then try again.", "")
+            failure = ("FileID’s helper isn’t running. Quit and reopen FileID, then try again.", "")
         }
     }
 
@@ -187,7 +187,7 @@ struct DeepAnalyzeModelPickerCard: View {
             try DescriptionModelStore.remove(kind)
             failure = nil
         } catch {
-            failure = ("FileID couldn't remove this model.", error.localizedDescription)
+            failure = ("FileID couldn’t remove this model.", error.localizedDescription)
         }
         diskRefresh += 1
     }
@@ -231,7 +231,7 @@ private struct ModelOptionRow: View {
                         .foregroundStyle(Theme.text3)
                     statsLine
                     if !fits {
-                        Text("Too big for this Mac's memory. Choose a smaller model.")
+                        Text("Too big for this Mac’s memory. Choose a smaller model.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.warning)
                     }
@@ -532,7 +532,7 @@ struct DeepAnalyzeView: View {
                 HStack(spacing: 10) {
                     secondaryApplyButton("Add tags to files…", systemImage: "tag",
                                          disabled: applyInFlight) { prepareApply(.tags) }
-                    secondaryApplyButton("Add people's names to files…", systemImage: "person.crop.square",
+                    secondaryApplyButton("Add people’s names to files…", systemImage: "person.crop.square",
                                          disabled: applyInFlight || !hasNamedAnyone) { prepareApply(.people) }
                         .help(hasNamedAnyone ? "Tag each photo with the names of the people in it. You confirm first." : "Name someone on the People page first")
                 }
@@ -543,7 +543,7 @@ struct DeepAnalyzeView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(DSSecondaryButtonStyle(height: 30))
-                .help(pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names in your Name style. You see the counts and confirm first." : "Adds tags and people's names to the files. You confirm first.")
+                .help(pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names in your Name style. You see the counts and confirm first." : "Adds tags and people’s names to the files. You confirm first.")
                 .disabled(applyInFlight)
                 .confirmationDialog(
                     applyConfirm?.title ?? "",
@@ -582,31 +582,30 @@ struct DeepAnalyzeView: View {
         var tagged = 0
         var people = 0
 
-        private static func files(_ n: Int) -> String { "\(n.formatted()) file\(n == 1 ? "" : "s")" }
 
         var title: String {
-            if !renames.isEmpty { return "Rename \(Self.files(renames.count)) and add tags?" }
+            if !renames.isEmpty { return "Rename \(Plural.noun(renames.count, "file", "files")) and add tags?" }
             switch scope {
-            case .tags: return "Add tags to \(Self.files(tagged))?"
-            case .people: return "Add people's names to \(Self.files(people))?"
-            case .all: return "Add tags and names to \(Self.files(max(tagged, people)))?"
+            case .tags: return "Add tags to \(Plural.noun(tagged, "file", "files"))?"
+            case .people: return "Add people’s names to \(Plural.noun(people, "file", "files"))?"
+            case .all: return "Add tags and names to \(Plural.noun(max(tagged, people), "file", "files"))?"
             }
         }
         var button: String {
-            if !renames.isEmpty { return "Rename \(Self.files(renames.count)) and add tags" }
+            if !renames.isEmpty { return "Rename \(Plural.noun(renames.count, "file", "files")) and add tags" }
             switch scope {
-            case .tags: return "Add tags to \(Self.files(tagged))"
-            case .people: return "Add names to \(Self.files(people))"
+            case .tags: return "Add tags to \(Plural.noun(tagged, "file", "files"))"
+            case .people: return "Add names to \(Plural.noun(people, "file", "files"))"
             case .all: return "Add tags and names"
             }
         }
         var message: String {
             var parts: [String] = []
             if !renames.isEmpty {
-                parts.append("\(Self.files(renames.count)) get the suggested name in your Name style. They stay in their folders. To put the old names back, use Undo last rename at the top of Library.")
+                parts.append("\(Plural.noun(renames.count, "file", "files")) get the suggested name in your Name style. They stay in their folders. To put the old names back, use Undo last rename at the top of Library.")
             }
-            if tagged > 0 { parts.append("\(Self.files(tagged)) get FileID's tags as Finder tags.") }
-            if people > 0 { parts.append("\(Self.files(people)) get the names of the people in them as Finder tags.") }
+            if tagged > 0 { parts.append("\(Plural.noun(tagged, "file", "files")) get FileID’s tags as Finder tags.") }
+            if people > 0 { parts.append("\(Plural.noun(people, "file", "files")) get the names of the people in them as Finder tags.") }
             parts.append("Your own Finder tags are kept. To take a tag off later, remove it in Finder.")
             return parts.joined(separator: " ")
         }
@@ -669,7 +668,7 @@ struct DeepAnalyzeView: View {
                 let result = await CatalogWrites.applyNames(confirm.renames, engine: engine, store: store)
                 BulkRenameSheet.saveLastBatch(result.renamed)
                 if !result.renamed.isEmpty { summary.append("\(result.renamed.count) renamed") }
-                if result.failed > 0 { summary.append("\(result.failed) couldn't be renamed") }
+                if result.failed > 0 { summary.append("\(result.failed.formatted()) couldn’t be renamed") }
             }
             if scope == .tags || scope == .all {
                 let n = await Task.detached(priority: .userInitiated) {
@@ -754,7 +753,7 @@ struct DeepAnalyzeView: View {
                     .font(Theme.Font.body(20, .semibold))
                     .foregroundStyle(Theme.warning)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Describe Files isn't available in this copy of FileID")
+                    Text("Describe Files isn’t available in this copy of FileID")
                         .font(Theme.Font.body(14, .semibold))
                     Text("Reinstall FileID to fix it.")
                         .font(Theme.Font.body(13.5))
@@ -769,7 +768,7 @@ struct DeepAnalyzeView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 14) {
-            MetaText("FileID's local AI looks at each file, writes a sentence about it and suggests a clearer name. Nothing is renamed until you approve it.", color: Theme.text2)
+            MetaText("FileID’s local AI looks at each file, writes a sentence about it and suggests a clearer name. Nothing is renamed until you approve it.", color: Theme.text2)
             Spacer(minLength: 0)
         }
     }
@@ -787,16 +786,16 @@ struct DeepAnalyzeView: View {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                     GridRow {
                         Text("Can be described").foregroundStyle(Theme.text3)
-                        Text("\(totals.total.formatted()) files").font(Theme.Font.body(13, .medium)).monospacedDigit()
+                        Text(Plural.noun(totals.total, "file", "files")).font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
                     GridRow {
                         Text("Not described yet").foregroundStyle(Theme.text3)
-                        Text("\(totals.undescribed.formatted()) files").font(Theme.Font.body(13, .medium)).monospacedDigit()
+                        Text(Plural.noun(totals.undescribed, "file", "files")).font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
                     if totals.pending > totals.undescribed {
                         GridRow {
                             Text("Described by another model").foregroundStyle(Theme.text3)
-                            Text("\((totals.pending - totals.undescribed).formatted()) files · \(settings.activeKind.displayName) describes them again")
+                            Text("\(Plural.noun(totals.pending - totals.undescribed, "file", "files")) · \(settings.activeKind.displayName) describes them again")
                                 .font(Theme.Font.body(13, .medium)).monospacedDigit()
                         }
                     }
@@ -833,11 +832,11 @@ struct DeepAnalyzeView: View {
     }
 
     private var runBlocker: String? {
-        if !engine.deepAnalyzeAvailable { return "Describe Files isn't available in this copy of FileID. Reinstall FileID to fix it." }
+        if !engine.deepAnalyzeAvailable { return "Describe Files isn’t available in this copy of FileID. Reinstall FileID to fix it." }
         if !settings.activeKind.fits(ramGB: settings.systemRAMGB) { return "\(settings.activeKind.displayName) needs more memory than this Mac has. Choose a smaller model in Settings." }
         if engine.deepAnalyzeInFlight { return "FileID is already describing files." }
         if pendingTotals.total == 0 { return "Scan a folder first." }
-        if skipExisting && pendingTotals.pending == 0 { return "Every file is already described. Turn off \"Only files not described yet\" to describe them again." }
+        if skipExisting && pendingTotals.pending == 0 { return "Every file is already described. Turn off “Only files not described yet” to describe them again." }
         return nil
     }
 
@@ -856,7 +855,7 @@ struct DeepAnalyzeView: View {
         }
         .disabled(runBlocker != nil)
         .help(runBlocker ?? (modelMissing
-              ? "The AI model isn't downloaded yet. This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once, then describes your files."
+              ? "The AI model isn’t downloaded yet. This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once, then describes your files."
               : "Write a description and a suggested name for each file. You can stop at any time."))
         .confirmationDialog("This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once. Continue?",
                             isPresented: $confirmDownload, titleVisibility: .visible) {
@@ -890,7 +889,7 @@ struct DeepAnalyzeView: View {
                     .font(Theme.Font.body(16, .semibold))
                     .foregroundStyle(Theme.warning)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Describing didn't start").font(Theme.Font.body(14, .semibold))
+                    Text("Describing didn’t start").font(Theme.Font.body(14, .semibold))
                     Text(failure.text)
                         .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1037,7 +1036,7 @@ struct DeepAnalyzeView: View {
                     ProgressView(value: Double(p.processed),
                                   total: Double(max(p.total, 1)))
                         .tint(Theme.gold)
-                    Text("\(p.processed.formatted()) of \(p.total.formatted()) files")
+                    Text("\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))")
                         .font(Theme.Font.body(12.5)).monospacedDigit()
                     if let path = p.currentPath {
                         Text(URL(fileURLWithPath: path).lastPathComponent)
@@ -1072,7 +1071,7 @@ struct DeepAnalyzeView: View {
                     Text(c.cancelled ? "Stopped" : "Finished").font(Theme.Font.body(14, .semibold))
                     Spacer()
                 }
-                Text("\(c.processed.formatted()) file\(c.processed == 1 ? "" : "s") described" + (c.failed > 0 ? " · \(c.failed) couldn't be read" : "") + " · took \(DurationText.short(c.totalSeconds))")
+                Text("\(c.processed.formatted()) file\(c.processed == 1 ? "" : "s") described" + (c.failed > 0 ? " · \(c.failed.formatted()) couldn’t be read" : "") + " · took \(DurationText.short(c.totalSeconds))")
                     .font(Theme.Font.body(12.5)).foregroundStyle(Theme.text3)
             }
         }
@@ -1147,7 +1146,7 @@ struct DeepAnalyzeButton: View {
         } message: {
             Text("FileID needs its description model before it can describe this file. It downloads once from the internet (huggingface.co). You can watch the download on the Describe Files page.")
         }
-        .alert("The description model can't be downloaded yet", isPresented: Binding(get: { blocked != nil }, set: { if !$0 { blocked = nil } })) {
+        .alert("The description model can’t be downloaded yet", isPresented: Binding(get: { blocked != nil }, set: { if !$0 { blocked = nil } })) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(blocked ?? "")

@@ -85,7 +85,7 @@ struct WelcomeSheet: View {
                 VStack(alignment: .leading, spacing: 0) {
             modelRow(
                 title: "Search by description",
-                detail: "Find photos by typing what's in them",
+                detail: "Find photos by typing what’s in them",
                 technical: "CLIP ViT-B/32",
                 size: "~\(ModelSize.label(Int64(CLIPModelInstaller.approxDownloadBytes)))",
                 status: clip.status,
@@ -94,7 +94,7 @@ struct WelcomeSheet: View {
             )
             modelRow(
                 title: "Photo tags",
-                detail: "Labels what's in each photo",
+                detail: "Labels what’s in each photo",
                 technical: "RAM++",
                 size: "~\(ModelSize.label(ramplus.spec.approxBytes))",
                 status: ramplus.status,
@@ -394,7 +394,7 @@ struct WelcomeSheet: View {
     private func triggerVLMInstall() {
         guard !vlmInProgress else { return }
         guard selectedVLMCanInstall else {
-            vlmLastError = selectedVLMInstallBlocker ?? "This description model can't be used on this Mac. Choose another one."
+            vlmLastError = selectedVLMInstallBlocker ?? "This description model can’t be used on this Mac. Choose another one."
             return
         }
         guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
@@ -422,7 +422,7 @@ struct WelcomeSheet: View {
             guard vlmRequested,
                   vlmRequestedAt == started,
                   engine.modelDownloadProgress?.modelKind != kind.rawValue else { return }
-            stopVLMRequest(kind, error: "The download didn't start. Try again.")
+            stopVLMRequest(kind, error: "The download didn’t start. Try again.")
         }
         // started-then-stalled watchdog. A download that emits ≥1 progress
         // event then goes silent (server hang / dropped link without RST) defeats

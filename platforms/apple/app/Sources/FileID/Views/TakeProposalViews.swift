@@ -30,7 +30,7 @@ struct RelatedTriesSection: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
             if loaded && proposals.isEmpty && job?.state != "running" {
-                MetaText(job == nil ? "FileID hasn't looked yet." : "No similar takes found yet.", size: 12)
+                MetaText(job == nil ? "FileID hasn’t looked yet." : "No similar takes found yet.", size: 12)
                     .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                     .fixedSize(horizontal: false, vertical: true)
             }

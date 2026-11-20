@@ -273,10 +273,15 @@ pub(crate) async fn handle_apply_tags(
                 }
                 Err(err) => {
                     failed += 1;
+                    tracing::warn!(%err, "tag write to the catalog failed");
+                    let err = anyhow::Error::from(err);
                     messages.push(BulkActionItem {
                         file_id: Some(*fid),
                         ok: false,
-                        message: Some(format!("tag write failed: {err}")),
+                        message: Some(match crate::util::user_message::io_cause(&err) {
+                            Some(cause) => cause.sentence().into(),
+                            None => "Couldn’t save the tags for this file.".to_string(),
+                        }),
                         reason: None,
                         operation_id: None,
                     });
@@ -295,7 +300,7 @@ pub(crate) async fn handle_apply_tags(
                     &mut failed,
                     &mut messages,
                     *message_index,
-                    err.to_string(),
+                    tag_failure_text(&err),
                 );
                 sidecar_failures.push((*message_index, *file_id, previous, current));
             }
@@ -381,13 +386,29 @@ struct PlannedRename {
 
 /// What a person is told when the move itself failed: the usual causes in words, anything else as the system reports it.
 fn rename_failure_text(err: &anyhow::Error, dest: &std::path::Path) -> String {
+    if let Some(cause) = crate::util::user_message::io_cause(err) {
+        return cause.sentence().into();
+    }
     match err.downcast_ref::<std::io::Error>().map(std::io::Error::kind) {
         Some(std::io::ErrorKind::AlreadyExists) => {
-            format!("a file named {} already exists in this folder; choose a different name", file_name_of(dest))
+            format!("A file named {} already exists in this folder. Choose a different name.", file_name_of(dest))
         }
-        Some(std::io::ErrorKind::NotFound) => "the file is no longer where FileID last saw it; refresh and try again".into(),
-        Some(std::io::ErrorKind::PermissionDenied) => "FileID doesn't have permission to rename this file".into(),
-        _ => err.to_string(),
+        Some(std::io::ErrorKind::NotFound) => "The file is no longer where FileID last saw it. Refresh and try again.".into(),
+        Some(std::io::ErrorKind::PermissionDenied) => "FileID doesn’t have permission to rename this file.".into(),
+        Some(_) => "FileID couldn’t rename this file. Try again.".into(),
+        None => err.to_string(),
+    }
+}
+
+fn tag_failure_text(err: &anyhow::Error) -> String {
+    use crate::util::user_message::{io_cause, IoCause};
+    match io_cause(err) {
+        Some(IoCause::ReadOnly) => "This disk is read-only, so Finder tags can’t be added.".into(),
+        Some(cause) => cause.sentence().into(),
+        None if err.chain().any(|layer| layer.to_string().contains("OSStatus error -61")) => {
+            "This disk is read-only, so Finder tags can’t be added.".into()
+        }
+        None => "Couldn’t add the Finder tag to this file.".into(),
     }
 }
 
@@ -684,10 +705,11 @@ fn rename_files_blocking(
             continue;
         };
         let p = &planned[bad];
-        let grouped = if unit.len() > 1 { "; its group keeps its names" } else { "" };
+        let grouped = if unit.len() > 1 { " Its group keeps its names." } else { "" };
         let reason = rename_failure_text(&err, &p.dest);
-        results[p.slot] = failed_item(p.file_id, format!("rename failed: {reason}{grouped}"));
-        let why = format!("not renamed: {} couldn't be renamed ({reason}), so its group keeps its names", file_name_of(&p.src));
+        tracing::warn!(?err, "rename failed");
+        results[p.slot] = failed_item(p.file_id, format!("{reason}{grouped}"));
+        let why = format!("{} couldn’t be renamed, so its group keeps its names. {reason}", file_name_of(&p.src));
         for &index in moved.iter().rev() {
             let p = &planned[index];
             results[p.slot] = match crate::util::path_safety::rename_no_replace(&p.dest, &p.src) {
@@ -695,7 +717,10 @@ fn rename_files_blocking(
                 Err(back) => Some(commit_rename(
                     db,
                     p,
-                    vec![format!("couldn't be put back after {} failed: {back}", file_name_of(&planned[bad].src))],
+                    vec![{
+                        tracing::warn!(error = ?back, "rename could not be reversed");
+                        format!("Couldn’t be put back after {} failed. It keeps its new name.", file_name_of(&planned[bad].src))
+                    }],
                     false,
                 )),
             };
@@ -1871,7 +1896,7 @@ fn mark_tag_sidecar_failure(
     *failed = failed.saturating_add(1);
     if let Some(message) = messages.get_mut(message_index) {
         message.ok = false;
-        message.message = Some(format!("file tag write failed: {error}"));
+        message.message = Some(error);
     }
 }
 
@@ -3024,7 +3049,7 @@ mod tests {
             &mut failed,
             &mut messages,
             0,
-            "access denied".into(),
+            "Couldn’t add the Finder tag to this file.".into(),
         );
 
         assert_eq!(succeeded, 0);
@@ -3032,7 +3057,7 @@ mod tests {
         assert!(!messages[0].ok);
         assert_eq!(
             messages[0].message.as_deref(),
-            Some("file tag write failed: access denied")
+            Some("Couldn’t add the Finder tag to this file.")
         );
     }
 
@@ -3815,10 +3840,27 @@ mod tests {
         let result = rename_files_blocking(&db, &renames(&[(1, "IMG_2.JPG")]), &no_clobber_rename_bound);
         assert_eq!((result.succeeded, result.failed), (0, 1), "{:?}", result.messages);
         let (ok, message) = message_of(&result, 1);
-        assert!(!ok && message.contains("a file named IMG_2.JPG already exists in this folder"), "{message}");
+        assert!(!ok && message.contains("A file named IMG_2.JPG already exists in this folder"), "{message}");
         assert!(!message.contains("os error"), "{message}");
         assert_eq!(listed(&directory), ["IMG_1.JPG", "IMG_2.JPG"]);
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn failures_from_the_operating_system_never_show_an_os_string() {
+        let dest = std::path::Path::new("/tmp/IMG_2.JPG");
+        let read_only = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
+        assert_eq!(rename_failure_text(&read_only, dest), "This folder is on a read-only disk, so FileID can’t change it.");
+        let too_long = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::InvalidFilename));
+        assert_eq!(rename_failure_text(&too_long, dest), "That name is too long (the limit is 255 characters).");
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert!(rename_failure_text(&full, dest).starts_with("There isn’t enough free space"));
+        let busy = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ResourceBusy));
+        assert_eq!(rename_failure_text(&busy, dest), "FileID couldn’t rename this file. Try again.");
+        assert_eq!(tag_failure_text(&read_only), "This disk is read-only, so Finder tags can’t be added.");
+        let status = anyhow::anyhow!("The operation couldn’t be completed. (OSStatus error -61.)");
+        assert_eq!(tag_failure_text(&status), "This disk is read-only, so Finder tags can’t be added.");
+        assert_eq!(tag_failure_text(&anyhow::anyhow!("boom")), "Couldn’t add the Finder tag to this file.");
     }
 
     #[test]
@@ -3834,9 +3876,9 @@ mod tests {
         assert_eq!((result.succeeded, result.failed), (1, 2), "{:?}", result.messages);
         assert_eq!(listed(&directory), ["IMG_5.ARW", "IMG_5.JPG", "IMG_5.xmp", "solo2.txt"]);
         let (ok, message) = message_of(&result, 1);
-        assert!(!ok && message.contains("IMG_5.ARW couldn't be renamed (injected failure)"), "{message}");
+        assert!(!ok && message.contains("IMG_5.ARW couldn’t be renamed, so its group keeps its names. injected failure"), "{message}");
         let (ok, message) = message_of(&result, 2);
-        assert!(!ok && message.starts_with("rename failed: injected failure"), "{message}");
+        assert!(!ok && message.starts_with("injected failure"), "{message}");
         let path_of = |id: i64| -> String {
             db.lock().query_row("SELECT path_text FROM files WHERE id=?1", [id], |row| row.get(0)).unwrap()
         };

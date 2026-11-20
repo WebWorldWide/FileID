@@ -719,7 +719,7 @@ public final class EngineClient {
                 benchmarkResults[result.modelKind] = benchmark
                 benchmarkMessage = nil
             } else {
-                benchmarkMessage = (result.modelKind, result.message ?? "The benchmark didn't finish.")
+                benchmarkMessage = (result.modelKind, result.message ?? "The benchmark didn’t finish.")
             }
         case .clipTextEmbedding(let reply):
             queryReplies.deliver(reply)
@@ -825,7 +825,7 @@ public final class EngineClient {
         state = .starting
         lastError = EngineError(
             kind: "engine_exited",
-            message: "FileID's helper stopped and is restarting…"
+            message: "FileID’s helper stopped and is restarting…"
         )
         Self.debug("respawn: scheduling attempt \(attemptIdx + 1)/\(Self.respawnDelays.count) in \(delay)s")
 
@@ -853,7 +853,7 @@ public final class EngineClient {
 
     private func beginDeepAnalyzeActivity() {
         guard deepAnalyzeActivityToken == nil else { return }
-        deepAnalyzeActivityToken = AppSleepActivity.begin(reason: "FileID is running Deep Analyze")
+        deepAnalyzeActivityToken = AppSleepActivity.begin(reason: "FileID is describing files")
     }
 
     private func endDeepAnalyzeActivity() {
@@ -925,7 +925,7 @@ public final class EngineClient {
     private func setSavedFolderBookmarkError() {
         lastError = EngineError(
             kind: "bookmark_unavailable",
-            message: "FileID can't open that folder any more. Choose the folder again."
+            message: "FileID can’t open that folder any more. Choose the folder again."
         )
     }
 
@@ -949,7 +949,7 @@ public final class EngineClient {
                 await MainActor.run {
                     client.lastError = EngineError(
                         kind: "bookmark_unavailable",
-                        message: "FileID couldn't retain access to that folder. Choose the folder again."
+                        message: "FileID couldn’t retain access to that folder. Choose the folder again."
                     )
                 }
                 return
@@ -966,7 +966,7 @@ public final class EngineClient {
                 } else {
                     client.lastError = EngineError(
                         kind: "engine_exited",
-                        message: "The scan couldn't start because FileID's helper isn't running. Wait a moment and press Scan again."
+                        message: "The scan couldn’t start because FileID’s helper isn’t running. Wait a moment and press Scan again."
                     )
                 }
             }

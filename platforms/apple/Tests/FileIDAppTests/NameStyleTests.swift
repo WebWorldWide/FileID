@@ -117,7 +117,7 @@ struct NameStyleTests {
         #expect(rows.map(\.suffix) == [".JPG", ".ARW", ".ARW.xmp", ""])
         #expect(NameStyle.companionChip(rows[0], in: rows) == "+ ARW, XMP")
         #expect(NameStyle.companionChip(rows[1], in: rows) == nil && NameStyle.companionChip(rows[3], in: rows) == nil)
-        #expect(NameStyle.reasonLabel("unscannedCompanion") == "Its partner file isn't scanned yet")
+        #expect(NameStyle.reasonLabel("unscannedCompanion") == "Its partner file isn’t scanned yet")
         #expect(NameStyle.accessibilityLabel(rows[1], in: rows)
                 == "DSC_1.ARW, rename to beach-sunset_2.ARW, from the AI name, together with DSC_1.JPG, DSC_1.ARW.xmp")
     }

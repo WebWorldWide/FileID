@@ -1504,6 +1504,14 @@ fn db_open_error_event(err: &anyhow::Error, db_path: &std::path::Path) -> IpcEve
         .with_path(path)
         .into_event();
     }
+    if crate::util::user_message::io_cause(err) == Some(crate::util::user_message::IoCause::DiskFull) {
+        return EngineError::new(
+            "db_disk_full",
+            "FileID has no room to save its library. Free some space (about 1 GB is plenty), then reopen FileID.",
+        )
+        .with_path(path)
+        .into_event();
+    }
     let message = if err.downcast_ref::<db::ReadOnlyDatabase>().is_some() {
         "FileID's library file is read-only, so it can't scan. Make the FileID data folder writable, then restart FileID."
     } else {
@@ -1923,6 +1931,10 @@ mod tests {
         let (kind, message) = kind_and_message(anyhow::Error::from(db::ReadOnlyDatabase));
         assert_eq!(kind, "db_open_failed");
         assert!(message.contains("read-only"), "{message}");
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull)).context("opening the library");
+        let (kind, message) = kind_and_message(full);
+        assert_eq!(kind, "db_disk_full");
+        assert!(message.starts_with("FileID has no room to save its library."), "{message}");
         let (kind, message) = kind_and_message(anyhow::anyhow!("file is not a database"));
         assert_eq!(kind, "db_open_failed");
         assert!(message.starts_with("FileID couldn't open its library, so it can't scan."), "{message}");

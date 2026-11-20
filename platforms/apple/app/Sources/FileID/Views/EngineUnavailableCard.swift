@@ -33,11 +33,11 @@ struct EngineUnavailableCard: View {
                 HStack(spacing: 10) {
                     Button("Show log", action: onShowLog)
                         .buttonStyle(DSSecondaryButtonStyle(height: 32))
-                        .help("Open FileID's log to see why the helper stopped.")
+                        .help("Open FileID’s log to see why the helper stopped.")
                     Button("Try again", action: onTryAgain)
                         .buttonStyle(DSPrimaryButtonStyle(height: 32))
                         .keyboardShortcut(.defaultAction)
-                        .help("Start FileID's helper again.")
+                        .help("Restart FileID’s helper.")
                 }
                 .padding(.top, 6)
             }
@@ -48,7 +48,7 @@ struct EngineUnavailableCard: View {
         .accessibilityLabel("\(Self.title). \(failure.summary)")
     }
 
-    static let title = "FileID's helper couldn't start"
+    static let title = "FileID’s helper couldn’t start"
 
     static func reinstallHint(for failure: EngineStartFailure) -> String {
         failure.suggestsReinstall

@@ -50,7 +50,7 @@ fn cancel_active(request: &ToolRequest) -> Result<ToolResponse> {
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
         bail!("Invalid tools request.")
     }
-    let id = request.operation_id.as_deref().context("Choose a running export")?;
+    let id = request.operation_id.as_deref().context("Choose a running export first.")?;
     let active = active_exports().lock();
     let cancelled = active.get(id).context("No running export matches this request.")?;
     cancelled.store(true, Ordering::Release);
@@ -90,6 +90,29 @@ struct Receipt {
     recovery_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery_published: Option<bool>,
+}
+
+fn export_failure_message(error: &anyhow::Error, folder: Option<&str>, exported: usize, total: usize) -> String {
+    use crate::util::user_message::{io_cause, IoCause};
+    let progress = if exported > 0 {
+        format!(
+            " {exported} of {} {} exported.",
+            crate::util::display::count_noun(total as i64, "file", "files"),
+            if exported == 1 { "was" } else { "were" }
+        )
+    } else {
+        String::new()
+    };
+    let folder = folder.unwrap_or("that folder");
+    match io_cause(error) {
+        Some(IoCause::DiskFull) => format!("There isn’t enough free space in {folder}. Free up space or choose another folder.{progress}"),
+        Some(IoCause::ReadOnly) => format!("{folder} is on a read-only disk, so FileID can’t save there. Choose another folder.{progress}"),
+        Some(IoCause::NameTooLong) => format!("A name in this export is too long (the limit is 255 characters). Rename the files and try again.{progress}"),
+        None if error.chain().any(|layer| layer.is::<std::io::Error>()) => {
+            "Export didn’t finish. Some files may already be saved; press Show last export to check.".to_string()
+        }
+        None => error.to_string(),
+    }
 }
 
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: ToolRequest) {
@@ -140,7 +163,7 @@ fn preview_message(kind: &str, count: usize) -> String {
         _ => None,
     };
     if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        let base = format!("Creates {count} new file(s). Originals are preserved.");
+        let base = format!("Creates {}. Originals are preserved.", crate::util::display::count_noun(count as i64, "new file", "new files"));
         caveat.map_or(base.clone(), |caveat| format!("{base} {caveat}"))
     } else {
         match caveat {
@@ -399,14 +422,14 @@ fn run_action(
             if let Some((id, (_, receipts, _))) = latest {
                 result.operation_id = Some(id);
                 result.outputs = receipts.into_iter().map(|r| r.output).collect();
-                result.message = "Last export operation.".into();
+                result.message = "Showing your last export.".into();
             } else {
                 result.message = "No completed export history.".into();
             }
         }
         "preview" => {
-            let ids = request.file_ids.as_ref().context("Choose files")?;
-            let recipe = request.recipe.as_ref().context("Choose a recipe")?;
+            let ids = request.file_ids.as_ref().context("Choose files first.")?;
+            let recipe = request.recipe.as_ref().context("Choose a recipe first.")?;
             let media = if media_recipes::is_media(&recipe.kind) {
                 media_recipes::validate(recipe)?;
                 Some(media_recipes::runtime().context(media_recipes::UNAVAILABLE)?)
@@ -420,7 +443,7 @@ fn run_action(
             {
                 bail!(UNSUPPORTED_RECIPE)
             }
-            let destination = foundation_standardized(Path::new(request.destination.as_deref().context("Choose an output folder")?));
+            let destination = foundation_standardized(Path::new(request.destination.as_deref().context("Choose an output folder first.")?));
             let destination = destination.as_path();
             read_only::require_source_mutation(destination)?;
             if !destination.is_absolute() || !destination.is_dir() {
@@ -718,12 +741,15 @@ fn run_action(
                 Ok(()) => {
                     db.with(|conn| persist(conn, id, &receipts, "completed"))?;
                     result.message =
-                        "Export complete. Undo moves unchanged exports into internal recovery storage.".into();
+                        "Export complete. Undo moves the exported files into FileID’s recovery folder.".into();
                 }
                 Err(error) => {
                     db.with(|conn| persist(conn, id, &receipts, "failed"))?;
+                    tracing::warn!(error = ?error, "export failed");
+                    let exported = receipts.iter().filter(|receipt| receipt.output.state == "completed").count();
+                    let folder = plan.items.first().and_then(|item| Path::new(&item.output.output_path).parent()).map(|parent| parent.display().to_string());
                     result.status = "error".into();
-                    result.message = error.to_string();
+                    result.message = export_failure_message(&error, folder.as_deref(), exported, plan.items.len());
                 }
             }
             result.operation_id = Some(id.into());
@@ -731,7 +757,7 @@ fn run_action(
         }
         "cancel" => return cancel_active(request),
         "undo" => {
-            let id = request.operation_id.as_deref().context("Choose an export operation")?;
+            let id = request.operation_id.as_deref().context("Choose an export first.")?;
             let (_, mut receipts, state) = db.with(|conn| load(conn, id))?;
             for receipt in &receipts {
                 if receipt.output.state != "completed" {
@@ -793,7 +819,7 @@ fn run_action(
                             db.with(|conn| Ok(conn.execute("DELETE FROM files WHERE id=?1", [derived])?))?;
                         }
                         receipts[index].output.state = "undone".into();
-                        receipts[index].output.message = format!("Recoverable at {path}");
+                        receipts[index].output.message = format!("Kept for undo at {path}");
                         db.with(|conn| persist(conn, id, &receipts, &state))?;
                         continue;
                     }
@@ -812,7 +838,7 @@ fn run_action(
                 let expected = receipts[index].hash.clone();
                 let mut published = || -> std::io::Result<()> {
                     receipts[index].recovery_published = Some(true);
-                    receipts[index].output.message = "Undo recovery published; export removal is pending.".into();
+                    receipts[index].output.message = "Undo is finishing. The exported files are being removed.".into();
                     db.with(|conn| persist(conn, id, &receipts, &state)).map_err(std::io::Error::other)?;
                     if hash(&source).map_err(std::io::Error::other)? != expected
                         || hash(&target).map_err(std::io::Error::other)? != expected
@@ -828,13 +854,13 @@ fn run_action(
                     db.with(|conn| Ok(conn.execute("DELETE FROM files WHERE id=?1", [derived])?))?;
                 }
                 receipts[index].output.state = "undone".into();
-                receipts[index].output.message = format!("Recoverable at {}", target.display());
+                receipts[index].output.message = format!("Kept for undo at {}", target.display());
                 db.with(|conn| persist(conn, id, &receipts, &state))?;
             }
             db.with(|conn| persist(conn, id, &receipts, "undone"))?;
             result.operation_id = Some(id.into());
             result.outputs = receipts.into_iter().map(|r| r.output).collect();
-            result.message = "Exports moved to internal recovery storage. Originals are unchanged.".into();
+            result.message = "Exports moved to FileID’s recovery folder. Originals are unchanged.".into();
         }
         _ => bail!("Unsupported tools action."),
     }
@@ -991,6 +1017,28 @@ fn foundation_standardized(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn export_failures_name_the_cause_in_plain_words() {
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull)).context("copying");
+        assert_eq!(
+            super::export_failure_message(&full, Some("/Volumes/Photos"), 1, 6),
+            "There isn’t enough free space in /Volumes/Photos. Free up space or choose another folder. 1 of 6 files was exported."
+        );
+        assert_eq!(
+            super::export_failure_message(&full, Some("/Volumes/Photos"), 0, 1),
+            "There isn’t enough free space in /Volumes/Photos. Free up space or choose another folder."
+        );
+        let read_only = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
+        assert_eq!(
+            super::export_failure_message(&read_only, Some("/Volumes/Disk"), 2, 5),
+            "/Volumes/Disk is on a read-only disk, so FileID can’t save there. Choose another folder. 2 of 5 files were exported."
+        );
+        let other = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        let message = super::export_failure_message(&other, None, 0, 1);
+        assert!(message.starts_with("Export didn’t finish.") && !message.contains("os error"), "{message}");
+        assert_eq!(super::export_failure_message(&anyhow::anyhow!("A source changed after preview. Preview again."), None, 0, 1), "A source changed after preview. Preview again.");
+    }
+
     #[test]
     fn preview_message_names_only_the_caveat_of_the_recipe_kind() {
         let photo = super::preview_message("photo", 2);
@@ -1225,7 +1273,7 @@ mod tests {
                 let history = execute(&mut fixture.conn, &action(None, "history")).unwrap();
                 assert_eq!(history.operation_id, preview.operation_id);
                 assert_eq!(history.outputs[0].state, "undone");
-                assert!(history.outputs[0].message.contains("Recoverable at"));
+                assert!(history.outputs[0].message.contains("Kept for undo at"));
             }
         }
     }

@@ -27,6 +27,14 @@ impl Drop for ScanStateGuard {
     }
 }
 
+fn scan_failure_event(err: &anyhow::Error) -> (&'static str, &'static str) {
+    if crate::util::user_message::io_cause(err) == Some(crate::util::user_message::IoCause::DiskFull) {
+        ("scan_disk_full", "Your disk is full, so FileID couldn’t finish scanning. Free some space, then scan again.")
+    } else {
+        ("scan_failed", "FileID couldn't finish scanning this folder. Check that it is still connected, then scan again.")
+    }
+}
+
 fn clear_scan_slot(state: &Mutex<Option<ScanCoordinator>>, coord: &ScanCoordinator) {
     let mut guard = state.lock();
     if guard.as_ref().is_some_and(|c| c.same_scan(coord)) {
@@ -421,10 +429,8 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(EngineError::new(
-                "scan_failed",
-                "FileID couldn't finish scanning this folder. Check that it is still connected, then scan again.",
-            )
+            let (kind, message) = scan_failure_event(&err);
+            sink.send(EngineError::new(kind, message)
             .with_path(payload.root_path)
             .into_event())
             .await;
@@ -462,6 +468,15 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_full_disk_is_named_instead_of_blaming_the_connection() {
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull)).context("writing the catalog");
+        let (kind, message) = scan_failure_event(&full);
+        assert_eq!(kind, "scan_disk_full");
+        assert!(message.contains("disk is full") && !message.contains("connected"), "{message}");
+        assert_eq!(scan_failure_event(&anyhow::anyhow!("walk failed")).0, "scan_failed");
+    }
 
     #[test]
     fn only_the_mac_scan_that_lost_the_graphics_chip_says_it_is_slower() {

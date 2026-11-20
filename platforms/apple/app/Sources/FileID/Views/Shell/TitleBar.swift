@@ -39,7 +39,7 @@ struct TitleBar: View {
         .background(Theme.bg1.opacity(0.62), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .overlay(alignment: .bottom) { Hairline() }
-        .confirmationDialog("Erase FileID's library and scan this folder again?", isPresented: $confirmWipe, titleVisibility: .visible) {
+        .confirmationDialog("Erase FileID’s library and scan this folder again?", isPresented: $confirmWipe, titleVisibility: .visible) {
             Button("Erase and scan again", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -96,7 +96,7 @@ struct TitleBar: View {
         let resolved = url.resolvingSymlinksInPath().path
         guard let root = engine.libraryRoots.first(where: { [path, resolved].contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path) || $0.path == path }),
               root.fileCount > 0 else { return "Not scanned" }
-        return "\(root.fileCount.formatted()) files"
+        return Plural.noun(root.fileCount, "file", "files")
     }
 
     private var switcherTitle: String {
@@ -342,7 +342,7 @@ struct TitleBar: View {
             let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : (p.phase == .completed ? 1 : 0)
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",
-                                   sub: running ? "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" : "\(p.processed.formatted()) files",
+                                   sub: running ? "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))" : "\(Plural.noun(p.processed, "file", "files"))",
                                    state: p.phase == .completed ? "Done" : running ? Self.scanStateLabel(p.phase, paused: engine.isPaused, fraction: frac) : Self.phaseLabel(p.phase),
                                    color: p.phase == .completed ? Theme.delight : engine.isPaused ? Theme.text3 : Theme.gold,
                                    progress: running && !engine.isPaused && p.phase != .tagging ? nil : frac,
@@ -352,11 +352,11 @@ struct TitleBar: View {
         }
         if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight {
             let frac = d.total > 0 ? Double(d.processed) / Double(d.total) : 0
-            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(d.processed.formatted()) of \(d.total.formatted()) files",
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(d.processed.formatted()) of \(Plural.noun(d.total, "file", "files"))",
                                    state: "\(Int(frac * 100))%", color: Theme.ai, progress: frac, tone: .ai,
                                    button: ("Cancel", { engine.deepAnalyzeCancel() }), open: .deep))
         } else if let done = engine.deepAnalyzeComplete, done.processed > 0 {
-            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(done.processed.formatted()) files", state: "Done", color: Theme.delight,
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(Plural.noun(done.processed, "file", "files"))", state: "Done", color: Theme.delight,
                                    progress: 1, tone: .done, button: nil, open: .deep))
         }
         if engine.faceClusteringInFlight {
@@ -385,7 +385,7 @@ struct TitleBar: View {
     private static func phaseLabel(_ phase: ScanPhase) -> String {
         switch phase {
         case .cancelled: return "Stopped"
-        case .failed: return "Didn't finish"
+        case .failed: return "Didn’t finish"
         default: return ""
         }
     }
@@ -406,7 +406,7 @@ struct TitleBar: View {
         case "running": return "Working \(Int(progress * 100))%"
         case "paused": return "Paused"
         case "cancelled", "canceled": return "Stopped"
-        default: return "Didn't finish"
+        default: return "Didn’t finish"
         }
     }
 

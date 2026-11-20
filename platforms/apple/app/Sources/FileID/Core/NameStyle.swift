@@ -58,7 +58,7 @@ enum NameStyle {
         case "budget": "Too long for the length limit"
         case "reserved": "Not allowed as a file name"
         case "collision": "No free name in this folder"
-        case SmartNameCompanions.unscanned: "Its partner file isn't scanned yet"
+        case SmartNameCompanions.unscanned: "Its partner file isn’t scanned yet"
         default: "Nothing to name it from yet"
         }
     }
@@ -156,7 +156,7 @@ enum NameStyle {
         let parts = keys.compactMap { key -> String? in
             switch key {
             case "dropWords": "leaves out words you remove"
-            case "people": "leaves out people's names"
+            case "people": "leaves out people’s names"
             case "words": "keeps it as short as you do"
             case "leadingDate", "trailingDate": "puts the date where you do"
             case "dateFormat": "writes the date your way"
@@ -195,7 +195,7 @@ enum NameStyle {
         case ("dateFormat", "underscore"): "dates like 2023_07_04"
         case ("dateFormat", "dotted"): "dates like 2023.07.04"
         case ("dateFormat", "month"): "dates like 2023-07"
-        case ("people", _): "no people's names"
+        case ("people", _): "no people’s names"
         case ("words", _): "at most \(value) word\(value == "1" ? "" : "s")"
         case ("dropWords", _): "without \u{201C}\(value)\u{201D}"
         default: nil

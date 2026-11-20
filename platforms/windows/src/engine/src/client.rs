@@ -220,7 +220,7 @@ pub fn drive_scan<R: Read, W: Write>(
     match (scan, read) {
         (Some(_), _) => ScanOutcome::Error {
             kind: "face_clustering_aborted".to_string(),
-            message: "engine exited before face clustering completed".to_string(),
+            message: "FileID’s helper stopped before it finished grouping faces. Press Group faces in People to try again.".to_string(),
         },
         (None, Err(error)) => ScanOutcome::Error {
             kind: "engine_output_error".to_string(),

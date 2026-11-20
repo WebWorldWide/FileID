@@ -105,10 +105,10 @@ final class ChatActionRunner {
             guard let progress = engine.lastProgress, [.discovering, .tagging, .postScan].contains(progress.phase) else { return fallback }
             if progress.phase == .discovering { return "Finding files · \(progress.discovered.formatted()) so far" }
             if progress.phase == .postScan { return "Finishing up" }
-            return "Scanning · \(progress.processed.formatted()) of \(progress.total.formatted()) files"
+            return "Scanning · \(progress.processed.formatted()) of \(Plural.noun(progress.total, "file", "files"))"
         case "describeFiles":
             guard let progress = engine.deepAnalyzeProgress else { return engine.deepAnalyzeStarting == nil ? fallback : "Loading the local AI model" }
-            return "Describing · \(progress.processed.formatted()) of \(progress.total.formatted()) files"
+            return "Describing · \(progress.processed.formatted()) of \(Plural.noun(progress.total, "file", "files"))"
         default:
             return fallback
         }
@@ -169,7 +169,7 @@ final class ChatActionRunner {
     // MARK: - Running
 
     func run(_ action: ChatAction, engine: EngineClient) async {
-        guard ChatActions.isRunnable(action) else { phases[action.id] = .failed("This action isn't available."); return }
+        guard ChatActions.isRunnable(action) else { phases[action.id] = .failed("This action isn’t available."); return }
         if case .running = phase(action) { return }
         let handoff = ChatHandoff.shared
         switch action.kind {
@@ -180,15 +180,15 @@ final class ChatActionRunner {
             phases[action.id] = .running("Starting the scan")
             await watch(action, started: { [.discovering, .tagging, .postScan].contains(engine.lastProgress?.phase) },
                         finished: { ![.discovering, .tagging, .postScan].contains(engine.lastProgress?.phase) }) {
-                guard let progress = engine.lastProgress else { return "Scan finished." }
+                guard let progress = engine.lastProgress else { return "Scan complete." }
                 if progress.phase == .cancelled { return "Scan stopped. Files found so far stay in the library." }
-                if progress.phase == .failed { return "The scan didn't finish. Scan again to pick up where it left off." }
-                return "Scan finished · \(progress.processed.formatted()) files\(progress.failed > 0 ? " · \(progress.failed.formatted()) couldn't be read" : "")."
+                if progress.phase == .failed { return "The scan didn’t finish. Scan again to pick up where it left off." }
+                return "Scan complete · \(Plural.noun(progress.processed, "file", "files"))\(progress.failed > 0 ? " · \(progress.failed.formatted()) couldn’t be read" : "")."
             }
         case "describeFiles":
             let kind = DeepAnalyzeSettings.shared.activeKind
             guard ModelLicenseGate.ensureAccepted(for: kind) else {
-                phases[action.id] = .failed("Describing didn't start because the AI model's terms weren't accepted.")
+                phases[action.id] = .failed("Describing didn’t start because the AI model’s terms weren’t accepted.")
                 return
             }
             let model = kind.rawValue
@@ -196,12 +196,12 @@ final class ChatActionRunner {
                 engine.deepAnalyzeAll(modelKind: model, skipExisting: true)
                 return engine.deepAnalyzeInFlight
             }()
-            guard sent else { phases[action.id] = .failed("Describing didn't start. Check the AI model in Describe Files."); return }
+            guard sent else { phases[action.id] = .failed("Describing didn’t start. Check the AI model in Describe Files."); return }
             phases[action.id] = .running("Starting")
             await watch(action, started: { engine.deepAnalyzeInFlight }, finished: { !engine.deepAnalyzeInFlight }) {
                 guard let done = engine.deepAnalyzeComplete else { return "Describing finished." }
-                if done.cancelled { return "Stopped after \(done.processed.formatted()) files. Their descriptions are kept." }
-                return "Described \(done.processed.formatted()) files\(done.failed > 0 ? " · \(done.failed.formatted()) couldn't be described" : "")."
+                if done.cancelled { return "Stopped after \(Plural.noun(done.processed, "file", "files")). Their descriptions are kept." }
+                return "Described \(Plural.noun(done.processed, "file", "files"))\(done.failed > 0 ? " · \(done.failed.formatted()) couldn’t be described" : "")."
             }
         case "stopJob":
             let job = action.job ?? "all"
@@ -232,7 +232,7 @@ final class ChatActionRunner {
             session.hits = rows.map { CatalogHit(fileID: $0.id, path: $0.pathText, kind: $0.kind, text: "") }
             session.selection = Set(rows.map(\.id))
             handoff.navigate(.tools)
-            phases[action.id] = .done("Opened File Tools with \(rows.count.formatted()) files chosen. Pick a format there.")
+            phases[action.id] = .done("Opened File Tools with \(Plural.noun(rows.count, "file", "files")) chosen. Pick a format there.")
         case "changeSetting":
             guard let setting = action.setting, let value = action.value else { return }
             let previous = Self.setting(setting)
@@ -248,11 +248,11 @@ final class ChatActionRunner {
             phases[action.id] = .running("Planning a tidier layout")
             await watch(action, started: { true }, finished: { engine.restructurePlanSignal != signal }, interrupted: interrupted) { [weak self] in
                 guard let summary = self?.planSummary(action, engine: engine) else { return "Nothing needs to move." }
-                return "Layout ready: \(summary.count.formatted()) files would move. Nothing has moved yet; review it in Organize Folders or ask Chat to apply it."
+                return "Layout ready: \(Plural.noun(summary.count, "file", "files")) would move. Nothing has moved yet; review it in Organize Folders or ask Chat to apply it."
             }
         case "applyFolderLayout":
             guard let summary = planSummary(action, engine: engine) else {
-                phases[action.id] = .failed("There's no suggested layout for this folder yet. Ask Chat to organize it first.")
+                phases[action.id] = .failed("There’s no suggested layout for this folder yet. Ask Chat to organize it first.")
                 return
             }
             let signal = engine.restructureApplyResultSignal
@@ -263,37 +263,37 @@ final class ChatActionRunner {
             phases[action.id] = .running("Moving files")
             await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }, interrupted: interrupted) {
                 guard let result = engine.restructureApplyResult else { return "Done." }
-                if result.cancelled { return "Stopped after moving \(result.applied.formatted()) files." }
-                return "Moved \(result.applied.formatted()) files\(result.failed > 0 ? " · \(result.failed.formatted()) couldn't move" : "")."
+                if result.cancelled { return "Stopped after moving \(Plural.noun(result.applied, "file", "files"))." }
+                return "Moved \(Plural.noun(result.applied, "file", "files"))\(result.failed > 0 ? " · \(result.failed.formatted()) couldn’t move" : "")."
             }
             if engine.canUndoRestructure {
                 offerUndo(action, label: "Undo moves") {
                     let signal = engine.restructureApplyResultSignal
                     let interrupted = Self.folderJobInterrupted(engine)
-                    guard engine.undoRestructure(libraryRoot: summary.root) else { return "Undo didn't start. Try Organize Folders." }
+                    guard engine.undoRestructure(libraryRoot: summary.root) else { return "Undo didn’t start. Try Organize Folders." }
                     while engine.restructureApplyResultSignal == signal {
                         if let reason = interrupted() { return reason }
                         try? await Task.sleep(for: .milliseconds(300))
                     }
-                    return "Moved \(engine.restructureApplyResult?.applied.formatted() ?? "the") files back."
+                    return Self.movedBack(engine.restructureApplyResult?.applied)
                 }
             }
         case "undoLastMove":
             guard let path = action.path, engine.canUndoRestructure else {
-                phases[action.id] = .failed("There's no applied layout to undo."); return
+                phases[action.id] = .failed("There’s no applied layout to undo."); return
             }
             let signal = engine.restructureApplyResultSignal
             let interrupted = Self.folderJobInterrupted(engine)
             guard engine.undoRestructure(libraryRoot: path) else { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
             phases[action.id] = .running("Moving files back")
             await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }, interrupted: interrupted) {
-                "Moved \(engine.restructureApplyResult?.applied.formatted() ?? "the") files back."
+                Self.movedBack(engine.restructureApplyResult?.applied)
             }
         case "moveDuplicatesToTrash":
             await trashDuplicates(action, engine: engine)
         case "renameToSuggested":
             guard let store = handoff.store, let renames = action.renames else { return }
-            phases[action.id] = .running("Renaming \(renames.count.formatted()) files")
+            phases[action.id] = .running("Renaming \(Plural.noun(renames.count, "file", "files"))")
             let wanted = Dictionary(renames.map { ($0.fileID, $0.newName) }, uniquingKeysWith: { first, _ in first })
             let current = await Task.detached(priority: .userInitiated) { () -> [Int64] in
                 // Only files whose suggestion is still the one the card showed.
@@ -319,13 +319,13 @@ final class ChatActionRunner {
             let result = await CatalogWrites.applyNames(styled, engine: engine, store: store)
             BulkRenameSheet.saveLastBatch(result.renamed)
             let changed = renames.count - current.count
-            phases[action.id] = .done("Renamed \(result.renamed.count.formatted()) files" + (StyledNames.suggestionLabel() == "Suggested name" ? "" : " in your name style") + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" : "") + (changed > 0 ? " · \(changed.formatted()) skipped because their suggestion changed" : "") + ".")
+            phases[action.id] = .done("Renamed \(Plural.noun(result.renamed.count, "file", "files"))" + (StyledNames.suggestionLabel() == "Suggested name" ? "" : " in your name style") + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed" : "") + (changed > 0 ? " · \(changed.formatted()) skipped because their suggestion changed" : "") + ".")
             if !result.renamed.isEmpty {
                 let batch = result.renamed
                 offerUndo(action, label: "Undo renames") {
                     let undone = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
                     if undone.failed == 0 && undone.skipped == 0 { BulkRenameSheet.removeBatch(batch) }
-                    return "Put back \(undone.undone.formatted()) names."
+                    return "Put back \(Plural.noun(undone.undone, "name", "names"))."
                 }
             }
         case "namePerson":
@@ -340,7 +340,7 @@ final class ChatActionRunner {
             let split = parts.count == 2
             guard await CatalogWrites.renamePerson(engine, store: store, id: id, title: nil, firstName: split ? parts[0] : whole, middleName: nil,
                                                    lastName: split ? parts[1] : nil, suffix: nil) else {
-                phases[action.id] = .failed("The name wasn't saved. Try again in People.")
+                phases[action.id] = .failed("The name wasn’t saved. Try again in People.")
                 return
             }
             phases[action.id] = .done("Named this person \(name).")
@@ -362,14 +362,14 @@ final class ChatActionRunner {
             let others = sources.filter { $0 != target && seen.insert($0).inserted }
             let merged = await CatalogWrites.mergeBatch(engine, store: store, plan: [(target: target, sources: others)])
             if merged == 0 {
-                phases[action.id] = .failed("The merge didn't go through. Nothing changed.")
+                phases[action.id] = .failed("The merge didn’t go through. Nothing changed.")
             } else if merged < others.count {
-                phases[action.id] = .done("Merged \(merged.formatted()) of \(others.count.formatted()) people into this person. The rest didn't merge; try again in People.")
+                phases[action.id] = .done("Merged \(merged.formatted()) of \(Plural.noun(others.count, "person", "people")) into this person. The rest didn’t merge; try again in People.")
             } else {
-                phases[action.id] = .done(merged == 1 ? "Merged the two into one person." : "Merged \(merged.formatted()) people into this person.")
+                phases[action.id] = .done(merged == 1 ? "Merged the two into one person." : "Merged \(Plural.noun(merged, "person", "people")) into this person.")
             }
         default:
-            phases[action.id] = .failed("This action isn't available.")
+            phases[action.id] = .failed("This action isn’t available.")
         }
     }
 
@@ -389,7 +389,7 @@ final class ChatActionRunner {
             self?.phases[id] = .running(text)
         }
         if outcome.engineUnavailable { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
-        if outcome.timedOut { phases[action.id] = .failed("Moving to Trash didn't finish. Check the Trash before trying again."); return }
+        if outcome.timedOut { phases[action.id] = .failed("Moving to Trash didn’t finish. Check the Trash before trying again."); return }
         let changed = outcome.verificationFailed + missing
         if outcome.trashed.isEmpty {
             phases[action.id] = .failed(ExactDuplicateVerifier.nothingMovedSummary(outcome, skippedAsChanged: changed))
@@ -399,7 +399,7 @@ final class ChatActionRunner {
         var summary = "Moved \(outcome.trashed.count.formatted()) \(outcome.trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
         if changed > 0 { summary += " · \(changed.formatted()) skipped because the file changed since the scan" }
         if outcome.protectedLocation > 0 { summary += " · \(outcome.protectedLocation.formatted()) left alone in a protected location, such as a Photos library" }
-        if outcome.failed > 0 { summary += " · \(outcome.failed.formatted()) couldn't be moved" }
+        if outcome.failed > 0 { summary += " · \(outcome.failed.formatted()) couldn’t be moved" }
         store.notifyChanged()
         phases[action.id] = .done(summary + ".")
         if let batch = outcome.batchID, !outcome.trashed.isEmpty {
@@ -448,11 +448,16 @@ final class ChatActionRunner {
 
     /// Why a folder job a card is waiting on will never send its reply.
     nonisolated static func folderJobInterruption(engineRestarted: Bool, newError: EngineError?) -> String? {
-        if engineRestarted { return "FileID's helper restarted before this finished. Check Organize Folders, then try again." }
+        if engineRestarted { return "FileID’s helper restarted before this finished. Check Organize Folders, then try again." }
         guard let newError, folderJobFailureKinds.contains(newError.kind) else { return nil }
         return ["restructure_busy", "restructure_already_running"].contains(newError.kind)
             ? "Another folder job is already running. Wait for it to finish, then try again."
-            : "This didn't finish. Check Organize Folders to see what changed, then try again."
+            : "This didn’t finish. Check Organize Folders to see what changed, then try again."
+    }
+
+    private static func movedBack(_ applied: Int?) -> String {
+        guard let applied else { return "Moved the files back." }
+        return "Moved \(Plural.noun(applied, "file", "files")) back."
     }
 
     private static func folderJobInterrupted(_ engine: EngineClient) -> () -> String? {
@@ -585,15 +590,15 @@ struct ChatActionCard: View {
 
     private var cardDetail: String {
         if action.kind == "applyFolderLayout" {
-            guard let plan else { return "There's no suggested layout for this folder yet. Ask Chat to organize it first; nothing moves until you apply it." }
-            return "Moves the \(plan.count.formatted()) files FileID is sure about in \(URL(fileURLWithPath: plan.root).lastPathComponent) into the suggested folders. Review the rest in Organize Folders."
+            guard let plan else { return "There’s no suggested layout for this folder yet. Ask Chat to organize it first; nothing moves until you apply it." }
+            return "Moves the \(Plural.noun(plan.count, "file", "files")) FileID is sure about in \(URL(fileURLWithPath: plan.root).lastPathComponent) into the suggested folders. Review the rest in Organize Folders."
         }
-        if action.kind == "undoLastMove", !engine.canUndoRestructure { return "There's no applied layout to undo." }
+        if action.kind == "undoLastMove", !engine.canUndoRestructure { return "There’s no applied layout to undo." }
         return action.detail
     }
 
     private var primaryTitle: String {
-        if action.kind == "applyFolderLayout", let plan { return "Move \(plan.count.formatted()) files" }
+        if action.kind == "applyFolderLayout", let plan { return "Move \(Plural.noun(plan.count, "file", "files"))" }
         if action.kind == "mergePeople" { return "Merge" }
         return action.title
     }

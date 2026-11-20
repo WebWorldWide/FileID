@@ -225,7 +225,7 @@ struct CatalogWorkbench: View {
         .fixedSize()
         .disabled(targets.isEmpty)
         .help(checkedRows.isEmpty ? "Open Chat with every result attached (⌘-click results to pick some)" : "Open Chat with the selected results attached")
-        .accessibilityLabel(checkedRows.isEmpty ? "Ask Chat about all \(targets.count) results" : "Ask Chat about the \(targets.count) selected results")
+        .accessibilityLabel(checkedRows.isEmpty ? "Ask Chat about all \(Plural.noun(targets.count, "result", "results"))" : "Ask Chat about the \(Plural.noun(targets.count, "selected result", "selected results"))")
     }
 
     private var resultsMeta: String {
@@ -264,7 +264,7 @@ struct CatalogWorkbench: View {
                 }
                 if unplayable {
                     HStack(spacing: 10) {
-                        MetaText("FileID can't play this format here. Open it in its default app instead.", color: Theme.text2)
+                        MetaText("FileID can’t play this format here. Open it in its default app instead.", color: Theme.text2)
                         Spacer(minLength: 8)
                         Button("Open") { NSWorkspace.shared.open(url) }
                             .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
@@ -609,7 +609,7 @@ struct CatalogWorkbench: View {
         let raw = response.message ?? ""
         // The helper's own wording is written for a log; show it only when it
         // reads like a sentence, and never for a request that worked.
-        message = failed ? (raw.isEmpty || Sidebar.looksTechnical(raw) ? "That didn't work. Try again in a moment." : raw) : ""
+        message = failed ? (raw.isEmpty || Sidebar.looksTechnical(raw) ? "That didn’t work. Try again in a moment." : raw) : ""
         if failed, action != "search" {
             if action == "enqueueTimeline", raw.localizedCaseInsensitiveContains("model") {
                 message = "Finding moments needs an AI model that describes files. Set one up on the Describe Files page, then try again."
@@ -895,7 +895,7 @@ struct CatalogJobRow: View {
         case "paused": return "Paused"
         case "completed": return "Done"
         case "cancelled", "canceled": return "Stopped"
-        default: return "Didn't finish"
+        default: return "Didn’t finish"
         }
     }
 
@@ -933,7 +933,7 @@ struct CatalogJobRow: View {
             }
             GrainProgressBar(progress: job.progress, tone: tone.1, height: 4)
             if let error = job.error, !error.isEmpty {
-                Text(Sidebar.looksTechnical(error) ? "This didn't finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                Text(Sidebar.looksTechnical(error) ? "This didn’t finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)

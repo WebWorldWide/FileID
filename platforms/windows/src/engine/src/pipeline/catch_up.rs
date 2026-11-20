@@ -341,6 +341,8 @@ pub struct Summary {
     pub cancelled: bool,
     /// Careful reads are owed and the reader was still warming up, so the pass did not wait for it.
     pub careful_waiting: bool,
+    /// The catalog refused the results because the disk is full.
+    pub disk_full: bool,
 }
 
 fn scope(root: Option<&std::path::Path>) -> Option<(String, String)> {
@@ -744,6 +746,8 @@ fn pass(
             }
             Err(error) => {
                 tracing::warn!(%error, "[CATCH-UP] could not store results; the rest stays owed");
+                summary.disk_full = crate::util::user_message::io_cause(&anyhow::Error::from(error))
+                    == Some(crate::util::user_message::IoCause::DiskFull);
                 stopped_early = true;
                 break;
             }
@@ -1053,6 +1057,26 @@ mod tests {
         assert_eq!(deferred.stored("abstract.png").1.as_deref(), Some("text of abstract.png"));
         assert_eq!(deferred.stored("dog.png").0.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["Canon", "Year_2019", "dog", "grass"]);
         assert_eq!(deferred.run(&PortableStub(portable_ram)), Summary::default(), "a second pass has nothing to do");
+    }
+
+    fn wordy_ram(name: &str) -> Vec<(String, f32)> {
+        (0..16).map(|index| (format!("{name}-a-long-tag-name-number-{index}-{}", "x".repeat(200)), 0.9 - index as f32 / 100.0)).collect()
+    }
+
+    #[tokio::test]
+    async fn a_full_disk_stops_the_pass_and_says_so() {
+        let library = Library::new("portable-disk-full");
+        let names: Vec<String> = (0..60).map(|index| format!("photo{index}.png")).collect();
+        library.write(names.iter().map(|name| portable_deferred(&library, name, &[("park", 0.5)], &["Year_2019"])).collect()).await;
+        {
+            let conn = library.conn.lock();
+            let pages: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+            conn.execute_batch(&format!("PRAGMA max_page_count = {pages}")).unwrap();
+        }
+        let summary = library.run(&PortableStub(wordy_ram));
+        assert!(summary.disk_full, "{summary:?}");
+        assert_eq!(summary.tagged, 0, "{summary:?}");
+        assert_eq!(library.stored("photo0.png").4, Some(TAGS_OWED), "the rest stays owed");
     }
 
     // The Mac rules: the classifier's tags at scan time, with a first text read.

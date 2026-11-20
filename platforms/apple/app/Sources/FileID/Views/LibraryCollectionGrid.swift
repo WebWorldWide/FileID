@@ -542,7 +542,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         view.needsLayout = true
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
-        view.setAccessibilityLabel([row.url.lastPathComponent, proposed.isEmpty ? nil : "suggested name \(proposed)", row.failed ? "couldn't be read" : FileKindLabel.title(row.kind),
+        view.setAccessibilityLabel([row.url.lastPathComponent, proposed.isEmpty ? nil : "suggested name \(proposed)", row.failed ? "couldn’t be read" : FileKindLabel.title(row.kind),
                                     offline ? "offline" : nil,
                                     row.displayDate?.formatted(date: .abbreviated, time: .omitted),
                                     row.hasFaces ? "contains faces" : nil, row.hasText ? "contains text" : nil]
@@ -635,7 +635,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         let menu = NSMenu()
         menu.addItem(ClosureMenuItem(title: "Open Preview") { [weak self] in self?.onOpenPreview?() })
         if findsSimilar {
-            menu.addItem(ClosureMenuItem(title: "Find Similar Photos and Videos") { [weak self] in self?.onFindSimilar?() })
+            menu.addItem(ClosureMenuItem(title: "Find similar photos and videos") { [weak self] in self?.onFindSimilar?() })
         }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Show in Finder") { [weak self] in self?.onRevealInFinder?() })

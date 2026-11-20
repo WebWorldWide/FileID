@@ -111,7 +111,7 @@ class Engine:
                 continue
             for name, value in payload.items():
                 value = value.get("_0", value) if isinstance(value, dict) else value
-                if name == "error" and isinstance(value, dict) and value.get("kind") in {"db_open_failed", "db_newer_than_engine"}:
+                if name == "error" and isinstance(value, dict) and value.get("kind") in {"db_open_failed", "db_disk_full", "db_newer_than_engine"}:
                     raise RuntimeError(value)
                 if match(name, value):
                     self.last = name

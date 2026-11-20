@@ -52,11 +52,11 @@ struct PipelineBlock: View {
         if let p = progress, scanRunning {
             let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
             if engine.isPaused {
-                return Status(title: "Scan paused", fraction: frac, tone: .paused, color: Theme.text3, sub: "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files")
+                return Status(title: "Scan paused", fraction: frac, tone: .paused, color: Theme.text3, sub: "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))")
             }
             switch p.phase {
             case .discovering:
-                return Status(title: "Counting files", fraction: 0, tone: .gold, color: Theme.gold, sub: "\(p.discovered.formatted()) files found so far", indeterminate: true)
+                return Status(title: "Counting files", fraction: 0, tone: .gold, color: Theme.gold, sub: "\(Plural.noun(p.discovered, "file", "files")) found so far", indeterminate: true)
             case .postScan:
                 // After the files are read, FileID's helper adds detailed tags: the
                 // total then runs past the files found by the number of photos left.
@@ -64,36 +64,36 @@ struct PipelineBlock: View {
                 if owed > 0 {
                     let done = min(owed, max(0, p.processed + p.failed - p.discovered))
                     let left = p.etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
-                    return Status(title: "Tagging photos", fraction: Double(done) / Double(owed), tone: .gold, color: Theme.gold, sub: "\(done.formatted()) of \(owed.formatted()) photos" + left)
+                    return Status(title: "Tagging photos", fraction: Double(done) / Double(owed), tone: .gold, color: Theme.gold, sub: "\(done.formatted()) of \(Plural.noun(owed, "photo", "photos"))" + left)
                 }
                 return Status(title: "Finishing up", fraction: 0, tone: .gold, color: Theme.gold, sub: "Saving what FileID found", indeterminate: true)
             default:
                 let left = p.etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
-                return Status(title: "Scanning", fraction: frac, tone: .gold, color: Theme.gold, sub: "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" + left)
+                return Status(title: "Scanning", fraction: frac, tone: .gold, color: Theme.gold, sub: "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))" + left)
             }
         }
         if captionsRunning, let d = engine.deepAnalyzeProgress {
             let frac = d.total > 0 ? Double(d.processed) / Double(d.total) : 0
-            return Status(title: "Describing files", fraction: frac, tone: .ai, color: Theme.ai, sub: "\(d.processed.formatted()) of \(d.total.formatted()) files described")
+            return Status(title: "Describing files", fraction: frac, tone: .ai, color: Theme.ai, sub: "\(d.processed.formatted()) of \(Plural.noun(d.total, "file", "files")) described")
         }
         if engine.faceClusteringInFlight {
-            return Status(title: "Grouping faces", fraction: 0, tone: .ai, color: Theme.ai, sub: "Finding the same person across photos", indeterminate: true)
+            return Status(title: "Grouping faces…", fraction: 0, tone: .ai, color: Theme.ai, sub: "Finding the same person across photos", indeterminate: true)
         }
         if let done = engine.deepAnalyzeComplete, done.processed > 0 {
-            return Status(title: "All done", fraction: 1, tone: .done, color: Theme.delight, sub: "\(done.processed.formatted()) files described")
+            return Status(title: "All done", fraction: 1, tone: .done, color: Theme.delight, sub: "\(Plural.noun(done.processed, "file", "files")) described")
         }
         if let p = progress, p.phase == .cancelled {
-            return Status(title: "Scan stopped", fraction: p.total > 0 ? Double(p.processed) / Double(p.total) : 0, tone: .paused, color: Theme.text3, sub: "\(p.processed.formatted()) of \(p.total.formatted()) files read. Scan again to finish; finished files are skipped.")
+            return Status(title: "Scan stopped", fraction: p.total > 0 ? Double(p.processed) / Double(p.total) : 0, tone: .paused, color: Theme.text3, sub: "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files")) read. Scan again to finish; finished files are skipped.")
         }
         if let p = progress, p.phase == .failed {
-            return Status(title: "The scan didn't finish", fraction: 0, tone: .paused, color: Theme.danger, sub: "Press Scan again. Files already read are skipped.")
+            return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.danger, sub: "Press Scan again. Files already read are skipped.")
         }
         if store.totalFiles > 0 || progress?.phase == .completed {
-            return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(store.totalFiles.formatted()) files ready to browse")
+            return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(Plural.noun(store.totalFiles, "file", "files")) ready to browse")
         }
         if !store.countersAvailable {
             return helperDown
-                ? Status(title: "Library not open", fraction: 0, tone: .paused, color: Theme.text3, sub: "Restart FileID's helper to read it.")
+                ? Status(title: "Library not open", fraction: 0, tone: .paused, color: Theme.text3, sub: "Restart FileID’s helper to read it.")
                 : Status(title: "Opening your library…", fraction: 0, tone: .gold, color: Theme.text2, sub: "Counting the files FileID has already read.")
         }
         return Status(title: startRequested ? "Starting…" : "Ready to scan", fraction: 0, tone: .gold, color: Theme.text2, sub: "Reads every file in it. Nothing is moved or changed.")
@@ -213,13 +213,13 @@ struct PipelineBlock: View {
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown))
-                    .help(helperDown ? "FileID's helper isn't running. Restart it, then scan again." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
+                    .help(helperDown ? "FileID’s helper isn’t running. Restart it, then scan again." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
                 Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(HelperGate.scanDisabled(startRequested: startRequested, helperDown: helperDown))
-                    .help(helperDown ? "FileID's helper isn't running. Restart it, then scan." : "Read every file in this folder (⌘R). Nothing is moved or changed.")
+                    .help(helperDown ? "FileID’s helper isn’t running. Restart it, then scan." : "Read every file in this folder (⌘R). Nothing is moved or changed.")
             }
         }
         .frame(maxWidth: .infinity)

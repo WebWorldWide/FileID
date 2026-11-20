@@ -243,7 +243,7 @@ class Engine:
                     return result
             if "error" in payload:
                 error = payload["error"].get("_0", payload["error"])
-                if error.get("kind") in {"db_open_failed", "db_newer_than_engine"}:
+                if error.get("kind") in {"db_open_failed", "db_disk_full", "db_newer_than_engine"}:
                     raise RuntimeError(error)
 
     def request(self, action, **fields):

@@ -287,7 +287,7 @@ enum SelfShot {
             let kind = DeepAnalyzeSettings.shared.activeKind.rawValue
             let ids = photos.prefix(n).map(\.id)
             let started = engine.deepAnalyzeSelection(fileIDs: Array(ids), modelKind: kind)
-            note("describe started \(started) for \(ids.count) files with \(kind)")
+            note("describe started \(started) for \(Plural.noun(ids.count, "file", "files")) with \(kind)")
             await waitUntil(timeout: 300) { engine.deepAnalyzeProgress != nil || !engine.deepAnalyzeInFlight }
             try? await Task.sleep(for: .seconds(1))
             write(name: "describe-running", plan: plan)

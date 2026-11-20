@@ -223,11 +223,11 @@ struct CleanupView: View {
     static func unreadableNote(_ count: Int, timedOut: Int = 0) -> String? {
         guard count > 0 else { return nil }
         let noun = count == 1 ? "1 file" : "\(count.formatted()) files"
-        let them = count == 1 ? "it's" : "they're"
+        let them = count == 1 ? "it’s" : "they’re"
         let timedOut = min(max(timedOut, 0), count)
-        if timedOut == 0 { return "\(noun) couldn't be read, so \(them) not in these results" }
-        if timedOut == count { return "\(noun) couldn't be read yet, so \(them) not in these results" }
-        return "\(noun) couldn't be read, so \(them) not in these results. \(timedOut.formatted()) of them ran out of time and may read next time"
+        if timedOut == 0 { return "\(noun) couldn’t be read, so \(them) not in these results" }
+        if timedOut == count { return "\(noun) couldn’t be read yet, so \(them) not in these results" }
+        return "\(noun) couldn’t be read, so \(them) not in these results. \(timedOut.formatted()) of them ran out of time and may read next time"
     }
 
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
@@ -237,7 +237,7 @@ struct CleanupView: View {
         let base: String
         if isSimilar {
             base = g == 0
-                ? "Photos that look nearly the same but aren't identical"
+                ? "Photos that look nearly the same but aren’t identical"
                 : "\(g) group\(g == 1 ? "" : "s") of look-alikes · check each before removing"
         } else {
             let bytes = visible.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
@@ -247,7 +247,7 @@ struct CleanupView: View {
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
             if exactCapped { result += " · more may exist" }
-            if exactSkipped > 0 { result += " · \(exactSkipped) couldn't be checked" }
+            if exactSkipped > 0 { result += " · \(exactSkipped.formatted()) couldn’t be checked" }
         }
         return result
     }
@@ -275,19 +275,19 @@ struct CleanupView: View {
                 title: "No extra copies found so far",
                 message: exactCapped
                     ? "FileID compared the most likely files and found no exact copies. It checks a limited number at a time, so a very large library may still hold some."
-                    : "No exact copies among the files FileID could read. \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn't be opened, for example because a drive is disconnected."
+                    : "No exact copies among the files FileID could read. \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn’t be opened, for example because a drive is disconnected."
             )
         } else if isSimilar {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No look-alikes",
-                message: "None of the \(store.totalImages.formatted()) photos look nearly the same as another. Exact copies are under Exact copies."
+                message: "None of the \(Plural.noun(store.totalImages, "photo", "photos")) look nearly the same as another. Exact copies are under Exact copies."
             )
         } else {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No extra copies",
-                message: "None of the \(store.totalFiles.formatted()) files is an exact copy of another. Try Look-alikes for photos that are nearly the same."
+                message: "None of the \(Plural.noun(store.totalFiles, "file", "files")) is an exact copy of another. Try Look-alikes for photos that are nearly the same."
             )
         }
     }
@@ -429,12 +429,12 @@ struct CleanupView: View {
 
     private func partialNotice(shown: Int) -> LocalizedStringKey {
         let unread = exactSkipped > 0
-            ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn't be opened, so \(exactSkipped == 1 ? "it wasn't" : "they weren't") checked."
+            ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn’t be opened, so \(exactSkipped == 1 ? "it wasn’t" : "they weren’t") checked."
             : ""
         if exactCapped {
             return "**Showing the first \(shown.formatted()) group\(shown == 1 ? "" : "s").** Each one is an exact copy, checked byte by byte. Clear these and more will appear.\(unread)"
         }
-        return "**Some files couldn't be checked.** Every group below is an exact copy, checked byte by byte.\(unread)"
+        return "**Some files couldn’t be checked.** Every group below is an exact copy, checked byte by byte.\(unread)"
     }
 
     private func confirmDeleteSelected() {
@@ -481,7 +481,7 @@ struct CleanupView: View {
             statusWarning = true
             status = outcome.engineUnavailable
                 ? "FileID is still getting ready. Try again in a moment."
-                : "Moving to Trash didn't finish. Check the Trash before trying again."
+                : "Moving to Trash didn’t finish. Check the Trash before trying again."
             reload()
             return
         }
@@ -518,7 +518,7 @@ struct CleanupView: View {
         // appended only when the auto-tag toggle did something.
         var tagSummary = ""
         if taggedAdded > 0 {
-            tagSummary = " · tagged \(taggedAdded) kept file\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
+            tagSummary = " · tagged \(Plural.noun(taggedAdded, "kept file", "kept files")) with “\(AppSettings.cleanupAutoTagName)”"
         }
         var summary = "Moved \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
             + " to Trash · freed \(freed)"
@@ -533,7 +533,7 @@ struct CleanupView: View {
             summary += " · \(protectedCount) left alone because \(protectedCount == 1 ? "it is" : "they are") in a protected location, such as a Photos library"
         }
         if trashFailures > 0 {
-            summary += " · \(trashFailures) couldn't be moved to Trash"
+            summary += " · \(trashFailures.formatted()) couldn’t be moved to Trash"
         }
         statusWarning = verificationRejected > 0 || trashFailures > 0 || keepOneSkipped > 0 || protectedCount > 0
         status = summary
@@ -672,7 +672,7 @@ private struct GroupCard: View {
         Panel {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    SectionLabel(group.isSimilar ? "Look-alikes · \(group.totalFileCount) photos" : "Same file · \(group.totalFileCount) copies")
+                    SectionLabel(group.isSimilar ? "Look-alikes · \(Plural.noun(group.totalFileCount, "photo", "photos"))" : "Same file · \(Plural.noun(group.totalFileCount, "copy", "copies"))")
                     if group.isSimilar {
                         BadgePill(label: "Looks the same", color: Theme.warning)
                             .help("These look nearly the same but are not identical. Check each before removing.")
@@ -710,7 +710,7 @@ private struct GroupCard: View {
 
                     Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
                     .buttonStyle(DSSecondaryButtonStyle(height: 26))
-                    .help("Hide this group if these aren't really copies. Nothing is deleted.")
+                    .help("Hide this group if these aren’t really copies. Nothing is deleted.")
 
                     Spacer()
                 }
@@ -883,7 +883,7 @@ private struct CopyTile: View {
                     .background(Circle().fill(.black.opacity(0.5)))
             }
             .buttonStyle(.plain)
-            .help(isSelected ? "Don't move this copy to Trash" : "Choose this copy for Trash")
+            .help(isSelected ? "Don’t move this copy to Trash" : "Choose this copy for Trash")
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }

@@ -27,12 +27,12 @@ fn flag(cancel: &AtomicBool) -> *const bool {
 }
 
 fn reply(pointer: *mut c_char) -> Result<Value> {
-    ensure!(!pointer.is_null(), "The media adapter returned no reply");
+    ensure!(!pointer.is_null(), "Reading this video didn’t finish. Try again.");
     // SAFETY: the adapter returned a NUL-terminated string it allocated for us.
     let text = unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
     // SAFETY: released exactly once, with the adapter's allocator.
     unsafe { ffi::fileid_apple_free(pointer.cast()) };
-    let value: Value = serde_json::from_str(&text).context("The media adapter returned invalid JSON")?;
+    let value: Value = serde_json::from_str(&text).context("Reading this video didn’t work. Try again.")?;
     if let Some(error) = value.get("error").and_then(Value::as_str) {
         bail!("{error}")
     }
@@ -66,7 +66,7 @@ pub(crate) fn probe(path: &Path, mime_type: Option<&str>, strict: bool) -> Resul
     let mime_pointer = mime.as_ref().map_or(std::ptr::null(), |mime| mime.as_ptr());
     // SAFETY: both strings outlive the call; the reply is owned by `reply`.
     let value = reply(unsafe { ffi::fileid_apple_media_probe(path.as_ptr(), mime_pointer, strict) })?;
-    serde_json::from_value(value).context("The media adapter returned an invalid probe")
+    serde_json::from_value(value).context("Reading this video didn’t work. Try again.")
 }
 
 pub(crate) fn export_common(recipe: &crate::ipc::ToolRecipe, source: &Path, output: &Path, cancel: &AtomicBool) -> Result<Probe> {
@@ -78,7 +78,7 @@ pub(crate) fn export_common(recipe: &crate::ipc::ToolRecipe, source: &Path, outp
     let request = CString::new(request.to_string())?;
     // SAFETY: the request and the flag outlive the synchronous call.
     let value = reply(unsafe { ffi::fileid_apple_media_export(request.as_ptr(), flag(cancel)) })?;
-    serde_json::from_value(value["probe"].clone()).context("The media adapter returned an invalid probe")
+    serde_json::from_value(value["probe"].clone()).context("Reading this video didn’t work. Try again.")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -195,7 +195,7 @@ pub(crate) fn transcribe(source: &Path, start: f64, end: f64, cancel: &AtomicBoo
     let path = c_path(source)?;
     // SAFETY: the path and the flag outlive the synchronous call.
     let value = reply(unsafe { ffi::fileid_apple_speech_transcribe(path.as_ptr(), start, end, flag(cancel)) })?;
-    serde_json::from_value(value["segments"].clone()).context("The speech adapter returned invalid segments")
+    serde_json::from_value(value["segments"].clone()).context("The transcript couldn’t be read. Try again.")
 }
 
 pub(crate) fn is_worker(args: &[OsString]) -> bool {

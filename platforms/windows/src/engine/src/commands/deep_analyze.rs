@@ -639,7 +639,7 @@ async fn run_deep_analyze_batch(
         DeepAnalyzeStarting {
             model_kind: model_kind.to_string(),
             phase: DeepAnalyzeStartingPhase::LoadingModel,
-            message: format!("Describing {} file(s)…", file_ids.len()),
+            message: format!("Describing {}…", crate::util::display::count_noun(file_ids.len() as i64, "file", "files")),
         },
     ))))
     .await;

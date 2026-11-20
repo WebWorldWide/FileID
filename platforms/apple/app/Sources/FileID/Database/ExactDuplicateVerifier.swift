@@ -305,7 +305,7 @@ extension ExactDuplicateVerifier {
         var reasons: [String] = []
         if skippedAsChanged > 0 { reasons.append("\(skippedAsChanged.formatted()) changed since the scan, so FileID left \(skippedAsChanged == 1 ? "it" : "them") alone") }
         if outcome.protectedLocation > 0 { reasons.append("\(outcome.protectedLocation.formatted()) \(outcome.protectedLocation == 1 ? "is" : "are") in a protected location, such as a Photos library") }
-        if outcome.failed > 0 { reasons.append(outcome.failureMessage ?? "\(outcome.failed.formatted()) couldn't be moved to the Trash") }
+        if outcome.failed > 0 { reasons.append(outcome.failureMessage ?? "\(outcome.failed.formatted()) couldn’t be moved to the Trash") }
         return reasons.isEmpty ? "Nothing was moved to the Trash. Your files are untouched." : "Nothing was moved to the Trash: " + reasons.joined(separator: "; ") + ". Your files are untouched."
     }
 
@@ -328,6 +328,6 @@ extension ExactDuplicateVerifier {
         let signal = engine.bulkActionResultSignal
         guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, "FileID is still getting ready. Try again in a moment.") }
         let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 300)
-        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn't finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
+        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn’t finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
     }
 }

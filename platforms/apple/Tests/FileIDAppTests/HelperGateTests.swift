@@ -39,7 +39,7 @@ struct HelperGateTests {
     }
 
     @Test func modelDownloadsStayOffWhileTheHelperIsDownAndSayWhy() {
-        #expect(HelperGate.downloadsUnavailableNote.contains("helper isn't running"))
+        #expect(HelperGate.downloadsUnavailableNote.contains("helper isn’t running"))
         #expect(HelperGate.downloadsUnavailableNote.contains("Restart the helper"))
     }
 
@@ -60,7 +60,7 @@ struct HelperGateTests {
     @Test func aMissingDescriptionModelIsAFailureTheDescribePageShows() {
         let error = EngineError(kind: "vlm_model_missing", message: "The qwen3_vl_2b model isn't installed yet.", modelKind: "qwen3_vl_2b")
         #expect(ModelFailureText.isModelFailure(error))
-        #expect(ModelFailureText.plain(error) == "This AI model isn't downloaded yet. Try again to download it first.")
+        #expect(ModelFailureText.plain(error) == "This AI model isn’t downloaded yet. Try again to download it first.")
     }
 
     @MainActor

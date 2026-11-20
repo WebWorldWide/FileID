@@ -79,11 +79,11 @@ struct BulkTagSheet: View {
             }.value
             inFlight = false
             if result.failed == 0 && result.unchanged == 0 {
-                status = "Tagged \(result.added) file\(result.added == 1 ? "" : "s")"
+                status = "Tagged \(Plural.noun(result.added, "file", "files"))"
             } else if result.failed == 0 {
-                status = "Tagged \(result.added) · \(result.unchanged) already had these tags"
+                status = "Tagged \(result.added.formatted()) · \(result.unchanged.formatted()) already had these tags"
             } else {
-                status = "Tagged \(result.added) · \(result.unchanged) unchanged · \(result.failed) failed"
+                status = "Tagged \(result.added.formatted()) · \(result.unchanged.formatted()) unchanged · \(result.failed.formatted()) couldn’t be tagged"
                     + (result.firstError.map { " — \($0)" } ?? "")
             }
             store.notifyChanged()

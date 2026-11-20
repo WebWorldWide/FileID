@@ -506,7 +506,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     let terminal = match outcome {
         Ok(()) => Some(None),
         Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => None,
-        Err(error) => Some(Some(format!("{error:#}").chars().take(2_000).collect::<String>())),
+        Err(error) => Some(Some(crate::util::user_message::job_failure_text(&error))),
     };
     let owned = id.to_owned();
     let _ = with_db(database, move |conn| {

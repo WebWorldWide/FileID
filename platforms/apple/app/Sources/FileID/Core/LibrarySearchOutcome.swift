@@ -62,7 +62,7 @@ enum LibrarySearchOutcome {
         var hiddenWeaker: Int
     }
 
-    static let plainLabel = "Matches by name, text and what's in the picture"
+    static let plainLabel = "Matches by name, text and what’s in the picture"
 
     /// The engine's summary recounted for the rows a kind filter keeps, in the engine's own wording.
     /// `hitIDs` is the engine's list in its order (good matches first). Nil when `message` is not a summary.

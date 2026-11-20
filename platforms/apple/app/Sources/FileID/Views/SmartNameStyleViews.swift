@@ -118,9 +118,9 @@ enum StyledNames {
         guard !ids.isEmpty else { return .rows([]) }
         let request = NameStyle.request(id: "names-" + UUID().uuidString, fileIDs: ids, naming: naming)
         guard let response = await TakeRequests.send(engine, request, timeout: 30) else {
-            return .failed("FileID didn't answer in time. Try again in a moment.")
+            return .failed("FileID didn’t answer in time. Try again in a moment.")
         }
-        guard response.status == "ok" else { return .failed(response.message ?? "FileID couldn't suggest names right now.") }
+        guard response.status == "ok" else { return .failed(response.message ?? "FileID couldn’t suggest names right now.") }
         return .rows(NameStyle.rows(from: response.hits, previous: previous))
     }
 
@@ -134,13 +134,13 @@ enum StyledNames {
 
     static func renamedSummary(_ result: ReadStore.BulkRenameResult) -> String {
         "Renamed \(result.renamed.count.formatted()) file\(result.renamed.count == 1 ? "" : "s")"
-            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" + (result.firstError.map { ": \($0)" } ?? "") : "") + "."
+            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed" : "") + "."
     }
 
     static func undoneSummary(_ result: (undone: Int, skipped: Int, failed: Int)) -> String {
         "Put back \(result.undone.formatted()) name\(result.undone == 1 ? "" : "s")"
             + (result.skipped > 0 ? " · \(result.skipped.formatted()) skipped because the file moved or changed" : "")
-            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed back" : "") + "."
+            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed back" : "") + "."
     }
 }
 
