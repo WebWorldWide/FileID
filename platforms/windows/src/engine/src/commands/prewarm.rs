@@ -276,7 +276,7 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
             ModelDownloadProgress {
                 model_kind: model_kind.clone(),
                 fraction: 0.0,
-                message: "Already downloading...".to_string(),
+                message: "Already downloading…".to_string(),
                 bytes_done: None,
                 total_bytes: None,
             },

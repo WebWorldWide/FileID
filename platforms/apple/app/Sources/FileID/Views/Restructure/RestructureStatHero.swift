@@ -60,6 +60,6 @@ private struct StatCell: View {
         .animation(Theme.spring, value: isActive)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
-        .accessibilityValue("\(value) files, \(hint)")
+        .accessibilityValue("\(Plural.noun(value, "file", "files")), \(hint)")
     }
 }

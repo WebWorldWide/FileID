@@ -40,7 +40,7 @@ enum LibraryReadiness: Equatable {
         case .needsScan:
             let lead = "Chat answers questions about the files FileID has scanned."
             if let chosenFolder {
-                return "\(lead) FileID hasn't read \(chosenFolder) yet. Scan it and FileID reads it on this Mac. Nothing is moved or changed."
+                return "\(lead) FileID hasn’t read \(chosenFolder) yet. Scan it and FileID reads it on this Mac. Nothing is moved or changed."
             }
             return "\(lead) Choose a folder and FileID reads it on this Mac. Nothing is moved or changed."
         case .reading:

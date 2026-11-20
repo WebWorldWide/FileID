@@ -359,7 +359,7 @@ public sealed partial class RestructureView : UserControl
         bool hasContent = moveCount > 0 || keepFolders > 0 || StaysPutFiles(plan) > 0;
         bool hasMoves = moveCount > 0;
         PlanStatusText.Text = moveCount == 0
-            ? "This folder is already tidy. Nothing to move."
+            ? "Your folders here are already well organized. FileID doesn’t rename the folder you chose."
             : $"{moveCount:N0} file{(moveCount == 1 ? "" : "s")} to move into {plan.CategoryCounts.Count:N0} folder{(plan.CategoryCounts.Count == 1 ? "" : "s")}.";
         StatHero.Visibility = hasContent ? Visibility.Visible : Visibility.Collapsed;
         ViewModeToggle.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;

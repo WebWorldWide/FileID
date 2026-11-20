@@ -201,7 +201,7 @@ final class ModelInstaller: ModelInstalling {
         refreshStatus()
     }
 
-    static let protectedMessage = "FileID can't change files in this location."
+    static let protectedMessage = "FileID can’t change files in this location."
 
     nonisolated static func notEnoughSpace(needed: Int64, available: Int64) -> String {
         "Not enough free space: needs \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)), \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file)) free."
@@ -242,21 +242,21 @@ enum ModelFailureText {
         switch error.kind {
         case "model_integrity_failed": return "The AI model download was damaged. Try again."
         case "deep_model_too_big": return "This AI model needs more memory than this Mac has. Choose a smaller one in Settings."
-        case "unknown_model": return "This copy of FileID doesn't know that AI model. Choose another one in Settings."
-        case "vlm_model_missing": return "This AI model isn't downloaded yet. Try again to download it first."
+        case "unknown_model": return "This copy of FileID doesn’t know that AI model. Choose another one in Settings."
+        case "vlm_model_missing": return "This AI model isn’t downloaded yet. Try again to download it first."
         default: break
         }
         let text = error.message.lowercased()
         if ["offline", "internet", "network", "timed out", "hostname", "connection"].contains(where: text.contains) {
-            return "FileID couldn't download the AI model. Check your internet connection, then try again."
+            return "FileID couldn’t download the AI model. Check your internet connection, then try again."
         }
         if text.contains("space") || text.contains("disk full") {
-            return "There isn't enough free space for the AI model. Free some space, then try again."
+            return "There isn’t enough free space for the AI model. Free some space, then try again."
         }
         if text.contains("memory") {
             return "This Mac is short on memory right now. Close a few apps, then try again."
         }
-        return "FileID couldn't get the AI model ready. Try again."
+        return "FileID couldn’t get the AI model ready. Try again."
     }
 }
 
@@ -285,7 +285,7 @@ enum DescriptionModelStore {
     }
 
     static func downloadSizeText(_ kind: AIModelKind) -> String {
-        String(format: "%.1f GB", Double(kind.approxBytes) / 1_073_741_824)
+        ModelSize.label(Int64(kind.approxBytes))
     }
 
     /// Free space on the drive that holds the model cache.
@@ -300,15 +300,15 @@ enum DescriptionModelStore {
     /// Deletes one downloaded model's folder. Only a real folder (not a link)
     /// that FileID finished downloading, directly inside the model cache.
     static func remove(_ kind: AIModelKind) throws {
-        guard let folder = folder(for: kind) else { throw RemovalError(reason: "The model's folder couldn't be worked out safely.") }
+        guard let folder = folder(for: kind) else { throw RemovalError(reason: "The model’s folder couldn’t be worked out safely.") }
         try ReadOnlyLocations.requireWritable(folder)
         let fm = FileManager.default
         let attributes = try fm.attributesOfItem(atPath: folder.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory else {
-            throw RemovalError(reason: "The model's folder is a link, so FileID left it alone.")
+            throw RemovalError(reason: "The model’s folder is a link, so FileID left it alone.")
         }
         guard fm.fileExists(atPath: folder.appendingPathComponent(".fileid-installed").path) else {
-            throw RemovalError(reason: "FileID didn't finish downloading this model, so it left the folder alone.")
+            throw RemovalError(reason: "FileID didn’t finish downloading this model, so it left the folder alone.")
         }
         try fm.removeItem(at: folder)
     }

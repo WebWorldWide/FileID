@@ -56,7 +56,8 @@ public enum MLXModelCatalog {
 
     private static func missing(_ message: String) {
         let line = "{\"lvl\":\"error\",\"ev\":\"model_catalog_missing\",\"src\":\"FileIDModelInfo\",\"error\":\"\(message)\"}\n"
-        try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
+        let stderr = FileHandle.standardError
+        try? stderr.write(contentsOf: Data(line.utf8))
     }
 
     private static let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })

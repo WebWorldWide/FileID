@@ -19,7 +19,7 @@ struct SettingsAndSidebarCopyTests {
 
     @Test("Locations says the helper is down instead of claiming there are no locations")
     func locationsEmptyStates() {
-        #expect(LocationText.emptyMessage(helperDown: true, helperStarting: false).contains("helper isn't running"))
+        #expect(LocationText.emptyMessage(helperDown: true, helperStarting: false).contains("helper isn’t running"))
         #expect(LocationText.emptyMessage(helperDown: false, helperStarting: true).contains("starting"))
         #expect(LocationText.emptyMessage(helperDown: false, helperStarting: false).hasPrefix("No locations yet"))
     }
@@ -36,7 +36,7 @@ struct SettingsAndSidebarCopyTests {
         let message = "Could not load Qwen3-VL 8B (4-bit): Available memory is too low to load this model safely."
         #expect(Sidebar.errorTitle("deep_load_failed", message: message) == "This Mac is short on memory")
         #expect(!Sidebar.errorText(kind: "deep_load_failed", message: message).contains("Settings"))
-        #expect(Sidebar.errorTitle("deep_load_failed", message: "Could not load Qwen3-VL 8B: broken weights") == "An AI model didn't load")
+        #expect(Sidebar.errorTitle("deep_load_failed", message: "Could not load Qwen3-VL 8B: broken weights") == "An AI model didn’t load")
         #expect(Sidebar.errorText(kind: "deep_load_failed", message: "broken weights").contains("Open Settings"))
     }
 

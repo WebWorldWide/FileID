@@ -1230,21 +1230,7 @@ pub fn bytes_label(bytes: i64) -> String {
     format!("{}.{} {}", tenths / 10, tenths % 10, units[index])
 }
 
-pub fn count_label(value: i64) -> String {
-    let digits = value.abs().to_string();
-    let mut grouped = String::new();
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    if value < 0 {
-        format!("-{grouped}")
-    } else {
-        grouped
-    }
-}
+pub use crate::util::display::{count_label, count_noun};
 
 pub fn noun(kinds: &[String], count: i64) -> String {
     let one = count == 1;

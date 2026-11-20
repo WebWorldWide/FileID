@@ -380,21 +380,21 @@ struct LibraryView: View {
 
     /// Why a visual search gave nothing, in plain words.
     private static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
-        let title = similar ? "Couldn't find similar files" : "Showing matches by name and text only"
+        let title = similar ? "Couldn’t find similar files" : "Showing matches by name and text only"
         var installed = false
         if case .installed = CLIPModelInstaller.shared.status { installed = true }
         if !installed {
-            return SearchProblem(title: title, detail: "Searching by what's in a picture needs the Search by description model. You can download it in Settings.", needsModel: true)
+            return SearchProblem(title: title, detail: "Searching by what’s in a picture needs the Search by description model. You can download it in Settings.", needsModel: true)
         }
         guard let response else {
-            return SearchProblem(title: title, detail: "FileID's helper didn't answer in time. Try again in a moment.")
+            return SearchProblem(title: title, detail: "FileID’s helper didn’t answer in time. Try again in a moment.")
         }
         if let message = response.message, !Sidebar.looksTechnical(message) {
             return SearchProblem(title: title, detail: message)
         }
         return SearchProblem(title: title, detail: similar
-            ? "FileID hasn't finished reading this file yet. Scan the folder again, then try once more."
-            : "Searching by what's in a picture isn't ready yet. Try again after the scan finishes.")
+            ? "FileID hasn’t finished reading this file yet. Scan the folder again, then try once more."
+            : "Searching by what’s in a picture isn’t ready yet. Try again after the scan finishes.")
     }
 
     @ViewBuilder
@@ -430,7 +430,7 @@ struct LibraryView: View {
                     .font(Theme.Font.body(13.5, .semibold))
                 Text(hint == .preparing
                      ? "Getting search by description ready… results update on their own."
-                     : "To search by what's in a photo (\"sunset at the beach\", \"red car\"), download the Search by description model in Settings.")
+                     : "To search by what’s in a photo (“sunset at the beach”, “red car”), download the Search by description model in Settings.")
                     .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
@@ -489,7 +489,7 @@ struct LibraryView: View {
                 }
                 Spacer()
                 Text(p.total > 0
-                     ? "\(p.processed.formatted()) of \(p.total.formatted()) files"
+                     ? "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))"
                      : "\(p.discovered.formatted()) found so far")
                     .font(Theme.Font.body(13.5).monospacedDigit())
                     .foregroundStyle(Theme.text3)
@@ -515,7 +515,7 @@ struct LibraryView: View {
                 }
                 Spacer()
                 if p.failed > 0 {
-                    Text("\(p.failed) couldn't be read").foregroundStyle(Theme.danger)
+                    Text("\(p.failed.formatted()) couldn’t be read").foregroundStyle(Theme.danger)
                 }
             }
             .font(Theme.Font.body(12).monospacedDigit())
@@ -548,7 +548,7 @@ struct LibraryView: View {
                 }
                 Spacer()
                 if let p {
-                    Text("\(p.processed.formatted()) of \(p.total.formatted()) files")
+                    Text("\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))")
                         .font(Theme.Font.body(13.5).monospacedDigit())
                         .foregroundStyle(Theme.text3)
                 }
@@ -835,7 +835,7 @@ struct LibraryView: View {
             .fixedSize()
             .disabled(checkedFiles.isEmpty)
             .help(checkedFiles.isEmpty ? "Select files first" : "Open Chat with only these files attached")
-            .accessibilityLabel("Ask Chat about the \(checkedFiles.count) selected files")
+            .accessibilityLabel("Ask Chat about the \(Plural.noun(checkedFiles.count, "selected file", "selected files"))")
     }
 
     private func toggleCheck(_ row: FileRow) {
@@ -871,7 +871,7 @@ struct LibraryView: View {
             }
             undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
                 + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
-                + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
+                + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed back" : "")
             editEpoch += 1   // refresh tiles (renamed files) even mid-scan
             refreshBulkState()
             reload()
@@ -889,7 +889,7 @@ struct LibraryView: View {
                 }
                 undoStatus = "Removed tags from \(result.undone) file\(result.undone == 1 ? "" : "s")"
                     + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
-                    + (result.failed > 0 ? " · \(result.failed) couldn't be changed" : "")
+                    + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be changed" : "")
                     + (result.firstError.map { " — \($0)" } ?? "")
                 editEpoch += 1   // refresh tile dots even mid-scan
                 refreshBulkState()
@@ -1372,7 +1372,7 @@ private struct FilePreviewSheet: View {
             await StyledNames.learn(engine: engine, shown: pending.rows, renamed: result.renamed, naming: pending.naming)
             renaming = false
             if result.renamed.isEmpty {
-                ToastCenter.shared.show(result.firstError.map { "The file wasn't renamed: \($0)" } ?? "The file wasn't renamed. Try again in a moment.")
+                ToastCenter.shared.show(result.firstError.map { "The file wasn’t renamed: \($0)" } ?? "The file wasn’t renamed. Try again in a moment.")
             } else {
                 onEdit()
                 dismiss()
@@ -1638,8 +1638,8 @@ private struct FileDetailRows: View {
         DetailRow("Kind", FileKindLabel.detail(kind: file.kind, fileExtension: file.extension))
         if file.failed {
                     DetailRow("Status", ReadStore.isTimedOut(errorMessage: file.errorMessage)
-                        ? "FileID ran out of time reading this file, so it has no tags, faces or text yet. It isn't damaged."
-                        : "Couldn't be read, so it has no tags, faces or text. It may be damaged.")
+                        ? "FileID ran out of time reading this file, so it has no tags, faces or text yet. It isn’t damaged."
+                        : "Couldn’t be read, so it has no tags, faces or text. It may be damaged.")
                 }
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
@@ -1831,7 +1831,7 @@ private struct InlineMediaPlayer: View {
             } else if failed {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle").font(.system(size: 28)).foregroundStyle(Theme.warning)
-                    Text("This file can't be played on this Mac.").font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                    Text("This file can’t be played on this Mac.").font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
                 }
             } else {
                 ProgressView().controlSize(.small)
@@ -2014,11 +2014,11 @@ private struct LibrarySelectedPane: View {
                 if offline {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         StatusPill(text: "OFFLINE", color: Theme.warning)
-                        MetaText("Its drive or folder isn't connected. Tags and descriptions are kept.", size: 11.5)
+                        MetaText("Its drive or folder isn’t connected. Tags and descriptions are kept.", size: 11.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Offline. Its drive or folder isn't connected. Tags and descriptions are kept.")
+                    .accessibilityLabel("Offline. Its drive or folder isn’t connected. Tags and descriptions are kept.")
                     .transition(.opacity)
                 }
 
@@ -2064,7 +2064,7 @@ private struct LibrarySelectedPane: View {
                         .help("Full preview with tags, the suggested name and Describe Files (or double-click the tile)")
                     HStack(spacing: 6) {
                         if row.kind == "image" || row.kind == "video" {
-                            Button(action: onFindSimilar) { Text("Similar").lineLimit(1).frame(maxWidth: .infinity) }
+                            Button(action: onFindSimilar) { Text("Find similar").lineLimit(1).frame(maxWidth: .infinity) }
                                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
                                 .help("Find visually similar files")
                         }

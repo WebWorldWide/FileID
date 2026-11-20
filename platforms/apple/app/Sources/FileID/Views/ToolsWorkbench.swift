@@ -149,12 +149,12 @@ final class ToolsSession {
         selection.formIntersection(chooseableHits.map(\.fileID))
     }
 
-    /// A successful preview says what Export will do in plain words; the engine's sentence ("new file(s)",
+    /// A successful preview says what Export will do in plain words; the engine's sentence ("new files",
     /// "8-bit SDR") stays for everything else. The photo caveat follows the recipe kind that was sent, not the engine's wording.
     nonisolated static func plainMessage(action: String, status: String, outputs: Int, recipeKind: String?, message: String) -> String {
         guard action == "preview", status == "ok", outputs > 0 else { return message }
         let plain = outputs == 1 ? "Press Export to make 1 new file. Your original stays as it is."
-                                 : "Press Export to make \(outputs.formatted()) new files. Your originals stay as they are."
+                                 : "Press Export to make \(Plural.noun(outputs, "new file", "new files")). Your originals stay as they are."
         return recipeKind == "photo" ? plain + " Photo copies leave out details such as location and use standard 8-bit colors." : plain
     }
 
@@ -174,9 +174,9 @@ final class ToolsSession {
             return "That search found \(allHits.count.formatted()) file\(allHits.count == 1 ? "" : "s"), but no \(kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again."
         }
         if let answeredQuery, !answeredQuery.isEmpty {
-            return "Nothing in the library matches “\(answeredQuery)”. Try part of a file name or a few words about what's in it."
+            return "Nothing in the library matches “\(answeredQuery)”. Try part of a file name or a few words about what’s in it."
         }
-        return "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
+        return "Search for files by name or by what’s in them, then tick the ones to export. Exports are new files; your originals stay as they are."
     }
 
     var selectedPaths: [String] { hits.filter { selection.contains($0.fileID) }.map(\.path) }
@@ -200,8 +200,8 @@ final class ToolsSession {
         pending = ""
         pendingAction = ""
         message = action == "execute"
-            ? "FileID's helper stopped during the export. Some files may already be saved; press Show last export to check."
-            : "FileID's helper stopped before this finished. Try again."
+            ? "FileID’s helper stopped during the export. Some files may already be saved; press Show last export to check."
+            : "FileID’s helper stopped before this finished. Try again."
     }
 }
 
@@ -322,7 +322,7 @@ struct ToolsWorkbench: View {
                 Button("Find", action: search)
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(busy || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help(session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type part of a file name or what's in it first" : "Search the library")
+                    .help(session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type part of a file name or what’s in it first" : "Search the library")
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
             .disabled(busy)
@@ -343,7 +343,7 @@ struct ToolsWorkbench: View {
                                 Text(url.lastPathComponent).font(Theme.Font.mono(12)).foregroundStyle(Theme.text1)
                                     .lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 8)
-                                Text(chooseable ? url.deletingLastPathComponent().lastPathComponent : "Can't be exported here. Choose the JPEG.").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                                Text(chooseable ? url.deletingLastPathComponent().lastPathComponent : "Can’t be exported here. Choose the JPEG.").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                                     .lineLimit(1).truncationMode(.head)
                             }
                         }
@@ -421,7 +421,7 @@ struct ToolsWorkbench: View {
                         }
                     }
                     note(session.videoFraming == "auto" && session.videoAspectRatio != "source"
-                         ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group can't fit. Clips up to ten minutes. Review the exported framing."
+                         ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group can’t fit. Clips up to ten minutes. Review the exported framing."
                          : "Fits the full picture inside the frame and pads the empty space.")
                     optionRow("") {
                         Toggle("Stabilize shaky video", isOn: $session.videoStabilization).toggleStyle(DSToggleStyle())
@@ -466,17 +466,17 @@ struct ToolsWorkbench: View {
                     .help("Fast cut copies the video and starts at the nearest keyframe. Exact cut re-encodes to H.264.")
             }
             note(session.media.trimMode == "exact"
-                 ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren't supported yet."
+                 ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren’t supported yet."
                  : "Copies the video without re-compressing it. The new file may start a little before your start time.")
         case "remux":
             note("Saves the same video and sound as the other kind of file (MP4 or MOV) without re-compressing, so quality is unchanged. The kind a file already is is greyed out.")
         case "audio":
-            note("Saves the soundtrack as an M4A audio file. Videos without sound can't be used.")
+            note("Saves the soundtrack as an M4A audio file. Videos without sound can’t be used.")
         case "proxy":
             optionRow("Size") {
                 SegmentedBar(selection: $session.media.proxySide, options: [(640, "640 pixels"), (960, "960 pixels")])
             }
-            note("A small MP4 copy for quick previews, linked to its original. Smaller videos aren't enlarged.")
+            note("A small MP4 copy for quick previews, linked to its original. Smaller videos aren’t enlarged.")
         default:
             optionRow("Turn") {
                 SegmentedBar(selection: $session.media.rotation, options: MediaToolChoice.rotations)
@@ -493,7 +493,7 @@ struct ToolsWorkbench: View {
             Button("Set from playhead") { value.wrappedValue = (clock.seconds * 100).rounded() / 100 }
                 .buttonStyle(.dsGhost)
                 .disabled(player == nil)
-                .help(player == nil ? "Tick a video that can play here first" : "Use the player's current time")
+                .help(player == nil ? "Tick a video that can play here first" : "Use the player’s current time")
         }
     }
 
@@ -744,7 +744,7 @@ struct ToolsWorkbench: View {
                 session.destinationBookmark = authorizedBookmark
                 #if FILEID_APP_STORE
                 if authorizedBookmark == nil {
-                    session.message = "FileID couldn't get permission to save in that folder. Choose it again."
+                    session.message = "FileID couldn’t get permission to save in that folder. Choose it again."
                 }
                 #endif
                 invalidate()
@@ -779,7 +779,7 @@ struct ToolsWorkbench: View {
         }
         switch session.kind {
         case "video": return "Makes a new MP4 at the size and shape you choose. Your original video stays as it is."
-        case "chapters": return "Saves a video's chapters as a file other apps can read."
+        case "chapters": return "Saves a video’s chapters as a file other apps can read."
         default: return "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is."
         }
     }

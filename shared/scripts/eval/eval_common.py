@@ -141,7 +141,7 @@ class Engine:
             if "error" in payload:
                 error = payload["error"]
                 error = error.get("_0", error) if isinstance(error, dict) else error
-                if isinstance(error, dict) and error.get("kind") in {"db_open_failed", "db_newer_than_engine"}:
+                if isinstance(error, dict) and error.get("kind") in {"db_open_failed", "db_disk_full", "db_newer_than_engine"}:
                     raise RuntimeError(error)
             if name in payload:
                 result = payload[name]

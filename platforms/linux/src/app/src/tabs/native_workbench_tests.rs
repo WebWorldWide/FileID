@@ -239,7 +239,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| text(&tools).contains("photo-fixture - Export.png"));
     button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
-        wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
+        wait(|| text(&tools).contains("Exports moved to FileID’s recovery folder"));
         assert!(!photo_export.exists());
     } else {
         assert!(!button(&tools, "Undo").is_sensitive());
@@ -261,7 +261,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .contains("Reviewed marker"));
     button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
-        wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
+        wait(|| text(&tools).contains("Exports moved to FileID’s recovery folder"));
         assert!(!chapter_export.exists());
     } else {
         assert!(chapter_export.is_file());

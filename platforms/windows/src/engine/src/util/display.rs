@@ -51,6 +51,26 @@ pub fn truncate(text: &str, max: usize) -> String {
     out
 }
 
+pub fn count_label(value: i64) -> String {
+    let digits = value.abs().to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if value < 0 {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
+pub fn count_noun(count: i64, one: &str, many: &str) -> String {
+    format!("{} {}", count_label(count), if count == 1 { one } else { many })
+}
+
 pub fn plural(count: u64, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
@@ -89,6 +109,13 @@ mod tests {
         assert_eq!(file_size(4_290_000_000), "4.29 GB");
         assert_eq!(file_size(2_500_000_000_000), "2.50 TB");
         assert_eq!(file_size_i64(-5), "Zero KB");
+    }
+
+    #[test]
+    fn count_noun_picks_the_form_and_groups_thousands() {
+        assert_eq!(count_noun(0, "file", "files"), "0 files");
+        assert_eq!(count_noun(1, "new file", "new files"), "1 new file");
+        assert_eq!(count_noun(1_234_567, "person", "people"), "1,234,567 people");
     }
 
     #[test]

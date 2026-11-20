@@ -222,12 +222,12 @@ final class CLIPModelInstaller: ModelInstalling {
             return
         }
         guard zipURL.pathExtension.lowercased() == "zip" else {
-            status = .installFailed("Selected file isn't a .zip — choose a clip-models.zip archive.")
+            status = .installFailed("That isn’t a .zip file. Choose the model archive you downloaded.")
             return
         }
         if let attrs = try? FileManager.default.attributesOfItem(atPath: zipURL.path),
            let type = attrs[.type] as? FileAttributeType, type != .typeRegular {
-            status = .installFailed("Zip path isn't a regular file (symlink or special file).")
+            status = .installFailed("That file can’t be used. Choose the model archive itself, not a link to it.")
             return
         }
 
@@ -235,7 +235,7 @@ final class CLIPModelInstaller: ModelInstalling {
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
            let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
            free < minFreeBytes {
-            status = .installFailed("Need at least 1 GB free to extract; only \(free / 1_048_576) MB available.")
+            status = .installFailed("Not enough free space to unpack the model archive: it needs about 1 GB and only \(ModelSize.label(free)) is free.")
             return
         }
 
@@ -245,7 +245,7 @@ final class CLIPModelInstaller: ModelInstalling {
             try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stagingRoot.path)
         } catch {
-            status = .installFailed("Couldn't create a private extraction area: \(error.localizedDescription)")
+            status = .installFailed("Couldn’t prepare space to unpack the model archive. Check that there’s free disk space, then try again.")
             return
         }
         defer { try? FileManager.default.removeItem(at: stagingRoot) }
@@ -257,8 +257,9 @@ final class CLIPModelInstaller: ModelInstalling {
             if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
                let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.uint64Value,
                free < requiredFree {
-                throw LocalArchiveError(
-                    "archive needs at least \(requiredFree / 1_048_576) MB free for extraction and rollback")
+                status = .installFailed("Not enough free space to unpack the model archive: it needs about \(ModelSize.label(Int64(clamping: requiredFree))).")
+                recomputePresentFiles()
+                return
             }
             let result = try await runUnzip(
                 ["-q", zipURL.path, "-d", stagingRoot.path],
@@ -287,7 +288,7 @@ final class CLIPModelInstaller: ModelInstalling {
                     .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
                 ])
                 guard values.isRegularFile == true, values.isSymbolicLink != true else {
-                    throw LocalArchiveError("\(item.staged.lastPathComponent) isn't a regular file")
+                    throw LocalArchiveError("\(item.staged.lastPathComponent) isn’t a regular file")
                 }
                 guard let expected = item.sha256 else {
                     throw LocalArchiveError("\(item.staged.lastPathComponent) has no canonical SHA-256 pin")
@@ -306,7 +307,8 @@ final class CLIPModelInstaller: ModelInstalling {
             recomputePresentFiles()
             return
         } catch {
-            status = .installFailed("Local model archive rejected: \(error.localizedDescription)")
+            NSLog("FileID model archive rejected: \(error.localizedDescription)")
+            status = .installFailed("That model archive isn’t valid, so nothing was installed. Download it again, then choose it again.")
             recomputePresentFiles()
             return
         }
@@ -323,7 +325,7 @@ final class CLIPModelInstaller: ModelInstalling {
             ["-Z1", zipURL.path], workRoot: workRoot,
             timeoutSeconds: 30, label: "names")
         guard namesResult.status == 0 else {
-            throw LocalArchiveError("couldn't list archive entries: \(namesResult.error)")
+            throw LocalArchiveError("couldn’t list archive entries: \(namesResult.error)")
         }
         let names = namesResult.output.split(whereSeparator: \.isNewline).map(String.init)
         guard names.count <= 10_000 else {
@@ -337,7 +339,7 @@ final class CLIPModelInstaller: ModelInstalling {
             ["-Z", "-v", zipURL.path], workRoot: workRoot,
             timeoutSeconds: 30, label: "metadata")
         guard verbose.status == 0 else {
-            throw LocalArchiveError("couldn't inspect archive metadata: \(verbose.error)")
+            throw LocalArchiveError("couldn’t inspect archive metadata: \(verbose.error)")
         }
         var total: UInt64 = 0
         for rawLine in verbose.output.split(whereSeparator: \.isNewline) {
@@ -355,7 +357,7 @@ final class CLIPModelInstaller: ModelInstalling {
             if line.hasPrefix("file security status:"),
                let value = line.split(separator: ":", maxSplits: 1).last,
                !LocalArchiveSafety.fileSecurityStatusIsUnencrypted(String(value)) {
-                throw LocalArchiveError("encrypted archives aren't supported")
+                throw LocalArchiveError("encrypted archives aren’t supported")
             }
             if line.hasPrefix("Unix file attributes"),
                let permissions = line.split(separator: ":", maxSplits: 1).last?
@@ -448,7 +450,7 @@ final class CLIPModelInstaller: ModelInstalling {
         let data = try handle.read(upToCount: cap + 1) ?? Data()
         guard data.count <= cap else { throw LocalArchiveError("archive listing was too large") }
         guard let text = String(data: data, encoding: .utf8) else {
-            throw LocalArchiveError("archive listing wasn't UTF-8")
+            throw LocalArchiveError("archive listing wasn’t UTF-8")
         }
         return text
     }
@@ -468,7 +470,7 @@ final class CLIPModelInstaller: ModelInstalling {
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
             options: []) else {
-            throw LocalArchiveError("couldn't inspect extracted files")
+            throw LocalArchiveError("couldn’t inspect extracted files")
         }
         var count = 0
         for case let url as URL in enumerator {

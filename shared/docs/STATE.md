@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-11-19 — Polish lane PC, copy and wording (`agent/pol-copy`)
+
+- **One count helper per language.** Swift `Plural.noun(count, one, many)` (`app/Sources/FileID/Core/Plural.swift`) and Rust `util::display::count_noun` (re-exported by `chat_intent`, which now delegates its two private copies). Every "N files / faces / photos / people / takes / copies" in the Mac app and every engine sentence with a count goes through it, so "1 file" and "1,200 files" read the same everywhere. `CopyWordingTests` fails when a counted noun is built by hand.
+- **Typographic punctuation in the Mac app.** Every apostrophe inside a user-facing literal is `’` and every quoted phrase uses “ ”; `CopyWordingTests` scans `app/Sources/FileID` for straight ones. Engine sentences written or edited in this lane use `’` too; older engine sentences are unchanged.
+- **Internal words out of engine messages that reach the UI** (adapter, MLX, pinned repository, engine, recovery storage, published). Raw errors are logged, not shown: the export failure, the Finder tag write, the rename failure, the description-model reply.
+- **Disk full is named.** `util::user_message::io_cause` maps io and SQLite errors to disk full, read-only or name too long. New error kinds `db_disk_full` (library cannot be created) and `scan_disk_full` (scan failed, or catch-up results could not be stored) carry their own title and sentence on Mac, Windows and Linux; export says which folder and how many files were exported; background job errors use the same sentence. No raw "os error" text in rename, tag or export messages.
+- **Organize Folders, nothing to move:** "Your folders inside “<name>” are already well organized. FileID doesn’t rename the folder you chose." (Windows and Linux use "here" because they have no root name at that point.)
+- Not changed: P2-11 (Cleanup vs Duplicates naming, left as an owner call), CLI/TUI text, older engine sentences with straight apostrophes.
+
 ## 2026-11-19 — Acceptance iteration 2, engine lane FE (`agent/fix2-engine`)
 
 - **E1 (S3/D-01):** the one retry pass did run, but straight after the first pass and under the same load, so it failed again (CPU hogs plus the Vision timeout hook on 18 Adlon RAW/JPEG copies: iter-2 engine left 12, 9 and 1 of 18 failed at hooks 0.15 s, 0.25 s and 0.35 s). Timed-out files are now read again in up to three further rounds, each after a longer wait (3, 8, 15 s) and with half the workers of the round before (`scan_session::TIMEOUT_RETRY_ROUNDS`, `commands/scan.rs`); the same runs left 4, 1 and 0. Chat answers add "N files couldn't be read yet — they're not in these results" while failed rows exist (`chat_facts::unreadable_files_note`); the Cleanup header says the same from `store.unreadableFiles`.

@@ -76,7 +76,7 @@ public sealed class WorkbenchSafetyIntegrationTests
         Assert.True(ToolUndoIntegration.CanUndo(plan.UndoID));
         Assert.False(ToolUndoIntegration.CanUndo(null));
         Assert.Equal("receipt", plan.UndoID);
-        Assert.Contains("internal recovery storage", ToolUndoIntegration.Detail, StringComparison.Ordinal);
+        Assert.Contains("recovery folder", ToolUndoIntegration.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

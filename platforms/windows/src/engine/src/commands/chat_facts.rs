@@ -1,7 +1,7 @@
 //! Structured Chat answers from fixed SQL templates (mirrors macOS `ChatFacts.swift`). No model ever writes SQL: every
 //! predicate is a constant with bound parameters.
 
-use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question, MONTH_NAMES};
+use super::chat_intent::{bytes_label, count_label, count_noun, noun, DateFilter, Question, MONTH_NAMES};
 use super::roots::RootScope;
 use crate::ipc::CatalogHit;
 use anyhow::Result;
@@ -537,15 +537,14 @@ pub(crate) fn people_answer(conn: &Connection, question: &Question, root: Option
     let hits = listed(conn, &filter, "newest", SHOWN, files)?;
     let named: Vec<&PersonGroup> = groups.iter().filter(|group| group.name.is_some()).collect();
     let unnamed = groups.len() - named.len();
-    let plural = |count: usize, one: &str, many: &str| format!("{} {}", count_label(count as i64), if count == 1 { one } else { many });
-    let in_files = plural(files as usize, "file", "files");
+    let in_files = count_noun(files as i64, "file", "files");
     let message = if named.is_empty() {
-        format!("Your library has {} of people in {in_files}, but none are named yet. Open People to name them.", plural(groups.len(), "group", "groups"))
+        format!("Your library has {} of people in {in_files}, but none are named yet. Open People to name them.", count_noun(groups.len() as i64, "group", "groups"))
     } else if question.people.as_deref() == Some("who") {
         let names: Vec<String> =
-            named.iter().take(8).map(|group| format!("{} ({})", group.name.as_deref().unwrap_or_default(), plural(group.files as usize, "file", "files"))).collect();
+            named.iter().take(8).map(|group| format!("{} ({})", group.name.as_deref().unwrap_or_default(), count_noun(group.files, "file", "files"))).collect();
         let more = if named.len() > 8 { format!(" and {} more", named.len() - 8) } else { String::new() };
-        let rest = if unnamed == 0 { String::new() } else { format!(" {} not named yet; open People to name them.", plural(unnamed, "more group is", "more groups are")) };
+        let rest = if unnamed == 0 { String::new() } else { format!(" {} not named yet; open People to name them.", count_noun(unnamed as i64, "more group is", "more groups are")) };
         format!("People in your library: {}{more}.{rest}", names.join(", "))
     } else {
         let names: Vec<&str> = named.iter().take(5).filter_map(|group| group.name.as_deref()).collect();
@@ -553,7 +552,7 @@ pub(crate) fn people_answer(conn: &Connection, question: &Question, root: Option
         let rest = if unnamed == 0 { String::new() } else { format!(", {unnamed} not named yet. Open People to name the rest") };
         format!(
             "Your library has {} of people in {in_files}: {} named ({}{more}){rest}.",
-            plural(groups.len(), "group", "groups"),
+            count_noun(groups.len() as i64, "group", "groups"),
             count_label(named.len() as i64),
             names.join(", ")
         )
@@ -631,7 +630,7 @@ pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Opt
         .map(|(path, count)| {
             let parts: Vec<&str> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
             let shown = parts[parts.len().saturating_sub(2)..].join("/");
-            format!("{shown} ({})", plural_files(*count))
+            format!("{shown} ({})", count_noun(*count, "file", "files"))
         })
         .collect();
     Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
@@ -663,10 +662,6 @@ pub(crate) fn unreadable_files_note(conn: &Connection, root: Option<&RootScope>)
         let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
         format!("{} {noun} couldn't be read yet — {pronoun} not in these results.", count_label(count))
     }))
-}
-
-fn plural_files(count: i64) -> String {
-    format!("{} {}", count_label(count), if count == 1 { "file" } else { "files" })
 }
 
 pub(crate) fn reference_answer(reference: &super::chat_intent::Reference, hits: Vec<CatalogHit>) -> (String, Vec<CatalogHit>) {

@@ -98,7 +98,7 @@ struct TreeDiffView: View {
                     sourceRowView(row)
                 }
                 paneCard(title: "After",
-                         subtitle: "Where they'll live",
+                         subtitle: "Where they’ll live",
                          rows: destRows) { row in
                     destRowView(row)
                 }

@@ -335,7 +335,7 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
     let failure = match outcome {
         Ok(()) => None,
         Err(error) if error.is::<Interrupted>() => return publish(sink, database).await,
-        Err(error) => Some(format!("{error:#}").chars().take(2_000).collect::<String>()),
+        Err(error) => Some(crate::util::user_message::job_failure_text(&error)),
     };
     let _ = super::timeline::with_db(database, move |conn| {
         match failure {

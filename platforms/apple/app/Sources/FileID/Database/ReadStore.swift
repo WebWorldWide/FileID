@@ -770,7 +770,7 @@ public final class ReadStore: @unchecked Sendable {
             }
             guard candidateCount <= Self.nearDupImageCap else {
                 reportError(
-                    "Visually similar comparison is unavailable for \(candidateCount.formatted()) images: " +
+                    "Visually similar comparison is unavailable for \(Plural.noun(candidateCount, "image", "images")): " +
                     "the exact Hamming matcher is capped at \(Self.nearDupImageCap.formatted()). " +
                     "Exact duplicate cleanup remains available.")
                 return []

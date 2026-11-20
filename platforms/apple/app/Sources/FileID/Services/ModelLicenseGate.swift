@@ -20,7 +20,7 @@ enum ModelLicenseGate {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "License acceptance required"
-            alert.informativeText = "This optional download is governed by the \(kind.licenseName), not FileID's Apache-2.0 license. Review the terms before downloading. Acceptance is recorded only on this Mac."
+            alert.informativeText = "This optional download is governed by the \(kind.licenseName), not FileID’s Apache-2.0 license. Review the terms before downloading. Acceptance is recorded only on this Mac."
             alert.addButton(withTitle: "Cancel")
             alert.addButton(withTitle: "I Accept and Download")
             alert.addButton(withTitle: "Review Full Terms")
@@ -45,7 +45,7 @@ enum ModelLicenseGate {
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "License acceptance was not saved"
-        alert.informativeText = "FileID did not start the download because acceptance could not be stored locally. Check permissions for FileID's Application Support folder and try again.\n\n\(error.localizedDescription)"
+        alert.informativeText = "FileID did not start the download because acceptance could not be stored locally. Check permissions for FileID’s Application Support folder and try again.\n\n\(error.localizedDescription)"
         alert.addButton(withTitle: "OK")
         alert.runModal()
         return false

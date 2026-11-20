@@ -753,9 +753,7 @@ impl ScanSession {
             );
             sink.send(crate::ipc::EngineError::new(
                 "discovery_partial",
-                format!(
-                        "{zero_byte_rejected} file(s) changed while FileID was scanning them. They will be picked up on the next scan."
-                    ),
+                changed_while_scanning_message(zero_byte_rejected),
             )
             .with_path(root.to_string_lossy().into_owned())
             .into_event())
@@ -959,6 +957,13 @@ impl ScanSession {
                         let finished = pass.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
+                        if finished.as_ref().is_ok_and(|(summary, _)| summary.disk_full) {
+                            sink.send(crate::ipc::EngineError::event(
+                                "scan_disk_full",
+                                crate::util::user_message::DISK_ALMOST_FULL,
+                            ))
+                            .await;
+                        }
                         match finished {
                             Ok((summary, analyzer)) if summary.careful_waiting && !self.coordinator.is_cancelled() => {
                                 spawn_late_careful_reads(self.db_conn.clone(), late_root, analyzer);
@@ -1343,6 +1348,15 @@ impl ProgressState {
 /// Single source for the empty/rescan/partial discovery notice: the 250 ms
 /// tick and the post-drain backstop must emit byte-identical IPC, so the kind
 /// codes + messages live here once.
+fn changed_while_scanning_message(files: u64) -> String {
+    format!(
+        "{} changed while FileID was scanning {}. {} picked up on the next scan.",
+        crate::util::display::count_noun(files as i64, "file", "files"),
+        if files == 1 { "it" } else { "them" },
+        if files == 1 { "It will be" } else { "They will be" },
+    )
+}
+
 fn discovery_notice(
     count: u64,
     skip_count: usize,
@@ -1391,9 +1405,10 @@ fn discovery_notice(
         (
             "discovery_partial",
             format!(
-                "Scanned {} file(s); {} path(s) couldn't be read \
+                "Scanned {}; {} couldn’t be read \
                  (permission denied or removed mid-scan). Scan continues.",
-                count, errs
+                crate::util::display::count_noun(count as i64, "file", "files"),
+                crate::util::display::count_noun(errs as i64, "item", "items")
             ),
         )
     } else {
@@ -2160,6 +2175,23 @@ mod tests {
         assert_eq!(notice.kind, "empty_folder");
         assert!(notice.message.contains("disconnected"));
         assert_eq!(discovery_notice(0, 0, 0, 0, "/lib", false).unwrap().kind, "empty_folder");
+    }
+
+    #[test]
+    fn counts_in_scan_notices_read_singular_at_one() {
+        assert_eq!(
+            changed_while_scanning_message(1),
+            "1 file changed while FileID was scanning it. It will be picked up on the next scan."
+        );
+        assert_eq!(
+            changed_while_scanning_message(2),
+            "2 files changed while FileID was scanning them. They will be picked up on the next scan."
+        );
+        let partial = discovery_notice(1, 0, 1, 0, "/lib", true).unwrap();
+        assert_eq!(partial.kind, "discovery_partial");
+        assert!(partial.message.starts_with("Scanned 1 file; 1 item couldn’t be read"), "{}", partial.message);
+        let partial = discovery_notice(1200, 0, 3, 0, "/lib", true).unwrap();
+        assert!(partial.message.starts_with("Scanned 1,200 files; 3 items couldn’t be read"), "{}", partial.message);
     }
 
     #[test]

@@ -36,7 +36,7 @@ struct SettingsTab: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Scanning").font(Theme.Font.body(14, .semibold))
                         SettingToggleRow("Faster text reading (Latin scripts only)",
-                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after FileID's helper restarts.",
+                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after FileID’s helper restarts.",
                                          isOn: $fastTextReading)
                         restartHelperRow
                     }
@@ -48,7 +48,7 @@ struct SettingsTab: View {
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        MetaText("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
+                        MetaText("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID’s helper restarts.")
                             .fixedSize(horizontal: false, vertical: true)
                         restartHelperRow
                     }
@@ -71,18 +71,18 @@ struct SettingsTab: View {
                             Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("FileID's helper").font(Theme.Font.body(12.5, .semibold))
+                                Text("FileID’s helper").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Status", connectionLabel)
                                 if case .ready(let info) = engine.state {
                                     infoRow("Version", info.version)
                                     infoRow("Process number", "\(info.pid)")
                                     infoRow("Files worked on at once", "\(info.workerCap)")
-                                    infoRow("This Mac's memory",  "\(Int(info.physicalMemoryGB)) GB")
+                                    infoRow("This Mac’s memory",  "\(Int(info.physicalMemoryGB)) GB")
                                 }
                                 HStack(spacing: 8) {
                                     Button("Restart helper") { engine.restart() }
                                         .buttonStyle(.dsSecondary)
-                                        .help("Restart FileID's background helper. Stops any scan in progress.")
+                                        .help("Restart FileID’s background helper. Stops any scan in progress.")
                                 }
                             }
 
@@ -161,7 +161,7 @@ struct SettingsTab: View {
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
-                                Text("Permanently erase FileID's library, settings, caches and small helper models. The large description models are kept.")
+                                Text("Permanently erase FileID’s library, settings, caches and small helper models. The large description models are kept.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 Button(role: .destructive) {
                                     confirmFactoryReset = true
@@ -179,7 +179,7 @@ struct SettingsTab: View {
                                     }
                                     Button("Cancel", role: .cancel) { }
                                 } message: {
-                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, caches and the small downloaded helper models. The large description models are kept; remove them under Settings ▸ AI models. Your own files are not touched. This can't be undone.")
+                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, caches and the small downloaded helper models. The large description models are kept; remove them under Settings ▸ AI models. Your own files are not touched. This can’t be undone.")
                                 }
                             }
                         }
@@ -189,7 +189,7 @@ struct SettingsTab: View {
                             Image(systemName: "wrench.and.screwdriver")
                                 .foregroundStyle(Theme.text3)
                             Text("Advanced").font(Theme.Font.body(14, .semibold))
-                            Text("(troubleshooting: background helper, storage, scan history, acknowledgements, logs)")
+                            Text("Background helper, storage, scan history, acknowledgements and logs.")
                                 .font(Theme.Font.body(12))
                                 .foregroundStyle(Theme.text3)
                         }
@@ -337,7 +337,7 @@ struct DeepAnalyzeExclusionsCard: View {
         case .alreadyExcluded:
             message = ("That folder is already skipped.", false)
         case .invalid:
-            message = ("Couldn't skip that folder. Choose a folder on this Mac.", true)
+            message = ("Couldn’t skip that folder. Choose a folder on this Mac.", true)
         }
     }
 }
@@ -523,7 +523,7 @@ struct EssentialModelsCard: View {
                     }
                     .buttonStyle(.dsPrimary)
                     .disabled(idle.isEmpty || helperDown)
-                    .help(busy ? "Each model's progress is shown in its card below" : "Downloads every missing model below, once, from the internet (huggingface.co)")
+                    .help(busy ? "Each model’s progress is shown in its card below" : "Downloads every missing model below, once, from the internet (huggingface.co)")
                 }
             }
         }
@@ -537,7 +537,7 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Search by description",
-            blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Runs on this Mac.",
+            blurb: "Lets you search photos by what’s in them, like “sunset at the beach”. Runs on this Mac.",
             rows: [
                 Row(name: "Understands photos", detail: "Looks at each photo during a scan.", technical: "OpenCLIP ViT-B/32 image model (MIT)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
                 Row(name: "Understands your search words", detail: "Matches what you type to what photos show.", technical: "OpenCLIP ViT-B/32 text model (MIT)", path: CLIPEmbeddingSpace.textModelURL),
@@ -553,7 +553,7 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Photo tags",
-            blurb: "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Without it, FileID uses a simpler built-in tagger.",
+            blurb: "Labels what’s in each photo (thousands of everyday things) so you can search and sort by it. Without it, FileID uses a simpler built-in tagger.",
             rows: [Row(name: "Photo tagger", detail: "Knows about 4,500 everyday things, in English.", technical: "RAM++ (Recognize Anything Plus), Swin-Large @384, Apache-2.0", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Photo tags model?",
@@ -590,11 +590,11 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Closed eyes in Best Takes",
-            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Runs on this Mac. Without it, FileID uses Apple's built-in eye check.",
+            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Runs on this Mac. Without it, FileID uses Apple’s built-in eye check.",
             rows: [Row(name: "Eye checker", detail: "Measures how open each eye is.", technical: "MediaPipe Face Mesh V2 (Apache-2.0), 478 face landmarks", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the closed-eyes model?",
-            fallback: "Best Takes goes back to Apple's built-in eye check.")
+            fallback: "Best Takes goes back to Apple’s built-in eye check.")
     }
 }
 

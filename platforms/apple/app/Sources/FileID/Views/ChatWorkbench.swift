@@ -111,7 +111,7 @@ struct ChatWorkbench: View {
             Button("Clear conversation", role: .destructive) { control("clear") }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The questions and answers here are deleted and can't be brought back. Your files are not touched.")
+            Text("The questions and answers here are deleted and can’t be brought back. Your files are not touched.")
         }
     }
 
@@ -524,7 +524,7 @@ struct ChatWorkbench: View {
         selectionNote = "Saving the group…"
         Task {
             let response = await TakeRequests.send(engine, request, timeout: 30)
-            selectionNote = response?.status == "ok" ? "Saved \(ids.count) files as a group in Best Takes." : (response?.message ?? "The group couldn't be saved. Try again.")
+            selectionNote = response?.status == "ok" ? "Saved \(Plural.noun(ids.count, "file", "files")) as a group in Best Takes." : (response?.message ?? "The group couldn’t be saved. Try again.")
         }
     }
 

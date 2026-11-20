@@ -51,7 +51,7 @@ struct Detail: View {
         switch activeTab {
         case .library: return Self.libraryMeta(total: store.scopedTotalFiles, unreadable: store.scopedUnreadableFiles, location: store.scope?.root.display)
         case .deep:
-            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) of \(d.total.formatted()) files" }
+            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) of \(Plural.noun(d.total, "file", "files"))" }
             return ""
         case .settings: return ""
         case .restructure: return pickedURL?.lastPathComponent ?? ""
@@ -65,7 +65,7 @@ struct Detail: View {
         let readable = max(0, total - unreadable)
         var text = "\(readable.formatted()) file\(readable == 1 ? "" : "s")"
         if let location { text += " in \(location)" }
-        if unreadable > 0 { text += " · \(unreadable.formatted()) couldn't be read" }
+        if unreadable > 0 { text += " · \(unreadable.formatted()) couldn’t be read" }
         return text
     }
 
@@ -155,10 +155,10 @@ private struct EmptyState: View {
     let onPickFolder: () -> Void
 
     private let steps: [(String, String, String)] = [
-        ("Library", "Scan a folder", "FileID reads each file, tags what's in your photos and finds faces. Nothing is moved or changed."),
+        ("Library", "Scan a folder", "FileID reads each file, tags what’s in your photos and finds faces. Nothing is moved or changed."),
         ("People", "Name the people", "Faces are grouped by person. Type a name once and FileID finds that person everywhere."),
         ("Describe Files", "Describe files (optional)", "A local AI writes a sentence about each file and suggests a clearer name. You approve every rename."),
-        ("Search & Moments · Chat", "Search and ask", "Find a photo, video or document by what's in it, or ask a question in Chat."),
+        ("Search & Moments · Chat", "Search and ask", "Find a photo, video or document by what’s in it, or ask a question in Chat."),
         ("Duplicates · Organize Folders", "Tidy up", "Move extra copies to Trash and preview a tidier folder layout before anything moves.")
     ]
 

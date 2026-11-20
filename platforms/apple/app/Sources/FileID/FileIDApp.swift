@@ -92,7 +92,7 @@ struct FileIDApp: App {
             CommandGroup(after: .sidebar) {
                 Button("Show Chat Beside Page") { NotificationCenter.default.post(name: .fileIDToggleChat, object: nil) }
                     .keyboardShortcut("k", modifiers: [.command, .shift])
-                Button("Pause or Resume Background Motion") { NotificationCenter.default.post(name: .fileIDToggleMotion, object: nil) }
+                Button("Pause or Resume Lava Lamp") { NotificationCenter.default.post(name: .fileIDToggleMotion, object: nil) }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
             CommandGroup(after: .textEditing) {
@@ -113,9 +113,9 @@ struct FileIDApp: App {
             }
             CommandGroup(replacing: .help) {
                 Button("FileID Help") { NSWorkspace.shared.open(URL(string: "https://github.com/WebWorldWide/FileID#readme")!) }
-                Button("Set up AI models…") { showWelcome = true }
+                Button("Set Up AI Models…") { showWelcome = true }
                 Divider()
-                Button("Privacy on this Mac") {
+                Button("Privacy on This Mac") {
                     let alert = NSAlert()
                     alert.messageText = "Everything stays on this Mac"
                     alert.informativeText = "FileID reads your files on this Mac and never sends them, or anything about how you use it, anywhere. The only time it uses the internet is when you choose to download an AI model.\n\nFile names, tags and descriptions also show up in Spotlight (⌘Space) on this Mac. To stop that, turn off “Show results in Spotlight” in Settings."

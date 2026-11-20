@@ -9,7 +9,7 @@ struct ChatTrashResultTests {
         var outcome = DuplicateTrashOutcome()
         outcome.failed = 8
         #expect(ExactDuplicateVerifier.nothingMovedSummary(outcome, skippedAsChanged: 0)
-                == "Nothing was moved to the Trash: 8 couldn't be moved to the Trash. Your files are untouched.")
+                == "Nothing was moved to the Trash: 8 couldn’t be moved to the Trash. Your files are untouched.")
         outcome.failureMessage = "The Trash folder isn't available."
         outcome.protectedLocation = 1
         let text = ExactDuplicateVerifier.nothingMovedSummary(outcome, skippedAsChanged: 2)

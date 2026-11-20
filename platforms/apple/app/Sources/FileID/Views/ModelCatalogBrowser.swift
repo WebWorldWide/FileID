@@ -218,7 +218,7 @@ struct ModelCatalogBrowser: View {
     private func download(_ kind: AIModelKind) {
         engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
         guard engine.prewarmModel(kind.rawValue) else {
-            statusMessage = "FileID's helper isn't running. Quit and reopen FileID, then try again."
+            statusMessage = "FileID’s helper isn’t running. Quit and reopen FileID, then try again."
             return
         }
         onSelect(kind)

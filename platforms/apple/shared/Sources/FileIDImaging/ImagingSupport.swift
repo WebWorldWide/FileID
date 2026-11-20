@@ -34,7 +34,8 @@ package enum ImagingLog {
         line.append(0x0A)
         lock.lock(); defer { lock.unlock() }
         // The throwing API: `write(_:)` raises an Objective-C exception, which Swift cannot catch, when the log disk is full or stderr is closed, and that took the whole engine down.
-        try? FileHandle.standardError.write(contentsOf: line)
+        let stderr = FileHandle.standardError
+        try? stderr.write(contentsOf: line)
     }
 }
 

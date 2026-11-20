@@ -249,7 +249,7 @@ struct MainWindow: View {
             }
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
                 guard let result = engine.lastFaceClustering, result.personCount > 0 else { return }
-                toasts.show("Scan complete · \(result.personCount) people grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
+                toasts.show("Scan complete · \(Plural.noun(result.personCount, "person", "people")) grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
                     activeTabBinding.wrappedValue = .people
                 }
             }
@@ -295,8 +295,8 @@ struct MainWindow: View {
                     let folderName = url.lastPathComponent
                     DispatchQueue.main.async {
                         let alert = NSAlert()
-                        alert.messageText = "Folder isn't readable"
-                        alert.informativeText = "\"\(folderName)\" can't be read. If it's a network share, mount it and try again. If it's a system folder, pick a folder you own."
+                        alert.messageText = "Folder isn’t readable"
+                        alert.informativeText = "“\(folderName)” can’t be read. If it’s a network share, mount it and try again. If it’s a system folder, pick a folder you own."
                         alert.alertStyle = .warning
                         alert.runModal()
                     }
@@ -333,8 +333,8 @@ struct MainWindow: View {
         if panel.runModal() == .OK, let url = panel.url {
             guard FileManager.default.isReadableFile(atPath: url.path) else {
                 let alert = NSAlert()
-                alert.messageText = "Can't read \(url.lastPathComponent)"
-                alert.informativeText = "FileID doesn't have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
+                alert.messageText = "Can’t read \(url.lastPathComponent)"
+                alert.informativeText = "FileID doesn’t have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
                 alert.runModal()

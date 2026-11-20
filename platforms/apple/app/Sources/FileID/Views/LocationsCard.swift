@@ -39,8 +39,8 @@ struct LocationsCard: View {
 /// Text for a location row. A plain type, not part of the view, so it carries no main-actor isolation.
 enum LocationText {
     static func emptyMessage(helperDown: Bool, helperStarting: Bool) -> String {
-        if helperDown { return "FileID's helper isn't running, so its locations can't be listed. Restart the helper under Advanced, then press Refresh." }
-        if helperStarting { return "FileID's helper is starting. Locations appear here in a moment." }
+        if helperDown { return "FileID’s helper isn’t running, so its locations can’t be listed. Restart the helper under Advanced, then press Refresh." }
+        if helperStarting { return "FileID’s helper is starting. Locations appear here in a moment." }
         return "No locations yet. Scan a folder or drive and it appears here."
     }
 

@@ -3,7 +3,7 @@
 
 use super::catalog_retrieval::{KnownEvents, KnownPeople};
 use super::chat_facts::{self, extra_hits, extras, file_name, listed, totals, Filter, SHOWN};
-use super::chat_intent::{bytes_label, clean, count_label, noun, parse_question, Intent};
+use super::chat_intent::{bytes_label, clean, count_label, count_noun, noun, parse_question, Intent};
 use super::chat_search::SearchPlan;
 use crate::ipc::{CatalogHit, ChatAction, ChatContext, ChatRename, CHAT_ACTION_KINDS, CHAT_JOBS, CHAT_PAGES, CHAT_SETTINGS};
 use anyhow::Result;
@@ -145,10 +145,6 @@ fn finish(mut action: ChatAction, hits: Vec<CatalogHit>) -> Resolution {
     } else {
         Resolution { message, hits, actions: vec![] }
     }
-}
-
-fn plural(count: i64, one: &str, many: &str) -> String {
-    format!("{} {}", count_label(count), if count == 1 { one } else { many })
 }
 
 struct Scope {
@@ -312,7 +308,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let found = if hits.is_empty() {
                 if intent.kind == "search" { format!("No matches for “{query}”.") } else { format!("No moments found for “{query}” yet.") }
             } else {
-                format!("Found {} for “{query}”.", plural(hits.len() as i64, "match", "matches"))
+                format!("Found {} for “{query}”.", count_noun(hits.len() as i64, "match", "matches"))
             };
             let mut resolution = finish(proposed, hits);
             resolution.message = format!("{found} {}", resolution.message);
@@ -366,14 +362,14 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let count = found.copies.len() as i64;
             let mut detail = format!(
                 "Keeps one copy of each of {}{qualifiers} and moves {} ({}) to the Trash. Each copy is checked byte by byte against the kept copy first; anything that changed is skipped.",
-                plural(found.groups, "file", "files"),
-                plural(count, "extra copy", "extra copies"),
+                count_noun(found.groups, "file", "files"),
+                count_noun(count, "extra copy", "extra copies"),
                 bytes_label(listed_bytes)
             );
             if found.count > count {
                 let _ = write!(detail, " This covers the largest {}; ask again for the rest.", count_label(count));
             }
-            let mut proposed = action(context, "moveDuplicatesToTrash", format!("Move {} to Trash", plural(count, "extra copy", "extra copies")), detail);
+            let mut proposed = action(context, "moveDuplicatesToTrash", format!("Move {} to Trash", count_noun(count, "extra copy", "extra copies")), detail);
             proposed.undo = Some("You can restore them from the Trash.".into());
             proposed.file_count = Some(count);
             proposed.byte_count = Some(listed_bytes);
@@ -399,8 +395,8 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 let mut proposed = action(
                     context,
                     "describeFiles",
-                    format!("Describe {} not described yet", plural(count, "file", "files")),
-                    format!("Describes {} not described yet with the local AI model: a description and a suggested name for each. Files on disk are not changed.", plural(count, "file", "files")),
+                    format!("Describe {} not described yet", count_noun(count, "file", "files")),
+                    format!("Describes {} not described yet with the local AI model: a description and a suggested name for each. Files on disk are not changed.", count_noun(count, "file", "files")),
                 );
                 proposed.file_count = Some(count);
                 proposed.examples = examples(&hits);
@@ -470,8 +466,8 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let mut proposed = action(
                 context,
                 "renameToSuggested",
-                format!("Rename {} to suggested names", plural(count, "file", "files")),
-                format!("Renames {}{qualifiers} in place to the names Describe Files suggested. Folders don't change.", plural(count, "file", "files")),
+                format!("Rename {} to suggested names", count_noun(count, "file", "files")),
+                format!("Renames {}{qualifiers} in place to the names Describe Files suggested. Folders don't change.", count_noun(count, "file", "files")),
             );
             proposed.undo = Some("Rename a file again from Library to change it back.".into());
             proposed.file_count = Some(count);
@@ -511,7 +507,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 context,
                 "namePerson",
                 format!("Name this person {name}"),
-                format!("Names the selected person {name} ({}). Only the name in FileID changes; no files are touched.", plural(count, "file", "files")),
+                format!("Names the selected person {name} ({}). Only the name in FileID changes; no files are touched.", count_noun(count, "file", "files")),
             );
             proposed.undo = Some("Rename them again in People.".into());
             proposed.person_id = Some(person);
@@ -574,7 +570,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                     "Moves every face of {} to {} ({}). Merged entries leave People; no files are touched.",
                     source_names.join(" and "),
                     name_of(destination),
-                    plural(files, "file", "files")
+                    count_noun(files, "file", "files")
                 ),
             );
             proposed.undo = Some("Faces can be moved back one by one in People.".into());

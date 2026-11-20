@@ -14,17 +14,17 @@ struct EngineStatusRow: View {
             Label("Ready", systemImage: "checkmark.circle.fill")
                 .font(Theme.ChromeFont.body(13.5, .semibold))
                 .foregroundStyle(Theme.delight)
-                .help("FileID is ready. Working on up to \(info.workerCap) files at a time with \(Int(info.physicalMemoryGB)) GB of memory.")
+                .help("FileID is ready. Working on up to \(Plural.noun(info.workerCap, "file", "files")) at a time with \(Int(info.physicalMemoryGB)) GB of memory.")
         case .crashed(let reason):
             VStack(alignment: .leading, spacing: 6) {
-                Label("FileID's helper stopped", systemImage: "xmark.octagon.fill")
+                Label("FileID’s helper stopped", systemImage: "xmark.octagon.fill")
                     .font(Theme.ChromeFont.body(12.5, .semibold))
                     .foregroundStyle(Theme.danger)
                     .help(reason)
                 if let onRestart {
                     Button("Restart") { onRestart() }
                         .buttonStyle(.dsSecondary)
-                        .help("Start the helper again. If it keeps stopping, quit and reopen FileID.")
+                        .help("Restart FileID’s helper. If it keeps stopping, quit and reopen FileID.")
                 }
             }
         }
