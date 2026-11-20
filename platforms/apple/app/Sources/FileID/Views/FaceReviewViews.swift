@@ -222,6 +222,7 @@ struct FaceReviewSheet: View {
             ScrollView { content.padding(16) }
         }
         .frame(minWidth: 760, minHeight: 520)
+        .dsEscapeCancels(onDone)
         .task { await loadAll() }
     }
 

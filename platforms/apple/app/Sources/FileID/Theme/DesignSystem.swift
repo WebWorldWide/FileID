@@ -109,6 +109,24 @@ extension View {
     func dsFocusRing(radius: CGFloat = Theme.Radius.s) -> some View { modifier(DSFocusRing(radius: radius)) }
 }
 
+/// Esc closes a sheet whose visible primary button already owns Return.
+private struct DSEscapeCancels: ViewModifier {
+    let action: () -> Void
+    func body(content: Content) -> some View {
+        content.background {
+            Button("", action: action)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+extension View {
+    func dsEscapeCancels(_ action: @escaping () -> Void) -> some View { modifier(DSEscapeCancels(action: action)) }
+}
+
 /// Whether the control itself holds keyboard focus. `\.isFocused` is also true
 /// for everything inside a focused container (the preview sheet takes focus for
 /// its arrow keys), which ringed every button in it at once.

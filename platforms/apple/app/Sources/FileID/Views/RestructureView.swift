@@ -1306,6 +1306,7 @@ struct RestructureView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 480)
+        .dsEscapeCancels { drillDown = nil }
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
     }

@@ -1168,6 +1168,7 @@ private struct PersonDetailSheet: View {
             Text(pendingTagMessage)
         }
         .frame(minWidth: 720, minHeight: 520)
+        .dsEscapeCancels { dismiss() }
         .onAppear {
             loadFiles()
             title = person.title ?? ""
@@ -1626,6 +1627,7 @@ private struct SuggestedMergesSheet: View {
         }
         .padding(20)
         .frame(minWidth: 560, minHeight: 420)
+        .dsEscapeCancels(onDismiss)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
         .confirmationDialog(
