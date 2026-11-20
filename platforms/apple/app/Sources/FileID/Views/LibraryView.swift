@@ -273,7 +273,7 @@ struct LibraryView: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().opacity(0.4)
+            Hairline()
             if let p = engine.lastProgress,
                p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
                 inFlightHeadline(p)
@@ -338,7 +338,7 @@ struct LibraryView: View {
                 .font(Theme.Font.body(13.5))
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.Font.body(13.5, .semibold))
-                Text(detail).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(detail).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
             Spacer()
             ProgressView().controlSize(.small).tint(Theme.ai)
@@ -407,7 +407,7 @@ struct LibraryView: View {
             Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 1) {
                 Text(problem.title).font(Theme.Font.body(13.5, .semibold))
-                Text(problem.detail).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(problem.detail).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -435,7 +435,7 @@ struct LibraryView: View {
                 Text(hint == .preparing
                      ? "Getting search by description ready… results update on their own."
                      : "To search by what's in a photo (\"sunset at the beach\", \"red car\"), download the Search by description model in Settings.")
-                    .font(Theme.Font.body(11))
+                    .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
             Spacer()
@@ -461,7 +461,7 @@ struct LibraryView: View {
                 Text("Photos similar to \(seed.url.lastPathComponent)")
                     .font(Theme.Font.body(13.5, .semibold))
                 Text("Most similar first. Clear to see every file again.")
-                    .font(Theme.Font.body(11))
+                    .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
             Spacer()
@@ -488,7 +488,7 @@ struct LibraryView: View {
                          : p.phase == .tagging ? "Reading files…" : "Finishing up…")
                         .font(Theme.Font.body(14, .semibold))
                     Text("Tagging photos and finding faces. You can browse while this runs.")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
@@ -504,9 +504,9 @@ struct LibraryView: View {
                     .tint(Theme.gold)
             } else if p.phase == .discovering {
                 ProgressView()
-                    .progressViewStyle(.linear)
                     .tint(Theme.gold)
             }
+            if p.filesPerSecond >= 0.5 || (p.etaSeconds ?? 0) > 0 || p.failed > 0 {
             HStack(spacing: 16) {
                 if p.filesPerSecond >= 0.5 {
                     let rate = Int(p.filesPerSecond.rounded())
@@ -524,6 +524,7 @@ struct LibraryView: View {
             }
             .font(Theme.Font.body(12).monospacedDigit())
             .help("Memory and resource details are in Settings → Advanced.")
+            }
         }
         .padding(16)
         .dsBannerSurface(fill: Theme.panel, stroke: Theme.gold.opacity(0.4))
@@ -546,7 +547,7 @@ struct LibraryView: View {
                     Text("Describing files…")
                         .font(Theme.Font.body(14, .semibold))
                     Text("Writing a description and a suggested name for each file. Nothing is renamed until you approve it.")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
@@ -562,7 +563,6 @@ struct LibraryView: View {
                     .tint(Theme.gold)
             } else {
                 ProgressView()
-                    .progressViewStyle(.linear)
                     .tint(Theme.gold)
             }
             if let p {
@@ -580,7 +580,7 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.text3)
             }
             if let last {
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "wand.and.rays")
                         .foregroundStyle(Theme.gold)
@@ -1089,8 +1089,7 @@ struct LibraryView: View {
                                message: "Choose All locations in the folder menu at the top, or scan this location again.")
             } else if let url = pickedURL {
                 EmptyStateView(icon: "folder.badge.plus", title: "No files yet",
-                               message: "Scan \(url.lastPathComponent) to see its files here. Nothing is moved or changed.",
-                               primaryAction: (label: "Scan", run: { engine.startScan(rootURL: url) }))
+                               message: "Press Scan in the sidebar to read \(url.lastPathComponent) and see its files here. Nothing is moved or changed.")
             } else {
                 EmptyStateView(icon: "folder.badge.plus", title: "No files yet",
                                message: "Choose a folder for FileID to read. Nothing is moved or changed.",
@@ -1707,7 +1706,7 @@ private struct FinderTagsEditor: View {
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 if let e = error {
-                    Text(e).font(Theme.Font.body(11)).foregroundStyle(Theme.warning)
+                    Text(e).font(Theme.Font.body(11.5)).foregroundStyle(Theme.warning)
                 }
             }
         
@@ -1920,7 +1919,7 @@ private struct UniversalPreview: View {
                         .font(Theme.Font.body(13.5))
                         .lineLimit(1).truncationMode(.middle)
                     Text("Open in default app for full preview")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
             }
