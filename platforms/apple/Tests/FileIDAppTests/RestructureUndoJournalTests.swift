@@ -41,7 +41,7 @@ struct RestructureUndoJournalTests {
     @Test("the notice for a skipped file name shows the engine's own sentence, even with an underscore in the name")
     func skippedNameNoticeIsShownAsWritten() {
         let message = "1 file stayed where it is because FileID can't use its name in a new folder, for example \"IMG_0001\n.jpg\". Rename it, then organize again. The other files were handled as usual."
-        #expect(Sidebar.errorTitle("apply_restructure_skipped", message: message) == "Some files weren't moved")
+        #expect(Sidebar.errorTitle("apply_restructure_skipped", message: message) == "Some files weren’t moved")
         #expect(Sidebar.errorText(kind: "apply_restructure_skipped", message: message) == message)
     }
 }

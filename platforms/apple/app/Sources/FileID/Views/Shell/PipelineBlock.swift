@@ -111,7 +111,7 @@ struct PipelineBlock: View {
             return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.danger, sub: "Press Scan again. Files already read are skipped.")
         }
         if showsUnfinishedScan {
-            return Status(title: "The scan didn't finish", fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
+            return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
         }
         if store.totalFiles > 0 || progress?.phase == .completed {
             return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(Plural.noun(store.totalFiles, "file", "files")) ready to browse")

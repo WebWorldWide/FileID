@@ -558,7 +558,7 @@ final class ListRowView: NSTableRowView {
         let fileName = row.url.lastPathComponent
         name.text = fileName
         let described = (row.vlmProposedName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        detail.text = row.failed ? (row.errorMessage ?? "Couldn't be read") : tags.joined(separator: " · ")
+        detail.text = row.failed ? (row.errorMessage ?? "Couldn’t be read") : tags.joined(separator: " · ")
         offlineBadge.isHidden = !offline
         let shownDate = sort.key == .dateAdded ? row.scannedAt : row.displayDate
         date.text = shownDate?.formatted(date: .abbreviated, time: .omitted) ?? "—"
@@ -568,7 +568,7 @@ final class ListRowView: NSTableRowView {
         checkView.image = NSImage(systemSymbolName: checked ? "checkmark.circle.fill" : "circle", accessibilityDescription: nil)
         checkView.contentTintColor = checked ? Theme.nsGold : NSColor.white.withAlphaComponent(0.7)
         unreadableGlyph.isHidden = !row.failed
-        setAccessibilityLabel([fileName, described.isEmpty ? nil : "suggested name \(described)", row.failed ? "couldn't be read" : FileKindLabel.title(row.kind),
+        setAccessibilityLabel([fileName, described.isEmpty ? nil : "suggested name \(described)", row.failed ? "couldn’t be read" : FileKindLabel.title(row.kind),
                                offline ? "offline" : nil, shownDate?.formatted(date: .abbreviated, time: .omitted),
                                ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file)]
             .compactMap { $0 }.joined(separator: ", "))
