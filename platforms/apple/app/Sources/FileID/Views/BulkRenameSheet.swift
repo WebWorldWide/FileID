@@ -125,6 +125,7 @@ struct BulkRenameSheet: View {
                       systemImage: "wand.and.rays")
             }
             .buttonStyle(DSPrimaryButtonStyle(height: 30))
+            .keyboardShortcut(.defaultAction)
             .disabled(ready.isEmpty || inFlight || loading)
             .confirmationDialog(
                 "Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")?",

@@ -5,7 +5,7 @@ import SwiftUI
 
 /// Review one suggested group of takes: side-by-side compare (best vs. the
 /// focused take), a filmstrip with the recommendation starred, plain reasons,
-/// keyboard (← → move, Space keep, Z zoom to face, ⌘⌫ keep the marked ones), and
+/// keyboard (← → move, Space keep, Z zoom to face, Return or ⌘⌫ keep the marked ones), and
 /// one primary action that moves the other takes to the Trash with Undo.
 struct TakeReview: View {
     @Bindable var engine: EngineClient
@@ -92,8 +92,16 @@ struct TakeReview: View {
             HStack(spacing: 8) {
                 Button(primaryTitle) { confirmTrash = true }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
-                    .disabled(loading || trashing || victims.isEmpty || keep.isEmpty)
-                    .keyboardShortcut(pageActive ? KeyboardShortcut(.delete, modifiers: .command) : nil)
+                    .disabled(primaryDisabled)
+                    .keyboardShortcut(pageActive ? .defaultAction : nil)
+                    .background {
+                        Button("") { confirmTrash = true }
+                            .keyboardShortcut(pageActive ? KeyboardShortcut(.delete, modifiers: .command) : nil)
+                            .disabled(primaryDisabled)
+                            .opacity(0)
+                            .frame(width: 0, height: 0)
+                            .accessibilityHidden(true)
+                    }
                     .help(primaryHelp)
                 Button("Keep all") { Task { await decide("keepAll") } }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.control))
@@ -147,10 +155,12 @@ struct TakeReview: View {
         return "Keep \(kept), move the other \(others) to Trash"
     }
 
+    private var primaryDisabled: Bool { loading || trashing || victims.isEmpty || keep.isEmpty }
+
     private var primaryHelp: String {
         if keep.isEmpty { return "Mark at least one \(noun.one) to keep (Space)" }
         if victims.isEmpty { return "Everything here is marked keep. Use Keep all." }
-        return "Moves the other \(noun.many) to the Trash. You can put them back afterwards. (⌘⌫)"
+        return "Moves the other \(noun.many) to the Trash. You can put them back afterwards. (Return or ⌘⌫)"
     }
 
     private var confirmTitle: String {
@@ -330,7 +340,7 @@ struct TakeReview: View {
             .onKeyPress(characters: CharacterSet(charactersIn: "zZ")) { _ in withAnimation(Theme.springStandard) { zoom.toggle() }; return .handled }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("\(qualities.count) \(noun.many). Left and right arrows move, Space marks keep.")
-            MetaText("← → move · Space keep · Z zoom · ⌘⌫ keeps the marked \(noun.many) and moves the rest to Trash", size: 11.5)
+            MetaText("← → move · Space keep · Z zoom · Return keeps the marked \(noun.many) and moves the rest to Trash", size: 11.5)
         }
     }
 
