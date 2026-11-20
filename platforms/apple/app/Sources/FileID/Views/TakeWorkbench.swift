@@ -154,11 +154,9 @@ struct TakeWorkbench: View {
 
     private var groupsPane: some View {
         VStack(spacing: 0) {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
-                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
-                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     HStack(spacing: 6) {
                         SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)
                         Spacer(minLength: 4)
@@ -177,6 +175,7 @@ struct TakeWorkbench: View {
                     }
                     ForEach(autoGroups) { group in
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
+                            .id(group.groupKey)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
@@ -195,9 +194,17 @@ struct TakeWorkbench: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
+                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
+                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
+                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     manualSection
                 }
                 .padding(.bottom, 10)
+            }
+            .onChange(of: selectedAutoKey ?? selectedProposalKey) { _, key in
+                guard let key else { return }
+                withAnimation(Theme.springStandard) { proxy.scrollTo(key, anchor: .center) }
+            }
             }
             if !lastTrashBatch.isEmpty {
                 Hairline()

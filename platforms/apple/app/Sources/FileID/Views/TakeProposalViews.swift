@@ -37,6 +37,7 @@ struct RelatedTriesSection: View {
             let chipRelations = TakeProposals.relationsShowingChip(among: proposals.map(\.relation))
             ForEach(proposals) { group in
                 ProposalRow(group: group, selected: selectedKey == group.groupKey, showsRelation: chipRelations.contains(group.relation)) { onOpen(group) }
+                    .id(group.groupKey)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -108,9 +109,11 @@ private struct ProposalRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
-                    Text(TakeProposals.evidenceText(group.evidence))
-                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if showsRelation || selected {
+                        Text(TakeProposals.evidenceText(group.evidence))
+                            .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2).lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .padding(.vertical, 6)
