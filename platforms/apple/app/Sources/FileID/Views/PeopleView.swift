@@ -386,14 +386,29 @@ struct PeopleView: View {
         }
     }
 
+    private var headerCount: some View {
+        MetaText(headerCountLine, color: Theme.text2).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private var headerButtons: some View {
+        reviewButton.fixedSize(horizontal: true, vertical: false)
+        undoMergeButton.fixedSize(horizontal: true, vertical: false)
+        headerActions.fixedSize(horizontal: true, vertical: false)
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                MetaText(headerCountLine, color: Theme.text2)
-                Spacer()
-                reviewButton
-                undoMergeButton
-                headerActions
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    headerCount
+                    Spacer()
+                    headerButtons
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    headerCount
+                    FlowLayout(spacing: 8) { headerButtons }
+                }
             }
             if let faceRefresh { FaceRefreshRow(model: faceRefresh) }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
