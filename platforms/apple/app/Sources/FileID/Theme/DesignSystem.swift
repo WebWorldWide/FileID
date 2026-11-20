@@ -464,7 +464,7 @@ struct DSToggleStyle: ToggleStyle {
         Button { configuration.isOn.toggle() } label: {
             HStack(spacing: 10) {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                    Capsule().fill(configuration.isOn ? Theme.gold : Color.white.opacity(0.14))
+                    Capsule().fill(configuration.isOn ? Theme.gold : Theme.hairlineStrong)
                     Circle().fill(configuration.isOn ? Theme.onGold : Theme.text2).frame(width: 12, height: 12).padding(2)
                 }
                 .frame(width: 30, height: 16)
@@ -750,7 +750,7 @@ struct DashedNotice: View {
         }
         .frame(maxWidth: .infinity)
         .padding(40)
-        .overlay(rounded(Theme.Radius.l).stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4])).foregroundStyle(Color.white.opacity(0.16)))
+        .overlay(rounded(Theme.Radius.l).stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4])).foregroundStyle(Theme.hairlineStrong))
     }
 }
 
@@ -805,7 +805,7 @@ struct ToastView: View {
         .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 8)
         .background(.ultraThinMaterial, in: rounded(Theme.Radius.l))
         .background(Theme.popoverFill, in: rounded(Theme.Radius.l))
-        .overlay(rounded(Theme.Radius.l).stroke(Color.white.opacity(0.14), lineWidth: 1))
+        .overlay(rounded(Theme.Radius.l).stroke(Theme.hairlineStrong, lineWidth: 1))
         .onHover { $0 ? ToastCenter.shared.hold() : ToastCenter.shared.release() }
         .shadow(color: .black.opacity(0.45), radius: 20, y: 12)
     }
