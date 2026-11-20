@@ -654,7 +654,7 @@ struct LibraryView: View {
                 .focused($searchFocused)
             if !searchText.isEmpty {
                 Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     .help("Clear search")
                     .accessibilityLabel("Clear search")
             }
@@ -681,7 +681,7 @@ struct LibraryView: View {
 
         if hiddenWeaker > 0, !rows.isEmpty {
             Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .font(Theme.Font.body(11.5, .semibold))
                 .foregroundStyle(Theme.gold)
                 .fixedSize()
@@ -882,7 +882,7 @@ struct LibraryView: View {
                         .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
@@ -1655,7 +1655,7 @@ private struct FinderTagsEditor: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text3)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Remove this tag")
             .accessibilityLabel("Remove this tag")
         }

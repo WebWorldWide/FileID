@@ -363,7 +363,7 @@ struct DSDangerButtonStyle: PrimitiveButtonStyle {
 }
 
 /// Face of a pop-up menu button, drawn like a secondary button: use inside a `Menu` label with
-/// `.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)`.
+/// `.menuStyle(.button).buttonStyle(DSBareButtonStyle()).menuIndicator(.hidden)`.
 struct DSMenuLabel: View {
     let title: String
     var systemImage: String? = nil

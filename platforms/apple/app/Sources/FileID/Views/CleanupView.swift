@@ -699,7 +699,7 @@ private struct GroupCard: View {
                         DSMenuLabel(title: "Choose…", systemImage: "checkmark.circle", height: 26)
                     }
                     .menuStyle(.button)
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     .menuIndicator(.hidden)
                     .fixedSize()
 

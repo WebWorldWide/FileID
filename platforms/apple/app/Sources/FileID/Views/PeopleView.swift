@@ -1473,7 +1473,7 @@ private struct MovePhotosTargetPicker: View {
                         Button { pendingTarget = p } label: {
                             PersonCard(person: p, store: store)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
                     }
                 }
                 .padding(16)
@@ -1782,7 +1782,7 @@ private struct MergeTargetPickerSheet: View {
                                             lineWidth: 1)
                             )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     }
                 }
             }

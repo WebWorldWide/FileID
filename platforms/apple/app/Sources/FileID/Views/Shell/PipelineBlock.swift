@@ -163,7 +163,7 @@ struct PipelineBlock: View {
                     .frame(minHeight: 22)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .help("Write a description and a clearer name for each file. You can skip this.")
             }
             if showDetails, let p = progress, p.phase != .idle {

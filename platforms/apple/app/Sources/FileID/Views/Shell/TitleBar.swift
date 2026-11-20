@@ -80,7 +80,7 @@ struct TitleBar: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(folderOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Choose which location to show, or add, rescan or close a folder")
             .accessibilityLabel("Location: \(switcherTitle)")
             .accessibilityHint("Chooses which location Library, Search & Moments and Chat show")
@@ -314,7 +314,7 @@ struct TitleBar: View {
                         .background(groupIndex == 0 && itemIndex == 0 ? Theme.gold.opacity(0.08) : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 }
             }
         }
@@ -444,7 +444,7 @@ struct TitleBar: View {
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activityOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .help("What FileID is working on right now")
         .popover(isPresented: $activityOpen, arrowEdge: .bottom) { activityPopover.chromeTextSize() }
     }

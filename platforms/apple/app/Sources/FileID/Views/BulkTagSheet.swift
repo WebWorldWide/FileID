@@ -45,7 +45,7 @@ struct BulkTagSheet: View {
                         .foregroundStyle(.black)
                         .font(Theme.Font.body(13.5, .semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .keyboardShortcut(.defaultAction)
                 .disabled(inFlight || parsedTags.isEmpty || files.isEmpty)
             }
