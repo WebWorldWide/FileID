@@ -35,6 +35,7 @@ pub mod catalog_take_auto;
 pub(crate) mod take_goal;
 mod catalog_take_suggestions;
 pub(crate) mod take_grouping;
+pub(crate) mod timeout_retry;
 
 pub mod chat;
 mod chat_search;

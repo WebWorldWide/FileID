@@ -650,11 +650,12 @@ fn twin_reuse_enabled() -> bool {
 }
 
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
-pub(crate) const PER_FILE_TIMEOUT_MESSAGE: &str = "per-file timeout after 60s";
-/// The Mac scan's Vision pass for one image did not answer in time.
-pub(crate) const VISION_TIMEOUT_MESSAGE: &str = "Vision pass timed out";
+/// What a row says when a read timed out: the file is fine, the machine was too busy, and the engine reads it again.
+pub(crate) const TIMED_OUT_MESSAGE: &str = "FileID ran out of time reading this file; it will try again";
+/// The wording earlier builds stored for the same failure; catalogs written by them still hold it.
+const LEGACY_TIMEOUT_MESSAGES: [&str; 2] = ["per-file timeout after 60s", "Vision pass timed out"];
 /// Stored `error_message` of a row that failed only because the machine was too busy, so a retry may succeed.
-pub(crate) const TIMEOUT_MESSAGES: [&str; 2] = [PER_FILE_TIMEOUT_MESSAGE, VISION_TIMEOUT_MESSAGE];
+pub(crate) const TIMEOUT_MESSAGES: [&str; 3] = [TIMED_OUT_MESSAGE, LEGACY_TIMEOUT_MESSAGES[0], LEGACY_TIMEOUT_MESSAGES[1]];
 
 /// Wait for the first copy's analysis before analyzing itself; shorter than `PER_FILE_TIMEOUT` and spent before that timer starts, so waiting never fails the copy.
 const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(45);
@@ -981,7 +982,7 @@ impl Tagger {
                                     path = %crate::platform::redact_path_for_log(path_for_timeout),
                                     "per-file timeout after 60s; marking failed and continuing"
                                 );
-                                Err((PER_FILE_TIMEOUT_MESSAGE.to_string(), 60000.0))
+                                Err((TIMED_OUT_MESSAGE.to_string(), 60000.0))
                             }
                         }
                     };
@@ -1435,7 +1436,11 @@ fn predecode_one(
                         }
                     }
                 }
-                // Video, over-cap Doc/Pdf/Audio and Other: compute the rename-heal hash here via the bounded composite so the async worker never re-opens the file as blocking IO.
+                FileKind::Video => {
+                    (content_hash, legacy_hashes) = composite_hashes(&file, legacy);
+                    exif_data = video_capture_fields(&file.path);
+                }
+                // Over-cap Doc/Pdf/Audio and Other: compute the rename-heal hash here via the bounded composite so the async worker never re-opens the file as blocking IO.
                 _ => (content_hash, legacy_hashes) = composite_hashes(&file, legacy),
             }
         }
@@ -2042,6 +2047,13 @@ async fn process_file_predecoded(
 
     // Audio metadata becomes tag chips; score=None since these are facts, not model probabilities.
     tagged.tags.extend(audio_tags);
+
+    if file.kind == FileKind::Video
+        && let Some(captured) = exif.as_ref().and_then(|fields| fields.3)
+    {
+        tagged.created_unix = Some(captured);
+        tagged.captured_from_exif = true;
+    }
 
     // A byte-identical image already analyzed: keep the file's own EXIF, year and camera chips and let the writer copy the twin's rows.
     let reuse = matches!(twin, TwinClaim::Ready);
@@ -2953,6 +2965,11 @@ pub(crate) fn capture_time_from_head(path: &std::path::Path) -> Option<f64> {
     }
     (&file).take(EXIF_HEAD_BYTES - FIRST).read_to_end(&mut head).ok()?;
     parse_exif_fields(&head)?.3
+}
+
+/// A video's container creation time shaped like an image's EXIF result, so both scan paths carry it the same way.
+pub(crate) fn video_capture_fields(path: &std::path::Path) -> Option<ExifFields> {
+    crate::util::video_creation_date::container_creation_unix(path).map(|captured| (None, None, None, Some(captured)))
 }
 
 fn exif_from_head(path: &std::path::Path) -> Option<ExifFields> {

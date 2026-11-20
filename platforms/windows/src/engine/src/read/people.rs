@@ -41,7 +41,7 @@ pub fn active_people(conn: &Connection, limit: Option<usize>) -> rusqlite::Resul
              WHERE fp.person_id = p.id AND f.failed = 0) AS files, \
             (SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id \
              WHERE fp.person_id = p.id AND f.failed = 0) AS faces \
-         FROM persons p WHERE EXISTS ( \
+         FROM persons p WHERE COALESCE(p.is_unknown, 0) = 0 AND EXISTS ( \
              SELECT 1 FROM face_prints fp JOIN files f ON f.id = fp.file_id \
              WHERE fp.person_id = p.id AND f.failed = 0 \
          ) ORDER BY faces DESC, p.id ASC LIMIT ?1",
@@ -65,7 +65,7 @@ pub fn active_people(conn: &Connection, limit: Option<usize>) -> rusqlite::Resul
 
 pub fn active_person_count(conn: &Connection) -> rusqlite::Result<u32> {
     conn.query_row(
-        "SELECT COUNT(*) FROM persons p WHERE EXISTS ( \
+        "SELECT COUNT(*) FROM persons p WHERE COALESCE(p.is_unknown, 0) = 0 AND EXISTS ( \
              SELECT 1 FROM face_prints fp JOIN files f ON f.id = fp.file_id \
              WHERE fp.person_id = p.id AND f.failed = 0 \
          )",
@@ -103,5 +103,21 @@ mod tests {
         assert_eq!((people[0].id, people[0].files, people[0].faces), (10, 1, 2));
         assert_eq!(people[0].name, "Visible");
         assert!(active_people(&conn, Some(0)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_person_marked_unknown_is_not_one_of_the_people_the_page_counts() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) VALUES \
+             (1, '/a.jpg', 1, 1, 0, 'image', 'jpg', 0); \
+             INSERT INTO persons (id, name, is_unknown, file_count, created_at) VALUES (10, 'Ada', 0, 1, 0), (20, NULL, 0, 1, 0), (30, NULL, 1, 1, 0); \
+             INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES \
+             (1, 10, X'00', '0,0,1,1'), (1, 20, X'00', '0,0,1,1'), (1, 30, X'00', '0,0,1,1');",
+        )
+        .unwrap();
+        assert_eq!(active_person_count(&conn).unwrap(), 2);
+        assert_eq!(active_people(&conn, None).unwrap().len(), 2);
     }
 }
