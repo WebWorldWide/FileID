@@ -75,7 +75,7 @@ private enum StderrLog {
         encoder.dateEncodingStrategy = .iso8601
         guard var line = try? encoder.encode(Entry(t: Date(), lvl: level, ev: event, path: path, error: error, extra: extra)) else { return }
         line.append(0x0A)
-        lock.withLock { FileHandle.standardError.write(line) }
+        lock.withLock { try? FileHandle.standardError.write(contentsOf: line) }
     }
 }
 

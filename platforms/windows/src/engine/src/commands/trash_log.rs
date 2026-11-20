@@ -407,6 +407,12 @@ pub(crate) fn recover_at_startup(
         }
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         {
+            if let (Ok(path), Ok(key)) = (paths::trash_log_path(), hmac::log_hmac_key()) {
+                let put_back = put_back_interrupted_batch(&path, &key, db, |batch_id| super::trash::restore_batch(db, batch_id));
+                if put_back > 0 {
+                    tracing::warn!(put_back, "put back files a killed trashFiles had already moved to the Trash");
+                }
+            }
             let dropped = reconcile_trashed_rows(db, crate::shell::trash::locate);
             if dropped > 0 {
                 tracing::warn!(dropped, "dropped catalog rows of files a killed trashFiles left in the Trash");
@@ -414,6 +420,55 @@ pub(crate) fn recover_at_startup(
         }
     }
     reclaimed
+}
+
+/// A `trashFiles` killed partway leaves its write-ahead line as the newest word on the batch (no item carries a Trash
+/// location) and some files already gone from their folders while their catalog rows remain, since the catalog commits
+/// only after every move. Puts the whole batch back, as the Windows claim recovery does, so the user's folder is as it
+/// was before the interrupted delete. Returns how many files `restore` put back; a batch it can't find in the Trash stays
+/// as it is.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) fn put_back_interrupted_batch(
+    path: &std::path::Path,
+    key: &[u8],
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    restore: impl Fn(&str) -> anyhow::Result<crate::ipc::BulkActionResult>,
+) -> usize {
+    let Ok(raw) = std::fs::read(path) else {
+        return 0;
+    };
+    let Some(newest) = latest_entries(&raw, key).pop() else {
+        return 0;
+    };
+    if newest.items.iter().any(|item| item.trashed_path.is_some()) {
+        return 0;
+    }
+    let stranded: Vec<&TrashLogItem> = newest
+        .items
+        .iter()
+        .filter(|item| {
+            std::fs::symlink_metadata(&item.original_path).is_err()
+                && db
+                    .lock()
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)",
+                        rusqlite::params![item.file_id, item.original_path],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+        })
+        .collect();
+    if stranded.is_empty() {
+        return 0;
+    }
+    if let Err(error) = restore(&newest.batch_id) {
+        tracing::warn!(?error, "could not put back an interrupted Trash batch");
+        return 0;
+    }
+    stranded
+        .iter()
+        .filter(|item| std::fs::symlink_metadata(&item.original_path).is_ok())
+        .count()
 }
 
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
@@ -599,6 +654,84 @@ mod tests {
         let persons: Vec<(i64, i64, Option<i64>)> =
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
         assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+    }
+
+    fn interrupted_batch_fixture(
+        items: usize,
+        in_trash: usize,
+    ) -> (std::path::PathBuf, std::path::PathBuf, Vec<std::path::PathBuf>, TrashLogEntry, std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>) {
+        let dir = std::env::temp_dir().join(format!("fileid-interrupted-trash-{}", uuid::Uuid::new_v4()));
+        let trash = dir.join("Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let mut entry = make_entry(&format!("interrupted-{}", uuid::Uuid::new_v4()));
+        entry.items.clear();
+        let mut originals = Vec::new();
+        for index in 0..items {
+            let original = dir.join(format!("photo-{index}.jpg"));
+            std::fs::write(&original, format!("bytes {index}")).unwrap();
+            crate::db::test_support::insert_file(&conn, index as i64 + 1, &original.to_string_lossy(), "image");
+            entry.items.push(TrashLogItem {
+                file_id: index as i64 + 1,
+                original_path: original.to_string_lossy().into_owned(),
+                ..Default::default()
+            });
+            if index < in_trash {
+                std::fs::rename(&original, trash.join(original.file_name().unwrap())).unwrap();
+            }
+            originals.push(original);
+        }
+        (dir, trash, originals, entry, std::sync::Arc::new(parking_lot::Mutex::new(conn)))
+    }
+
+    fn put_everything_back_from(trash: &std::path::Path, originals: &[std::path::PathBuf]) -> impl Fn(&str) -> anyhow::Result<crate::ipc::BulkActionResult> {
+        let trash = trash.to_path_buf();
+        let originals = originals.to_vec();
+        move |_| {
+            for original in &originals {
+                let parked = trash.join(original.file_name().unwrap());
+                if parked.exists() {
+                    std::fs::rename(parked, original)?;
+                }
+            }
+            Ok(crate::ipc::BulkActionResult { command_id: None, action: "restoreFromTrash".into(), succeeded: 0, failed: 0, messages: Vec::new() })
+        }
+    }
+
+    #[test]
+    fn a_trash_batch_killed_partway_is_put_back_at_the_next_start() {
+        let (dir, trash, originals, entry, db) = interrupted_batch_fixture(5, 2);
+        let (log, key) = (dir.join("trash_log.json"), b"test key".to_vec());
+        append_at(&log, &key, &entry).unwrap();
+
+        let put_back = put_back_interrupted_batch(&log, &key, &db, put_everything_back_from(&trash, &originals));
+
+        assert_eq!(put_back, 2, "the two files already in the Trash came back");
+        assert!(originals.iter().all(|original| original.exists()), "the folder is as it was before the delete");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_finished_or_untouched_trash_batch_is_left_alone() {
+        let called = std::cell::Cell::new(0);
+        let count = |_: &str| -> anyhow::Result<crate::ipc::BulkActionResult> {
+            called.set(called.get() + 1);
+            anyhow::bail!("must not be called")
+        };
+
+        let (dir, _trash, _originals, entry, db) = interrupted_batch_fixture(3, 0);
+        let (log, key) = (dir.join("trash_log.json"), b"test key".to_vec());
+        append_at(&log, &key, &entry).unwrap();
+        assert_eq!(put_back_interrupted_batch(&log, &key, &db, count), 0, "nothing left its folder");
+
+        let (dir2, _trash2, _originals2, mut receipted, db2) = interrupted_batch_fixture(3, 3);
+        receipted.items[0].trashed_path = Some("/Trash/photo-0.jpg".into());
+        let log2 = dir2.join("trash_log.json");
+        append_at(&log2, &key, &receipted).unwrap();
+        assert_eq!(put_back_interrupted_batch(&log2, &key, &db2, count), 0, "a batch with a receipt finished normally");
+        assert_eq!(called.get(), 0);
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(dir2).ok();
     }
 
     #[test]

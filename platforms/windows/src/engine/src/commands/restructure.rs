@@ -19,7 +19,7 @@ use crate::db::read::restructure::{
 #[cfg(test)]
 use crate::db::read::restructure::unambiguous_person_name;
 use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassification};
-use crate::pipeline::restructure_apply::RestructureApply;
+use crate::pipeline::restructure_apply::{RestructureApply, UnusableNames};
 use crate::pipeline::restructure_feedback;
 use crate::pipeline::restructure_semantic;
 
@@ -1510,6 +1510,23 @@ pub(crate) async fn handle_undo_restructure(
     }
 }
 
+/// The plain reason a file was left in place; one odd name never refuses the rest of the plan.
+fn unusable_names_notice(unusable: &UnusableNames) -> Option<String> {
+    let first = unusable.first.as_deref()?;
+    let shown: String = first.chars().take(60).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let tail = if first.chars().count() > 60 { "…" } else { "" };
+    let (what, them) = if unusable.count == 1 {
+        ("1 file stayed".to_string(), "its name")
+    } else {
+        (format!("{} files stayed", unusable.count), "their names")
+    };
+    Some(format!(
+        "{what} where {} because FileID can't use {them} in a new folder, for example \"{shown}{tail}\". Rename {}, then organize again. The other files were handled as usual.",
+        if unusable.count == 1 { "it is" } else { "they are" },
+        if unusable.count == 1 { "it" } else { "them" },
+    ))
+}
+
 pub(crate) async fn handle_apply_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1518,7 +1535,7 @@ pub(crate) async fn handle_apply_restructure(
 ) {
     let requested = payload.moves.len();
     let result = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<ipc::RestructureApplyResult> {
+        move || -> anyhow::Result<(ipc::RestructureApplyResult, UnusableNames)> {
             // Inject the operation token the CancelRestructure dispatch arm sets so a long apply is actually stoppable (the flag is reset to false in the ApplyRestructure arm so a stale cancel can't pre-stop a fresh apply).
             let ipc::ApplyRestructurePayload {
                 library_root,
@@ -1553,21 +1570,25 @@ pub(crate) async fn handle_apply_restructure(
                         "[RESTRUCTURE] validated stored-plan bulk eligibility"
                     );
                 }
-                Ok(result)
+                Ok((result, apply.take_unusable_names()))
             } else {
                 // Inline moves are exactly the rows the user reviewed and kept selected in WinUI, so an Ask-tier row carries explicit consent. Only stored/truncated plans need the server-side Ask exclusion, since most of those rows were never displayed.
-                apply_inline_plan(&apply, moves)
+                let result = apply_inline_plan(&apply, moves)?;
+                Ok((result, apply.take_unusable_names()))
             }
         },
     )
     .await;
 
     match result {
-        Ok(Ok(r)) => {
+        Ok(Ok((r, unusable))) => {
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(
                 Wrap::new(r),
             )))
             .await;
+            if let Some(message) = unusable_names_notice(&unusable) {
+                sink.send(EngineError::event("apply_restructure_skipped", message)).await;
+            }
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");
@@ -2183,6 +2204,76 @@ mod tests {
             "no move performed under a pre-set cancel"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One file with a name FileID can't use must not refuse the whole inline plan: the rest move, the odd one stays, and a plain notice says why.
+    #[tokio::test]
+    async fn apply_dispatch_skips_one_unusable_name_and_says_why() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let root = std::env::temp_dir().join(format!("fileid-dispatch-badname-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let mut moves = Vec::new();
+        for (index, name) in ["one.jpg", "bad\nname.jpg", "two.jpg"].iter().enumerate() {
+            let source = root.join(name);
+            std::fs::write(&source, b"data").unwrap();
+            let file_id = index as i64 + 1;
+            conn.execute(
+                "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, file_ref) \
+                 VALUES (?1, ?2, 0, 4, 0.0, 'image', 'jpg', 0, ?3)",
+                rusqlite::params![file_id, source.to_string_lossy(), crate::platform::file_ref(&source).map(|v| v as i64)],
+            )
+            .unwrap();
+            moves.push(ipc::RestructureMove {
+                file_id,
+                source: source.to_string_lossy().into_owned(),
+                destination: root.join("Sorted").join(name).to_string_lossy().into_owned(),
+                category: "Sorted".into(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+                content_hash: None,
+                size_bytes: None,
+                file_ref: None,
+                modified_at: None,
+            });
+        }
+        let payload = ipc::ApplyRestructurePayload {
+            library_root: root.to_string_lossy().into_owned(),
+            plan_id: None,
+            moves,
+            use_symlinks: false,
+        };
+        let (sink, mut rx) = Sink::channel_for_test(8);
+        handle_apply_restructure(sink, Arc::new(parking_lot::Mutex::new(conn)), payload, Arc::new(AtomicBool::new(false))).await;
+
+        let mut counts = None;
+        let mut notice = None;
+        while let Ok(event) = rx.try_recv() {
+            match event.payload {
+                EventPayload::RestructureApplyResult(result) => counts = Some((result.inner.applied, result.inner.failed)),
+                EventPayload::Error(error) => notice = Some((error.inner.kind, error.inner.message)),
+                _ => {}
+            }
+        }
+        assert_eq!(counts, Some((2, 1)));
+        let (kind, message) = notice.expect("a notice names the skipped file");
+        assert_eq!(kind, "apply_restructure_skipped");
+        assert!(message.starts_with("1 file stayed where it is"), "{message}");
+        assert!(message.contains("\"bad name.jpg\""), "a control character in the name is shown as a space: {message}");
+        assert!(root.join("bad\nname.jpg").exists());
+        assert!(root.join("Sorted/one.jpg").exists() && root.join("Sorted/two.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unusable_name_notice_counts_files() {
+        assert_eq!(unusable_names_notice(&UnusableNames::default()), None);
+        let many = UnusableNames { count: 3, first: Some("a\tb.jpg".into()) };
+        let message = unusable_names_notice(&many).unwrap();
+        assert!(message.starts_with("3 files stayed where they are"), "{message}");
+        assert!(message.contains("Rename them"), "{message}");
     }
 
     #[test]

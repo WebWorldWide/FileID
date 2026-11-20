@@ -23,6 +23,7 @@ const VIDEO_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(6);
 const DECODE_FAILED: &str = "Could not decode image";
 const CUT_OFF_IMAGE: &str = "The image file is cut off: it ends before the picture does";
 const PERMISSION_DENIED: &str = "FileID isn't allowed to read this file";
+const WENT_MISSING: &str = "The file went missing while FileID was reading it (will retry next scan)";
 const PDF_OPEN_FAILED: &str = "Could not open PDF (will retry next scan)";
 
 pub(super) fn enabled() -> bool {
@@ -151,12 +152,19 @@ fn read_for_hash(file: &DiscoveredFile, legacy: bool) -> (Option<Vec<u8>>, Optio
 }
 
 /// An image the decoder gave up on is unreadable for the reason the operating system gives when it is opened: a file
-/// FileID may not read is not a damaged image.
+/// FileID may not read, or one that vanished (renamed, deleted, volume unplugged) is not a damaged image. The "will
+/// retry" wording keeps a vanished file out of the Unreadable count and in the next scan.
 fn decode_failure(path: &Path) -> &'static str {
     match std::fs::File::open(crate::util::path_safety::to_extended_length(path)) {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => PERMISSION_DENIED,
+        Err(error) if went_missing(&error) => WENT_MISSING,
         _ => DECODE_FAILED,
     }
+}
+
+fn went_missing(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || matches!(error.raw_os_error(), Some(libc::ENXIO | libc::ENODEV | libc::EIO | libc::ENOTDIR))
 }
 
 fn stored_text(text: Option<String>) -> Option<String> {
@@ -608,7 +616,9 @@ mod tests {
         let broken = dir.join("broken.jpg");
         std::fs::write(&broken, b"not a jpeg").unwrap();
         assert_eq!(decode_failure(&broken), DECODE_FAILED);
-        assert_eq!(decode_failure(&dir.join("missing.jpg")), DECODE_FAILED);
+        assert_eq!(decode_failure(&dir.join("missing.jpg")), WENT_MISSING);
+        assert!(!decode_failure(&dir.join("missing.jpg")).contains("decode"), "a vanished file is not a damaged image");
+        assert!(WENT_MISSING.contains("will retry"), "the Library's Unreadable count leaves out rows that say will retry");
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
         let denied = std::fs::File::open(&broken).is_err();
         if denied {

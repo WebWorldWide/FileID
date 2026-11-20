@@ -1559,6 +1559,7 @@ pub struct RestructureApply {
     // Test seam: journal location override so concurrent tests never share or clobber the real user journal. None → the app-data location.
     undo_journal_override: Option<PathBuf>,
     shortcut_undo_dir_override: Option<PathBuf>,
+    unusable_names: Mutex<UnusableNames>,
     #[cfg(test)]
     fail_next_move_after_journal: AtomicBool,
     #[cfg(test)]
@@ -1567,6 +1568,13 @@ pub struct RestructureApply {
     fail_next_shortcut_manifest_commit: AtomicBool,
     #[cfg(test)]
     cancel_after_undo_replay: AtomicBool,
+}
+
+/// Files an apply left in place because their destination name can't be used on this platform (the name is the file's own, so the planner proposed it unchanged).
+#[derive(Default)]
+pub(crate) struct UnusableNames {
+    pub(crate) count: u32,
+    pub(crate) first: Option<String>,
 }
 
 pub(crate) struct ForwardBatchPreflight<'a> {
@@ -1578,7 +1586,7 @@ pub(crate) struct ForwardBatchPreflight<'a> {
     destination_claims: DestinationClaims,
 }
 
-/// Outcome of a single move's preflight check. `Stale` covers a row's relationship to the live corpus changing since planning (deleted/renamed source, DB identity drift, a destination that collided after planning); apply_iter_with re-checks and skips these per move, so a stale row must not abort the batch. `Err` is reserved for structural plan corruption (duplicate IDs, paths outside the root, unsafe filenames) that makes the WHOLE plan untrustworthy.
+/// Outcome of a single move's preflight check. `Stale` covers a row's relationship to the live corpus changing since planning (deleted/renamed source, DB identity drift, a destination that collided after planning, a destination name this platform can't store); apply_iter_with re-checks and skips these per move, so a stale row must not abort the batch. `Err` is reserved for structural plan corruption (duplicate IDs, paths outside the root) that makes the WHOLE plan untrustworthy.
 pub(crate) enum PreflightOutcome {
     Applicable,
     Stale(&'static str),
@@ -1659,13 +1667,11 @@ impl ForwardBatchPreflight<'_> {
             ));
         }
 
-        if let Some(name) = destination.file_name().and_then(|name| name.to_str()) {
-            anyhow::ensure!(
-                crate::util::path_safety::is_safe_filename(name),
-                "planned destination has an invalid filename"
-            );
-        } else {
+        let Some(name) = destination.file_name().and_then(|name| name.to_str()) else {
             anyhow::bail!("planned destination must name a file");
+        };
+        if !crate::util::path_safety::is_safe_filename(name) {
+            return Ok(PreflightOutcome::Stale("planned destination name can't be used here"));
         }
         let normalized_destination =
             crate::util::path_safety::canonicalize_for_containment(destination);
@@ -1700,6 +1706,7 @@ impl RestructureApply {
             cancel: Arc::new(AtomicBool::new(false)),
             undo_journal_override: None,
             shortcut_undo_dir_override: None,
+            unusable_names: Mutex::new(UnusableNames::default()),
             #[cfg(test)]
             fail_next_move_after_journal: AtomicBool::new(false),
             #[cfg(test)]
@@ -1743,6 +1750,11 @@ impl RestructureApply {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// What the last apply skipped for an unusable destination name; resets the tally.
+    pub(crate) fn take_unusable_names(&self) -> UnusableNames {
+        std::mem::take(&mut *self.unusable_names.lock())
     }
 
     #[cfg(test)]
@@ -1968,6 +1980,18 @@ impl RestructureApply {
             };
 
             let dest = PathBuf::from(&m.destination);
+            if record_undo
+                && let Some(name) = dest.file_name().and_then(|name| name.to_str())
+                && !crate::util::path_safety::is_safe_filename(name)
+            {
+                tracing::warn!(file_id = m.file_id, "[RESTRUCTURE] leaving a file in place: its name can't be used here");
+                let mut unusable = self.unusable_names.lock();
+                unusable.count += 1;
+                unusable.first.get_or_insert_with(|| name.to_owned());
+                drop(unusable);
+                failed += 1;
+                continue;
+            }
             // Path-traversal guard: the destination's parent must exist or be createable under library_root; canonicalize the closest existing ancestor and verify containment.
             // Skipped on an UNDO replay (record_undo=false): undo_last validates the whole journal against the caller's canonical library root before any inverse move, so repeating the walk only widens the per-file TOCTOU surface. Forward destinations still require the check immediately before mutation.
             if record_undo
@@ -5239,6 +5263,43 @@ mod tests {
         assert_eq!(res.failed, 1);
         assert!(real.exists(), "the real file must be untouched");
         assert!(!root.join("Sorted").join("x.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One file whose destination name can't be used must be skipped with a reason; the other files in the same plan still move.
+    #[test]
+    fn apply_skips_an_unusable_destination_name_and_moves_the_rest() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-badname-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let names = ["one.jpg", "bad\nname.jpg", "two.jpg"];
+        let mut moves = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            let source = root.join(name);
+            std::fs::write(&source, name.as_bytes()).unwrap();
+            insert_file_row(&conn, index as i64 + 1, &source.to_string_lossy());
+            let destination = root.join("Sorted").join(name);
+            moves.push(move_fixture(index as i64 + 1, &source.to_string_lossy(), &destination.to_string_lossy()));
+        }
+        let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false)
+            .with_undo_journal_path(root.join("undo.ndjson"));
+
+        let mut preflight = apply.begin_forward_preflight().unwrap();
+        let outcomes: Vec<bool> = moves
+            .iter()
+            .map(|m| matches!(preflight.validate(m).unwrap(), PreflightOutcome::Applicable))
+            .collect();
+        assert_eq!(outcomes, [true, false, true], "preflight flags the row instead of refusing the plan");
+
+        let res = apply.apply(&moves).unwrap();
+        assert_eq!((res.applied, res.failed), (2, 1));
+        assert!(root.join("Sorted/one.jpg").exists() && root.join("Sorted/two.jpg").exists());
+        assert!(root.join("bad\nname.jpg").exists(), "the odd file stays where it was");
+        assert!(!root.join("Sorted").join("bad\nname.jpg").exists());
+        let unusable = apply.take_unusable_names();
+        assert_eq!(unusable.count, 1);
+        assert_eq!(unusable.first.as_deref(), Some("bad\nname.jpg"));
+        assert_eq!(apply.take_unusable_names().count, 0, "the tally resets after it is read");
         let _ = std::fs::remove_dir_all(&root);
     }
 

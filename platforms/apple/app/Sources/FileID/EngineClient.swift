@@ -172,6 +172,8 @@ public final class EngineClient {
     public private(set) var lastSentCommandID: String?
     /// True once an applyRestructure has moved files and they haven't been undone; drives "Undo last run".
     public private(set) var canUndoRestructure = false
+    /// The folder whose last Organize is waiting to be undone after a relaunch (from the engine's journal on disk); nil when the undo came from this session's own apply.
+    public private(set) var restructureUndoRoot: String?
     private var undoRestructureInFlight = false
 
     private var process: Process?
@@ -577,6 +579,10 @@ public final class EngineClient {
             startupExits.reachedReady()
             if lastError?.kind == "engine_exited" { lastError = nil }
             restoreSavedFolderAccess()
+            if !canUndoRestructure, let root = RestructureUndoJournal.pendingRoot() {
+                canUndoRestructure = true
+                restructureUndoRoot = root
+            }
             // Don't clear the respawn budget merely on reaching Ready: a Ready→immediate-crash flap would reset it each cycle and never trip the 3-in-60s cap. Record when we became Ready; handleEngineExit clears the budget only after `stabilitySettle`.
             lastReadyAt = Date()
             refreshVLMAdvice()
@@ -696,6 +702,7 @@ public final class EngineClient {
             } else {
                 canUndoRestructure = result.applied > 0
             }
+            restructureUndoRoot = nil
         case .bulkActionResult(let result):
             bulkActionResult = result
             bulkActionResultSignal &+= 1
