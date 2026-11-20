@@ -134,6 +134,14 @@ async fn async_main() -> Result<()> {
     // Emit `ready` first so the sidebar can leave .starting; the handshake is one-way.
     commands::hardware::emit_ready(&sink).await;
 
+    // The first search after launch should not wait for the CLIP text model; a few seconds' grace keeps launch itself quick.
+    if let Some(db) = db_conn.clone() {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let _ = tokio::task::spawn_blocking(move || commands::embed::prewarm_clip_text(&db)).await;
+        });
+    }
+
     // Structural integrity check after `ready`, on its own read-only connection so a large library never delays launch. A torn page or truncated file (power loss mid-checkpoint, failing disk) would otherwise surface as opaque per-query failures. Non-fatal: the engine keeps running so the user can wipe + rescan.
     let integrity_check = Arc::new(db::IntegrityCheck::default());
     if db_conn.is_some() {
@@ -606,12 +614,27 @@ fn reserve_scan(
 struct JobTrackGuard {
     queue: job_queue::JobQueue,
     id: job_queue::JobId,
+    title: String,
 }
 impl JobTrackGuard {
     fn start(queue: &job_queue::JobQueue, category: JobCategory, title: &str) -> Self {
         let id = queue.push(category, title, None);
         queue.promote_next();
-        Self { queue: queue.clone(), id }
+        Self { queue: queue.clone(), id, title: title.to_string() }
+    }
+}
+impl JobTrackGuard {
+    /// Shows how far finding the faces has got as the job's title and remaining time.
+    fn finding_faces(&self) -> commands::face_clustering::FindingFaces {
+        let (queue, id, started) = (self.queue.clone(), self.id.clone(), std::time::Instant::now());
+        let title = self.title.clone();
+        Arc::new(move |progress| match progress {
+            Some((done, total)) if total > 0 => {
+                let eta = (done > 0).then(|| started.elapsed().as_secs_f64() * (total - done.min(total)) as f64 / done as f64);
+                queue.retitle(&id, format!("Finding faces… {} of {}", done.min(total), total), eta);
+            }
+            _ => queue.retitle(&id, title.as_str(), None),
+        })
     }
 }
 impl Drop for JobTrackGuard {
@@ -700,8 +723,9 @@ impl AfterScan {
             face_clustering_rejection_event("FileID can't group faces while the scan is paused. Resume or stop the scan, then try again."),
             async move {
                 let _guard = guard;
+                let finding = track.finding_faces();
                 let _track = track;
-                commands::face_clustering::handle_run_face_clustering(sink, db, terminal_active).await;
+                commands::face_clustering::handle_run_face_clustering(sink, db, terminal_active, finding).await;
             },
         )
         .await;
@@ -1269,6 +1293,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                         || commands::prewarm::any_download_in_flight()
                 })
             };
+            let prewarm_db = db.clone();
             #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
             let after_scan = AfterScan {
                 sink: sink.clone(),
@@ -1292,6 +1317,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 .await;
                 if completed {
                     retry_timed_out_files_when_idle(retry_dispatcher, retry_payload, other_heavy_work);
+                    drop(tokio::task::spawn_blocking(move || commands::embed::prewarm_clip_text(&prewarm_db)));
                 }
                 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
                 if completed {
@@ -1437,11 +1463,13 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 ),
                 async move {
                     let _guard = guard;
+                    let finding = track.finding_faces();
                     let _track = track;
                     commands::face_clustering::handle_run_face_clustering(
                         sink_c,
                         db_c,
                         terminal_active,
+                        finding,
                     )
                     .await;
                 },

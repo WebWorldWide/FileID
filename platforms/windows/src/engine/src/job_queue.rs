@@ -72,6 +72,16 @@ impl JobQueue {
         Some(next)
     }
 
+    /// Renames the job and refreshes its remaining time, emitting `queueState`; nothing happens once it has finished.
+    pub fn retitle(&self, id: &str, title: impl Into<String>, eta_seconds: Option<f64>) {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let Some(job) = inner.running.iter_mut().chain(inner.pending.iter_mut()).find(|job| job.id == id) else { return };
+        job.title = title.into();
+        job.eta_seconds = eta_seconds;
+        Self::emit_locked(inner);
+    }
+
     pub fn has_active_besides(&self, category: JobCategory) -> bool {
         let inner = self.inner.lock();
         inner.running.iter().chain(inner.pending.iter()).any(|job| job.category != category)
@@ -133,5 +143,30 @@ impl JobQueue {
 impl Default for JobQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retitle_changes_the_running_job_and_announces_it() {
+        let queue = JobQueue::new();
+        let seen = Arc::new(Mutex::new(Vec::<QueueState>::new()));
+        let sink = seen.clone();
+        queue.on_change(move |state| sink.lock().push(state));
+        let id = queue.push(JobCategory::FaceCluster, "Group faces", None);
+        queue.promote_next();
+        queue.retitle(&id, "Finding faces… 5 of 10", Some(3.0));
+        let last = seen.lock().last().cloned().unwrap();
+        let running = last.running.unwrap();
+        assert_eq!((running.title.as_str(), running.eta_seconds, last.total_eta_seconds), ("Finding faces… 5 of 10", Some(3.0), Some(3.0)));
+        let announced = seen.lock().len();
+        queue.finish(&id);
+        let after_finish = seen.lock().len();
+        queue.retitle(&id, "late", None);
+        assert_eq!(seen.lock().len(), after_finish, "a finished job is not retitled or announced");
+        assert!(after_finish > announced);
     }
 }

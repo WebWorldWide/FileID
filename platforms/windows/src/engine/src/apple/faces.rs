@@ -15,6 +15,8 @@ use crate::models::face_align;
 use crate::models::face_landmark_match::{self, NormRect};
 
 pub const EXTRACT_LONG_SIDE: u32 = 2048;
+const DECODE_LONG_SIDES: [u32; 3] = [1024, 1536, EXTRACT_LONG_SIDE];
+fn min_face_pixels() -> f64 { std::env::var("FILEID_X_MINFACE").ok().and_then(|v| v.parse().ok()).unwrap_or(128.0) }
 
 /// Normalized bottom-left box and five points in top-left pixels of the decoded image.
 #[derive(Debug, Clone, PartialEq)]
@@ -154,10 +156,39 @@ pub struct FaceCrop {
     pub aligned: bool,
 }
 
+fn smallest_box_side(boxes: &[String], width: u32, height: u32, orientation: u8) -> Option<f64> {
+    boxes
+        .iter()
+        .filter_map(|bbox| face_landmark_match::parse_normalized(bbox, width, height, orientation))
+        .map(|rect| (rect.w * f64::from(width)).min(rect.h * f64::from(height)))
+        .reduce(f64::min)
+}
+
+/// The smallest decode whose stored boxes all stay at least `min_face_pixels` across, taking the frame as narrow as 3:2
+/// so a portrait or panorama is checked again against its real size once decoded.
+fn first_long_side(boxes: &[String]) -> u32 {
+    let Some(smallest) = smallest_box_side(boxes, 1, 1, 1).filter(|side| *side > 0.0 && *side <= 1.0) else { return EXTRACT_LONG_SIDE };
+    DECODE_LONG_SIDES.into_iter().find(|side| smallest * f64::from(*side) * 2.0 / 3.0 >= min_face_pixels()).unwrap_or(EXTRACT_LONG_SIDE)
+}
+
+/// Decodes at the size the stored faces need, not always at 2048: a decode is most of what reading a photo costs. A
+/// photo whose smallest face is under `min_face_pixels` at that size is decoded again at 2048.
+fn open_for_faces(path: &Path, boxes: &[String], landmarks: bool) -> Option<FaceImage> {
+    let mut side = first_long_side(boxes);
+    loop {
+        let image = FaceImage::open(path, side, landmarks)?;
+        let enough = smallest_box_side(boxes, image.width, image.height, image.orientation).is_none_or(|smallest| smallest >= min_face_pixels());
+        if side >= EXTRACT_LONG_SIDE || enough || image.width.max(image.height) < side {
+            return Some(image);
+        }
+        side = EXTRACT_LONG_SIDE;
+    }
+}
+
 /// `None` per box that yields no crop; landmarks run only when `FILEID_FACE_ALIGN` is not `0`.
 pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
     let align = std::env::var("FILEID_FACE_ALIGN").as_deref() != Ok("0");
-    let Some(image) = FaceImage::open(path, EXTRACT_LONG_SIDE, align) else { return Vec::new() };
+    let Some(image) = open_for_faces(path, boxes, align) else { return Vec::new() };
     let pixels = if image.landmarks.is_empty() { None } else { image.pixels() };
     let detected: Vec<NormRect> = image.landmarks.iter().map(|l| l.bounds).collect();
     boxes
@@ -186,9 +217,12 @@ pub struct MacSFace {
     version: String,
 }
 
-/// Two by default so the four extraction workers rarely wait; `FILEID_SFACE_SESSIONS` (1–4) overrides.
+/// One per two extraction workers, two to four, so they rarely wait; `FILEID_SFACE_SESSIONS` (1–4) overrides.
 fn sface_sessions() -> usize {
-    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(2, |n| n.clamp(1, 4))
+    std::env::var("FILEID_SFACE_SESSIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map_or_else(|| (crate::commands::face_extract_mac::extraction_threads() / 2).clamp(2, 4), |n| n.clamp(1, 4))
 }
 
 impl MacSFace {
@@ -217,7 +251,10 @@ impl MacSFace {
         let mut session = (0..count)
             .find_map(|offset| self.sessions[(start + offset) % count].try_lock())
             .unwrap_or_else(|| self.sessions[start % count].lock());
-        session.embed_rgba(rgba_112).map_err(|error| tracing::warn!(?error, "SFace embed failed")).ok()
+        // The extraction workers already fill the cores; a 112 px face split over the shared matmul pool only spins its threads.
+        tract_linalg::multithread::multithread_tract_scope(tract_linalg::multithread::Executor::SingleThread, || session.embed_rgba(rgba_112))
+            .map_err(|error| tracing::warn!(?error, "SFace embed failed"))
+            .ok()
     }
 }
 
@@ -281,7 +318,7 @@ pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
 
 /// Phase 1 of the Swift `runClustering`: embeds every pending face except those of people marked Unknown. Without
 /// weights nothing runs.
-pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>) {
+pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>, progress: crate::commands::face_extract_mac::Progress) {
     let processing = crate::commands::face_refresh::processing();
     if !processing.starts_with(crate::commands::face_clustering_mac::MAC_PREFIX) {
         return;
@@ -308,7 +345,7 @@ pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Conne
         }
     };
     let crops = crate::paths::faces_dir().ok();
-    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), &|| false) {
+    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), &|| false, progress) {
         Ok(summary) => tracing::info!(?summary, "face_print_extract_finished"),
         Err(error) => tracing::error!(?error, "face_print_persist_failed"),
     }
@@ -692,6 +729,40 @@ mod tests {
         assert!(signals.faces.is_empty());
         assert_eq!(signals.face_long_side, Some(2048), "a large frame without faces is tiled");
         assert!(take_image_signals(&dir.path().join("missing.jpg"), &mut faces).is_none());
+    }
+
+    #[test]
+    fn the_decode_size_follows_the_smallest_stored_face() {
+        let one = |bbox: &str| first_long_side(&[bbox.to_string()]);
+        assert_eq!(one("0.4,0.4,0.3,0.3"), 1024);
+        assert_eq!(one("0.4,0.4,0.2,0.2"), 1024);
+        assert_eq!(one("0.4,0.4,0.15,0.15"), 1536);
+        assert_eq!(one("0.4,0.4,0.1,0.1"), 2048);
+        assert_eq!(one("0.4,0.4,0.03,0.03"), 2048);
+        assert_eq!(first_long_side(&["0.4,0.4,0.3,0.3".into(), "0.1,0.1,0.03,0.03".into()]), 2048, "the smallest face decides");
+        assert_eq!(first_long_side(&["garbage".into()]), 2048);
+        assert_eq!(first_long_side(&[]), 2048);
+        assert_eq!(first_long_side(&[r#"{"x":10,"y":10,"w":900,"h":900}"#.into()]), 2048, "pixel boxes are sized once decoded");
+    }
+
+    #[test]
+    fn a_photo_is_decoded_small_for_large_faces_and_again_at_full_size_for_small_ones() {
+        let dir = Scratch::new();
+        let path = write_gradient_jpeg(dir.path(), 3000, 2000);
+        let large = open_for_faces(&path, &["0.3,0.3,0.4,0.4".into()], false).expect("decoded");
+        assert_eq!((large.width, large.height), (1024, 683));
+        let small = open_for_faces(&path, &["0.3,0.3,0.03,0.03".into()], false).expect("decoded");
+        assert_eq!((small.width, small.height), (2048, 1365));
+        let panorama = dir.path().join("panorama");
+        std::fs::create_dir(&panorama).unwrap();
+        let wide = write_gradient_jpeg(&panorama, 3000, 1000);
+        let opened = open_for_faces(&wide, &["0.3,0.3,0.15,0.15".into()], false).expect("decoded");
+        assert_eq!(opened.width, 2048, "a face short in pixels on a wide frame is decoded again at full size");
+        let small_dir = dir.path().join("small");
+        std::fs::create_dir(&small_dir).unwrap();
+        let tiny = write_gradient_jpeg(&small_dir, 400, 300);
+        let kept = open_for_faces(&tiny, &["0.3,0.3,0.15,0.15".into()], false).expect("decoded");
+        assert_eq!(kept.width, 400, "a photo already smaller than the decode is not decoded twice");
     }
 
     #[test]

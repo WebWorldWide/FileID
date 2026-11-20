@@ -736,10 +736,10 @@ struct PeopleView: View {
         EmptyStateView(
             icon: "person.crop.circle.badge.questionmark",
             title: "\(totalFacePrints) faces found",
-            message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
+            message: "Press Group faces to sort them into one card per person. This can take a few minutes for a large library.",
             primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
             secondaryMessage: "Then click a card to type that person's name.",
-            progressLabel: engine.faceClusteringInFlight ? "Grouping faces…" : nil
+            progressLabel: engine.faceClusteringInFlight ? (engine.faceStageProgress ?? "Grouping faces…") : nil
         )
     }
 
