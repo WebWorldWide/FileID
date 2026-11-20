@@ -35,9 +35,11 @@ struct VlmKind {
     license: &'static str,
 }
 
+const LARGE_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_LARGE_KIND;
 const SMALL_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_SMALL_KIND;
+const SMALLEST_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_SMALLEST_KIND;
 
-const VLMS: [VlmKind; 4] = [
+const VLMS: [VlmKind; 6] = [
     VlmKind {
         key: "qwen2_5_vl_7b",
         display: "Qwen2.5-VL 7B",
@@ -60,9 +62,23 @@ const VLMS: [VlmKind; 4] = [
         license: "Apache-2.0",
     },
     VlmKind {
+        key: LARGE_VLM_KIND,
+        display: "GLM-4.6V",
+        ram_gb: 84.0,
+        secs_per_image: 30.0,
+        license: "MIT",
+    },
+    VlmKind {
         key: SMALL_VLM_KIND,
         display: "Qwen3-VL 2B",
         ram_gb: 3.0,
+        secs_per_image: 3.0,
+        license: "Apache-2.0",
+    },
+    VlmKind {
+        key: SMALLEST_VLM_KIND,
+        display: "Qwen3-VL 2B (compact)",
+        ram_gb: 2.4,
         secs_per_image: 3.0,
         license: "Apache-2.0",
     },
@@ -78,11 +94,11 @@ fn recommended_vlm_kind(
     free_disk_bytes: Option<u64>,
 ) -> &'static str {
     let order: &[&str] = if total_ram_gb >= 47.5 {
-        &["mistral_small_3_2", "qwen2_5_vl_7b", SMALL_VLM_KIND]
+        &[LARGE_VLM_KIND, "mistral_small_3_2", "qwen2_5_vl_7b", SMALL_VLM_KIND, SMALLEST_VLM_KIND]
     } else if total_ram_gb >= 15.0 {
-        &["qwen2_5_vl_7b", SMALL_VLM_KIND]
+        &["qwen2_5_vl_7b", SMALL_VLM_KIND, SMALLEST_VLM_KIND]
     } else {
-        &[SMALL_VLM_KIND]
+        &[SMALL_VLM_KIND, SMALLEST_VLM_KIND]
     };
     order
         .iter()
@@ -94,7 +110,7 @@ fn recommended_vlm_kind(
                 .copied()
                 .find(|kind| vlm_fits(kind, total_ram_gb, available_ram_gb, None))
         })
-        .unwrap_or(SMALL_VLM_KIND)
+        .unwrap_or(SMALLEST_VLM_KIND)
 }
 
 thread_local! {
@@ -2026,6 +2042,25 @@ mod recommendation_tests {
             recommended_vlm_kind(48.0, 40.0, Some(PLENTY)),
             "mistral_small_3_2"
         );
+    }
+
+    #[test]
+    fn a_typical_8_gb_pc_gets_the_2b_model_that_loads_now() {
+        assert_eq!(recommended_vlm_kind(8.0, 4.6, Some(PLENTY)), SMALL_VLM_KIND);
+        assert_eq!(recommended_vlm_kind(8.0, 3.7, Some(PLENTY)), SMALLEST_VLM_KIND, "45% of 8 GB is free: only the Q4_K_M loads");
+        assert_eq!(recommended_vlm_kind(8.0, 1.0, Some(PLENTY)), SMALLEST_VLM_KIND, "nothing loads now: the smallest that could ever run");
+        assert!(vlm_fits(SMALLEST_VLM_KIND, 8.0, 3.7, None) && !vlm_fits(SMALL_VLM_KIND, 8.0, 3.7, None));
+    }
+
+    #[test]
+    fn the_hundred_billion_model_leads_only_hosts_that_can_hold_it() {
+        assert!(!vlm_fits(LARGE_VLM_KIND, 64.0, 0.0, None));
+        assert!(vlm_fits(LARGE_VLM_KIND, 96.0, 0.0, None));
+        assert_eq!(recommended_vlm_kind(64.0, 50.0, Some(PLENTY)), "mistral_small_3_2");
+        assert_eq!(recommended_vlm_kind(96.0, 60.0, Some(PLENTY)), "mistral_small_3_2");
+        assert_eq!(recommended_vlm_kind(96.0, 90.0, Some(PLENTY)), LARGE_VLM_KIND);
+        assert_eq!(recommended_vlm_kind(128.0, 100.0, Some(PLENTY)), LARGE_VLM_KIND);
+        assert_eq!(vlm_by_key(LARGE_VLM_KIND).license, "MIT");
     }
 
     #[test]
