@@ -627,21 +627,23 @@ struct PeopleView: View {
                         let inMode = mergeMode || unknownMode
                         let checked = mergeMode ? mergeChecked.contains(person.id)
                                                 : unknownChecked.contains(person.id)
-                        PersonCard(person: person, store: store,
-                                   selectionMode: inMode,
-                                   isChecked: checked,
-                                   selectionTint: unknownMode ? Color.gray : Theme.gold)
-                            .onTapGesture {
-                                if mergeMode {
-                                    if mergeChecked.contains(person.id) { mergeChecked.remove(person.id) }
-                                    else { mergeChecked.insert(person.id) }
-                                } else if unknownMode {
-                                    if unknownChecked.contains(person.id) { unknownChecked.remove(person.id) }
-                                    else { unknownChecked.insert(person.id) }
-                                } else {
-                                    activeSheet = .personDetail(person.id)
-                                }
+                        Button {
+                            if mergeMode {
+                                if mergeChecked.contains(person.id) { mergeChecked.remove(person.id) }
+                                else { mergeChecked.insert(person.id) }
+                            } else if unknownMode {
+                                if unknownChecked.contains(person.id) { unknownChecked.remove(person.id) }
+                                else { unknownChecked.insert(person.id) }
+                            } else {
+                                activeSheet = .personDetail(person.id)
                             }
+                        } label: {
+                            PersonCard(person: person, store: store,
+                                       selectionMode: inMode,
+                                       isChecked: checked,
+                                       selectionTint: unknownMode ? Color.gray : Theme.gold)
+                        }
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
                             // Drag a card onto another to merge; disabled in checkbox modes so a drag mid-selection doesn't merge.
                             .modifier(PersonCardDragMergeModifier(
                                 enabled: !mergeMode && !unknownMode,
@@ -1116,19 +1118,21 @@ private struct PersonDetailSheet: View {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 8)], spacing: 8) {
                     ForEach(files) { f in
-                        PersonFileTile(
-                            file: f,
-                            selectMode: selectMode,
-                            isChecked: checked.contains(f.id)
-                        )
-                            .onTapGesture {
-                                if selectMode {
-                                    if checked.contains(f.id) { checked.remove(f.id) }
-                                    else { checked.insert(f.id) }
-                                } else {
-                                    NSWorkspace.shared.open(f.url)
-                                }
+                        Button {
+                            if selectMode {
+                                if checked.contains(f.id) { checked.remove(f.id) }
+                                else { checked.insert(f.id) }
+                            } else {
+                                NSWorkspace.shared.open(f.url)
                             }
+                        } label: {
+                            PersonFileTile(
+                                file: f,
+                                selectMode: selectMode,
+                                isChecked: checked.contains(f.id)
+                            )
+                        }
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
                     }
                 }
                 .padding(16)
