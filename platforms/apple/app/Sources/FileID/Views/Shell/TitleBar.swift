@@ -175,7 +175,7 @@ struct TitleBar: View {
                 Button(pickedURL == nil ? "Choose folder…" : "Choose another folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
-                        .buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("r", modifiers: .command)
+                        .buttonStyle(DSSecondaryButtonStyle(height: 28))
                         .disabled(engine.lastProgress.map { $0.phase == .discovering || $0.phase == .tagging || $0.phase == .postScan } ?? false)
                 }
             }
