@@ -133,6 +133,7 @@ const MODELS: &[(&str, &str, f64)] = &[
     ("gemma_3_4b", "Gemma 3 4B (QAT 4-bit)", 4.5),
     ("gemma_3_12b", "Gemma 3 12B (QAT 4-bit)", 9.0),
     ("mistral_small_3_2", "Mistral Small 3.2 24B (4-bit)", 16.0),
+    ("qwen3_5_122b", "Qwen3.5 122B-A10B (4-bit)", 72.0),
     ("paligemma_3b", "PaliGemma 3B (8-bit)", 4.0),
 ];
 

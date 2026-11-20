@@ -38,7 +38,7 @@ const VISION_ARCHITECTURES: &[&str] = &[
 const RUNTIME_INCOMPATIBLE: [&str; 2] = ["mlx-community/SmolVLM-256M-Instruct-4bit", "mlx-community/SmolVLM-500M-Instruct-4bit"];
 
 /// `AIModelKind.favorites`: kind, display name, resident-memory budget (GB).
-const FAVORITES: [(&str, &str, f64); 9] = [
+const FAVORITES: [(&str, &str, f64); 10] = [
     ("qwen2_5_vl_7b", "Qwen2.5-VL 7B (4-bit)", 7.0),
     ("qwen3_vl_2b", "Qwen3-VL 2B (4-bit)", 3.0),
     ("qwen3_vl_4b", "Qwen3-VL 4B (4-bit)", 5.0),
@@ -47,6 +47,7 @@ const FAVORITES: [(&str, &str, f64); 9] = [
     ("gemma_3_4b", "Gemma 3 4B (QAT 4-bit)", 4.5),
     ("gemma_3_12b", "Gemma 3 12B (QAT 4-bit)", 9.0),
     ("mistral_small_3_2", "Mistral Small 3.2 24B (4-bit)", 16.0),
+    ("qwen3_5_122b", "Qwen3.5 122B-A10B (4-bit)", 72.0),
     ("paligemma_3b", "PaliGemma 3B (8-bit)", 4.0),
 ];
 

@@ -7476,6 +7476,98 @@
       }
     },
     {
+      "repo": "mlx-community/Qwen3.5-122B-A10B-4bit",
+      "revision": "e9c67b08899964be5fdd069bb1b4bc8907fe68f5",
+      "license": "apache-2.0",
+      "architecture": "qwen3_5_moe",
+      "role": "vision",
+      "weightBytes": 69593636939,
+      "bases": [
+        {
+          "repo": "Qwen/Qwen3.5-122B-A10B",
+          "revision": "dc4d348443bc740c68e2d77492492c11606384d5",
+          "license": "apache-2.0"
+        }
+      ],
+      "files": [
+        {
+          "path": "model-00001-of-00014.safetensors",
+          "sha256": "a2e5982d8ae4087ef151c5faab112a4a1d4b511a399dd4c83390183cf9dc2bed",
+          "size": 5117191884
+        },
+        {
+          "path": "model-00002-of-00014.safetensors",
+          "sha256": "617d0276db85950faff4d7e8a253940addcb05137f6374d95d0a9c83e752f883",
+          "size": 5199749275
+        },
+        {
+          "path": "model-00003-of-00014.safetensors",
+          "sha256": "a96a3a6e837c1f2dea15f312ed85189c1887c04b94bbf0e9bd4ce400f4514991",
+          "size": 5199749313
+        },
+        {
+          "path": "model-00004-of-00014.safetensors",
+          "sha256": "fb70d290b16264828109df54b627e448fefbe3477c2772a0c36bc6e8cbbdadb3",
+          "size": 5144114566
+        },
+        {
+          "path": "model-00005-of-00014.safetensors",
+          "sha256": "d396eef8d4fe4911bdf6dcc0e219f60fa55922baae647929c9f2fa00d26abab6",
+          "size": 5199749511
+        },
+        {
+          "path": "model-00006-of-00014.safetensors",
+          "sha256": "19f338fdd7ac3f9246addcb9ec387f28f129a3b36082ebb8f90de20abea10ad2",
+          "size": 5199749419
+        },
+        {
+          "path": "model-00007-of-00014.safetensors",
+          "sha256": "ef428dd92ed6ee5a7d4e32dd8caba3919cb2963040b11e26fbeae98191e23f7f",
+          "size": 5144114570
+        },
+        {
+          "path": "model-00008-of-00014.safetensors",
+          "sha256": "e7c877102c7f1e572838cce84d83890478ca45a3dd6f603d923da2bd9fc68cf5",
+          "size": 5199749483
+        },
+        {
+          "path": "model-00009-of-00014.safetensors",
+          "sha256": "4fb3c12704e6010312fd8c377ec15b0f582ca5772e61d67dd4e28c91decc56ce",
+          "size": 5199749473
+        },
+        {
+          "path": "model-00010-of-00014.safetensors",
+          "sha256": "a1de2cfcb5c251578bde9cec23c4d02ed2c37be3de4b5a8a30f5168078aa5a07",
+          "size": 5144114588
+        },
+        {
+          "path": "model-00011-of-00014.safetensors",
+          "sha256": "b8f6fc3bdf62bad1d0db747bafff02a8c179172508bf5ed08d625690f8bac2d1",
+          "size": 5199749481
+        },
+        {
+          "path": "model-00012-of-00014.safetensors",
+          "sha256": "bd42762181ba345e1b092b95384d575b37fe402ad191796b6eab2d38d8b7d357",
+          "size": 5199749423
+        },
+        {
+          "path": "model-00013-of-00014.safetensors",
+          "sha256": "e240d793b2b925df9564ff934ce2da30ba81f72c78fa1671cffe6958fc7fcbe8",
+          "size": 5149742812
+        },
+        {
+          "path": "model-00014-of-00014.safetensors",
+          "sha256": "aeee4503d75b5d55bd65e001cb4d781bacac886529351cfa7593e9d9fb25ecb0",
+          "size": 2296363141
+        }
+      ],
+      "quantization": {
+        "bits": 4,
+        "groupSize": 64,
+        "mode": "affine"
+      }
+    },
+    {
       "repo": "mlx-community/Qwen3.5-122B-A10B-OptiQ-2bit",
       "revision": "8284ab1029a2b0114824175aa7f04740ff318934",
       "license": "apache-2.0",
