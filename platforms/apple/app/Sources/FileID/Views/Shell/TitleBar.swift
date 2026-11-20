@@ -72,7 +72,7 @@ struct TitleBar: View {
                         .frame(maxWidth: 180, alignment: .leading)
                         .contentTransition(.opacity)
                         .animation(Theme.spring, value: switcherTitle)
-                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
+                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).accessibilityHidden(true)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
@@ -158,7 +158,7 @@ struct TitleBar: View {
                 .overlay(alignment: .top) { if !engine.libraryRoots.isEmpty { Hairline(color: Theme.hairlineStrong) } }
             if let url = pickedURL {
                 HStack(alignment: .top, spacing: 10) {
-                    Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14)
+                    Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(url.lastPathComponent).font(Theme.ChromeFont.body(14, .semibold)).foregroundStyle(Theme.text1)
                         Text(url.path).font(Theme.ChromeFont.meta).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)

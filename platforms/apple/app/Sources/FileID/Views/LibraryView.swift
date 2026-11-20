@@ -1862,7 +1862,7 @@ private struct LibrarySelectedPane: View {
                     Spacer()
                     Button(action: onClose) {
                         Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
-                            .frame(width: 22, height: 22)
+                            .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget)
                     }
                     .buttonStyle(.dsRow)
                     .keyboardShortcut(pageActive ? .cancelAction : nil)
