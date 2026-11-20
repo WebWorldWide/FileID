@@ -343,13 +343,17 @@ struct TakeReview: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    DSTextField(placeholder: "What should happen? e.g. Kyle gets a hit, everyone smiling", text: $goal, height: Theme.Metrics.control) {
+                    DSTextField(placeholder: "What should happen?", text: $goal, height: Theme.Metrics.control) {
                         Task { await rankWithGoal() }
                     }
+                    .help("For example: Kyle gets a hit, everyone smiling")
                     Button { Task { await rankWithGoal() } } label: { Label("Rank with AI", systemImage: "sparkles") }
                         .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.control))
                         .disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || rankingInFlight)
                         .help("Looks at all the \(noun.many) together, using the same AI as Describe Files. Runs on this Mac.")
+                }
+                if ranking == nil {
+                    MetaText("For example: Kyle gets a hit, everyone smiling", size: 11.5)
                 }
                 if let ranking {
                     HStack(alignment: .top, spacing: 10) {
@@ -563,7 +567,7 @@ private struct ReasonChips: View {
         if reasons.isEmpty {
             MetaText("Nothing stands out", size: 11.5)
         } else {
-            HStack(spacing: 6) {
+            FlowLayout(spacing: 6) {
                 ForEach(reasons, id: \.self) { reason in
                     let good = Self.positives.contains(reason)
                     Text(reason).font(Theme.Font.body(11.5, .medium))
@@ -571,7 +575,7 @@ private struct ReasonChips: View {
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background((good ? (reason.contains("goal") ? Theme.ai : Theme.gold) : Color.white).opacity(good ? 0.12 : 0.07),
                                     in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
-                        .lineLimit(1)
+                        .fixedSize()
                 }
             }
             .accessibilityElement(children: .ignore)
