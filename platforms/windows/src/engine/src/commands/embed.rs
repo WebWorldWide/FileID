@@ -158,6 +158,30 @@ pub(crate) fn embed_text_blocking(query: &str) -> anyhow::Result<Vec<f32>> {
     })?
 }
 
+/// A catalog with picture vectors can be searched by meaning, and the text model is installed, on a machine with room to
+/// hold it before anyone searches.
+fn clip_text_prewarm_wanted(conn: &rusqlite::Connection, installed: bool, tier: crate::platform::MemoryTier) -> bool {
+    installed
+        && tier != crate::platform::MemoryTier::Low
+        && conn.query_row("SELECT EXISTS(SELECT 1 FROM clip_embeddings)", [], |row| row.get(0)).unwrap_or(false)
+}
+
+/// Loads the CLIP text model so the first search after launch or a scan does not wait for it (479 ms quiet, over a second
+/// on a busy Mac); it parks again after `PARK_AFTER` of no searches. Returns whether the model is loaded.
+pub(crate) fn prewarm_clip_text(db: &parking_lot::Mutex<rusqlite::Connection>) -> bool {
+    let installed = crate::models::clip_text::default_weights_path().is_ok_and(|path| path.is_file());
+    if !clip_text_prewarm_wanted(&db.lock(), installed, crate::platform::memory_tier()) {
+        return false;
+    }
+    match CLIP_TEXT.with(load_clip_text, |_| ()) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(?error, "CLIP text prewarm failed");
+            false
+        }
+    }
+}
+
 fn load_clip_text() -> anyhow::Result<crate::models::clip_text::ClipText> {
     let weights = crate::models::clip_text::default_weights_path()?;
     let dir = weights
@@ -185,6 +209,25 @@ mod tests {
         let pid = sysinfo::Pid::from_u32(std::process::id());
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         system.process(pid).map_or(0.0, |process| process.memory() as f64 / 1_048_576.0)
+    }
+
+    #[test]
+    fn the_text_model_is_prewarmed_only_for_a_searchable_catalog_with_room_and_weights() {
+        use crate::platform::MemoryTier::{Balanced, High, Low};
+        let conn = crate::db::test_support::memory_db();
+        assert!(!clip_text_prewarm_wanted(&conn, true, Balanced), "no picture vectors yet");
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/a.jpg','h',1,1,0,'image','jpg')", []).unwrap();
+        conn.execute("INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(1,X'00','m')", []).unwrap();
+        assert!(clip_text_prewarm_wanted(&conn, true, Balanced));
+        assert!(clip_text_prewarm_wanted(&conn, true, High));
+        assert!(!clip_text_prewarm_wanted(&conn, true, Low), "a small Mac keeps its memory");
+        assert!(!clip_text_prewarm_wanted(&conn, false, Balanced), "no weights installed");
+    }
+
+    #[test]
+    fn prewarm_without_weights_loads_nothing() {
+        let conn = parking_lot::Mutex::new(crate::db::test_support::memory_db());
+        assert!(!prewarm_clip_text(&conn));
     }
 
     #[test]

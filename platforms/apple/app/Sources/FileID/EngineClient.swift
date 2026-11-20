@@ -130,6 +130,11 @@ public final class EngineClient {
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?
     public private(set) var faceClusteringInFlight: Bool = false
+    /// "Finding faces… 120 of 848" while the engine reads the faces of a pass, which it reports as the running job's title.
+    public var faceStageProgress: String? {
+        guard let job = queueState.running, job.category == .faceCluster, job.title.hasPrefix("Finding faces") else { return nil }
+        return job.title
+    }
     /// Engine doesn't echo paused state, so the app mirrors it locally.
     public private(set) var isPaused: Bool = false
 
@@ -681,6 +686,7 @@ public final class EngineClient {
             modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
+            if q.running?.category == .faceCluster { faceClusteringInFlight = true }
         // Restructure butler replies (handleEvent runs on the main actor, so these assignments are isolation-safe).
         case .restructurePlan(let plan):
             restructurePlan = plan

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,7 +13,20 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub const MAX_PER_BATCH: usize = 5000;
-const EXTRACTION_THREADS: usize = 4;
+
+/// Photos read at once: one per performance core, four on a machine short of memory (each holds a decoded frame).
+pub fn extraction_threads() -> usize {
+    if let Some(n) = std::env::var("FILEID_X_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) { return n; }
+    let most = match crate::platform::memory_tier() {
+        crate::platform::MemoryTier::Low => 4,
+        _ => 8,
+    };
+    crate::platform::performance_core_count().clamp(2, most)
+}
+
+/// Faces extracted so far and in all, reported at most a few times a second while photos are read.
+pub type Progress<'a> = &'a (dyn Fn(usize, usize) + Sync);
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
@@ -230,10 +244,17 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
     skip: &HashSet<i64, S>,
     crops: Option<&Path>,
     cancelled: &(dyn Fn() -> bool + Sync),
+    progress: Progress,
 ) -> rusqlite::Result<Summary> {
     let model = extractor.model().to_string();
     let mut total = Summary::default();
     let mut cursor = 0i64;
+    let expected = {
+        let conn = database.lock();
+        pending(&conn, &model, processing, usize::MAX, 0, super::face_review::now())?.iter().filter(|input| !skip.contains(&input.id)).count()
+    };
+    let finished = AtomicUsize::new(0);
+    let last_report = Mutex::new(None::<Instant>);
     loop {
         if cancelled() {
             return Ok(total);
@@ -257,7 +278,7 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
         let queue = Mutex::new(by_path.into_values().collect::<Vec<_>>());
         let results = Mutex::new(Vec::<FileResult>::new());
         std::thread::scope(|scope| {
-            for _ in 0..EXTRACTION_THREADS.min(files.max(1)) {
+            for _ in 0..extraction_threads().min(files.max(1)) {
                 // User-initiated QoS, as Swift's `extractOneFile`: Vision and the HEVC decoder schedule by the caller's
                 // QoS.
                 scope.spawn(|| {
@@ -268,7 +289,14 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
                             }
                             let Some(rows) = queue.lock().pop() else { return };
                             let result = extract_one(rows, extractor);
+                            let now_finished = finished.fetch_add(result.rows.len(), Ordering::Relaxed) + result.rows.len();
                             results.lock().push(result);
+                            if let Some(mut last) = last_report.try_lock()
+                                && last.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL)
+                            {
+                                *last = Some(Instant::now());
+                                progress(now_finished.min(expected), expected);
+                            }
                         }
                     });
                 });

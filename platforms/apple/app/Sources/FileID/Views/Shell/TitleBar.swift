@@ -360,7 +360,7 @@ struct TitleBar: View {
                                    progress: 1, tone: .done, button: nil, open: .deep))
         }
         if engine.faceClusteringInFlight {
-            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: "Finding the same person across photos", state: "Working", color: Theme.ai, progress: nil, tone: .ai, button: nil, open: .people))
+            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: engine.faceStageProgress ?? "Finding the same person across photos", state: "Working", color: Theme.ai, progress: nil, tone: .ai, button: nil, open: .people))
         }
         if let download = engine.modelDownloadProgress {
             let name = AIModelKind.migrated(rawValue: download.modelKind).displayName

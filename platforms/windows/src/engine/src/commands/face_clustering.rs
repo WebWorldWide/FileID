@@ -1382,10 +1382,14 @@ fn task_did_not_complete(error: &tokio::task::JoinError) -> IpcEvent {
     EngineError::event("face_clustering_failed", "FileID couldn't finish grouping faces. Try again.")
 }
 
+/// Faces read so far and in all while a pass finds them; `None` once it has.
+pub(crate) type FindingFaces = Arc<dyn Fn(Option<(usize, usize)>) + Send + Sync>;
+
 pub(crate) async fn handle_run_face_clustering(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     active: Arc<AtomicBool>,
+    #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(unused_variables))] finding: FindingFaces,
 ) {
     let _sleep = SleepGuard::acquire();
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -1395,7 +1399,12 @@ pub(crate) async fn handle_run_face_clustering(
             sink.send(EngineError::event(kind, message)).await;
         }
         let extract_db = db.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::apple::faces::extract_before_clustering(&extract_db)).await;
+        let report = finding.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::apple::faces::extract_before_clustering(&extract_db, &|done, total| report(Some((done, total))));
+        })
+        .await;
+        finding(None);
     }
     let started = Instant::now();
     let skip_db = db.clone();
