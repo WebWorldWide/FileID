@@ -309,13 +309,9 @@ struct LibraryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Standard idiom: a hidden ⌘F button, since keyboardShortcut doesn't attach to TextField focus.
-        .background(
-            Button("") { searchFocused = true }
-                .keyboardShortcut(pageActive ? KeyboardShortcut("f", modifiers: .command) : nil)
-                .opacity(0)
-                .frame(width: 0, height: 0)
-        )
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
+            if pageActive && NSApp.keyWindow?.attachedSheet == nil { searchFocused = true }
+        }
     }
 
     /// Inline post-scan banner used for "Grouping faces…" and

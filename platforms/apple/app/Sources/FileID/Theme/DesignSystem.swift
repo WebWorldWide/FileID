@@ -682,9 +682,11 @@ struct DSTextField: View {
     var icon: String? = nil
     var height: CGFloat = Theme.Metrics.controlLarge
     var mono = false
+    var respondsToFind = false
     var onSubmit: () -> Void = {}
     @FocusState private var focused: Bool
     @Environment(\.fixedTextSize) private var fixed
+    @Environment(\.pageActive) private var pageActive
     var body: some View {
         HStack(spacing: 8) {
             if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3).accessibilityHidden(true) }
@@ -706,6 +708,9 @@ struct DSTextField: View {
         .contentShape(rounded(Theme.Radius.s))
         .onTapGesture { focused = true }
         .animation(Theme.quick, value: focused)
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
+            if respondsToFind && pageActive && NSApp.keyWindow?.attachedSheet == nil { focused = true }
+        }
     }
 }
 
