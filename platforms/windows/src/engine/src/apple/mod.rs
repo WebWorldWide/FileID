@@ -33,21 +33,21 @@ pub fn run_hosted() -> ! {
     match crate::paths::logs_dir() {
         Ok(logs) => {
             if let Err(error) = crate::ipc::sink::route_events_to_stderr(&logs) {
-                eprintln!("FileIDEngine: engine-stderr.log unavailable ({error}); events share fd 2");
+                crate::logging::note_stderr(format_args!("FileIDEngine: engine-stderr.log unavailable ({error}); events share fd 2"));
             }
         }
-        Err(error) => eprintln!("FileIDEngine: no logs folder ({error:#}); events share fd 2"),
+        Err(error) => crate::logging::note_stderr(format_args!("FileIDEngine: no logs folder ({error:#}); events share fd 2")),
     }
     let abi = adapter_abi_version();
     if abi != ABI_VERSION {
-        eprintln!("FileIDEngine: FileIDAppleKit interface {abi}, engine expects {ABI_VERSION}");
+        crate::logging::note_stderr(format_args!("FileIDEngine: FileIDAppleKit interface {abi}, engine expects {ABI_VERSION}"));
         hard_exit(EXIT_ABI_MISMATCH);
     }
     scan::start_ocr_warmup_when_idle();
     let code = match crate::server::run() {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("FileIDEngine: {error:#}");
+            crate::logging::note_stderr(format_args!("FileIDEngine: {error:#}"));
             1
         }
     };

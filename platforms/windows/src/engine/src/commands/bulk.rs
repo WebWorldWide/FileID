@@ -422,7 +422,7 @@ fn plan_rename(
         );
     if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
         return Err((
-            "new name must be a single filename (no slashes, no '..', no '.', no drive)".into(),
+            crate::util::path_safety::unsafe_filename_reason().into(),
             row.ok().map(|(path, _, _)| path),
         ));
     }
@@ -3592,6 +3592,41 @@ mod tests {
             .unwrap();
         assert_eq!(extension, "md");
         assert_eq!(renamed_extension("/a/b/README"), "");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn rename_accepts_a_colon_and_refuses_a_slash_with_a_plain_message() {
+        let directory = std::env::temp_dir().join(format!("fileid-rename-colon-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("IMG_1.jpg");
+        std::fs::write(&source, b"photo").unwrap();
+        let file_ref = crate::platform::file_identity(&source).unwrap().file as i64;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,file_ref) \
+             VALUES(1,?1,1,5,0,'image','jpg',?2)",
+            rusqlite::params![source.to_string_lossy(), file_ref],
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let rename = |name: &str| ipc::RenameFilesPayload { renames: vec![ipc::RenameEntry { file_id: 1, new_name: name.into() }] };
+
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_rename_files(sink, db.clone(), rename("a/b.jpg")).await;
+        let EventPayload::BulkActionResult(refused) = events.recv().await.unwrap().payload else { panic!("expected BulkActionResult") };
+        assert_eq!((refused.inner.succeeded, refused.inner.failed), (0, 1));
+        let message = refused.inner.messages[0].message.clone().unwrap();
+        assert_eq!(message, crate::util::path_safety::unsafe_filename_reason());
+        assert!(!message.contains("drive") && !message.contains("no '.'"), "{message}");
+
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_rename_files(sink, db.clone(), rename("Meeting 10:30 notes.jpg")).await;
+        let EventPayload::BulkActionResult(accepted) = events.recv().await.unwrap().payload else { panic!("expected BulkActionResult") };
+        assert_eq!((accepted.inner.succeeded, accepted.inner.failed), (1, 0), "{:?}", accepted.inner.messages);
+        assert!(directory.join("Meeting 10:30 notes.jpg").exists());
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

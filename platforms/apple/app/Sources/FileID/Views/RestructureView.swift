@@ -425,6 +425,18 @@ struct RestructureView: View {
         return "This plan is too large to list file by file. It sorts files into: \(shown)\(tail). Only the moves FileID is sure about happen now; the rest stay put. Nothing is deleted, and Undo move puts every file back."
     }
 
+    /// An Organize waits to be undone: this session's own apply, or one a relaunch found in the engine's journal for this folder.
+    private var undoAvailable: Bool {
+        guard engine.canUndoRestructure else { return false }
+        guard let pending = engine.restructureUndoRoot, let root = libraryRoot else { return true }
+        return Self.sameFolder(pending, root.path)
+    }
+
+    nonisolated static func sameFolder(_ left: String, _ right: String) -> Bool {
+        URL(fileURLWithPath: left).standardizedFileURL.resolvingSymlinksInPath().path
+            == URL(fileURLWithPath: right).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     private func undoLastMove() {
         guard let root = libraryRoot, !applying else { return }
         applying = true
@@ -442,7 +454,7 @@ struct RestructureView: View {
     }
 
     private var stepCells: some View {
-        let moved = engine.canUndoRestructure
+        let moved = undoAvailable
         let previewState: RestructureStepState = loading ? .current : (planReady || moved ? .done : .current)
         let reviewState: RestructureStepState = !planReady ? .upcoming : (applyCount > 0 || moved ? .done : .current)
         let moveState: RestructureStepState = applying ? .current : (moved ? .done : (planReady && applyCount > 0 ? .current : .upcoming))
@@ -722,6 +734,10 @@ struct RestructureView: View {
                     .lineLimit(1).truncationMode(.head)
                     .help(root.path)
                     .accessibilityLabel("Library folder \(root.path)")
+            }
+            if undoAvailable && proposals.isEmpty && !applying && moveOutcome == nil {
+                Text("Your last Organize can still be undone.")
+                    .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
             }
         }
     }

@@ -2121,6 +2121,29 @@ mod tests {
         assert_eq!(leftovers, 0);
         assert_eq!(fs::read(&clip).unwrap(), b"source clip bytes");
     }
+
+    #[test]
+    fn a_killed_exports_writer_sibling_is_removed_with_its_part_file() {
+        let dir = std::env::temp_dir().join(format!("fileid-orphan-stage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let stage = dir.join(".FileIDExport-be29b13a-0000-4000-8000-000000000000.part");
+        let sibling = dir.join(".FileIDExport-be29b13a-0000-4000-8000-000000000000.part.sb-3771399d-ceVlkX");
+        let other_export = dir.join(".FileIDExport-ffffffff-0000-4000-8000-000000000000.part.sb-1");
+        let user_file = dir.join("Clip.mp4");
+        for file in [&stage, &sibling, &other_export, &user_file] {
+            fs::write(file, b"bytes").unwrap();
+        }
+        remove_stage_files(&stage);
+        assert!(!stage.exists() && !sibling.exists(), "the part file and its writer sibling are gone");
+        assert!(other_export.exists() && user_file.exists(), "nothing else in the folder is touched");
+
+        let lone = dir.join(".FileIDExport-aaaaaaaa-0000-4000-8000-000000000000.part");
+        let lone_sibling = dir.join(".FileIDExport-aaaaaaaa-0000-4000-8000-000000000000.part.sb-9");
+        fs::write(&lone_sibling, b"bytes").unwrap();
+        remove_stage_files(&lone);
+        assert!(!lone_sibling.exists(), "the sibling goes even when the part file itself is already gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 pub(crate) fn recover(conn: &Connection) -> Result<()> {
@@ -2158,11 +2181,28 @@ pub(crate) fn recover(conn: &Connection) -> Result<()> {
                 {
                     continue;
                 }
-                if fs::symlink_metadata(stage).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
-                    let _ = fs::remove_file(stage);
-                }
+                remove_stage_files(stage);
             }
         }
     });
     Ok(())
+}
+
+/// Removes a killed export's `.part` file and the `<name>.part.sb-<id>` sibling the Apple media writer keeps beside it.
+fn remove_stage_files(stage: &Path) {
+    let removable = |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink());
+    if removable(stage) {
+        let _ = fs::remove_file(stage);
+    }
+    let (Some(parent), Some(name)) = (stage.parent(), stage.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let sibling_prefix = format!("{name}.sb-");
+    let Ok(entries) = fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_str().is_some_and(|n| n.starts_with(&sibling_prefix)) && removable(&path) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }

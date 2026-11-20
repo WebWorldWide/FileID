@@ -2,8 +2,35 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// True iff `name` is exactly one Normal path component: no slashes, "..", ".", drive letter, UNC, or leading/trailing whitespace the OS would silently strip. The path-traversal guard for `renameFiles`; conservative, since the destination is computed by joining to a directory.
+/// True iff `name` is exactly one path component this platform can store. The path-traversal guard for `renameFiles` and Organize destinations; conservative, since the destination is computed by joining to a directory.
+///
+/// Windows rules (alternate data streams, reserved device names, trailing dot/space) are not applied elsewhere: a macOS or Linux file that already exists as `Meeting 10:30.jpg` or `a|b.jpg` is legal there, so refusing it only strands the file.
 pub(crate) fn is_safe_filename(name: &str) -> bool {
+    if cfg!(windows) {
+        is_safe_windows_filename(name)
+    } else {
+        is_safe_posix_filename(name)
+    }
+}
+
+/// What to tell the user when `is_safe_filename` refuses a name.
+pub(crate) fn unsafe_filename_reason() -> &'static str {
+    if cfg!(windows) {
+        "That name can't contain \\ / : * ? \" < > | or end with a space or a dot, and can't be a reserved name such as CON."
+    } else {
+        "That name can't contain / or \\, and it can't be empty, \".\" or \"..\"."
+    }
+}
+
+/// A single component with no separator of either kind and no control character (NUL included).
+fn is_safe_posix_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(|c: char| c == '/' || c == '\\' || (c as u32) < 0x20)
+}
+
+fn is_safe_windows_filename(name: &str) -> bool {
     if name.is_empty() || name.trim() != name {
         return false;
     }
@@ -643,48 +670,81 @@ mod tests {
     }
 
     #[test]
-    fn safe_filenames_accepted() {
+    fn posix_names_accept_what_the_filesystem_allows() {
+        for name in [
+            "Meeting 10:30 notes.jpg",
+            "shot \"final\".jpg",
+            "a|b.jpg",
+            "who?.jpg",
+            "trail dot..jpg",
+            "trailing space .jpg ",
+            " leading.jpg",
+            "CON.jpg",
+            "NUL",
+            "a<b>c*d.txt",
+        ] {
+            assert!(is_safe_posix_filename(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn posix_names_reject_separators_dots_and_control_characters() {
+        for name in ["", ".", "..", "a/b", "/abs", "back\\slash.jpg", "new\nline.jpg", "tab\t.jpg", "nul\0.jpg"] {
+            assert!(!is_safe_posix_filename(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn this_platform_picks_its_own_rules() {
+        assert_eq!(is_safe_filename("a:b.jpg"), !cfg!(windows));
+        assert_eq!(is_safe_filename("CON.jpg"), !cfg!(windows));
         assert!(is_safe_filename("photo.jpg"));
-        assert!(is_safe_filename("My Vacation Photo (2024).heic"));
-        assert!(is_safe_filename("a"));
+        assert!(!is_safe_filename("a/b"));
+    }
+
+    #[test]
+    fn safe_filenames_accepted() {
+        assert!(is_safe_windows_filename("photo.jpg"));
+        assert!(is_safe_windows_filename("My Vacation Photo (2024).heic"));
+        assert!(is_safe_windows_filename("a"));
     }
 
     #[test]
     fn traversal_rejected() {
-        assert!(!is_safe_filename(".."));
-        assert!(!is_safe_filename("."));
-        assert!(!is_safe_filename("../etc/passwd"));
-        assert!(!is_safe_filename("..\\windows\\system32"));
-        assert!(!is_safe_filename("a/b"));
-        assert!(!is_safe_filename("a\\b"));
-        assert!(!is_safe_filename("/abs"));
-        assert!(!is_safe_filename("\\abs"));
-        assert!(!is_safe_filename("C:\\evil.exe"));
-        assert!(!is_safe_filename("\\\\unc\\share\\evil.exe"));
-        assert!(!is_safe_filename(""));
-        assert!(!is_safe_filename("  "));
-        assert!(!is_safe_filename(" leading-space.jpg"));
-        assert!(!is_safe_filename("trailing-space.jpg "));
-        assert!(!is_safe_filename("photo.jpg:evil"));
-        assert!(!is_safe_filename("a:b"));
-        assert!(!is_safe_filename("a<b"));
-        assert!(!is_safe_filename("a>b"));
-        assert!(!is_safe_filename("a|b"));
-        assert!(!is_safe_filename("a?b"));
-        assert!(!is_safe_filename("a*b"));
-        assert!(!is_safe_filename("a\"b"));
+        assert!(!is_safe_windows_filename(".."));
+        assert!(!is_safe_windows_filename("."));
+        assert!(!is_safe_windows_filename("../etc/passwd"));
+        assert!(!is_safe_windows_filename("..\\windows\\system32"));
+        assert!(!is_safe_windows_filename("a/b"));
+        assert!(!is_safe_windows_filename("a\\b"));
+        assert!(!is_safe_windows_filename("/abs"));
+        assert!(!is_safe_windows_filename("\\abs"));
+        assert!(!is_safe_windows_filename("C:\\evil.exe"));
+        assert!(!is_safe_windows_filename("\\\\unc\\share\\evil.exe"));
+        assert!(!is_safe_windows_filename(""));
+        assert!(!is_safe_windows_filename("  "));
+        assert!(!is_safe_windows_filename(" leading-space.jpg"));
+        assert!(!is_safe_windows_filename("trailing-space.jpg "));
+        assert!(!is_safe_windows_filename("photo.jpg:evil"));
+        assert!(!is_safe_windows_filename("a:b"));
+        assert!(!is_safe_windows_filename("a<b"));
+        assert!(!is_safe_windows_filename("a>b"));
+        assert!(!is_safe_windows_filename("a|b"));
+        assert!(!is_safe_windows_filename("a?b"));
+        assert!(!is_safe_windows_filename("a*b"));
+        assert!(!is_safe_windows_filename("a\"b"));
         for device in ["NUL .txt", "con  .jpg", "CONIN$", "conout$.log", "COM\u{b9}", "lpt\u{b3}.txt"] {
-            assert!(!is_safe_filename(device), "{device}");
+            assert!(!is_safe_windows_filename(device), "{device}");
         }
-        assert!(is_safe_filename("console.txt"));
-        assert!(is_safe_filename("COM10.txt"));
+        assert!(is_safe_windows_filename("console.txt"));
+        assert!(is_safe_windows_filename("COM10.txt"));
     }
 
     proptest::proptest! {
         #[test]
         fn any_string_with_slash_is_rejected(s in "[a-zA-Z0-9./\\\\]{1,40}") {
             if s.contains('/') || s.contains('\\') {
-                proptest::prop_assert!(!is_safe_filename(&s));
+                proptest::prop_assert!(!is_safe_windows_filename(&s));
             }
         }
 
@@ -699,9 +759,9 @@ mod tests {
         ) {
             let s = format!("{prefix}{inner}{suffix}");
             if !prefix.is_empty() || !suffix.is_empty() {
-                proptest::prop_assert!(!is_safe_filename(&s));
+                proptest::prop_assert!(!is_safe_windows_filename(&s));
             } else {
-                proptest::prop_assert!(is_safe_filename(&s));
+                proptest::prop_assert!(is_safe_windows_filename(&s));
             }
         }
 
@@ -739,7 +799,7 @@ mod tests {
                 _ => stem.chars().enumerate().map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect(),
             };
             let name = if let Some(e) = ext { format!("{normalized}.{e}") } else { normalized };
-            proptest::prop_assert!(!is_safe_filename(&name), "reserved name {name} must be rejected");
+            proptest::prop_assert!(!is_safe_windows_filename(&name), "reserved name {name} must be rejected");
         }
     }
 

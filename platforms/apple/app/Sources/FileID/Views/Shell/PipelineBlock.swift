@@ -9,6 +9,8 @@ struct PipelineBlock: View {
     let pickedURL: URL
     var openPage: (MainWindow.Tab) -> Void = { _ in }
     @State private var startRequested = false
+    /// The newest scan of this folder, when it stopped before it finished (quit, killed, or failed). Read from the catalog's session rows so it survives a relaunch.
+    @State private var unfinishedScan: ReadStore.ScanSessionRow?
 
     /// Describe Files is optional, so it is not a step: a finished scan is Done.
     private enum Stage: Int, CaseIterable { case scan, tag, finish, faces, done
@@ -33,8 +35,28 @@ struct PipelineBlock: View {
             }
         }
         if engine.faceClusteringInFlight { return .faces }
+        if showsUnfinishedScan { return .scan }
         if store.totalFiles > 0 || progress?.phase == .completed { return .done }
         return .scan
+    }
+
+    private var showsUnfinishedScan: Bool {
+        unfinishedScan != nil && !scanRunning && progress?.phase != .completed
+    }
+
+    /// The newest session of `root` when it is not `completed`. A `running` row means a scan is starting right now, not that one was interrupted.
+    nonisolated static func unfinishedScan(in sessions: [ReadStore.ScanSessionRow], root: URL) -> ReadStore.ScanSessionRow? {
+        let wanted = root.standardizedFileURL.resolvingSymlinksInPath().path
+        guard let newest = sessions.first(where: {
+            URL(fileURLWithPath: $0.rootPath).standardizedFileURL.resolvingSymlinksInPath().path == wanted
+        }) else { return nil }
+        return newest.status == "cancelled" || newest.status == "failed" ? newest : nil
+    }
+
+    nonisolated static func unfinishedScanDetail(filesRead: Int) -> String {
+        filesRead > 0
+            ? "\(filesRead.formatted()) file\(filesRead == 1 ? "" : "s") read so far. Press Scan again to read the rest."
+            : "Press Scan again to read the rest."
     }
 
     static let cpuScanNotice = "Scanning on the CPU — slower than usual. Reinstall FileID if this persists."
@@ -88,6 +110,9 @@ struct PipelineBlock: View {
         if let p = progress, p.phase == .failed {
             return Status(title: "The scan didn't finish", fraction: 0, tone: .paused, color: Theme.danger, sub: "Press Scan again. Files already read are skipped.")
         }
+        if showsUnfinishedScan {
+            return Status(title: "The scan didn't finish", fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
+        }
         if store.totalFiles > 0 || progress?.phase == .completed {
             return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(store.totalFiles.formatted()) files ready to browse")
         }
@@ -102,6 +127,7 @@ struct PipelineBlock: View {
     private var stepText: String {
         if captionsRunning && !scanRunning { return "Optional · Describe Files" }
         if let phase = progress?.phase, phase == .cancelled || phase == .failed { return "Not finished" }
+        if showsUnfinishedScan { return "Not finished" }
         return stage == .done ? "4 of 4 steps finished" : "Step \(stage.rawValue + 1) of 4 · \(stage.label)"
     }
 
@@ -171,9 +197,27 @@ struct PipelineBlock: View {
             }
             controls
         }
+        .task(id: UnfinishedScanKey(version: store.version, phase: progress?.phase.rawValue, root: pickedURL.path, engineReady: engineReady)) {
+            let readable = store
+            let sessions = await Task.detached(priority: .utility) { readable.recentSessions(limit: 20) }.value
+            unfinishedScan = Self.unfinishedScan(in: sessions, root: pickedURL)
+        }
         .onChange(of: engine.lastProgress?.phase) { _, new in if new != nil && new != .idle { startRequested = false } }
         .onChange(of: engine.lastErrorSignal) { _, _ in startRequested = false }
         .onChange(of: engine.engineResetSignal) { _, _ in startRequested = false }
+    }
+
+    private struct UnfinishedScanKey: Hashable {
+        let version: Int
+        let phase: String?
+        let root: String
+        /// The engine settles a scan a crash left `running` as `failed` when it starts, so the sessions are read again once it is ready.
+        let engineReady: Bool
+    }
+
+    private var engineReady: Bool {
+        if case .ready = engine.state { return true }
+        return false
     }
 
     /// Scan counters: found, read, speed and failures.
@@ -209,7 +253,7 @@ struct PipelineBlock: View {
                 }
                 Button("Stop") { engine.cancelScan() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3)).help("Stop scanning. Scan again later to pick up where it left off.")
             } else if store.totalFiles > 0 || progress != nil {
-                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
+                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed || showsUnfinishedScan ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown))

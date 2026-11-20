@@ -34,6 +34,8 @@ enum RestoreOutcome {
     Restored(crate::platform::FileIdentity, Option<std::path::PathBuf>),
     /// An earlier put back already finished: the file is back and the catalog row exists again.
     AlreadyPutBack,
+    /// The journal never recorded this file as trashed (a killed Trash batch stopped before reaching it) and it still sits at its original path with its row.
+    NeverMoved,
     Conflict,
     Refused(String),
     Failed(String),
@@ -402,6 +404,7 @@ fn catalog_holds(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem) ->
 
 fn occupied_outcome(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem, original: &std::path::Path) -> RestoreOutcome {
     match already_restored_outcome(item, original) {
+        Some(_) if catalog_holds(conn, item) && item.trashed_path.is_none() => RestoreOutcome::NeverMoved,
         Some(_) if catalog_holds(conn, item) => RestoreOutcome::AlreadyPutBack,
         Some(restored) => restored,
         None => RestoreOutcome::Conflict,
@@ -570,9 +573,19 @@ pub(crate) async fn handle_restore_from_trash(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::RestoreFromTrashPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
-        let mut entry = trash_log::read_batch(&payload.batch_id)?
-            .ok_or_else(|| anyhow::anyhow!("trash log batch {} not found", payload.batch_id))?;
+    let result = tokio::task::spawn_blocking(move || restore_batch(&db, &payload.batch_id)).await;
+
+    emit_bulk_result(&sink, "restoreFromTrash", result).await;
+}
+
+/// Puts back every item of one journalled Trash batch. Items the journal never saw trashed and that are still in place count as fine, so a batch cut short by a crash restores without reporting its untouched files as failures.
+pub(crate) fn restore_batch(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    batch_id: &str,
+) -> anyhow::Result<BulkActionResult> {
+    {
+        let mut entry = trash_log::read_batch(batch_id)?
+            .ok_or_else(|| anyhow::anyhow!("trash log batch {batch_id} not found"))?;
         let library_roots = library_roots(&db.lock())?;
 
         let mut outcomes: Vec<Option<RestoreOutcome>> =
@@ -711,7 +724,17 @@ pub(crate) async fn handle_restore_from_trash(
                     messages.push(BulkActionItem {
                         file_id: Some(item.file_id),
                         ok: false,
-                        message: Some(format!("{} was already put back.", item.original_path)),
+                        message: Some(format!("{} is already back in its folder.", item.original_path)),
+                        reason: None,
+                        operation_id: None,
+                    });
+                }
+                RestoreOutcome::NeverMoved => {
+                    succeeded += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: true,
+                        message: Some(format!("{} is already back in its folder.", item.original_path)),
                         reason: None,
                         operation_id: None,
                     });
@@ -758,10 +781,7 @@ pub(crate) async fn handle_restore_from_trash(
             failed,
             messages,
         })
-    })
-    .await;
-
-    emit_bulk_result(&sink, "restoreFromTrash", result).await;
+    }
 }
 
 /// Separator for the `FILEID_RB_PATHS` env transport (engine -> PowerShell). MUST be NUL-free: `Command` runs `ensure_no_nuls` on env values, so an interior NUL makes `.status()` fail WITHOUT spawning powershell.exe, silently restoring nothing for every multi-file batch. U+001F is NUL-free yet forbidden in Windows file names, so it can't appear in an `original_path` or inject an entry; the script splits on the same byte (`-split [char]0x1f`).
@@ -1687,7 +1707,12 @@ mod tests {
             [&item.original_path],
         )
         .unwrap();
-        assert!(matches!(occupied_outcome(&conn, &item, &path), RestoreOutcome::AlreadyPutBack));
+        assert!(
+            matches!(occupied_outcome(&conn, &item, &path), RestoreOutcome::NeverMoved),
+            "a journal that never saw the file trashed (a killed batch) counts it as fine, not as a failure"
+        );
+        let trashed = trash_log::TrashLogItem { trashed_path: Some("/Trash/back.bin".into()), ..item.clone() };
+        assert!(matches!(occupied_outcome(&conn, &trashed, &path), RestoreOutcome::AlreadyPutBack));
         let stranger = trash_log::TrashLogItem { source_identity: None, ..item };
         assert!(matches!(occupied_outcome(&conn, &stranger, &path), RestoreOutcome::Conflict));
         std::fs::remove_dir_all(base).ok();
