@@ -16,6 +16,10 @@ public enum LibrarySortKey: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+public enum LibraryLayout: String, Sendable {
+    case grid, list
+}
+
 public struct LibrarySort: Equatable, Sendable {
     static let keyStorage = "library.sortKey"
     static let ascendingStorage = "library.sortAscending"
@@ -42,6 +46,11 @@ public struct LibrarySort: Equatable, Sendable {
     /// Choosing the key already in use flips its direction; a new key starts in its natural one.
     func choosing(_ next: LibrarySortKey) -> LibrarySort {
         next == key ? LibrarySort(key: key, ascending: !ascending) : LibrarySort(key: next, ascending: Self.firstDirection(for: next))
+    }
+
+    /// The menu's key choice: the key already in use keeps its direction, a new key starts in its natural one.
+    func selecting(_ next: LibrarySortKey) -> LibrarySort {
+        next == key ? self : LibrarySort(key: next, ascending: Self.firstDirection(for: next))
     }
 
     /// SQL for `ORDER BY`. Ties and missing values resolve the same way in both directions so paging by offset never repeats or skips a row.

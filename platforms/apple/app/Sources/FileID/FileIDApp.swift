@@ -5,6 +5,12 @@ import SwiftUI
 import AppKit
 import FileIDShared
 
+/// Smallest window every page lays out in, and the larger size a first launch opens at.
+enum WindowSizes {
+    static let minimum = CGSize(width: 1000, height: 700)
+    static let firstLaunch = CGSize(width: 1200, height: 800)
+}
+
 @main
 struct FileIDApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -28,7 +34,7 @@ struct FileIDApp: App {
                 .toggleStyle(DSCheckboxToggleStyle())
                 .progressViewStyle(DSProgressViewStyle())
                 .buttonStyle(DSSecondaryButtonStyle())
-                .frame(minWidth: 1200, minHeight: 800)
+                .frame(minWidth: WindowSizes.minimum.width, minHeight: WindowSizes.minimum.height)
                 .background(
                     VisualEffectView(material: .underWindowBackground,
                                      blendingMode: .behindWindow)
@@ -76,6 +82,7 @@ struct FileIDApp: App {
                 #endif
         }
         .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: WindowSizes.firstLaunch.width, height: WindowSizes.firstLaunch.height)
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .newItem) {

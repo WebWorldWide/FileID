@@ -63,6 +63,11 @@ struct LibraryView: View {
     private var kindFilter: String? {
         get { kindFilterRaw.isEmpty ? nil : kindFilterRaw }
     }
+    @AppStorage(LibrarySort.keyStorage) private var sortKeyRaw: String = LibrarySort.standard.key.rawValue
+    @AppStorage(LibrarySort.ascendingStorage) private var sortAscending: Bool = LibrarySort.standard.ascending
+    @AppStorage(LibrarySort.layoutStorage) private var layoutRaw: String = LibraryLayout.grid.rawValue
+    private var sort: LibrarySort { LibrarySort(storedKey: sortKeyRaw, ascending: sortAscending) }
+    private var layout: LibraryLayout { LibraryLayout(rawValue: layoutRaw) ?? .grid }
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
     @State private var lastCounterRefreshAt: Date = .distantPast
@@ -79,7 +84,7 @@ struct LibraryView: View {
     @State private var loadMoreTask: Task<Void, Never>?
     /// Query and kind of the rows on screen; a refresh with the same pair keeps
     /// every loaded page instead of dropping back to the first.
-    @State private var listedQuery: (String, String?)? = nil
+    @State private var listedQuery: (String, String?, LibrarySort)? = nil
     private static let pageSize = 300
     private static let refreshCap = 3_000
     private static let liveReloadInterval: TimeInterval = 5
@@ -128,6 +133,11 @@ struct LibraryView: View {
                 }
             }
             .onChange(of: kindFilterRaw) { _, _ in reloadWhenShown() }
+            .onChange(of: sort) { _, _ in
+                scrollToTopToken += 1
+                gridAtTop = true
+                reloadWhenShown()
+            }
             .onChange(of: store.readerEpoch) { _, _ in reloadWhenShown() }
             .onChange(of: similarSeed?.id) { _, _ in reloadWhenShown() }
             .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
@@ -606,6 +616,7 @@ struct LibraryView: View {
                     filterControls
                     summaryControls(wrapped: false)
                     Spacer(minLength: 8)
+                    viewControls
                     modeControls
                 }
                 VStack(alignment: .leading, spacing: 8) {
@@ -614,7 +625,11 @@ struct LibraryView: View {
                         Spacer(minLength: 8)
                         modeControls
                     }
-                    HStack(alignment: .center, spacing: 10) { summaryControls(wrapped: true) }
+                    HStack(alignment: .center, spacing: 10) {
+                        summaryControls(wrapped: true)
+                        Spacer(minLength: 8)
+                        viewControls
+                    }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .center, spacing: 10) {
@@ -628,7 +643,11 @@ struct LibraryView: View {
                             modeControls
                         }
                     }
-                    HStack(alignment: .center, spacing: 10) { summaryControls(wrapped: true) }
+                    HStack(alignment: .center, spacing: 10) {
+                        summaryControls(wrapped: true)
+                        Spacer(minLength: 8)
+                        viewControls
+                    }
                 }
             }
         }
@@ -671,6 +690,75 @@ struct LibraryView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
         kindPicker
+    }
+
+    private var orderIsRanked: Bool { similarSeed != nil || visualSummary != nil }
+
+    @ViewBuilder
+    private var viewControls: some View {
+        HStack(spacing: 8) {
+            sortMenu
+            layoutToggle
+        }
+        .fixedSize()
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(LibrarySortKey.allCases) { key in
+                Button { sortKeyRaw = sort.selecting(key).key.rawValue; sortAscending = sort.selecting(key).ascending } label: {
+                    if key == sort.key { Label(key.title, systemImage: "checkmark") } else { Text(key.title) }
+                }
+            }
+            Divider()
+            Button { sortAscending = true } label: {
+                if sort.ascending { Label("Ascending", systemImage: "checkmark") } else { Text("Ascending") }
+            }
+            Button { sortAscending = false } label: {
+                if !sort.ascending { Label("Descending", systemImage: "checkmark") } else { Text("Descending") }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.arrow.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.text3)
+                Text(sort.summary).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2).lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: Theme.Metrics.control)
+            .background(Theme.well, ignoresSafeAreaEdges: [])
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(orderIsRanked)
+        .opacity(orderIsRanked ? Theme.disabledOpacity : 1)
+        .help(orderIsRanked ? "Results are ordered by best match" : "Sort files")
+        .accessibilityLabel("Sort files")
+        .accessibilityValue(sort.summary)
+    }
+
+    private var layoutToggle: some View {
+        HStack(spacing: 0) {
+            ForEach([(LibraryLayout.grid, "square.grid.2x2", "Grid"), (LibraryLayout.list, "list.bullet", "List")], id: \.1) { item in
+                let active = layout == item.0
+                Button { withAnimation(Theme.spring) { layoutRaw = item.0.rawValue } } label: {
+                    Image(systemName: item.1)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(active ? Theme.onGold : Theme.text2)
+                        .frame(width: 34, height: Theme.Metrics.control)
+                        .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Show files as a \(item.2.lowercased())")
+                .accessibilityLabel(item.2)
+                .accessibilityAddTraits(active ? .isSelected : [])
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
     @ViewBuilder
@@ -896,27 +984,61 @@ struct LibraryView: View {
     // MARK: - Grid
 
     @ViewBuilder
+    private var listing: some View {
+        if layout == .list {
+            LibraryListTable(
+                rows: rows,
+                tagsByFile: tagsByFile,
+                selectMode: selectMode,
+                checkedIDs: Set(checkedFiles.keys),
+                selectedID: previewSelectedID ?? paneSelectedID,
+                refreshToken: pageActive ? tileRefreshToken : shownTileToken,
+                contentVersion: rowsEpoch,
+                scrollToTopToken: scrollToTopToken,
+                textSize: ContentTextScale.shared.size,
+                offline: offlineRoots,
+                sort: sort,
+                onSort: { key in
+                    let next = sort.choosing(key)
+                    sortKeyRaw = next.key.rawValue
+                    sortAscending = next.ascending
+                },
+                onSelect: { paneSelectedID = $0.id },
+                onOpen: { openPreview($0) },
+                onToggleCheck: toggleCheck,
+                onFindSimilar: { similarSeed = $0 },
+                onNearEnd: { loadMore() },
+                onClearSelection: { paneSelectedID = nil },
+                onRangeCheck: checkRange,
+                onCommandCheck: { row in selectMode = true; toggleCheck(row) },
+                onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
+        } else {
+            LibraryCollectionGrid(
+                rows: rows,
+                tagsByFile: tagsByFile,
+                selectMode: selectMode,
+                checkedIDs: Set(checkedFiles.keys),
+                selectedID: previewSelectedID ?? paneSelectedID,
+                refreshToken: pageActive ? tileRefreshToken : shownTileToken,
+                contentVersion: rowsEpoch,
+                scrollToTopToken: scrollToTopToken,
+                textSize: ContentTextScale.shared.size,
+                offline: offlineRoots,
+                onSelect: { paneSelectedID = $0.id },
+                onOpen: { openPreview($0) },
+                onToggleCheck: toggleCheck,
+                onFindSimilar: { similarSeed = $0 },
+                onNearEnd: { loadMore() },
+                onClearSelection: { paneSelectedID = nil },
+                onRangeCheck: checkRange,
+                onCommandCheck: { row in selectMode = true; toggleCheck(row) },
+                onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
+        }
+    }
+
+    @ViewBuilder
     private var grid: some View {
-        LibraryCollectionGrid(
-            rows: rows,
-            tagsByFile: tagsByFile,
-            selectMode: selectMode,
-            checkedIDs: Set(checkedFiles.keys),
-            selectedID: previewSelectedID ?? paneSelectedID,
-            refreshToken: pageActive ? tileRefreshToken : shownTileToken,
-            contentVersion: rowsEpoch,
-            scrollToTopToken: scrollToTopToken,
-            textSize: ContentTextScale.shared.size,
-            offline: offlineRoots,
-            onSelect: { paneSelectedID = $0.id },
-            onOpen: { openPreview($0) },
-            onToggleCheck: toggleCheck,
-            onFindSimilar: { similarSeed = $0 },
-            onNearEnd: { loadMore() },
-            onClearSelection: { paneSelectedID = nil },
-            onRangeCheck: checkRange,
-            onCommandCheck: { row in selectMode = true; toggleCheck(row) },
-            onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
+        listing
         .overlay(alignment: .bottom) {
             if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
         }
@@ -1027,7 +1149,8 @@ struct LibraryView: View {
         if query.trimmingCharacters(in: .whitespacesAndNewlines) != shownQuery { showWeaker = false }
         let kind = kindFilter
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
-        let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
+        let sort = self.sort
+        let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind && $2 == sort } == true
         let want = sameListing && !firstPageOnly ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
         newFilesWaiting = false
         reloadTask?.cancel()
@@ -1052,7 +1175,7 @@ struct LibraryView: View {
                     problem = Self.searchProblem(response, similar: true)
                 }
             } else {
-                newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
+                newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind, sort: sort)
                 pageable = newRows.count == want
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
@@ -1107,7 +1230,7 @@ struct LibraryView: View {
             hiddenWeaker = hidden
             shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
             searchProblem = problem
-            listedQuery = seed == nil ? (query, kind) : nil
+            listedQuery = seed == nil ? (query, kind, sort) : nil
         }
     }
 
@@ -1128,11 +1251,11 @@ struct LibraryView: View {
     private func loadMore() {
         guard canLoadMore, !loadingMore, similarSeed == nil else { return }
         loadingMore = true
-        let offset = rows.count, query = searchText, kind = kindFilter
+        let offset = rows.count, query = searchText, kind = kindFilter, sort = self.sort
         loadMoreTask = Task { @MainActor in
             defer { if !Task.isCancelled { loadingMore = false } }
-            let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind)
-            guard !Task.isCancelled, query == searchText, kind == kindFilter, offset == rows.count else { return }
+            let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind, sort: sort)
+            guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort, offset == rows.count else { return }
             let ids = page.map(\.id)
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
