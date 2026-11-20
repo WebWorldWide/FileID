@@ -261,6 +261,29 @@ final class TileCollectionView: NSCollectionView {
     override var acceptsFirstResponder: Bool { true }
     override var focusRingMaskBounds: NSRect { .zero }
 
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { showKeyboardFocus(true) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { showKeyboardFocus(false) }
+        return resigned
+    }
+
+    /// The grid draws its own 2 pt gold ring on the enclosing scroll view; the system ring stays off.
+    private func showKeyboardFocus(_ on: Bool) {
+        guard let scrollView = enclosingScrollView else { return }
+        scrollView.wantsLayer = true
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        scrollView.layer?.borderWidth = on ? 2 : 0
+        scrollView.layer?.borderColor = Theme.nsGold.withAlphaComponent(0.9).cgColor
+        scrollView.layer?.cornerRadius = 10
+        CATransaction.commit()
+    }
+
     enum TileKey { case left, right, up, down, open, clear }
 
     override func keyDown(with event: NSEvent) {
