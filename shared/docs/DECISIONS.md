@@ -5175,3 +5175,11 @@ The owner approved adding much bigger models at the top of the ladders for machi
 - **Qwen3-VL 2B Q4_K_M ships with the Q8_0 projector,** so an 8 GB PC at 45% free (3.7 GB) can load it; the F16 projector would need more than that free.
 
 Not measured, and the first things to check on hardware: that a 96 GB Mac loads the 122B within its GPU wired-memory limit; whether GLM-4.6V's default thinking mode wastes tokens under FileID's llama.cpp requests; seconds per photo for both.
+
+## 2026-11-19 — Owner decisions during Mac acceptance
+
+- **Apple adapters stay inside `fileidd` on the Mac** (D-F1 closed). CLIP image and RAM++ run on MLX and faces, OCR and scene classes on Apple Vision through `libFileIDAppleKit`, inside the Rust engine process; the app process does no inference. tract stays the runtime on Windows and Linux and the Mac fallback. Measured: tract-only CLIP is about 8.6× slower on the Mac (741 vs 86 ms per file) and there is no permissive Rust OCR wired.
+- **Model ladder approved, with ~100B-class models on top for machines that hold them.** Mac: Qwen3.5-122B-A10B → Mistral Small 3.2 → Qwen3-VL 8B → 4B → 2B. Windows/Linux: GLM-4.6V → Qwen2.5-VL 7B → Qwen3-VL 8B → 4B → 2B Q8_0 → 2B Q4_K_M. The engine's one fits rule decides what is offered; Gemma-terms models are never a default.
+- **Library sort and list layout are in v1.**
+- **Minimum window 1000×700**; the first-launch window stays large.
+- **Organize Folders never renames or moves the folder the user chose.** When the folders inside it are already well organised the plan is empty and says why (supervisor's call, delegated by the owner).

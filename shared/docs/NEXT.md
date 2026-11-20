@@ -2,6 +2,16 @@
 
 Short, current priorities only: open work, nothing else. History lives in `STATE.md` (newest first) and git; release gates live in `SHIP.md`; the feature ledger lives in `NEXT_VERSION.md`; model choices live in `MODELS.md`. When an item is finished and verified, delete it here.
 
+## Mac acceptance loop (2026-11-19, in progress — owner: "polish the Mac app, then tell me so I can move on to Windows")
+
+Loop state and evidence: `~/FileIDDev/scratch/accept/` (iterN/DEFECTS.md, tester REPORT.md per lane, polish/P1–P5). Three test-and-fix rounds merged; every major found so far is fixed and re-verified on real data.
+
+- [ ] **Polish fix round** (from the five audits in `~/FileIDDev/scratch/accept/polish/`): visual (P1, 6 minor + 17 polish), copy and plurals (P2, 9 minor), performance (P3: post-scan face stage is 3.3–3.7× the scan time; photo scan 70–89 files/s against the 140 target), resilience (P4: "Scan complete 100%" after an interrupted scan; Organize Undo lost on relaunch; Organize refuses a whole plan over one illegal file name; engine aborts when its log write fails on a full disk), accessibility and keyboard (P5: People cards and tiles not keyboard-reachable; Escape doesn't close four sheets; missing Return defaults).
+- [ ] **Owner decisions of 2026-11-19, to build:** Library sort (date taken, date added, name, size, kind) and a list layout; minimum window 1000×700 (default stays large); Organize explains in plain words why a generic root with well-organised folders plans nothing.
+- [ ] **Fourth full test round** on the merged tree, then repeat until one round finds no blocker, major or minor defect and PR #345 CI is green. Then the owner moves on to Windows.
+- [ ] **Big models (merged, not run on hardware):** Qwen3.5-122B-A10B tops the Mac ladder (offered from about 96 GB; a 96 GB Mac may need `iogpu.wired_limit_mb` raised); GLM-4.6V tops Windows/Linux (about 92 GB; its thinking mode is not turned off on the llama.cpp path yet). Qwen3-VL 2B Q4_K_M ends the Windows/Linux ladder, so a typical 8 GB PC gets a model that loads. Owner question: support split (multi-file) GGUFs? That unlocks Qwen3.5-122B, Qwen3-VL-235B and Mistral-Small-4 on Windows/Linux and touches the downloader, memory admission and catalog schema.
+- [ ] **WinUI `VlmRecommendation.cs`, CLI and TUI model lists** lack the new 2B rungs (Windows phase).
+
 ## Open from the 2026-11-17 production push
 
 Done items are in `STATE.md` (2026-11-17). Tester report with repros: `~/FileIDDev/scratch/prod-test/REPORT.md` (PT-1…PT-19).
@@ -11,7 +21,7 @@ Done items are in `STATE.md` (2026-11-17). Tester report with repros: `~/FileIDD
   - Left: the Windows build, MSI, Store and WinUI edits are compiled only in hosted CI (no Windows target here); Windows CPU throughput, peak memory and the RAM++ 11 GiB floor (8 GB box) are unmeasured on hardware (group C); the NVIDIA GPU throughput regression is recorded in DECISIONS 2026-11-18; GPU acceleration (tract-metal, tract-cuda, wgpu) is a later cross-platform decision; a YuNet decoded-box golden needs a rights-cleared face image; the golden tests run only as a release step (`FILEID_TEST_MODELS_DIR`).
 - [ ] **chrono is unmaintained (RUSTSEC-2026-0543, published 2026-11-18; no vulnerability).** The engine uses it in 18 files, and it also arrives through `rusqlite`'s `chrono` feature and `pdfium-render`. `deny.toml` ignores the advisory with a reason so CI stays green. Move the engine to `jiff` or `time` (new dependency: needs owner approval and a `DECISIONS.md` entry), drop rusqlite's `chrono` feature, then remove the ignore.
 - [ ] **Owner decisions:**
-  - **PT-12:** Organize Folders plans 0 moves on the whole `Camera` folder (all 37 event folders are anchors); `RESTRUCTURE.md` once measured 2,966. Intended?
+  - **PT-12 (decided 2026-11-19):** a root whose folders are already well organised plans nothing; FileID never renames the folder you chose. The plan must say so in plain words (polish round).
   - **PT-13:** search counts differ between engines ("pumpkins": Rust 72 good + 25 weaker, Swift 48; "Kyle Baseball Game" 283 vs 184). Which ranking is canonical?
   - **PT-3:** the Rust engine catalogues files inside dot-folders (`.vscode/`); Swift skips them. Keep?
   - **PT-18:** the real `~/.Trash` went from 2 items to 0 at 12:54 on 2026-11-17. No FileID code empties the Trash and every test used a test Trash root. Did the owner empty it?
