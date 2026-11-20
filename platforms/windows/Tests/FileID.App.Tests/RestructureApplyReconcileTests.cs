@@ -1,9 +1,5 @@
-﻿// Leaving the Restructure tab mid-apply unsubscribes the view,
-// dropping the apply-completion event; the static single-flight guard would then
-// stay engaged for the session (Apply buttons stuck disabled). OnLoaded replays
-// the handlers, which gate on IsUnhandledCompletion: a NEW completion reference
-// (arrived while unloaded) must surface; the SAME reference (already surfaced, or
-// apply still in flight with an unchanged slot) must be a no-op.
+﻿// Leaving the Restructure tab mid-apply unsubscribes the view, dropping the apply-completion event; the static single-flight guard would then stay engaged for the session (Apply buttons stuck disabled).
+// OnLoaded replays the handlers, which gate on IsUnhandledCompletion: a NEW completion reference (arrived while unloaded) must surface; the SAME reference (already surfaced, or apply still in flight with an unchanged slot) must be a no-op.
 
 using FileID.IpcSchema;
 using FileID.Views.Restructure;

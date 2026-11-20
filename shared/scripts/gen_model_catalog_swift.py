@@ -2,7 +2,7 @@
 """Embed the Mac MLX model catalog in FileIDModelInfo.
 
 The Rust engine compiles model-catalog.json in (include_str!); this gives the
-Swift side the same bytes, so the app, the Swift engine and FileIDAppleKit read
+Swift side the same bytes, so the app and FileIDAppleKit read
 the same catalog in every layout, with or without the resource bundle beside
 them (an engine copied alone, as CI runs it).
 

@@ -7,8 +7,6 @@ namespace FileID.App.Tests;
 
 public class UndoStackTests
 {
-    // UndoStack is a singleton (UndoStack.Instance). To keep test isolation
-    // we drain it at the start of each test by undoing whatever's queued.
     private static async Task DrainAsync()
     {
         while (UndoStack.Instance.CanUndo)
@@ -66,7 +64,6 @@ public class UndoStackTests
     public async Task SessionHistoryRetainsEntriesBeyondLegacyUndoStackCapacity()
     {
         await DrainAsync();
-        // Session history keeps every entry; reverse callbacks are capped separately.
         for (int i = 0; i < 20; i++)
         {
             int captured = i;

@@ -186,18 +186,6 @@ enum ExactDuplicateVerifier {
         for key in oldest { cacheState.values.removeValue(forKey: key) }
     }
 
-    static func matchesImmediately(
-        keeper: URL, victim: URL, expectedSize: Int64
-    ) async -> ExactFileDigest.CacheKey? {
-        await withCheckedContinuation { continuation in
-            destructiveQueue.async {
-                let match = ExactFileDigest.matchWithIdentity(
-                    first: keeper, second: victim, expectedSize: expectedSize)
-                continuation.resume(returning: match?.second)
-            }
-        }
-    }
-
     private static func keeperComesFirst(_ lhs: FileRow, _ rhs: FileRow) -> Bool {
         let la = lhs.aesthetic ?? 0
         let ra = rhs.aesthetic ?? 0
@@ -237,6 +225,7 @@ struct DuplicateTrashOutcome: Sendable {
     var verificationFailed = 0
     var protectedLocation = 0
     var failed = 0
+    var failureMessage: String?
     var batchID: String?
     var engineUnavailable = false
     var timedOut = false
@@ -302,11 +291,22 @@ extension ExactDuplicateVerifier {
             switch trashRefusal(refusal) {
             case "protected": outcome.protectedLocation += 1
             case "changed": outcome.verificationFailed += 1
-            default: outcome.failed += 1
+            default:
+                outcome.failed += 1
+                if outcome.failureMessage == nil, let text = refusal.message, !text.isEmpty, !Sidebar.looksTechnical(text) { outcome.failureMessage = text }
             }
         }
         outcome.batchID = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         return outcome
+    }
+
+    /// Why a batch that moved nothing says so plainly: the card must not show a success for an empty move.
+    nonisolated static func nothingMovedSummary(_ outcome: DuplicateTrashOutcome, skippedAsChanged: Int) -> String {
+        var reasons: [String] = []
+        if skippedAsChanged > 0 { reasons.append("\(skippedAsChanged.formatted()) changed since the scan, so FileID left \(skippedAsChanged == 1 ? "it" : "them") alone") }
+        if outcome.protectedLocation > 0 { reasons.append("\(outcome.protectedLocation.formatted()) \(outcome.protectedLocation == 1 ? "is" : "are") in a protected location, such as a Photos library") }
+        if outcome.failed > 0 { reasons.append(outcome.failureMessage ?? "\(outcome.failed.formatted()) couldn’t be moved to the Trash") }
+        return reasons.isEmpty ? "Nothing was moved to the Trash. Your files are untouched." : "Nothing was moved to the Trash: " + reasons.joined(separator: "; ") + ". Your files are untouched."
     }
 
     /// The helper's reason code; a helper that sends none is read from its fixed
@@ -328,6 +328,6 @@ extension ExactDuplicateVerifier {
         let signal = engine.bulkActionResultSignal
         guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, "FileID is still getting ready. Try again in a moment.") }
         let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 300)
-        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn't finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
+        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn’t finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
     }
 }

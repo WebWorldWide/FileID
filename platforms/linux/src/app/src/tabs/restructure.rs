@@ -1,7 +1,4 @@
-// Restructure (DESIGN_V3_PORT "Restructure"): Preview · Review · Move step
-// cells pinned above the plan, then the intro, metric row, notices,
-// recommendations with their files grouped by destination, Staying put and
-// the Review drill-down. Nothing moves until Move is confirmed.
+// Restructure page. Nothing moves until Move is confirmed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
@@ -156,7 +153,6 @@ fn notice(tone: Tone) -> (gtk::Box, gtk::Label, gtk::Label) {
 }
 
 pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
-    // ── Step strip ─────────────────────────────────────────────────────────
     let strip_outer = v3::vbox(0);
     strip_outer.add_css_class("v3-strip");
     let strip = gtk::Box::builder()
@@ -205,7 +201,6 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     }
     strip_outer.append(&strip);
 
-    // ── Content ────────────────────────────────────────────────────────────
     let content = v3::vbox(16);
     content.add_css_class("v3-page-pad");
     let intro = v3::vbox(4);

@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::test_support::receipt;
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -119,9 +120,6 @@ async fn finish(server: Arc<VlmServer>, tracker: &ProcessTracker, s: &ResourceSc
     Arc::try_unwrap(server).ok().unwrap().shutdown().await.unwrap();
     tracker.shutdown().await.unwrap();
     assert_eq!(snapshot(s), (0, 0, 0, 0));
-}
-fn receipt(root: &Path, value: serde_json::Value) {
-    std::fs::write(root.join("receipt.json"), serde_json::to_vec(&value).unwrap()).unwrap();
 }
 fn normal(listener: std::net::TcpListener) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {

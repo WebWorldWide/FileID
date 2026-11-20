@@ -3,12 +3,9 @@ using FileID.IpcSchema;
 
 namespace FileID.ViewModels;
 
-/// <summary>What the model browser shows: search text, the hardware-fit filter, downloaded
-/// only, and whether only models Describe Files can run are listed.</summary>
+/// <summary>What the model browser shows: search text, the hardware-fit filter, downloaded only, and whether only models Describe Files can run are listed.</summary>
 internal sealed record ModelCatalogFilter(string? Query = null, bool OnlyFit = true, bool InstalledOnly = false, bool DescribeFilesOnly = false);
 
-/// <summary>Filtering, ordering and wording for the model catalog browser (Describe Files and
-/// Settings) and its tests.</summary>
 internal static partial class ModelCatalogPresentation
 {
     public static readonly IReadOnlyList<(string Label, string? Role)> Roles =
@@ -28,12 +25,9 @@ internal static partial class ModelCatalogPresentation
     public static bool IsDescribeFilesModel(ModelCatalogItem model) =>
         model.Role == "vision" && model.Format == "gguf" && model.Runnable;
 
-    /// <summary>A catalog GGUF id (as the engine validates them); the engine still rejects unknown ids.</summary>
     public static bool IsCatalogModelKind(string? id) =>
         id is { Length: > 0 and <= 120 } && CatalogIdPattern().IsMatch(id) && id.Contains("_gguf", StringComparison.Ordinal);
 
-    /// <summary>Every offerable model matching the filter, curated defaults first, then measured
-    /// models (fastest decode first), then smallest resident estimate.</summary>
     public static IReadOnlyList<ModelCatalogItem> Filter(IEnumerable<ModelCatalogItem> models, ModelCatalogFilter filter)
     {
         var query = filter.Query?.Trim() ?? "";

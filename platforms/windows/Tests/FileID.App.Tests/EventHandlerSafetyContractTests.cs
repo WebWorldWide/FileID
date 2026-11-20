@@ -3,25 +3,12 @@ using Xunit;
 
 namespace FileID.App.Tests;
 
-/// <summary>
-/// The stowed-exception crash class: an exception that escapes a
-/// PropertyChanged handler tears down the WinUI process rather than surfacing
-/// as a catchable error. The app's standing invariant is that every such
-/// handler body runs inside <c>DebugLog.SafeRun</c>. These tests hold the whole
-/// app to it so a newly added subscription can't silently reopen the class.
-/// </summary>
+/// <summary>The stowed-exception crash class: an exception that escapes a PropertyChanged handler tears down the WinUI process rather than surfacing as a catchable error. The app's standing invariant is that every such handler body runs inside DebugLog.SafeRun; these tests hold the whole app to it so a newly added subscription can't silently reopen the class.</summary>
 public sealed class EventHandlerSafetyContractTests
 {
     private static readonly string RepoRoot = FindRepoRoot();
 
-    /// <summary>
-    /// Matches <c>receiver.PropertyChanged += HandlerName;</c> — a subscription
-    /// to <em>another</em> object's notifications, which is where the crash
-    /// class lives. A bare <c>PropertyChanged += handler;</c> (EngineClient
-    /// awaiting its own one-shot reply) is deliberately out of scope: those
-    /// bodies only compare a property name and call <c>TrySetResult</c>, which
-    /// cannot throw.
-    /// </summary>
+    /// <summary>Matches `receiver.PropertyChanged += HandlerName;`, a subscription to ANOTHER object's notifications, which is where the crash class lives. A bare PropertyChanged += handler; (EngineClient awaiting its own one-shot reply) is deliberately out of scope: those bodies only compare a property name and call TrySetResult, which cannot throw.</summary>
     private static readonly Regex Subscription =
         new(@"[\w\.]+\.PropertyChanged\s*\+=\s*(?<handler>\w+)\s*;", RegexOptions.Compiled);
 
@@ -42,8 +29,7 @@ public sealed class EventHandlerSafetyContractTests
                 var handler = match.Groups["handler"].Value;
                 examined++;
 
-                // `-=` unsubscriptions are matched by the same shape only when
-                // written as `+=`, so every hit here is a real subscription.
+                // `-=` unsubscriptions are matched by the same shape only when written as `+=`, so every hit here is a real subscription.
                 var bodyStart = FindHandlerBody(lines, handler);
                 if (bodyStart < 0)
                 {
@@ -59,8 +45,6 @@ public sealed class EventHandlerSafetyContractTests
             }
         }
 
-        // Guards against the regex silently matching nothing and the assertion
-        // below passing vacuously after a refactor renames the event.
         Assert.True(examined >= 30, $"Expected to inspect the app's PropertyChanged subscriptions; saw {examined}.");
 
         Assert.True(
@@ -69,12 +53,7 @@ public sealed class EventHandlerSafetyContractTests
                 + "cannot escape as a stowed exception:\n  " + string.Join("\n  ", offenders));
     }
 
-    /// <summary>
-    /// ReducedMotion raises PropertyChanged from a threadpool thread (the WinRT
-    /// UISettings callback). A bare multicast invoke there is a process kill —
-    /// one throwing subscriber escapes unhandled AND starves every later
-    /// subscriber. It must fan out per-subscriber with isolation instead.
-    /// </summary>
+    /// <summary>ReducedMotion raises PropertyChanged from a threadpool thread (the WinRT UISettings callback), so a bare multicast invoke is a process kill: one throwing subscriber escapes unhandled AND starves every later subscriber. It must fan out with per-subscriber isolation instead.</summary>
     [Fact]
     public void ReducedMotionIsolatesEachSubscriberFromItsSiblings()
     {
@@ -89,8 +68,6 @@ public sealed class EventHandlerSafetyContractTests
         Assert.True(guard > fanOut, "Each subscriber invocation must be individually guarded.");
     }
 
-    /// <summary>Index of the first line of <paramref name="handler"/>'s body,
-    /// whether it is declared as a method or assigned as a lambda.</summary>
     private static int FindHandlerBody(string[] lines, string handler)
     {
         var method = new Regex(@"\b(?:void|Task)\s+" + Regex.Escape(handler) + @"\s*\(");

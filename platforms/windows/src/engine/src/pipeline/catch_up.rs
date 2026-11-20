@@ -1,28 +1,19 @@
-//! What a scan still owes a file after its main pass, and what it remembers
-//! about files it could not read. Both live in `scan_catchup` (catalog v34),
-//! shared with the Swift engine's `ScanCatchUp`, so either engine can finish
-//! the other's work.
+//! What a scan still owes a file after its main pass, and what it remembers about files it could not read. Both live in `scan_catchup` (catalog v34), shared with the Swift engine's `ScanCatchUp`, so either engine can finish the other's work.
 
 use parking_lot::Mutex;
 
-/// RAM++ tags are owed (`ScanCatchUp.tagsOwed`).
 pub const TAGS_OWED: i64 = 1;
-/// The careful text read is owed (`ScanCatchUp.carefulTextOwed`).
 pub const CAREFUL_TEXT_OWED: i64 = 2;
-/// The fast text read ran during the scan (`ScanCatchUp.textReadAtScan`).
 pub const TEXT_READ_AT_SCAN: i64 = 4;
 pub const OWED_MASK: i64 = TAGS_OWED | CAREFUL_TEXT_OWED;
 
-/// What the writer stores in `scan_catchup` next to a file's scan results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
     pub stages: i64,
-    /// The classifier context JSON (`ScanCatchUp.VisionContext`).
     pub vision: Option<String>,
     pub face_count: i64,
 }
 
-// MARK: - Files that keep failing
 
 /// A file that could not be analysed is retried on this many scans, then left
 /// alone until its size or date changes, the engine is updated, or the user
@@ -40,8 +31,6 @@ pub fn failure_context() -> &'static str {
     })
 }
 
-/// ?1 file id, ?2 size, ?3 modified, ?4 `failure_context()`, ?5 now. The count
-/// continues only while the file and the engine build are the ones that failed.
 pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_failures \
      (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) \
      VALUES (?1, ?2, ?3, ?4, 1, ?5) \
@@ -55,8 +44,6 @@ pub const RECORD_FAILURE_SQL: &str = "INSERT INTO scan_failures \
 
 pub const CLEAR_FAILURE_SQL: &str = "DELETE FROM scan_failures WHERE file_id = ?1";
 
-/// Failed rows that have used up their retries and still describe the file
-/// on record. ?1 `failure_context()`; callers append a path-range clause.
 pub const GIVEN_UP_SQL: &str = "SELECT f.path_text, f.size_bytes, f.modified_at \
      FROM scan_failures c JOIN files f ON f.id = c.file_id \
      WHERE c.attempts >= 3 AND f.failed = 1 \
@@ -73,7 +60,6 @@ pub fn failure_is_about_the_file(path: &std::path::Path) -> bool {
     std::fs::File::open(long).and_then(|mut file| file.read(&mut [0u8; 1])).is_ok()
 }
 
-// MARK: - RAM++ after the scan
 
 /// A file's catch-up is given up after this many failed attempts
 /// (`ScanCatchUp.maxAttempts`); it keeps the tags the scan stored.
@@ -112,20 +98,14 @@ pub struct Context {
     /// The tags the scan stored in place of RAM++'s: the Vision classifier's
     /// on the Mac, the CLIP scene labels elsewhere.
     pub k: Vec<String>,
-    /// Classifier confidences the tag agreement reads, as `f32` bit patterns.
     pub c: Vec<Label>,
-    /// The classifier answered at all.
     pub u: bool,
-    /// Classifier plus RAM++ tags, once known; the careful read needs them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t: Option<Vec<String>>,
-    /// Face detection ran (the portable people-word rule needs to know).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub f: Option<bool>,
-    /// The photo names a camera (the portable text-read rule).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub m: Option<bool>,
-    /// The Year and camera tags the scan appended, so the pass appends the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<Vec<String>>,
 }
@@ -136,16 +116,11 @@ pub struct Label {
     pub b: u32,
 }
 
-/// `TagAgreement.vetoable`, as classifier keys.
 const VETO_KEYS: [&str; 3] = ["canoe", "skateboard", "frisbee"];
-/// `TagAgreement.vetoBelow`.
 const VETO_BELOW: f32 = 0.01;
-/// The confidence from which the agreement raises a RAM++ score.
 const AGREEMENT_FROM: f32 = 0.30;
 
 impl Context {
-    /// Exactly the classifier output `TagAgreement.combine` reads: every label
-    /// at 0.30 or above and the vetoable labels at 0.01 or above.
     pub fn from_classifier(tags: &[String], confidences: impl IntoIterator<Item = (String, f32)>) -> Self {
         let mut answered = false;
         let mut c: Vec<Label> = confidences
@@ -206,7 +181,6 @@ pub fn unicode_fold(tag: &str) -> String {
     tag.to_lowercase()
 }
 
-/// What a text read returned (the Mac adapter's reply).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TextRead {
     pub ran: bool,
@@ -283,7 +257,6 @@ pub fn careful_update(file: &Pending, context: &Context, read_text: impl FnOnce(
     Outcome::Done(Update { tags: None, text, stages: file.stages & !CAREFUL_TEXT_OWED, vision: file.vision.clone() })
 }
 
-/// One file the pass has to visit.
 #[derive(Debug, Clone)]
 pub struct Pending {
     pub file_id: i64,
@@ -323,23 +296,17 @@ pub struct TextUpdate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Update {
-    /// The complete stored tag list; `None` leaves the scan's tags in place.
     pub tags: Option<Vec<(String, Option<f32>)>>,
-    /// The text read again with the final tags; `None` leaves the text as it is.
     pub text: Option<TextUpdate>,
-    /// What the row still says afterwards; nothing owed removes the row.
     pub stages: i64,
     pub vision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// Changed, missing or unreachable: the next scan deals with it.
     Leave,
-    /// The row no longer describes the analysis the marker was written for.
     Stale,
     Failed,
-    /// The reader went away; stop the pass and keep what is owed.
     Blocked,
     Done(Update),
 }
@@ -347,13 +314,11 @@ pub enum Outcome {
 /// Decodes and analyses one owed file. The scan's own decoder and models
 /// stand behind it (`tagging::catch_up_analyzer`); tests use a stub.
 pub trait Analyzer: Sync {
-    /// Whether this phase can run now (RAM++ loaded, careful reader ready).
     fn ready(&self, phase: Phase) -> bool;
-    /// Files analysed at once.
     fn parallelism(&self) -> usize;
     fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome;
-    /// How long to wait for a phase's reader to become ready before giving up
-    /// on it for this pass (`Readers.carefulWaitSeconds`).
+    /// How long a reader that is still warming up may be waited on after the scan ended
+    /// (`Readers.carefulWaitSeconds`); a scan itself never waits for it.
     fn ready_wait(&self, _phase: Phase) -> std::time::Duration {
         std::time::Duration::ZERO
     }
@@ -374,6 +339,10 @@ pub struct Summary {
     pub left: u64,
     pub failed: u64,
     pub cancelled: bool,
+    /// Careful reads are owed and the reader was still warming up, so the pass did not wait for it.
+    pub careful_waiting: bool,
+    /// The catalog refused the results because the disk is full.
+    pub disk_full: bool,
 }
 
 fn scope(root: Option<&std::path::Path>) -> Option<(String, String)> {
@@ -447,7 +416,6 @@ fn next_chunk(
     }
 }
 
-/// The checks every analyzer shares, then the analyzer itself.
 fn process(file: &Pending, phase: Phase, analyzer: &dyn Analyzer) -> Outcome {
     if file.mark_size != file.size_bytes || !same_time(file.mark_modified, file.modified_at) {
         return Outcome::Stale;
@@ -532,10 +500,7 @@ fn apply(tx: &rusqlite::Connection, file: &Pending, outcome: &Outcome, summary: 
     Ok(())
 }
 
-/// Runs the tag pass, then the careful-read pass, over what files under
-/// `root` (everything when `None`) are owed. The `scan_catchup` row is the
-/// cursor: a cancel or a crash leaves the rest for the next scan. Safe to call
-/// with nothing owed.
+/// Runs the tag pass, then the careful-read pass, over what files under `root` (everything when `None`) are owed. The `scan_catchup` row is the cursor, so a cancel or crash leaves the rest for the next scan.
 pub fn run(
     conn: &Mutex<rusqlite::Connection>,
     root: Option<&std::path::Path>,
@@ -543,6 +508,111 @@ pub fn run(
     is_cancelled: &(dyn Fn() -> bool + Sync),
     is_paused: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(Progress) + Sync),
+) -> Summary {
+    run_with_health(conn, root, analyzer, is_cancelled, is_paused, progress, &CAREFUL_READER)
+}
+
+fn note_careful_pass(reader: &Mutex<ReaderHealth>, careful_pass: PassEnd) {
+    if careful_pass.blocked {
+        reader.lock().failed(std::time::Instant::now());
+    } else if !careful_pass.stopped_early {
+        reader.lock().recovered();
+    }
+}
+
+/// Careful reads left owed because the reader was still warming up when the scan ended: waits for it, for up to
+/// twice its warm-up wait, then reads them without reporting progress. The scan never waits for this.
+pub fn finish_careful_when_ready(
+    conn: &Mutex<rusqlite::Connection>,
+    root: Option<&std::path::Path>,
+    analyzer: &dyn Analyzer,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Summary {
+    finish_careful_with_health(conn, root, analyzer, is_cancelled, &CAREFUL_READER, std::time::Duration::from_millis(250))
+}
+
+fn finish_careful_with_health(
+    conn: &Mutex<rusqlite::Connection>,
+    root: Option<&std::path::Path>,
+    analyzer: &dyn Analyzer,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    reader: &Mutex<ReaderHealth>,
+    poll: std::time::Duration,
+) -> Summary {
+    let mut summary = Summary::default();
+    let deadline = std::time::Instant::now() + analyzer.ready_wait(Phase::CarefulText).saturating_mul(2);
+    while !analyzer.ready(Phase::CarefulText) && std::time::Instant::now() < deadline && !is_cancelled() {
+        std::thread::sleep(poll);
+    }
+    if is_cancelled() || reader.lock().deferred_for(std::time::Instant::now()).is_some() {
+        return summary;
+    }
+    if !analyzer.ready(Phase::CarefulText) {
+        tracing::info!("[CATCH-UP] careful text stays owed: the careful reader did not warm up in time");
+        return summary;
+    }
+    let careful = owed(&conn.lock(), root).1;
+    if careful == 0 {
+        return summary;
+    }
+    summary.owed_careful = careful;
+    let careful_pass = pass(conn, root, Phase::CarefulText, analyzer, is_cancelled, &|| false, &|_| {}, &mut summary);
+    note_careful_pass(reader, careful_pass);
+    tracing::info!(text_read = summary.text_read, left = summary.left, failed = summary.failed, "[CATCH-UP] late careful text finished");
+    summary
+}
+
+/// How long the careful text reader is left alone after it stopped answering.
+/// Each further failure doubles it, up to the cap, and one good pass resets it.
+const READER_BACKOFF_FIRST: std::time::Duration = std::time::Duration::from_mins(1);
+const READER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_mins(15);
+
+/// Whether the careful text reader answered the last time it was asked. A reader
+/// that did not is not waited on by every scan that follows.
+#[derive(Debug, Default)]
+pub struct ReaderHealth {
+    failures: u32,
+    retry_at: Option<std::time::Instant>,
+}
+
+impl ReaderHealth {
+    pub const fn new() -> Self {
+        Self { failures: 0, retry_at: None }
+    }
+
+    pub fn deferred_for(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.retry_at.and_then(|at| at.checked_duration_since(now)).filter(|left| !left.is_zero())
+    }
+
+    pub fn failed(&mut self, now: std::time::Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let doublings = (self.failures - 1).min(16);
+        self.retry_at = Some(now + READER_BACKOFF_FIRST.saturating_mul(1 << doublings).min(READER_BACKOFF_CAP));
+    }
+
+    pub fn recovered(&mut self) {
+        *self = Self::new();
+    }
+}
+
+static CAREFUL_READER: Mutex<ReaderHealth> = Mutex::new(ReaderHealth::new());
+
+pub fn careful_reader_deferred() -> bool {
+    CAREFUL_READER.lock().deferred_for(std::time::Instant::now()).is_some()
+}
+
+pub fn forget_careful_reader_failures() {
+    CAREFUL_READER.lock().recovered();
+}
+
+pub fn run_with_health(
+    conn: &Mutex<rusqlite::Connection>,
+    root: Option<&std::path::Path>,
+    analyzer: &dyn Analyzer,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    is_paused: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
+    reader: &Mutex<ReaderHealth>,
 ) -> Summary {
     let mut summary = Summary::default();
     let (owed_tags, owed_careful) = owed(&conn.lock(), root);
@@ -553,27 +623,27 @@ pub fn run(
     summary.owed_careful = owed_careful;
     let started = std::time::Instant::now();
     tracing::info!(tags = owed_tags, careful_text = owed_careful, "[CATCH-UP] started");
-    progress(Progress::Total(owed_tags + owed_careful));
+    let reader_backed_off = reader.lock().deferred_for(std::time::Instant::now()).is_some();
+    let careful_now = !reader_backed_off && analyzer.ready(Phase::CarefulText);
+    progress(Progress::Total(owed_tags + if careful_now { owed_careful } else { 0 }));
 
-    let mut visited = 0;
     if owed_tags > 0 {
         if analyzer.ready(Phase::Tags) {
-            visited += pass(conn, root, Phase::Tags, analyzer, is_cancelled, is_paused, progress, &mut summary);
+            pass(conn, root, Phase::Tags, analyzer, is_cancelled, is_paused, progress, &mut summary);
         } else {
             tracing::info!("[CATCH-UP] tags skipped: the tagger is not available");
         }
     }
     let careful = owed(&conn.lock(), root).1;
     if careful > 0 && !summary.cancelled && !is_cancelled() {
-        progress(Progress::Total(visited + careful));
-        let deadline = std::time::Instant::now() + analyzer.ready_wait(Phase::CarefulText);
-        while !analyzer.ready(Phase::CarefulText) && std::time::Instant::now() < deadline && !is_cancelled() {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        if analyzer.ready(Phase::CarefulText) {
-            pass(conn, root, Phase::CarefulText, analyzer, is_cancelled, is_paused, progress, &mut summary);
+        let deferred = reader.lock().deferred_for(std::time::Instant::now());
+        if let Some(left) = deferred {
+            tracing::info!(owed = careful, retry_in_seconds = left.as_secs(), "[CATCH-UP] careful text skipped: the careful reader stopped answering recently");
+        } else if analyzer.ready(Phase::CarefulText) {
+            note_careful_pass(reader, pass(conn, root, Phase::CarefulText, analyzer, is_cancelled, is_paused, progress, &mut summary));
         } else {
-            tracing::info!(owed = careful, "[CATCH-UP] careful text skipped: the careful reader is not ready");
+            summary.careful_waiting = true;
+            tracing::info!(owed = careful, "[CATCH-UP] careful text left owed: the careful reader is still warming up");
         }
     }
     if is_cancelled() {
@@ -604,23 +674,26 @@ fn pass(
     is_paused: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(Progress) + Sync),
     summary: &mut Summary,
-) -> u64 {
+) -> PassEnd {
     let scheduler = crate::resource_scheduler::ResourceScheduler::shared();
     let chunk_size = analyzer.parallelism().clamp(1, 16);
     let mut cursor = 0;
-    let mut visited = 0;
+    let mut blocked = false;
+    let mut stopped_early = false;
     loop {
         while is_paused() && !is_cancelled() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         if is_cancelled() {
             summary.cancelled = true;
+            stopped_early = true;
             break;
         }
         let chunk = match next_chunk(&conn.lock(), root, phase, cursor, chunk_size) {
             Ok(chunk) => chunk,
             Err(error) => {
                 tracing::warn!(%error, "[CATCH-UP] could not read what is owed");
+                stopped_early = true;
                 break;
             }
         };
@@ -636,8 +709,6 @@ fn pass(
                         if is_cancelled() {
                             return Outcome::Leave;
                         }
-                        // The same background admission as a scan file: a
-                        // search or a resident model goes first.
                         let lease = scheduler.reserve_patient(
                             crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 0 },
                             crate::resource_scheduler::Priority::Background,
@@ -675,21 +746,30 @@ fn pass(
             }
             Err(error) => {
                 tracing::warn!(%error, "[CATCH-UP] could not store results; the rest stays owed");
+                summary.disk_full = crate::util::user_message::io_cause(&anyhow::Error::from(error))
+                    == Some(crate::util::user_message::IoCause::DiskFull);
+                stopped_early = true;
                 break;
             }
         }
         if outcomes.iter().any(|outcome| matches!(outcome, Outcome::Blocked)) {
             tracing::info!("[CATCH-UP] paused: the reader stopped answering");
+            blocked = true;
             break;
         }
         if cancelled_midway {
             summary.cancelled = true;
+            stopped_early = true;
             break;
         }
-        visited += chunk.len() as u64;
         progress(Progress::Advance(chunk.len() as u64));
     }
-    visited
+    PassEnd { blocked, stopped_early }
+}
+
+struct PassEnd {
+    blocked: bool,
+    stopped_early: bool,
 }
 
 #[cfg(test)]
@@ -702,6 +782,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn ram_plus_is_deferred_by_default_on_the_mac_and_on_request_elsewhere() {
@@ -719,7 +800,6 @@ mod tests {
 
     #[test]
     fn the_context_reads_and_writes_the_swift_engines_json() {
-        // As `ScanCatchUp.VisionContext` encodes it (any key order, no `t` yet).
         let swift = r#"{"u":true,"c":[{"n":"dog","b":1063675494},{"n":"frisbee","b":1017370378}],"k":["dog","outdoor"]}"#;
         let context = Context::decode(Some(swift)).expect("Swift-written context");
         assert_eq!(context.k, ["dog", "outdoor"]);
@@ -753,7 +833,6 @@ mod tests {
         assert_eq!(context.c[1].b, 0.02f32.to_bits(), "confidences round-trip bit for bit");
         assert!(context.u);
 
-        // The classifier answered but nothing was kept: still "answered".
         let quiet = Context::from_classifier(&tags, [("park".to_string(), 0.1f32)]);
         assert!(quiet.u && quiet.c.is_empty());
         assert_eq!(quiet.confidences().len(), 1);
@@ -775,7 +854,6 @@ mod tests {
         assert_eq!(unicode_fold("ÉCOLE"), "école");
     }
 
-    // MARK: the pass over a real catalog, with a stub in place of the models
 
     struct Library {
         dir: PathBuf,
@@ -790,7 +868,6 @@ mod tests {
             Self { dir, conn: Arc::new(Mutex::new(crate::db::test_support::memory_db())) }
         }
 
-        /// A scanned image row for a real file, before any tags.
         fn image(&self, name: &str) -> TaggedFile {
             let path = self.dir.join(name);
             std::fs::write(&path, name.as_bytes()).unwrap();
@@ -819,10 +896,13 @@ mod tests {
         }
 
         fn run(&self, analyzer: &dyn Analyzer) -> Summary {
-            run(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {})
+            run_with_health(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {}, &Mutex::new(ReaderHealth::new()))
         }
 
-        /// (tags with scores, text, handwritten, has_text, owed stages)
+        fn run_remembering(&self, analyzer: &dyn Analyzer, reader: &Mutex<ReaderHealth>) -> Summary {
+            run_with_health(&self.conn, Some(&self.dir), analyzer, &|| false, &|| false, &|_| {}, reader)
+        }
+
         #[allow(clippy::type_complexity)]
         fn stored(&self, name: &str) -> (Vec<(String, Option<f64>)>, Option<String>, bool, bool, Option<i64>) {
             let conn = self.conn.lock();
@@ -911,7 +991,6 @@ mod tests {
         }
     }
 
-    /// The row as the inline scan writes it: RAM++ in the scan, then the text read.
     fn portable_inline(library: &Library, name: &str, scene: &[(&str, f32)], extras: &[&str]) -> TaggedFile {
         let mut row = library.image(name);
         row.faces_evaluated = true;
@@ -931,7 +1010,6 @@ mod tests {
         row
     }
 
-    /// The row as the deferred scan writes it: scene labels, no text read, a marker.
     fn portable_deferred(library: &Library, name: &str, scene: &[(&str, f32)], extras: &[&str]) -> TaggedFile {
         let mut row = library.image(name);
         row.faces_evaluated = true;
@@ -963,7 +1041,6 @@ mod tests {
         inline.write(cases.iter().map(|(name, scene, extras)| portable_inline(&inline, name, scene, extras)).collect()).await;
         deferred.write(cases.iter().map(|(name, scene, extras)| portable_deferred(&deferred, name, scene, extras)).collect()).await;
 
-        // Before the pass the deferred library holds the scene labels and owes the rest.
         let (tags, text, _, _, owed) = deferred.stored("dog.png");
         assert_eq!(tags.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["Canon", "Year_2019", "park"]);
         assert_eq!((text, owed), (None, Some(TAGS_OWED)));
@@ -980,6 +1057,26 @@ mod tests {
         assert_eq!(deferred.stored("abstract.png").1.as_deref(), Some("text of abstract.png"));
         assert_eq!(deferred.stored("dog.png").0.iter().map(|(tag, _)| tag.as_str()).collect::<Vec<_>>(), ["Canon", "Year_2019", "dog", "grass"]);
         assert_eq!(deferred.run(&PortableStub(portable_ram)), Summary::default(), "a second pass has nothing to do");
+    }
+
+    fn wordy_ram(name: &str) -> Vec<(String, f32)> {
+        (0..16).map(|index| (format!("{name}-a-long-tag-name-number-{index}-{}", "x".repeat(200)), 0.9 - index as f32 / 100.0)).collect()
+    }
+
+    #[tokio::test]
+    async fn a_full_disk_stops_the_pass_and_says_so() {
+        let library = Library::new("portable-disk-full");
+        let names: Vec<String> = (0..60).map(|index| format!("photo{index}.png")).collect();
+        library.write(names.iter().map(|name| portable_deferred(&library, name, &[("park", 0.5)], &["Year_2019"])).collect()).await;
+        {
+            let conn = library.conn.lock();
+            let pages: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+            conn.execute_batch(&format!("PRAGMA max_page_count = {pages}")).unwrap();
+        }
+        let summary = library.run(&PortableStub(wordy_ram));
+        assert!(summary.disk_full, "{summary:?}");
+        assert_eq!(summary.tagged, 0, "{summary:?}");
+        assert_eq!(library.stored("photo0.png").4, Some(TAGS_OWED), "the rest stays owed");
     }
 
     // The Mac rules: the classifier's tags at scan time, with a first text read.
@@ -1055,13 +1152,9 @@ mod tests {
     #[tokio::test]
     async fn mac_tags_and_text_after_the_pass_equal_the_inline_scan() {
         let cases: [(&str, &[&str], &[&str]); 4] = [
-            // RAM++ adds a text hint the classifier lacked: the text is read in the pass.
             ("note.heic", &["outdoor"], &["Year_2024", "iPhone"]),
-            // No text either way.
             ("hike.heic", &["outdoor", "sky"], &["Year_2023"]),
-            // Read at scan time; RAM++'s tags change what the read is told.
             ("scan.heic", &["document"], &[]),
-            // RAM++ has nothing to add: the classifier's tags stand.
             ("blank.heic", &["document", "white"], &["Year_2020"]),
         ];
         let (inline, deferred) = (Library::new("mac-inline"), Library::new("mac-deferred"));
@@ -1090,7 +1183,6 @@ mod tests {
         row.ocr_stage_ran = true;
         row.ocr_text = Some("fast read".to_string());
         row.has_text = true;
-        // As the Swift scan writes it once RAM++ ran inline: the text tags are known.
         let swift = r#"{"k":["document"],"c":[],"u":true,"t":["document","handwriting"]}"#;
         row.catch_up = Some(Marker { stages: CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, vision: Some(swift.to_string()), face_count: 0 });
         library.write(vec![row]).await;
@@ -1104,7 +1196,6 @@ mod tests {
         assert_eq!(owed, None);
     }
 
-    /// A Mac reader whose careful tier is still compiling until `warm` is set.
     struct ColdReader {
         warm: std::sync::atomic::AtomicBool,
     }
@@ -1264,7 +1355,6 @@ mod tests {
         library.write((0..7).map(|i| owing(&library, &format!("photo{i}.png"))).collect()).await;
         let analyzer = Counting { calls: AtomicUsize::new(0), fail: false };
         let progress = Mutex::new(Vec::new());
-        // Cancelled once the first two files have been analysed.
         let summary = run(
             &library.conn,
             Some(&library.dir),
@@ -1307,7 +1397,6 @@ mod tests {
         let scene = vec![("scene".to_string(), Some(0.5))];
         // The row was rewritten since the marker (a different size on record).
         library.conn.lock().execute("UPDATE scan_catchup SET size_bytes = size_bytes + 1 WHERE file_id = (SELECT id FROM files WHERE path_text LIKE '%stale.png')", []).unwrap();
-        // The file changed on disk after the scan.
         std::fs::write(library.dir.join("edited.png"), b"a longer file than before").unwrap();
 
         let good = Counting { calls: AtomicUsize::new(0), fail: false };
@@ -1354,6 +1443,281 @@ mod tests {
         library.write(vec![owing(&library, "a.png")]).await;
         assert_eq!(library.run(&NotReady).tagged, 0);
         assert_eq!(library.stored("a.png").4, Some(TAGS_OWED));
+    }
+
+    #[test]
+    fn a_reader_that_stopped_answering_is_left_alone_for_longer_each_time() {
+        let t0 = std::time::Instant::now();
+        let mut health = ReaderHealth::new();
+        assert_eq!(health.deferred_for(t0), None);
+
+        health.failed(t0);
+        assert_eq!(health.deferred_for(t0), Some(Duration::from_secs(60)));
+        assert_eq!(health.deferred_for(t0 + Duration::from_secs(61)), None);
+
+        health.failed(t0);
+        assert_eq!(health.deferred_for(t0), Some(Duration::from_secs(120)));
+        for _ in 0..40 {
+            health.failed(t0);
+        }
+        assert_eq!(health.deferred_for(t0), Some(READER_BACKOFF_CAP));
+
+        health.recovered();
+        assert_eq!(health.deferred_for(t0), None);
+    }
+
+    struct SilentReader {
+        calls: AtomicUsize,
+        ready_checks: AtomicUsize,
+        answers: bool,
+    }
+
+    impl Analyzer for SilentReader {
+        fn ready(&self, phase: Phase) -> bool {
+            self.ready_checks.fetch_add(1, Ordering::SeqCst);
+            phase == Phase::CarefulText && self.answers
+        }
+        fn parallelism(&self) -> usize {
+            2
+        }
+        fn ready_wait(&self, _phase: Phase) -> Duration {
+            Duration::from_millis(600)
+        }
+        fn analyse(&self, _file: &Pending, _phase: Phase, _context: Option<&Context>) -> Outcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Outcome::Blocked
+        }
+    }
+
+    fn owing_careful_text(library: &Library, name: &str) -> TaggedFile {
+        let mut row = library.image(name);
+        row.catch_up = marker(CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, Context { u: true, ..Context::default() }, 0);
+        row
+    }
+
+    #[tokio::test]
+    async fn a_scan_does_not_wait_for_a_reader_that_is_still_warming_up() {
+        let library = Library::new("reader-warming");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: false };
+
+        let started = std::time::Instant::now();
+        let summary = library.run_remembering(&silent, &reader);
+        assert!(started.elapsed() < Duration::from_millis(300), "the scan answered at once: {:?}", started.elapsed());
+        assert_eq!((summary.owed_careful, summary.text_read, summary.careful_waiting), (1, 0, true));
+        assert_eq!(reader.lock().deferred_for(std::time::Instant::now()), None, "a warming reader is not a failing one");
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 1), "the read stays owed");
+    }
+
+    struct WarmsUpAfter {
+        checks: AtomicUsize,
+        warm_after: usize,
+    }
+
+    impl Analyzer for WarmsUpAfter {
+        fn ready(&self, phase: Phase) -> bool {
+            phase == Phase::CarefulText && self.checks.fetch_add(1, Ordering::SeqCst) >= self.warm_after
+        }
+        fn parallelism(&self) -> usize {
+            1
+        }
+        fn ready_wait(&self, _phase: Phase) -> Duration {
+            Duration::from_secs(5)
+        }
+        fn analyse(&self, file: &Pending, _phase: Phase, context: Option<&Context>) -> Outcome {
+            Outcome::Done(Update {
+                tags: None,
+                text: Some(TextUpdate { text: Some("careful".into()), handwritten: false }),
+                stages: file.stages & !CAREFUL_TEXT_OWED,
+                vision: context.and_then(Context::encoded),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn careful_reads_a_warming_reader_left_owed_are_finished_once_it_is_ready() {
+        let library = Library::new("reader-late");
+        library.write(vec![owing_careful_text(&library, "a.png"), owing_careful_text(&library, "b.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let warming = WarmsUpAfter { checks: AtomicUsize::new(0), warm_after: 3 };
+        let summary = finish_careful_with_health(&library.conn, Some(&library.dir), &warming, &|| false, &reader, Duration::from_millis(5));
+        assert_eq!((summary.owed_careful, summary.text_read), (2, 2));
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn late_careful_reads_give_up_when_the_reader_never_warms_up_or_the_scan_is_cancelled() {
+        let library = Library::new("reader-late-never");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let never = WarmsUpAfter { checks: AtomicUsize::new(0), warm_after: usize::MAX };
+        let cancelled = finish_careful_with_health(&library.conn, Some(&library.dir), &never, &|| true, &reader, Duration::from_millis(5));
+        assert_eq!(cancelled.text_read, 0);
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 1));
+
+        struct Brief(WarmsUpAfter);
+        impl Analyzer for Brief {
+            fn ready(&self, phase: Phase) -> bool {
+                self.0.ready(phase)
+            }
+            fn parallelism(&self) -> usize {
+                1
+            }
+            fn ready_wait(&self, _phase: Phase) -> Duration {
+                Duration::from_millis(10)
+            }
+            fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome {
+                self.0.analyse(file, phase, context)
+            }
+        }
+        let started = std::time::Instant::now();
+        let summary = finish_careful_with_health(&library.conn, Some(&library.dir), &Brief(never), &|| false, &reader, Duration::from_millis(5));
+        assert_eq!(summary.text_read, 0);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(owed(&library.conn.lock(), Some(&library.dir)), (0, 1), "the read stays owed for the next scan");
+    }
+
+    struct TagsThenCareful;
+
+    impl Analyzer for TagsThenCareful {
+        fn ready(&self, _phase: Phase) -> bool {
+            true
+        }
+        fn parallelism(&self) -> usize {
+            1
+        }
+        fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome {
+            let (stages, tags) = match phase {
+                Phase::Tags => (CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, Some(vec![("tagged".to_string(), None)])),
+                Phase::CarefulText => (TEXT_READ_AT_SCAN, None),
+            };
+            Outcome::Done(Update {
+                tags,
+                text: (phase == Phase::CarefulText).then(|| TextUpdate { text: Some("careful".into()), handwritten: false }),
+                stages,
+                vision: context.and_then(Context::encoded).or_else(|| file.vision.clone()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_progress_total_is_fixed_when_the_pass_starts_even_if_the_tag_pass_owes_more_reads() {
+        let library = Library::new("fixed-total");
+        let rows: Vec<TaggedFile> = ["a.png", "b.png", "c.png"]
+            .iter()
+            .map(|name| {
+                let mut row = library.image(name);
+                row.catch_up = marker(TAGS_OWED | TEXT_READ_AT_SCAN, Context { u: true, ..Context::default() }, 0);
+                row
+            })
+            .collect();
+        library.write(rows).await;
+        let events = Mutex::new(Vec::new());
+        let summary = run_with_health(&library.conn, Some(&library.dir), &TagsThenCareful, &|| false, &|| false, &|event| events.lock().push(event), &Mutex::new(ReaderHealth::new()));
+        assert_eq!((summary.tagged, summary.text_read), (3, 3));
+        let totals: Vec<u64> = events.lock().iter().filter_map(|event| if let Progress::Total(total) = event { Some(*total) } else { None }).collect();
+        assert_eq!(totals, vec![3], "the total never grows mid-phase");
+        let advanced: u64 = events.lock().iter().filter_map(|event| if let Progress::Advance(count) = event { Some(*count) } else { None }).sum();
+        assert!(advanced >= 3);
+    }
+
+    #[tokio::test]
+    async fn forgetting_the_reader_failures_asks_it_again_at_once() {
+        let library = Library::new("reader-forgotten");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: true };
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1);
+        assert!(reader.lock().deferred_for(std::time::Instant::now()).is_some());
+
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1, "inside the window the reader is left alone");
+
+        reader.lock().recovered();
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 2, "a rescan or an install asks the reader again");
+
+        forget_careful_reader_failures();
+        assert!(!careful_reader_deferred());
+    }
+
+    #[tokio::test]
+    async fn a_skipped_careful_pass_does_not_promise_its_files_in_the_progress_total() {
+        let library = Library::new("reader-skipped-total");
+        library.write(vec![owing_careful_text(&library, "a.png"), owing_careful_text(&library, "b.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        reader.lock().failed(std::time::Instant::now());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: true };
+        let totals = Mutex::new(Vec::new());
+        let summary = run_with_health(
+            &library.conn,
+            Some(&library.dir),
+            &silent,
+            &|| false,
+            &|| false,
+            &|event| {
+                if let Progress::Total(total) = event {
+                    totals.lock().push(total);
+                }
+            },
+            &reader,
+        );
+        assert_eq!((summary.owed_careful, summary.text_read, silent.calls.load(Ordering::SeqCst)), (2, 0, 0));
+        assert_eq!(*totals.lock(), vec![0], "nothing is promised that the pass will not do");
+
+        reader.lock().recovered();
+        totals.lock().clear();
+        run_with_health(&library.conn, Some(&library.dir), &silent, &|| false, &|| false, &|event| {
+            if let Progress::Total(total) = event {
+                totals.lock().push(total);
+            }
+        }, &reader);
+        assert_eq!(*totals.lock(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_stopped_answering_mid_pass_is_not_tried_again_straight_away() {
+        let library = Library::new("reader-blocked");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth::new());
+        let silent = SilentReader { calls: AtomicUsize::new(0), ready_checks: AtomicUsize::new(0), answers: true };
+
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1);
+        assert!(reader.lock().deferred_for(std::time::Instant::now()).is_some());
+
+        library.run_remembering(&silent, &reader);
+        assert_eq!(silent.calls.load(Ordering::SeqCst), 1, "no read was attempted while the reader is backed off");
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_answers_again_after_its_backoff_is_trusted_again() {
+        let library = Library::new("reader-recovers");
+        library.write(vec![owing_careful_text(&library, "a.png")]).await;
+        let reader = Mutex::new(ReaderHealth { failures: 2, retry_at: Some(std::time::Instant::now()) });
+        struct Answering;
+        impl Analyzer for Answering {
+            fn ready(&self, _phase: Phase) -> bool {
+                true
+            }
+            fn parallelism(&self) -> usize {
+                1
+            }
+            fn analyse(&self, file: &Pending, _phase: Phase, context: Option<&Context>) -> Outcome {
+                Outcome::Done(Update {
+                    tags: None,
+                    text: Some(TextUpdate { text: Some("read".into()), handwritten: false }),
+                    stages: file.stages & !CAREFUL_TEXT_OWED,
+                    vision: context.and_then(Context::encoded),
+                })
+            }
+        }
+        let summary = library.run_remembering(&Answering, &reader);
+        assert_eq!(summary.text_read, 1);
+        assert_eq!(reader.lock().failures, 0);
+        assert_eq!(reader.lock().deferred_for(std::time::Instant::now()), None);
     }
 
     #[test]

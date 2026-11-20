@@ -1,0 +1,28 @@
+{
+ "mtimes": {
+  "Clip.mov": [
+   1795033078,
+   942037653
+  ]
+ },
+ "removed": [],
+ "vars": {
+  "job": "708D6089-3B16-40BF-944E-DE6B215679E7",
+  "rows1": [
+   [
+    "scene:1:18760:4745315722416900696:timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc:0",
+    "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+    0.0,
+    2.0,
+    "A vertical split screen displays a dark brown and a green vertical panel on the left and right, respectively. A white horizontal bar is centered across the screen."
+   ],
+   [
+    "scene:1:18760:4745315722416900696:timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc:2000",
+    "timeline-scene-v1/qwen3_vl_2b@9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+    2.0,
+    3.0,
+    "A vertical, abstract composition features a dark brown rectangle on the left, a solid green rectangle on the right, and a white horizontal band across the lower portion of the frame. The background is a solid dark brown."
+   ]
+  ]
+ }
+}

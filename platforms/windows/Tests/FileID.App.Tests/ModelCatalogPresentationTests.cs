@@ -12,7 +12,7 @@ public sealed class ModelCatalogPresentationTests
 
     private static ModelCatalogItem Model(string id, bool fits, string status, double resident, double? rate, bool installed = false) =>
         new(id, id, "family", $"org/{id}", "vision", "gguf", "Q4_K_M", "Apache-2.0", false, null, 2_000_000_000, resident,
-            "small", status, true, installed || rate is not null, fits,
+            "small", status, true, installed || rate is not null, fits, fits,
             rate is { } r ? new ModelBenchmark("t", "h", 2.0, null, r, 1.5, 2.4, 0.5, 0.8, TunedArguments) : null);
 
     [Fact]
@@ -92,9 +92,9 @@ public sealed class ModelCatalogPresentationTests
         Assert.Equal("Showing 80 of 120 models. Search to narrow the list.", ModelCatalogPresentation.CountSummary(80, 120));
         Assert.Equal("1 model", ModelCatalogPresentation.CountSummary(1, 1));
         Assert.Equal("This PC: 32 GB memory · 8 GB dedicated graphics memory",
-            ModelCatalogPresentation.HardwareSummary(new ModelCatalog("r", 32, 8192, Array.Empty<ModelCatalogItem>())));
+            ModelCatalogPresentation.HardwareSummary(new ModelCatalog("r", 32, 20000, 8192, null, Array.Empty<ModelCatalogItem>())));
         Assert.Equal("This PC: 16 GB memory · no dedicated graphics memory reported",
-            ModelCatalogPresentation.HardwareSummary(new ModelCatalog("r", 16, 0, Array.Empty<ModelCatalogItem>())));
+            ModelCatalogPresentation.HardwareSummary(new ModelCatalog("r", 16, 9000, 0, null, Array.Empty<ModelCatalogItem>())));
     }
 
     [Theory]

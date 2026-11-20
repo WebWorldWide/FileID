@@ -93,8 +93,6 @@ pub(crate) fn dot(a: &[f32], b: &[f32]) -> f64 {
     f64::from(a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>())
 }
 
-/// Faces kept out of the full clustering pool for review: pending suggestions, and new faces once
-/// the space already has assigned faces to compare them with.
 pub(crate) fn holdout(conn: &Connection, model: &str, processing: &str, min_quality: f64) -> rusqlite::Result<HashSet<i64>> {
     let incremental: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM face_prints WHERE person_id IS NOT NULL AND embedding_model=?1 AND processing_version=?2)",
@@ -115,7 +113,6 @@ pub(crate) fn holdout(conn: &Connection, model: &str, processing: &str, min_qual
         .collect()
 }
 
-/// Records every face of this run's pool that has no assessment yet, so later runs treat it as known.
 pub(crate) fn mark_pool<'a>(conn: &Connection, pool: impl IntoIterator<Item = &'a i64>, at: f64) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT OR IGNORE INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) \
@@ -291,8 +288,7 @@ pub(crate) struct AssessStats {
     pub unmatched: usize,
 }
 
-/// Compares held faces with person centroids in their own space. By default it only queues
-/// suggestions; `auto_assign` assigns confident matches instead.
+/// By default only queues suggestions; `auto_assign` assigns confident matches instead.
 pub(crate) fn assess(
     conn: &Connection,
     held: &HashSet<i64>,
@@ -429,8 +425,6 @@ pub(crate) fn face_namespace(conn: &Connection, face: i64) -> rusqlite::Result<S
     )
 }
 
-/// The user moved a face out of a person by hand: remember it is not that person, log the
-/// correction and settle any pending suggestion for it.
 pub(crate) fn record_reassignment(conn: &Connection, face: i64, previous: Option<i64>, destination: Option<i64>) -> rusqlite::Result<()> {
     let at = now();
     let (file, bbox): (i64, String) = conn.query_row("SELECT file_id, bbox FROM face_prints WHERE id=?1", [face], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -812,7 +806,7 @@ fn undo_face_in(conn: &Connection, request: &str, before: &serde_json::Value, af
     Ok(FaceReviewPage { face_id: Some(face), total: pending_count(conn)?, ..page(request, "undo", "ok") })
 }
 
-fn restore_candidate(conn: &Connection, face: i64, candidate: &serde_json::Value) -> rusqlite::Result<()> {
+pub(super) fn restore_candidate(conn: &Connection, face: i64, candidate: &serde_json::Value) -> rusqlite::Result<()> {
     let reason = candidate["reason"].as_str().unwrap_or("suggested");
     let namespace = candidate["namespace"].as_str().unwrap_or_default();
     if let Some(person) = candidate["personID"].as_i64() {
@@ -1068,7 +1062,6 @@ pub(crate) async fn handle_list(sink: Sink, db: Option<Writer>, payload: ListFac
         sink.send(reply_event(failed(&request_id, "list", "FileID couldn't open its library. Quit and reopen FileID."))).await;
         return;
     };
-    // Listing only reads, so it runs on a pooled read-only connection instead of the writer.
     let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<FaceReviewPage> {
         match crate::db::reader_for(&db) {
             Ok(Some(reader)) => list(&reader, &payload),

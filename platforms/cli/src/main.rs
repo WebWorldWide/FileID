@@ -1,16 +1,4 @@
-//! `fileid` — the cross-platform FileID command-line front-end.
-//!
-//! A thin client over the shared Rust engine (`fileid-engine`). It links the
-//! engine as a library and reuses its DB schema/migrations, file
-//! classification, restructure cascade, and apply/trash code directly
-//! (in-process), so the CLI can never drift from the engine contract. Reads and
-//! plans are model-free; `dedupe --apply` / `restructure --apply` call the
-//! engine's exact apply path; `scan --models` spawns the engine binary to drive
-//! the full ML pipeline. Destructive actions are opt-in and prompt unless
-//! `--yes`.
-//!
-//! Cross-OS despite living under `platforms/`: builds and runs identically on
-//! macOS, Linux, and Windows.
+//! `fileid` CLI. Reads and apply paths run in-process on `fileid-engine`; `scan --models` spawns the engine binary because it owns the async runtime lifecycle.
 
 mod context;
 mod dedupe;
@@ -18,7 +6,6 @@ mod info;
 mod models;
 mod people;
 mod restructure;
-mod runtime;
 mod scan;
 mod scan_models;
 mod search;
@@ -52,8 +39,7 @@ Everything runs on-device — no cloud, no telemetry. Run a bare `fileid` for a 
 struct Cli {
     #[command(flatten)]
     global: GlobalArgs,
-    // A bare invocation prints the guided introduction below. Clap still owns
-    // help, version, and invalid-command errors.
+    // Optional so a bare invocation can print the intro; clap still owns help and errors.
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -210,44 +196,6 @@ enum Command {
         #[command(subcommand)]
         cmd: ModelsCmd,
     },
-
-    /// Manage the ONNX Runtime library the full-ML scan loads (`status` /
-    /// `install`).
-    ///
-    /// Separate from `models` (the AI weights): this is the inference library
-    /// that loads them. On macOS it must be installed once (`ort` ships only a
-    /// static lib for arm64); on Windows/Linux the platform provides it.
-    ///
-    /// Example: fileid runtime status   ·   fileid runtime install
-    Runtime {
-        #[command(subcommand)]
-        cmd: RuntimeCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum RuntimeCmd {
-    /// Show whether ONNX Runtime is installed + where the engine looks for it.
-    ///
-    /// Example: fileid runtime status
-    Status,
-
-    /// Install the ONNX Runtime library where the engine loads it (macOS).
-    ///
-    /// Idempotent: reports + exits if it's already available (e.g. via
-    /// Homebrew). Provisions from a local copy when possible (no network), else
-    /// guides you through the one-time install. On Windows/Linux there's nothing
-    /// to install — the platform provides the runtime.
-    ///
-    /// Example: fileid runtime install
-    Install {
-        /// Reinstall into the engine runtime dir even if one is already found.
-        #[arg(long)]
-        force: bool,
-        /// Skip the confirmation prompt for a download.
-        #[arg(long)]
-        yes: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -292,9 +240,7 @@ fn parse_result_limit(raw: &str) -> Result<usize, String> {
     }
 }
 
-/// Friendly getting-started shown for a bare `fileid` (no subcommand) — what it
-/// is, the handful of commands worth trying first (copy-pasteable), and the
-/// model story. Replaces clap's terse "USAGE:" error.
+/// Intro for a bare `fileid`; replaces clap's terse "USAGE:" error.
 fn intro() -> &'static str {
     "FileID — on-device AI file organizer.\n\
      Tag, search, dedupe, and tidy your files locally — no cloud, no telemetry.\n\
@@ -320,14 +266,7 @@ fn intro() -> &'static str {
      (macOS: with no --db, commands read your FileID desktop app's library.)"
 }
 
-/// Point the engine at its OWN writable models dir for this process (and any
-/// engine subprocess we spawn), unless the user already pinned
-/// `FILEID_MODELS_DIR`. On macOS this is the XDG `~/.local/share/FileID/Models`,
-/// NOT the desktop app's read-only CoreML `~/Library/Application Support/...` —
-/// so `fileid models download` writes the engine's ONNX/GGUF weights somewhere
-/// it can also read for `scan --models`. On Windows/Linux this is exactly the
-/// default the engine already resolves to (so app-installed models are still
-/// found); it only makes that choice explicit + inheritable by the spawned engine.
+/// Pins the engine to its own writable models dir (not the read-only macOS CoreML app-support path) unless `FILEID_MODELS_DIR` is set, so `models download` and `scan --models` read the same weights.
 pub(crate) fn ensure_engine_models_dir() {
     if std::env::var_os("FILEID_MODELS_DIR").is_some_and(|v| !v.is_empty()) {
         return;
@@ -338,11 +277,7 @@ pub(crate) fn ensure_engine_models_dir() {
     }
 }
 
-/// Report a failure on stderr, honouring `--json`.
-///
-/// `--json` is documented as "machine-readable output", but the error paths
-/// always printed prose, so a run that failed emitted text no parser could
-/// read. Diagnostics stay on stderr either way — stdout remains pure data.
+/// Diagnostics go to stderr; with `--json` they are one JSON object so failures stay parseable.
 fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
     if json {
         eprintln!(
@@ -358,7 +293,6 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let json_output = cli.global.json;
 
-    // Bare `fileid`: print the friendly intro to stdout and exit cleanly.
     let Some(command) = cli.command else {
         println!("{}", intro());
         return ExitCode::SUCCESS;
@@ -422,17 +356,12 @@ fn main() -> ExitCode {
                 names,
             } => models::download(&ctx, all, dry_run, yes, &names),
         },
-        Command::Runtime { cmd } => match cmd {
-            RuntimeCmd::Status => runtime::status(&ctx),
-            RuntimeCmd::Install { force, yes } => runtime::install(&ctx, yes, force),
-        },
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.downcast_ref::<scan::PartialScan>().is_some() => {
-            // Committed-but-partial scan: results are usable, some files were
-            // unreadable. Dedicated code (rsync-style) so scripts can branch.
+            // Exit 3 (rsync-style) lets scripts tell a partial scan from a failure.
             report_failure(json_output, "warning", "partialScan", &e);
             ExitCode::from(3)
         }

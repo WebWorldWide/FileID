@@ -1,8 +1,7 @@
-//! Structured Chat answers from fixed SQL templates. Mirrors macOS
-//! `ChatFacts.swift`. No model ever writes SQL: every predicate below is a
-//! constant with bound parameters.
+//! Structured Chat answers from fixed SQL templates (mirrors macOS `ChatFacts.swift`). No model ever writes SQL: every
+//! predicate is a constant with bound parameters.
 
-use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question};
+use super::chat_intent::{bytes_label, count_label, count_noun, noun, DateFilter, Question, MONTH_NAMES};
 use super::roots::RootScope;
 use crate::ipc::CatalogHit;
 use anyhow::Result;
@@ -12,12 +11,11 @@ use std::path::Path;
 
 pub(crate) const ANALYZABLE: [&str; 6] = ["image", "video", "pdf", "doc", "audio", "model"];
 pub(crate) const SHOWN: usize = 50;
-/// Above this many matches a listing walks the date or size index; below it,
-/// SQLite sorts the matches. Same threshold in macOS `ChatFacts`.
+/// Above this many matches a listing walks the date or size index; below it SQLite sorts. Same threshold in macOS
+/// `ChatFacts`.
 pub(crate) const LARGE: i64 = 2_000;
 const TAKEN: &str = "COALESCE(f.created_at,f.modified_at)";
 
-/// "RAW" for the RAW family, else the first extension in capitals ("JPG", "PNG").
 pub(crate) fn format_label(extensions: &[String]) -> String {
     if extensions.iter().any(|e| e == "arw") && extensions.iter().any(|e| e == "cr2") {
         "RAW".into()
@@ -26,30 +24,24 @@ pub(crate) fn format_label(extensions: &[String]) -> String {
     }
 }
 
-/// Which files a structured answer or action covers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Filter {
     pub kinds: Vec<String>,
     pub person_ids: Vec<i64>,
     pub person_names: Vec<String>,
     pub date: Option<DateFilter>,
-    /// `named:<folder>` or an absolute path.
     pub folder: Option<String>,
     pub undescribed: bool,
+    pub faces: bool,
     pub ids: Option<Vec<i64>>,
-    /// Lowercase file extensions ("raw" covers every RAW type).
     pub extensions: Vec<String>,
-    /// Every named person must appear ("Kyle and Maya"), not any of them.
     pub all_people: bool,
-    /// The subject words behind `ids`, for the reply.
     pub subject: Option<String>,
-    /// People the question leaves out ("without Maya").
     pub excluded_person_ids: Vec<i64>,
     pub excluded_person_names: Vec<String>,
-    /// Exclusive byte bounds.
     pub min_bytes: Option<i64>,
     pub max_bytes: Option<i64>,
-    /// The library location the app is scoped to (`rootID`).
+    pub camera: Option<String>,
     pub root: Option<RootScope>,
 }
 
@@ -76,13 +68,12 @@ impl Filter {
         }
     }
 
-    /// The SQL predicate over `files f`, appending its parameters.
     pub fn clause(&self, args: &mut Vec<Value>) -> String {
         self.predicate(args, false)
     }
 
-    /// `ordered` hides the kind column from the planner (`+f.kind`) so a
-    /// large listing walks the ORDER BY index instead of sorting every match.
+    /// `ordered` hides the kind column from the planner (`+f.kind`) so a large listing walks the ORDER BY index instead
+    /// of sorting every match.
     fn predicate(&self, args: &mut Vec<Value>, ordered: bool) -> String {
         let mut parts = vec!["f.failed=0".to_owned()];
         let kinds = self.effective_kinds();
@@ -112,6 +103,10 @@ impl Filter {
             parts.push("f.id NOT IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)".into());
             args.push(json(&self.excluded_person_ids));
             args.push(json(&self.excluded_person_ids));
+        }
+        if let Some(camera) = &self.camera {
+            parts.push("lower(trim(f.camera_model))=lower(?)".into());
+            args.push(Value::Text(camera.clone()));
         }
         if let Some(min) = self.min_bytes {
             parts.push("f.size_bytes>?".into());
@@ -160,6 +155,9 @@ impl Filter {
         if self.undescribed {
             parts.push("(f.vlm_description IS NULL OR trim(f.vlm_description)='')".into());
         }
+        if self.faces {
+            parts.push("f.has_faces=1".into());
+        }
         if let Some(root) = &self.root {
             parts.push(super::roots::clause("f.path_text", "?"));
             args.push(Value::Text(root.param().to_owned()));
@@ -167,7 +165,6 @@ impl Filter {
         parts.join(" AND ")
     }
 
-    /// " of Kyle in Downloads from 2023 not described yet".
     pub fn qualifiers(&self) -> String {
         use std::fmt::Write;
         let mut text = String::new();
@@ -176,6 +173,9 @@ impl Filter {
         }
         if !self.extensions.is_empty() {
             let _ = write!(text, " in {} format", format_label(&self.extensions));
+        }
+        if let Some(camera) = &self.camera {
+            let _ = write!(text, " taken with {camera}");
         }
         if !self.person_names.is_empty() {
             let separator = if self.all_people || self.person_names.len() == 1 { " and " } else { " or " };
@@ -199,8 +199,54 @@ impl Filter {
         if self.undescribed {
             text += " not described yet";
         }
+        if self.faces {
+            text += " with faces";
+        }
         text
     }
+}
+
+/// A camera model the catalog knows, named in the question; `rest` is the question without those words.
+pub(crate) struct CameraAsk {
+    pub model: String,
+    pub rest: String,
+}
+
+fn alphanumerics(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+const CAMERA_LEAD_WORDS: [&str; 12] = ["taken", "shot", "captured", "recorded", "made", "with", "on", "by", "using", "from", "the", "a"];
+
+pub(crate) fn camera_asked_about(conn: &Connection, text: &str) -> Result<Option<CameraAsk>> {
+    let mut statement = conn.prepare("SELECT DISTINCT trim(camera_model) FROM files WHERE failed=0 AND camera_model IS NOT NULL AND trim(camera_model)<>''")?;
+    let models = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut best: Option<(&String, usize, usize)> = None;
+    for model in &models {
+        let wanted = alphanumerics(model);
+        if wanted.len() < 3 {
+            continue;
+        }
+        for start in 0..words.len() {
+            for end in start + 1..=(start + 4).min(words.len()) {
+                if alphanumerics(&words[start..end].concat()) == wanted && best.is_none_or(|(known, _, _)| model.len() > known.len()) {
+                    best = Some((model, start, end));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(best.map(|(model, start, end)| {
+        let mut first = start;
+        while first > 0 && CAMERA_LEAD_WORDS.contains(&words[first - 1].to_lowercase().as_str()) {
+            first -= 1;
+        }
+        CameraAsk {
+            model: model.clone(),
+            rest: words.iter().enumerate().filter(|(index, _)| !(first..end).contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" "),
+        }
+    }))
 }
 
 pub(crate) fn file_name(path: &str) -> String {
@@ -212,7 +258,6 @@ pub(crate) fn capitalized(text: &str) -> String {
     chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
-/// Count and total size of the matching files.
 pub(crate) fn totals(conn: &Connection, filter: &Filter) -> Result<(i64, i64)> {
     let mut args = Vec::new();
     let clause = filter.clause(&mut args);
@@ -223,8 +268,6 @@ pub(crate) fn totals(conn: &Connection, filter: &Filter) -> Result<(i64, i64)> {
     )?)
 }
 
-/// Matching files as citations, in the requested order. `count` is the
-/// number of matches, from [`totals`].
 pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usize, count: i64) -> Result<Vec<CatalogHit>> {
     let mut args = Vec::new();
     let clause = filter.predicate(&mut args, count > LARGE);
@@ -257,9 +300,8 @@ pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usi
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Extra copies of files that share a stored content hash and size, with the
-/// copy Cleanup would keep. The keeper order mirrors Cleanup's: best-looking,
-/// largest, oldest, shortest path.
+/// Extra copies sharing a stored content hash and size, with the copy Cleanup would keep (best-looking, largest,
+/// oldest, shortest path).
 pub(crate) struct Extras {
     pub groups: i64,
     pub count: i64,
@@ -334,8 +376,7 @@ pub(crate) struct FolderTotal {
     pub bytes: i64,
 }
 
-/// Folders holding the most files (or bytes), from the stored paths. Both path
-/// separators are folded so a catalog scanned on Windows reads the same.
+/// Both path separators are folded so a catalog scanned on Windows reads the same.
 pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64, root: Option<&RootScope>) -> Result<Vec<FolderTotal>> {
     let path = "replace(f.path_text,char(92),'/')";
     let order = if by_size { "b DESC,c DESC" } else { "c DESC,b DESC" };
@@ -350,7 +391,6 @@ pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64, root: Option
         Ok(FolderTotal { name: dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(&dir).to_owned(), path: dir, count: row.get(1)?, bytes: row.get(2)? })
     })?;
     let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    // Widen the label one folder at a time until no two folders share it.
     for depth in 2..8 {
         let mut seen = std::collections::HashSet::new();
         let repeated: std::collections::HashSet<String> =
@@ -448,12 +488,244 @@ fn library_answer(conn: &Connection, question: &Question, root: Option<&RootScop
     Ok((message, hits))
 }
 
-/// Answers a question that is fully structured: no subject words remain.
+struct PersonGroup {
+    id: i64,
+    name: Option<String>,
+    files: i64,
+}
+
+fn person_groups(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<PersonGroup>> {
+    let within = super::roots::clause("f.path_text", "?1");
+    let mut statement = conn.prepare(&format!(
+        "SELECT p.id,p.name,p.first_name,p.last_name,COUNT(DISTINCT fp.file_id) AS n FROM persons p \
+         JOIN face_prints fp ON fp.person_id=p.id AND COALESCE(fp.excluded,0)=0 \
+         JOIN files f ON f.id=fp.file_id AND f.failed=0 \
+         WHERE COALESCE(p.is_unknown,0)=0 AND {within} GROUP BY p.id ORDER BY n DESC,p.id ASC"
+    ))?;
+    let rows = statement.query_map([root.map(RootScope::param)], |row| {
+        let name: Option<String> = row.get(1)?;
+        let first: Option<String> = row.get(2)?;
+        let last: Option<String> = row.get(3)?;
+        let composed = [first, last].into_iter().flatten().map(|part| part.trim().to_owned()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+        let name = name.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).or((!composed.is_empty()).then_some(composed));
+        Ok(PersonGroup { id: row.get(0)?, name, files: row.get(4)? })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn people_unnamed(conn: &Connection, root: Option<&RootScope>) -> Result<bool> {
+    let groups = person_groups(conn, root)?;
+    Ok(!groups.is_empty() && groups.iter().all(|group| group.name.is_none()))
+}
+
+/// Answered from the face groups, never from the word "people"; files with a counted face are listed.
+pub(crate) fn people_answer(conn: &Connection, question: &Question, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+    let groups = person_groups(conn, root)?;
+    if groups.is_empty() {
+        return Ok(("No people are grouped yet. Faces are grouped after a scan finds them; open People to see the groups.".into(), vec![]));
+    }
+    let within = super::roots::clause("f.path_text", "?1");
+    let files: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN persons p ON p.id=fp.person_id AND COALESCE(p.is_unknown,0)=0 \
+             JOIN files f ON f.id=fp.file_id AND f.failed=0 WHERE COALESCE(fp.excluded,0)=0 AND {within}"
+        ),
+        [root.map(RootScope::param)],
+        |row| row.get(0),
+    )?;
+    let filter = Filter { person_ids: groups.iter().map(|group| group.id).collect(), root: root.cloned(), ..Filter::default() };
+    let hits = listed(conn, &filter, "newest", SHOWN, files)?;
+    let named: Vec<&PersonGroup> = groups.iter().filter(|group| group.name.is_some()).collect();
+    let unnamed = groups.len() - named.len();
+    let in_files = count_noun(files as i64, "file", "files");
+    let message = if named.is_empty() {
+        format!("Your library has {} of people in {in_files}, but none are named yet. Open People to name them.", count_noun(groups.len() as i64, "group", "groups"))
+    } else if question.people.as_deref() == Some("who") {
+        let names: Vec<String> =
+            named.iter().take(8).map(|group| format!("{} ({})", group.name.as_deref().unwrap_or_default(), count_noun(group.files, "file", "files"))).collect();
+        let more = if named.len() > 8 { format!(" and {} more", named.len() - 8) } else { String::new() };
+        let rest = if unnamed == 0 { String::new() } else { format!(" {} not named yet; open People to name them.", count_noun(unnamed as i64, "more group is", "more groups are")) };
+        format!("People in your library: {}{more}.{rest}", names.join(", "))
+    } else {
+        let names: Vec<&str> = named.iter().take(5).filter_map(|group| group.name.as_deref()).collect();
+        let more = if named.len() > 5 { format!(" and {} more", named.len() - 5) } else { String::new() };
+        let rest = if unnamed == 0 { String::new() } else { format!(", {unnamed} not named yet. Open People to name the rest") };
+        format!(
+            "Your library has {} of people in {in_files}: {} named ({}{more}){rest}.",
+            count_noun(groups.len() as i64, "group", "groups"),
+            count_label(named.len() as i64),
+            names.join(", ")
+        )
+    };
+    Ok((message, hits))
+}
+
+fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &str, unit: &str, noun_phrase: &str) -> String {
+    let by_size = question.measure == "size";
+    let metric = |group: &(Option<String>, i64, i64)| if by_size { group.2 } else { group.1 };
+    let dated: Vec<(&str, i64)> = groups.iter().filter_map(|group| group.0.as_deref().map(|label| (label, metric(group)))).collect();
+    let target = if peak == "least" { dated.iter().map(|group| group.1).min() } else { dated.iter().map(|group| group.1).max() };
+    let Some(target) = target else {
+        let missing = if unit == "camera" { "a camera recorded" } else { "a capture date" };
+        return format!("None of these files has {missing}, so I can't rank them by {unit}.");
+    };
+    let label = |text: &str| match (unit, text.split_once('-')) {
+        ("month", Some((year, month))) => month.parse::<usize>().ok().and_then(|n| MONTH_NAMES.get(n.wrapping_sub(1))).map_or_else(|| text.to_owned(), |name| format!("{name} {year}")),
+        _ => text.to_owned(),
+    };
+    let winners: Vec<String> = dated.iter().filter(|group| group.1 == target).map(|group| label(group.0)).collect();
+    let extreme = match (peak, by_size) {
+        ("least", true) => "the least",
+        ("least", false) => "the fewest",
+        _ => "the most",
+    };
+    let amount = if by_size { bytes_label(target) } else { count_label(target) };
+    let what = if by_size { "space".to_owned() } else { noun_phrase.to_owned() };
+    match winners.as_slice() {
+        [only] => format!("{only} {} {extreme} {what} ({amount}).", if by_size { "uses" } else { "has" }),
+        [head @ .., last] => format!("{} and {last} are tied for {extreme} {what} ({amount} each).", head.join(", ")),
+        [] => String::new(),
+    }
+}
+
+/// `None` when the catalog has no such folder, so the question is searched as words instead (Swift
+/// `ChatFacts.folderAnswer`).
+pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
+    let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
+    let (count, bytes) = totals(conn, &filter)?;
+    if count == 0 {
+        return Ok(None);
+    }
+    let mut args = Vec::new();
+    let clause = filter.clause(&mut args);
+    let mut statement = conn.prepare(&format!("SELECT f.kind,COUNT(*) AS c FROM files f WHERE {clause} GROUP BY f.kind ORDER BY c DESC,f.kind ASC"))?;
+    let kinds = statement
+        .query_map(rusqlite::params_from_iter(args), |row| {
+            let (kind, n): (String, i64) = (row.get(0)?, row.get(1)?);
+            Ok(format!("{} {}", count_label(n), noun(&[kind], n)))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let hits = listed(conn, &filter, "newest", SHOWN, count)?;
+    let files = if count == 1 { "file" } else { "files" };
+    Ok(Some((format!("“{name}” holds {} {files} ({}): {}.", count_label(count), bytes_label(bytes), kinds.join(", ")), hits)))
+}
+
+/// "Photos" can name several folders (one per scanned location); say so instead of silently merging their files.
+pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Option<&RootScope>) -> Result<Option<String>> {
+    let Some(name) = folder.strip_prefix("named:") else { return Ok(None) };
+    let filter = Filter { folder: Some(folder.to_owned()), root: root.cloned(), ..Filter::default() };
+    let mut args = vec![Value::Text(format!("/{name}/")), Value::Text(format!("/{name}/"))];
+    let clause = filter.clause(&mut args);
+    let mut statement = conn.prepare(&format!(
+        "SELECT substr(f.path_text,1,instr(lower(replace(f.path_text,char(92),'/')),lower(?))+length(?)-2) AS folder,COUNT(*) AS c FROM files f WHERE {clause} GROUP BY folder ORDER BY c DESC,folder ASC LIMIT 6"
+    ))?;
+    let found = statement
+        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if found.len() < 2 {
+        return Ok(None);
+    }
+    let places: Vec<String> = found
+        .iter()
+        .map(|(path, count)| {
+            let parts: Vec<&str> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+            let shown = parts[parts.len().saturating_sub(2)..].join("/");
+            format!("{shown} ({})", count_noun(*count, "file", "files"))
+        })
+        .collect();
+    Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
+}
+
+/// Said after an answer when files failed to read (a busy machine timed them out, say): they are in none of the answers.
+/// Counts what the apps' Unreadable filter counts, inside the asked-about location.
+pub(crate) fn unreadable_files_note(conn: &Connection, root: Option<&RootScope>) -> Result<Option<String>> {
+    let mut args = vec![
+        Value::Text(crate::scan_session::HIDDEN_ROW_MESSAGE.to_owned()),
+        Value::Text(crate::db::zero_byte::ZERO_BYTE_REASON.to_owned()),
+    ];
+    let within = match root {
+        Some(root) => {
+            args.push(Value::Text(root.param().to_owned()));
+            format!(" AND {}", super::roots::clause("f.path_text", "?3"))
+        }
+        None => String::new(),
+    };
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM files f WHERE f.failed=1 AND COALESCE(f.error_message,'') NOT LIKE '%will retry%' \
+             AND COALESCE(f.error_message,'') NOT IN (?1,?2){within}"
+        ),
+        rusqlite::params_from_iter(args),
+        |row| row.get(0),
+    )?;
+    Ok((count > 0).then(|| {
+        let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
+        format!("{} {noun} couldn't be read yet — {pronoun} not in these results.", count_label(count))
+    }))
+}
+
+pub(crate) fn reference_answer(reference: &super::chat_intent::Reference, hits: Vec<CatalogHit>) -> (String, Vec<CatalogHit>) {
+    use super::chat_intent::Reference;
+    if hits.is_empty() {
+        return ("There is no earlier list to pick from yet. Ask a question first, then say “the second one”.".into(), vec![]);
+    }
+    let count = hits.len();
+    let describe = |hit: &CatalogHit| if hit.text.is_empty() { file_name(&hit.path) } else { format!("{} ({})", file_name(&hit.path), hit.text) };
+    let pick = match reference {
+        Reference::Nth(n) => hits.get(n - 1).cloned().ok_or_else(|| format!("The last answer showed {} {}, so there is no number {n}.", count_label(count as i64), if count == 1 { "file" } else { "files" })),
+        Reference::Last => Ok(hits[count - 1].clone()),
+        Reference::Single if count == 1 => Ok(hits[0].clone()),
+        Reference::Single => Err(format!("The last answer showed {} files. Say which one, like “the first one” or “the biggest one”.", count_label(count as i64))),
+    };
+    match pick {
+        Ok(hit) => {
+            let which = match reference {
+                Reference::Nth(n) => format!("The {} one", ordinal_label(*n)),
+                Reference::Last => "The last one".into(),
+                Reference::Single => "That".into(),
+            };
+            (format!("{which} is {}.", describe(&hit)), vec![hit])
+        }
+        Err(message) => (message, vec![]),
+    }
+}
+
+fn ordinal_label(n: usize) -> String {
+    const NAMES: [&str; 10] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+    NAMES.get(n - 1).map_or_else(|| format!("{n}th"), |name| (*name).to_owned())
+}
+
+/// The library records positions, not place names, so say how many files carry one (Swift `ChatFacts.placesAnswer`).
+pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&RootScope>) -> Result<String> {
+    let filter = Filter { kinds: kinds.to_vec(), root: root.cloned(), ..Filter::default() };
+    let (total, _) = totals(conn, &filter)?;
+    let mut args = Vec::new();
+    let clause = filter.clause(&mut args);
+    let located: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM files f WHERE {clause} AND f.location_lat IS NOT NULL AND f.location_lon IS NOT NULL"),
+        rusqlite::params_from_iter(args),
+        |row| row.get(0),
+    )?;
+    let things = noun(kinds, 2);
+    Ok(if total == 0 {
+        format!("No {things} in the library yet.")
+    } else if located == 0 {
+        format!("None of your {} {things} have a location recorded, so I can't say where they were taken.", count_label(total))
+    } else {
+        format!("{} of your {} {things} have a location recorded, but I can't name the places yet.", count_label(located), count_label(total))
+    })
+}
+
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
     if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
         return library_answer(conn, question, filter.root.as_ref());
     }
     let qualifiers = filter.qualifiers();
+    if let (Some(unit), Some(_)) = (&question.breakdown, &question.peak)
+        && !["year", "month", "camera"].contains(&unit.as_str())
+    {
+        return Ok((format!("I can't rank {} by {unit} yet. I can count them by year or month, for example “which month has the most {}?”", noun(&filter.kinds, 2), noun(&filter.kinds, 2)), vec![]));
+    }
     if question.duplicates {
         let extras = extras(conn, filter, SHOWN)?;
         let message = if question.measure == "size" && extras.count > 0 {
@@ -489,9 +761,15 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     if let Some(unit) = &question.breakdown {
         let mut args = Vec::new();
         let clause = filter.clause(&mut args);
-        let format = if unit == "year" { "%Y" } else { "%Y-%m" };
+        let (group, order) = match unit.as_str() {
+            "camera" => ("NULLIF(trim(f.camera_model),'')".to_owned(), "c DESC,g ASC".to_owned()),
+            _ => (
+                format!("strftime('{}',{TAKEN},'unixepoch','localtime')", if unit == "year" { "%Y" } else { "%Y-%m" }),
+                "g DESC".to_owned(),
+            ),
+        };
         let mut statement = conn.prepare(&format!(
-            "SELECT strftime('{format}',{TAKEN},'unixepoch','localtime') AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,g DESC"
+            "SELECT {group} AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,{order}"
         ))?;
         let groups = statement
             .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))?
@@ -500,12 +778,13 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
             .iter()
             .take(24)
             .map(|(label, n, b)| {
-                let label = label.as_deref().unwrap_or("no date");
+                let label = label.as_deref().unwrap_or(if unit == "camera" { "no camera recorded" } else { "no date" });
                 if question.measure == "size" { format!("{label}: {}", bytes_label(*b)) } else { format!("{label}: {}", count_label(*n)) }
             })
             .collect();
         let more = if groups.len() > 24 { format!(" and {} more", groups.len() - 24) } else { String::new() };
-        return Ok((format!("{}{qualifiers} by {unit}: {}{more}.", capitalized(&noun(&kinds, 2)), parts.join(", ")), hits));
+        let lead = question.peak.as_deref().map(|peak| format!("{} ", peak_lead(&groups, question, peak, unit, &noun(&kinds, 2)))).unwrap_or_default();
+        return Ok((format!("{lead}{}{qualifiers} by {unit}: {}{more}.", capitalized(&noun(&kinds, 2)), parts.join(", ")), hits));
     }
     let message = match question.measure.as_str() {
         "size" => {
@@ -533,7 +812,6 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     Ok((message, hits))
 }
 
-/// Words that only join a subject to the question ("about taxes", "photos showing a dog").
 const SUBJECT_FILLERS: [&str; 56] = [
     "them", "they", "it", "its", "those", "these", "ones", "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show", "containing",
     "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where", "who", "me", "my", "i", "do",
@@ -542,9 +820,8 @@ const SUBJECT_FILLERS: [&str; 56] = [
 ];
 pub(crate) const SUBJECT_LIMIT: usize = 200_000;
 
-/// Subject words split into alternatives on "or": "beach or sunset" → [[beach], [sunset]].
-/// Each subject word costs several index lookups, so a pasted paragraph is cut
-/// to the first few alternatives and words (Swift `ChatFacts.subjectGroups`).
+/// "beach or sunset" → [[beach], [sunset]]. Each word costs several index lookups, so a pasted paragraph is cut to the
+/// first few (Swift `ChatFacts.subjectGroups`).
 pub(crate) const SUBJECT_MAX_GROUPS: usize = 6;
 pub(crate) const SUBJECT_MAX_WORDS: usize = 8;
 
@@ -570,12 +847,9 @@ pub(crate) fn subject_groups(query: &str) -> Vec<Vec<String>> {
     groups
 }
 
-/// Every file the subject describes, so counts, sizes and orders see all
-/// matches rather than the best hundred search keeps. A word matches a file's
-/// name, description, scan tags, document or photo text, or current video
-/// evidence, in its written or singular form; every word must match, and "or"
-/// joins alternatives. `None` when no subject word remains. Mirrors macOS
-/// `ChatFacts.subjectIDs`.
+/// Counts, sizes and orders see all matches, not search's best hundred. A word matches name, description, scan tags,
+/// document/photo text or current video evidence, written or singular; every word must match, "or" joins alternatives.
+/// `None` when no subject word remains (macOS `ChatFacts.subjectIDs`).
 pub(crate) fn subject_ids(conn: &Connection, query: &str) -> Result<Option<Vec<i64>>> {
     let groups = subject_groups(query);
     if groups.is_empty() {
@@ -643,7 +917,6 @@ fn files_matching(conn: &Connection, word: &str) -> Result<HashSet<i64>> {
     Ok(ids)
 }
 
-/// Keeps only hits whose files pass the structured filter, preserving order.
 pub(crate) fn restrict(conn: &Connection, hits: Vec<CatalogHit>, filter: &Filter) -> Result<Vec<CatalogHit>> {
     if hits.is_empty() {
         return Ok(hits);

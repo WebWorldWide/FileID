@@ -1,0 +1,39 @@
+{
+ "mtimes": {
+  "photos/camera.jpg": [
+   1789812000,
+   0
+  ],
+  "photos/text.heic": [
+   1789812060,
+   0
+  ],
+  "screens/known-text.png": [
+   1789812120,
+   0
+  ]
+ },
+ "removed": [],
+ "vars": {
+  "hashes": [
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-image-hashes/tree/photos/camera.jpg",
+    1212696624,
+    "ILCE-7M3",
+    1717230030.25
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-image-hashes/tree/photos/text.heic",
+    25362134204416,
+    null,
+    1789812060.0
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-image-hashes/tree/screens/known-text.png",
+    25362134204416,
+    null,
+    1789812120.0
+   ]
+  ]
+ }
+}

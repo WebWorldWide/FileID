@@ -54,12 +54,12 @@ echo "▶ Stopping running FileID processes…"
 osascript -e 'tell application "FileID" to quit' >/dev/null 2>&1 || true
 sleep 0.5
 pkill -f "FileID.app/Contents/MacOS/FileID"        2>/dev/null || true
-pkill -f "FileID.app/Contents/MacOS/FileIDEngine"  2>/dev/null || true
+pkill -f "FileID.app/Contents/MacOS/fileidd"  2>/dev/null || true
 pkill -x "FileID"                                   2>/dev/null || true
-pkill -x "FileIDEngine"                             2>/dev/null || true
+pkill -x "fileidd"                             2>/dev/null || true
 sleep 0.5
 pkill -9 -f "FileID.app/Contents/MacOS/" 2>/dev/null || true
-pkill -9 -x "FileIDEngine"               2>/dev/null || true
+pkill -9 -x "fileidd"               2>/dev/null || true
 echo "  ✓ processes signalled"
 
 echo "▶ Removing installed bundles…"

@@ -13,7 +13,7 @@ and unit tests (e.g. the Windows `shell/ocr.rs` known-text test).
   at runtime — git can't reliably carry these names across platforms.
 - `assertions.json` — platform-neutral expected outcomes.
 
-Keep fixtures tiny and rights-clear. No real personal photos.
+Keep fixtures tiny and rights-clear. No real personal photos. `conformance-media/` (`camera.jpg` is a flat-colour render with hand-written EXIF, the clip, PDF, audio and HEIC are generated) is synthetic, so no third-party rights attach to any fixture.
 
 - `face-alignment.json` — synthetic landmark/template fixtures shared by Swift and Rust; checks geometry only, without personal photographs or identity-accuracy claims.
 - `mlx-verified-install.json` — one MLX model install as the Swift and Rust engines each record it (`.fileid-verified-<revision>`); both engines check they write their own form and accept the other.

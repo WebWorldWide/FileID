@@ -7,6 +7,8 @@ struct LocationsCard: View {
     let engine: EngineClient
 
     private var roots: [LibraryRoot] { engine.libraryRoots }
+    private var engineReady: Bool { if case .ready = engine.state { return true } else { return false } }
+    private var helperDown: Bool { HelperGate.isDown(engine) }
 
     var body: some View {
         Panel(padding: 16) {
@@ -16,14 +18,15 @@ struct LocationsCard: View {
                     Spacer()
                     Button("Refresh") { engine.refreshLibraryRoots() }
                         .buttonStyle(DSSecondaryButtonStyle())
+                        .disabled(helperDown)
                         .accessibilityLabel("Refresh locations")
                 }
                 if roots.isEmpty {
-                    MetaText("No locations yet. Scan a folder or drive and it appears here.")
+                    MetaText(LocationText.emptyMessage(helperDown: helperDown, helperStarting: !helperDown && !engineReady))
                 } else {
                     ForEach(roots, id: \.id) { root in
                         LocationRow(root: root, engine: engine)
-                        if root.id != roots.last?.id { Divider().opacity(0.3) }
+                        if root.id != roots.last?.id { Hairline(color: Theme.hairlineSoft) }
                     }
                     MetaText("Offline locations keep their tags, faces and descriptions. They come back when the drive does.")
                 }
@@ -35,6 +38,12 @@ struct LocationsCard: View {
 
 /// Text for a location row. A plain type, not part of the view, so it carries no main-actor isolation.
 enum LocationText {
+    static func emptyMessage(helperDown: Bool, helperStarting: Bool) -> String {
+        if helperDown { return "FileID’s helper isn’t running, so its locations can’t be listed. Restart the helper under Advanced, then press Refresh." }
+        if helperStarting { return "FileID’s helper is starting. Locations appear here in a moment." }
+        return "No locations yet. Scan a folder or drive and it appears here."
+    }
+
     static func summary(_ root: LibraryRoot, now: Date = Date()) -> String {
         let count = root.fileCount.formatted()
         let size = ByteCountFormatter.string(fromByteCount: root.totalBytes, countStyle: .file)
@@ -71,7 +80,7 @@ struct LocationRow: View {
                     if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
                 }
                 MetaText(LocationText.summary(root))
-                MetaText(PathText.abbreviated(root.path)).lineLimit(1).truncationMode(.middle).help(root.path)
+                Text(PathText.abbreviated(root.path)).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head).help(root.path)
             }
             Spacer()
             Button("Rescan") { engine.startScan(rootURL: URL(fileURLWithPath: root.path)) }

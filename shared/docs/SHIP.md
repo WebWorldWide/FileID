@@ -1,5 +1,11 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-11-19 Throughput: ≥140 files/s is the Mac target, not a cross-platform claim
+
+≥140 files/s is the target for the macOS Apple-native scan path (ImageIO decode, Vision, MLX CLIP/RAM++). Windows and Linux run the portable CPU path (image-rs decode, tract), which has not been measured on Windows or Linux hardware and is not held to that number.
+
+What the portable path measured (acceptance lane F, 2026-11-18): the portable pipeline (`FILEID_APPLE_SCAN=0`, CLIP on tract, no RAM++) on an M1 Pro (10 cores, 16 GB), on a shared machine at load average 17–40, scanned 200 large Sony JPEG/ARW originals in 19.7–24.1 s, about 8–10 files/s. Decode alone cost 390–470 ms per file, 4–9× the ImageIO decode of the same files (52–133 ms), and is the ceiling. With RAM++ on tract the cost is about 2.5 s per image and 4.3–4.9 GB of memory, so the portable scan skips RAM++ below 11 GiB installed and tags with CLIP scene tags. The Mac path in the same lane scanned 300 of the same originals in 56.6 s (about 5 files/s, load 30–39), so no run on these 24 MP originals came near 140 files/s on either path. The timings are indicative only (shared machine); the memory figures are the trustworthy ones. No Windows or Linux throughput is claimed until it is measured on that hardware.
+
 ## 2026-11-15 Where the release stands
 
 Not release-ready, and closer than it has been. What is true today:
@@ -200,10 +206,8 @@ SHA-pinned, after the user explicitly triggers it. Full registry in
 Removed in the commercial-clean pass: the non-commercial Qwen2.5-VL-3B,
 InsightFace ArcFace/SCRFD, and research-only MobileCLIP-S2.
 
-On Windows, ONNX Runtime auto-selects the execution provider
-(CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU). NVIDIA cards without the CUDA
-pack installed run on DirectML — fully functional, ~80–90% of native CUDA
-throughput for ML inference. macOS uses MLX + CoreML + the Neural Engine.
+Every ONNX model runs on tract on the CPU on Windows, macOS and Linux. On macOS the
+app's scan CLIP and RAM++ run on MLX through the adapters.
 
 ## Restructure — butler-grade overhaul
 
@@ -265,8 +269,8 @@ on the Developer ID cert). The major open items:
   app: RAM++ tagger, ViT-B/32, SFace (128-d) with Apple Vision detection, VLM
   ladder. Goal: a face DB written on one platform round-trips on the other. Until
   then, treat face DBs as platform-local.
-- **Throughput re-baseline** — DirectML on the RTX 2060 measures ~6–7 files/s
-  (RAM++ Swin-L-bound); host the ORT CUDA EP DLLs for the NVIDIA 3–5× path.
+- **Throughput re-baseline** — measure the tract CPU path on the Windows hardware
+  below (RAM++ Swin-L is the bound); GPU inference is a later cross-platform decision.
 - **Face clustering** — Pass-1 single-linkage chains distinct people through
   bridge faces on very large libraries; structural fix (mutual-kNN / density-gated
   edges) + calibration against labeled faces.
@@ -280,29 +284,25 @@ on the Developer ID cert). The major open items:
 
 ## Appendix — Windows per-vendor verification matrix
 
-The engine's ORT execution-provider picker auto-detects the best accelerator on
-each vendor's silicon. **GPU Performance Packs were removed** (no shippable,
-license-compliant per-vendor URLs) — DirectML is the universal GPU path for every
-D3D12-capable vendor, CPU is the floor. Rationale in `DECISIONS.md`. The
-Intel OpenVINO and Snapdragon QNN packs remain unhosted; power users who install a
-vendor SDK locally get the engine's auto-pick (OpenVINO / QNN), but the default
-ship target is DirectML or CPU.
+Every ONNX model runs on tract on the CPU; the only GPU use is llama.cpp (Describe
+Files, Chat). GPU Performance Packs and ONNX Runtime execution providers no longer
+exist. Rationale in `DECISIONS.md` (2026-11-18).
 
 Run a 1,000-file scan on representative hardware per row and confirm the engine log
 + throughput.
 
-| Vendor | Reference hardware | Expected EP | Status |
-|--------|--------------------|-------------|--------|
-| NVIDIA | RTX 2060 / 3060 / 4060+ | DirectML (CUDA with the EP DLLs) | ⬜ pending re-baseline w/ RAM++ |
-| AMD | RX 6600 / 7600+ | DirectML | ⬜ pending |
-| Intel | Arc A380 / Iris Xe / UHD iGPU | DirectML | ⬜ pending |
-| Qualcomm | Snapdragon X Elite | CPU (QNN if the SDK is installed) | ⬜ pending |
-| CPU | i7-12700 / Ryzen 7 7700 | CPU | ⬜ pending |
+| Vendor | Reference hardware | Inference | Status |
+|--------|--------------------|-----------|--------|
+| NVIDIA | RTX 2060 / 3060 / 4060+ | tract CPU (llama.cpp on Vulkan or CUDA) | ⬜ pending |
+| AMD | RX 6600 / 7600+ | tract CPU (llama.cpp on Vulkan) | ⬜ pending |
+| Intel | Arc A380 / Iris Xe / UHD iGPU | tract CPU (llama.cpp on Vulkan) | ⬜ pending |
+| Qualcomm | Snapdragon X Elite | tract CPU (llama.cpp on CPU) | ⬜ pending |
+| CPU | i7-12700 / Ryzen 7 7700 | tract CPU | ⬜ pending |
 
 ### Per-vendor acceptance (each row passes when all hold)
 
-1. **Engine log shows the expected EP.** `%LOCALAPPDATA%\FileID\logs\app.log`
-   after a fresh scan — the `ep=` field on `[EP] built session` matches the table.
+1. **Engine log shows the backend.** `%LOCALAPPDATA%\FileID\logs\app.log`
+   after a fresh scan — `[ML] inference backend` says `tract-cpu`.
 2. **Throughput target met** over a representative 1,000-file image library.
 3. **Memory ceiling honored** — peak RSS within budget across the scan.
 4. **No crash dumps** in `%LOCALAPPDATA%\CrashDumps\` during the run.
@@ -310,10 +310,8 @@ Run a 1,000-file scan on representative hardware per row and confirm the engine 
    AMD / Intel; CPU on Snapdragon) — surfaced via `[VLM]` log lines.
 6. **`iterate.ps1` corpus regression green** on the host (`scan_assertions.py`).
 
-Code-level certainty is in place: `models/runtime.rs` unit tests cover every
-vendor's EP pick + fallback, and the picker fails safely down the chain when an EP
-can't build a session. Hardware certainty — proving drivers, DLLs, and ORT line up
-on real silicon — is the missing layer the six checks above provide.
+Hardware certainty — proving the tract CPU path meets the throughput and memory
+targets on real silicon — is the layer the six checks above provide.
 
 ### Build pre-reqs for the verification pass
 

@@ -1,6 +1,6 @@
-// User-initiated downloads of the single-directory ONNX models (RAM++, BGE,
-// SFace, Face Mesh) from their Hugging Face repos. Weights are never redistributed in-app,
-// and every file is SHA-256 verified against ModelManifest.
+// User-initiated installs of the single-directory ONNX models (RAM++, BGE,
+// SFace, Face Mesh). The engine downloads them from their Hugging Face repos and verifies
+// every file against ModelManifest; this app opens no connection of its own.
 import Foundation
 import FileIDShared
 
@@ -123,12 +123,14 @@ final class ModelInstaller: ModelInstalling {
     private init(_ spec: Spec) { self.spec = spec }
 
     func refreshStatus() {
-        let fm = FileManager.default
-        presentFilePaths = Set(spec.downloads.map { spec.destination($0).path }.filter { fm.fileExists(atPath: $0) })
+        let found = spec.downloads.map(spec.destination).compactMap { destination in
+            ModelFileLayout.installedFile(destination).map { (destination: destination, installed: $0) }
+        }
+        presentFilePaths = Set(found.map(\.destination.path))
         if spec.requiredFiles.allSatisfy({ presentFilePaths.contains($0.path) }) {
             let size = spec.ownsDirectory
                 ? Self.diskSize(of: spec.directory)
-                : spec.downloads.reduce(Int64(0)) { $0 + Self.diskSize(of: spec.destination($1)) }
+                : found.reduce(Int64(0)) { $0 + Self.diskSize(of: $1.installed) }
             status = .installed(sizeBytes: size)
         } else {
             if status.inProgress, task != nil { return }
@@ -147,10 +149,19 @@ final class ModelInstaller: ModelInstalling {
         if !isDir.boolValue {
             return Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
+        // Lists each folder itself: on exFAT the URL enumerator prefetching sizes fails with EINVAL
+        // for some folders and then drops their contents without a word.
         var total: Int64 = 0
-        if let entries = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
-            for case let file as URL in entries {
-                total += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        var pending = [url]
+        while let directory = pending.popLast() {
+            guard let children = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { continue }
+            for child in children {
+                let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                if values?.isDirectory == true {
+                    pending.append(child)
+                } else {
+                    total += Int64(values?.fileSize ?? 0)
+                }
             }
         }
         return total
@@ -160,11 +171,7 @@ final class ModelInstaller: ModelInstalling {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self, activity = spec.activity] in
             await AppSleepActivity.run(reason: activity) {
-                if EngineModelInstall.active {
-                    await self?.runEngineInstall()
-                } else {
-                    await self?.runInstall()
-                }
+                await self?.runEngineInstall()
             }
             self?.task = nil
         }
@@ -185,70 +192,26 @@ final class ModelInstaller: ModelInstalling {
             status = .installFailed(Self.protectedMessage); return
         }
         for target in targets { try? FileManager.default.removeItem(at: target) }
+        if !spec.ownsDirectory {
+            for target in targets {
+                if let other = ModelFileLayout.alternate(of: target, in: AppSupportPath.models) { try? FileManager.default.removeItem(at: other) }
+            }
+        }
         status = .unknown
         refreshStatus()
     }
 
-    static let protectedMessage = "FileID can't change files in this location."
+    static let protectedMessage = "FileID can’t change files in this location."
 
     nonisolated static func notEnoughSpace(needed: Int64, available: Int64) -> String {
         "Not enough free space: needs \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)), \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file)) free."
     }
 
-    private func runInstall() async {
-        let dir = spec.directory
-        guard (try? ReadOnlyLocations.requireWritable(dir)) != nil,
-              spec.downloads.allSatisfy({ (try? ReadOnlyLocations.requireWritable(spec.destination($0))) != nil }) else {
-            status = .installFailed(Self.protectedMessage); return
-        }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        sweepStaleStagingEntries(in: dir.appendingPathComponent(".fileid-staging", isDirectory: true))
-
-        if let free = Self.freeDiskBytes(at: dir), free < spec.approxBytes * 2 {
-            status = .installFailed(Self.notEnoughSpace(needed: spec.approxBytes * 2, available: free))
-            return
-        }
-        let remotes = spec.downloads.map { $0.manifest.flatMap { URL(string: $0.url) } }
-        guard remotes.allSatisfy({ $0 != nil }) else {
-            status = .installFailed("This download isn't available in this copy of FileID. Reinstall FileID to fix it.")
-            return
-        }
-
-        status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
-        installing = true
-        defer { installing = false }
-
-        do {
-            for (index, download) in spec.downloads.enumerated() {
-                let remote = remotes[index]!
-                let primary = index == 0
-                do {
-                    try await parallelStreamingDownload(
-                        remote: remote, dest: spec.destination(download), parts: download.parts,
-                        approxBytes: primary ? spec.approxBytes : 0,
-                        expectedSHA256: download.manifest?.sha256
-                    ) { tick in
-                        guard primary else { return }
-                        Task { @MainActor [weak self] in
-                            guard let self, self.installing else { return }
-                            self.status = .downloading(
-                                fraction: tick.total > 0 ? min(1.0, Double(tick.written) / Double(tick.total)) : 0,
-                                message: Self.progressMessage(written: tick.written, total: tick.total),
-                                bytesPerSecond: tick.bytesPerSecond, etaSeconds: tick.etaSeconds)
-                        }
-                    }
-                } catch where download.optional {
-                    continue
-                }
-            }
-        } catch {
-            status = Self.failureStatus(error)
-            return
-        }
-        refreshStatus()
-    }
-
     private func runEngineInstall() async {
+        guard EngineModelInstall.active else {
+            status = .installFailed(EngineModelInstall.notResponding)
+            return
+        }
         status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
         let outcome = await EngineModelInstall.install(kinds: [spec.engineKind], files: spec.downloads.map(spec.destination)) { [weak self] fraction, message in
             guard let self, self.task != nil else { return }
@@ -259,66 +222,6 @@ final class ModelInstaller: ModelInstalling {
         case .cancelled: status = .missing(reason: "Cancelled.")
         case .failed(let message): status = .installFailed(message)
         }
-    }
-
-    static func progressMessage(written: Int64, total: Int64, suffix: String = "") -> String {
-        let mb = Double(written) / 1_048_576.0
-        return total > 0
-            ? String(format: "Downloading… %.0f / %.0f MB%@", mb, Double(total) / 1_048_576.0, suffix)
-            : String(format: "Downloading… %.0f MB%@", mb, suffix)
-    }
-
-    static func failureStatus(_ error: Error) -> Status {
-        switch error {
-        case is CancellationError:
-            return .missing(reason: "Cancelled.")
-        default:
-            return .installFailed(failureText(error))
-        }
-    }
-
-    /// One plain sentence for a failed download. Status codes, hashes and
-    /// system error text stay out of it.
-    nonisolated static func failureText(_ error: Error) -> String {
-        switch error {
-        case StreamingDownloadError.http(let code):
-            switch code {
-            case 404, 410: return "The download is no longer on the server. Update FileID, then try again."
-            case 408, 429: return "The download server is busy. Try again in a few minutes."
-            case 500...599: return "The download server is having trouble. Try again later."
-            default: return "The download server refused the request. Try again later."
-            }
-        case StreamingDownloadError.checksumMismatch, StreamingDownloadError.sizeImplausible,
-             StreamingDownloadError.missingTempFile:
-            return "The download was damaged. Try again."
-        case StreamingDownloadError.insufficientDiskSpace(let needed, let available):
-            return notEnoughSpace(needed: needed, available: available)
-        case StreamingDownloadError.pinningFailed, StreamingDownloadError.redirectBlocked:
-            return "The connection to the download server wasn't secure, so FileID stopped. Try again on another network."
-        case StreamingDownloadError.underlying(let inner):
-            return failureText(inner)
-        default:
-            break
-        }
-        let ns = error as NSError
-        if ns.domain == NSURLErrorDomain {
-            switch URLError.Code(rawValue: ns.code) {
-            case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff,
-                 .cannotFindHost, .dnsLookupFailed:
-                return "No internet connection. Connect, then try again."
-            case .timedOut, .cannotConnectToHost:
-                return "The download server didn't answer. Check your internet connection, then try again."
-            default:
-                return "The download was interrupted. Try again."
-            }
-        }
-        if ns.domain == NSCocoaErrorDomain, ns.code == NSFileWriteOutOfSpaceError {
-            return "Not enough free space to finish the download. Free some space, then try again."
-        }
-        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(ENOSPC) {
-            return "Not enough free space to finish the download. Free some space, then try again."
-        }
-        return "The download didn't finish. Try again."
     }
 
     nonisolated static func freeDiskBytes(at url: URL) -> Int64? {
@@ -332,27 +235,28 @@ enum ModelFailureText {
     static func isModelFailure(_ error: EngineError) -> Bool {
         if error.kind == "prewarm_cancelled" { return false }
         return error.kind.hasPrefix("prewarm_")
-            || ["model_integrity_failed", "deep_load_failed", "deep_model_too_big", "unknown_model"].contains(error.kind)
+            || ["model_integrity_failed", "deep_load_failed", "deep_model_too_big", "unknown_model", "vlm_model_missing"].contains(error.kind)
     }
 
     static func plain(_ error: EngineError) -> String {
         switch error.kind {
         case "model_integrity_failed": return "The AI model download was damaged. Try again."
         case "deep_model_too_big": return "This AI model needs more memory than this Mac has. Choose a smaller one in Settings."
-        case "unknown_model": return "This copy of FileID doesn't know that AI model. Choose another one in Settings."
+        case "unknown_model": return "This copy of FileID doesn’t know that AI model. Choose another one in Settings."
+        case "vlm_model_missing": return "This AI model isn’t downloaded yet. Try again to download it first."
         default: break
         }
         let text = error.message.lowercased()
         if ["offline", "internet", "network", "timed out", "hostname", "connection"].contains(where: text.contains) {
-            return "FileID couldn't download the AI model. Check your internet connection, then try again."
+            return "FileID couldn’t download the AI model. Check your internet connection, then try again."
         }
         if text.contains("space") || text.contains("disk full") {
-            return "There isn't enough free space for the AI model. Free some space, then try again."
+            return "There isn’t enough free space for the AI model. Free some space, then try again."
         }
         if text.contains("memory") {
             return "This Mac is short on memory right now. Close a few apps, then try again."
         }
-        return "FileID couldn't get the AI model ready. Try again."
+        return "FileID couldn’t get the AI model ready. Try again."
     }
 }
 
@@ -381,7 +285,7 @@ enum DescriptionModelStore {
     }
 
     static func downloadSizeText(_ kind: AIModelKind) -> String {
-        String(format: "%.1f GB", Double(kind.approxBytes) / 1_073_741_824)
+        ModelSize.label(Int64(kind.approxBytes))
     }
 
     /// Free space on the drive that holds the model cache.
@@ -396,15 +300,15 @@ enum DescriptionModelStore {
     /// Deletes one downloaded model's folder. Only a real folder (not a link)
     /// that FileID finished downloading, directly inside the model cache.
     static func remove(_ kind: AIModelKind) throws {
-        guard let folder = folder(for: kind) else { throw RemovalError(reason: "The model's folder couldn't be worked out safely.") }
+        guard let folder = folder(for: kind) else { throw RemovalError(reason: "The model’s folder couldn’t be worked out safely.") }
         try ReadOnlyLocations.requireWritable(folder)
         let fm = FileManager.default
         let attributes = try fm.attributesOfItem(atPath: folder.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory else {
-            throw RemovalError(reason: "The model's folder is a link, so FileID left it alone.")
+            throw RemovalError(reason: "The model’s folder is a link, so FileID left it alone.")
         }
         guard fm.fileExists(atPath: folder.appendingPathComponent(".fileid-installed").path) else {
-            throw RemovalError(reason: "FileID didn't finish downloading this model, so it left the folder alone.")
+            throw RemovalError(reason: "FileID didn’t finish downloading this model, so it left the folder alone.")
         }
         try fm.removeItem(at: folder)
     }

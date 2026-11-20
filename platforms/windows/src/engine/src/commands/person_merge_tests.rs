@@ -1,5 +1,4 @@
 use super::*;
-use crate::commands::face_review::now;
 use crate::commands::bulk::merge_clusters;
 use crate::commands::face_review::{list as list_review, undo as undo_review};
 use crate::db::test_support::{insert_file, memory_db};
@@ -11,7 +10,6 @@ fn db() -> Connection {
     conn
 }
 
-/// A person with `faces` faces, one file each; the last face is the representative.
 fn person(conn: &Connection, first: Option<&str>, title: Option<&str>, unknown: bool, faces: i64) -> (i64, Vec<i64>) {
     conn.execute(
         "INSERT INTO persons(name,first_name,title,file_count,created_at,is_unknown) VALUES(?1,?1,?2,?3,100.0,?4)",
@@ -247,7 +245,7 @@ fn journal_rows_use_the_swift_field_names() {
     let keys = |text: &str| -> Vec<String> { serde_json::from_str::<Value>(text).unwrap().as_object().unwrap().keys().cloned().collect() };
     let mut before_keys = keys(&before);
     before_keys.sort();
-    assert_eq!(before_keys, ["keepNames", "keepRepresentative", "keepUnknown", "other", "otherPersonID", "personID", "resolution", "verifications"]);
+    assert_eq!(before_keys, ["candidates", "keepNames", "keepRepresentative", "keepUnknown", "other", "otherPersonID", "personID", "resolution", "runnerUpFaces", "verifications"]);
     let mut after_keys = keys(&after);
     after_keys.sort();
     assert_eq!(after_keys, ["faceIDs", "otherPersonID", "personID", "resolution"]);
@@ -264,70 +262,41 @@ fn journal_rows_use_the_swift_field_names() {
     assert_eq!(serde_json::from_str::<Value>(&plan).unwrap(), json!({"type": KIND, "resolution": "merge", "personID": keep.0}));
 }
 
-/// The three strings are what the Swift engine's `PersonMergeJournal.merge`
-/// writes (JSONSerialization, sorted keys) for person 2 "Bo" merged into the
-/// unnamed, hidden person 1.
+/// The catalog is what the Swift engine left after merging person 2 "Alex"
+/// ("Aunt") into the unnamed, hidden person 1: its `PersonMergeJournal` lines,
+/// the merged faces and the verdict the merge recorded.
 #[test]
 fn a_merge_journaled_by_the_swift_engine_is_undone_here() {
-    const BEFORE: &str = r#"{"keepNames":[null,null,null,null,null,null],"keepRepresentative":2,"keepUnknown":1,"other":{"anchor_radius":0.41999999999999998,"created_at":100,"first_name":"Bo","is_unknown":0,"last_clustered_at":null,"last_name":null,"middle_name":null,"name":"Bo","representative_face_id":5,"suffix":null,"title":"Uncle"},"otherPersonID":2,"personID":1,"resolution":"merge","verifications":[{"bboxA":null,"bboxB":"0,0,1,1","confidence":1,"faceA":1,"faceB":3,"fileA":null,"fileB":13,"model":"user-verified","personA":1,"personB":2,"samePerson":0,"verifiedAt":5}]}"#;
-    const AFTER: &str = r#"{"faceIDs":[3,4,5],"otherPersonID":2,"personID":1,"resolution":"merge"}"#;
-    const PLAN: &str = r#"{"personID":1,"resolution":"merge","type":"person_merge"}"#;
-    const ID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let catalog = crate::db::test_support::swift_catalog("swift-written-people-merge");
+    let conn = &catalog.conn;
+    conn.execute("UPDATE catalog_operations SET created_at=?1", [crate::commands::face_review::now()]).unwrap();
+    let id: String = conn.query_row("SELECT id FROM catalog_operations", [], |row| row.get(0)).unwrap();
 
-    let conn = db();
-    for face in 1..=5 {
-        insert_file(&conn, 10 + face, &format!("/fixture/{face}.jpg"), "image");
-    }
-    conn.execute("INSERT INTO persons(id,name,first_name,title,is_unknown,created_at,representative_face_id,file_count) VALUES(1,'Bo','Bo','Uncle',0,50,5,5)", []).unwrap();
-    for face in 1..=5 {
-        conn.execute(
-            "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(?1,?2,1,X'','0,0,1,1',X'0000803f',0.5)",
-            params![face, 10 + face],
-        )
-        .unwrap();
-    }
-    conn.execute(
-        "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b,file_a,bbox_a,file_b,bbox_b) \
-         VALUES(1,2,1,1.0,'user-merged',?1,2,5,12,'0,0,1,1',15,'0,0,1,1')",
-        [now()],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO catalog_corrections(id,file_id,kind,before_json,after_json,created_at) VALUES(?1,12,'person_merge',?2,?3,?4)",
-        params![ID, BEFORE, AFTER, now()],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,?3,'completed',?4)",
-        params![ID, PLAN, BEFORE, now()],
-    )
-    .unwrap();
-
-    let page = offered_page(&conn);
-    assert_eq!((page.total, page.operation_id.as_deref(), page.person_id, page.other_person_id), (1, Some(ID), Some(1), Some(2)));
-    let page = undo_op(&conn, LAST_TOKEN);
-    assert_eq!((page.status.as_str(), page.operation_id.as_deref(), page.person_id, page.other_person_id), ("ok", Some(ID), Some(1), Some(2)));
+    let page = offered_page(conn);
+    assert_eq!((page.total, page.operation_id.as_deref(), page.person_id, page.other_person_id), (1, Some(id.as_str()), Some(1), Some(2)));
+    let page = undo_op(conn, LAST_TOKEN);
+    assert_eq!((page.status.as_str(), page.operation_id.as_deref(), page.person_id, page.other_person_id), ("ok", Some(id.as_str()), Some(1), Some(2)));
 
     assert_eq!(
-        snapshot(&conn, 1).unwrap(),
-        Snapshot { first: None, title: None, unknown: 1, count: 2, representative: Some(2), faces: vec![1, 2] }
+        snapshot(conn, 1).unwrap(),
+        Snapshot { first: None, title: None, unknown: 1, count: 1, representative: Some(1), faces: vec![1] }
     );
     assert_eq!(
-        snapshot(&conn, 2).unwrap(),
-        Snapshot { first: Some("Bo".into()), title: Some("Uncle".into()), unknown: 0, count: 3, representative: Some(5), faces: vec![3, 4, 5] }
+        snapshot(conn, 2).unwrap(),
+        Snapshot { first: Some("Alex".into()), title: Some("Aunt".into()), unknown: 0, count: 2, representative: Some(3), faces: vec![2, 3] }
     );
     let (name, created, radius): (Option<String>, f64, Option<f64>) =
         conn.query_row("SELECT name, created_at, anchor_radius FROM persons WHERE id=2", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
-    assert_eq!((name.as_deref(), created, radius), (Some("Bo"), 100.0, Some(0.42)));
-    let restored: (i64, String, f64, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<i64>, Option<String>) = conn
+    assert_eq!((name.as_deref(), created, radius), (Some("Alex"), 123.0, None));
+    let restored: (i64, String, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<i64>, Option<String>) = conn
         .query_row(
-            "SELECT same_person, vlm_model, verified_at, face_a, face_b, file_a, bbox_a, file_b, bbox_b FROM face_verifications WHERE person_a=1 AND person_b=2",
+            "SELECT same_person, vlm_model, face_a, face_b, file_a, bbox_a, file_b, bbox_b FROM face_verifications WHERE person_a=1 AND person_b=2",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
         )
         .unwrap();
-    assert_eq!(restored, (0, "user-verified".into(), 5.0, Some(1), Some(3), None, None, Some(13), Some("0,0,1,1".into())));
-    let state: String = conn.query_row("SELECT state FROM catalog_operations WHERE id=?1", [ID], |row| row.get(0)).unwrap();
+    assert_eq!(restored, (0, "user-verified".into(), Some(1), Some(2), None, None, None, None));
+    let state: String = conn.query_row("SELECT state FROM catalog_operations WHERE id=?1", [&id], |row| row.get(0)).unwrap();
     assert_eq!(state, "undone");
 }
 
@@ -357,4 +326,46 @@ fn a_merge_that_changes_nothing_returns_no_operation() {
     let missing = merge_clusters(&conn, 999, keep.0).unwrap();
     assert_eq!((missing.failed, missing.messages[0].operation_id.as_deref()), (1, None));
     assert_eq!(offered_page(&conn).total, 0);
+}
+
+fn pending_suggestion(conn: &Connection, face_file: i64, suggested: i64, runner_up: Option<i64>) -> i64 {
+    insert_file(conn, face_file, &format!("/fixture/loose{face_file}.jpg"), "image");
+    conn.execute(
+        "INSERT INTO face_prints(file_id,print_data,bbox,arcface_embedding,face_quality) VALUES(?1,X'','0,0,1,1',X'0000803f',0.8)",
+        [face_file],
+    )
+    .unwrap();
+    let face = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO face_review_candidates(face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at) \
+         VALUES(?1,?2,0.7,'suggested',?3,0.5,'ns',9.0)",
+        params![face, suggested, runner_up],
+    )
+    .unwrap();
+    face
+}
+
+fn candidate_row(conn: &Connection, face: i64) -> Option<(i64, Option<i64>)> {
+    conn.query_row("SELECT person_id, runner_up_person_id FROM face_review_candidates WHERE face_id=?1", [face], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()
+}
+
+#[test]
+fn undo_brings_back_the_merged_away_persons_pending_suggestions() {
+    let conn = db();
+    let keep = person(&conn, Some("Ada"), None, false, 2);
+    let other = person(&conn, None, None, false, 2);
+    let third = person(&conn, None, None, false, 1);
+    let for_other = pending_suggestion(&conn, 9001, other.0, Some(keep.0));
+    let for_keep = pending_suggestion(&conn, 9002, keep.0, Some(other.0));
+    let for_third = pending_suggestion(&conn, 9003, third.0, None);
+
+    let operation = merge(&conn, other.0, keep.0);
+    assert_eq!(candidate_row(&conn, for_other), None);
+    assert_eq!(candidate_row(&conn, for_keep), Some((keep.0, None)));
+
+    assert_eq!(undo_op(&conn, &operation).status, "ok");
+    assert_eq!(candidate_row(&conn, for_other), Some((other.0, Some(keep.0))));
+    assert_eq!(candidate_row(&conn, for_keep), Some((keep.0, Some(other.0))));
+    assert_eq!(candidate_row(&conn, for_third), Some((third.0, None)));
 }

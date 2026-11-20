@@ -21,7 +21,7 @@ def verify(binary: Path) -> None:
     job_id = "catalog-index-" + hashlib.sha256(model.encode()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="fileid-index-jobs-") as temporary:
         directory = Path(temporary)
-        engine = Engine(binary.resolve(), directory, swift=True)
+        engine = Engine(binary.resolve(), directory)
         try:
             engine.wait("ready")
         finally:
@@ -31,7 +31,7 @@ def verify(binary: Path) -> None:
                 "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,progress,created_at,updated_at) VALUES(?,'catalogIndex','[]',?,'running',1,0.4,1,1)",
                 (job_id, json.dumps({"model": model})),
             )
-        engine = Engine(binary.resolve(), directory, swift=True)
+        engine = Engine(binary.resolve(), directory)
         try:
             engine.wait("ready")
             jobs = engine.request("jobs")["jobs"]

@@ -1,7 +1,3 @@
-// Best Takes pieces (DESIGN_V3_PORT "Best Takes"): a fixed-size shot view that
-// zooms onto a face on the standard spring, the BEST / THIS TRY compare pane
-// and the filmstrip tile.
-//
 // Shots draw through Cairo instead of gtk::Picture because a Picture asks for
 // its texture's natural size, which would blow the 28 px fan thumbnails and the
 // 112 × 76 tiles up to the decoded size.

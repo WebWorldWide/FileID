@@ -3,8 +3,23 @@ import AppKit
 import AVKit
 import FileIDShared
 
+/// What puts new content at the end of the transcript: a message, a confirmation card, or the working row.
+struct ChatTranscriptTail: Equatable {
+    static let bottomID = "chat-transcript-bottom"
+    let lastMessageID: String?
+    let actionIDs: [String]
+    let busy: Bool
+
+    init(messages: [ChatMessage], actions: [ChatAction], busy: Bool) {
+        lastMessageID = messages.last?.id
+        actionIDs = actions.map(\.id)
+        self.busy = busy
+    }
+}
+
 struct ChatWorkbench: View {
     @Bindable var engine: EngineClient
+    let store: ReadStore
     var onClose: (() -> Void)? = nil
     @FocusState private var inputFocused: Bool
     @Environment(\.pageActive) private var pageActive
@@ -34,6 +49,8 @@ struct ChatWorkbench: View {
     @State private var puttingBack = false
 
     private var isPage: Bool { onClose == nil }
+    private var readiness: LibraryReadiness { LibraryReadiness(catalogedFiles: store.catalogedFileCount, scanPhase: engine.lastProgress?.phase) }
+    private var chosenFolderName: String? { handoff.libraryRoot?.lastPathComponent }
     private var describeKind: String { DeepAnalyzeSettings.shared.activeKind.rawValue }
     private var followsDescribe: Bool { chatModelKind.isEmpty || chatModelKind == describeKind }
     private var activeModelKind: String { followsDescribe ? describeKind : chatModelKind }
@@ -67,6 +84,10 @@ struct ChatWorkbench: View {
         .onDisappear { player?.pause() }
         #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: .selfShotSendChat)) { _ in if isPage { send() } }
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+            guard isPage, let action = note.object as? String else { return }
+            if action == "models" { modelsPresented = true } else if action == "close" { modelsPresented = false }
+        }
         #endif
         // After the page stack has released the old page's focus.
         .onPageVisibility(shown: { DispatchQueue.main.async { inputFocused = true } },
@@ -90,7 +111,7 @@ struct ChatWorkbench: View {
             Button("Clear conversation", role: .destructive) { control("clear") }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The questions and answers here are deleted and can't be brought back. Your files are not touched.")
+            Text("The questions and answers here are deleted and can’t be brought back. Your files are not touched.")
         }
     }
 
@@ -103,11 +124,13 @@ struct ChatWorkbench: View {
             ScrollViewReader { scroll in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
-                        if messages.isEmpty { emptyState }
+                        if messages.isEmpty {
+                            if readiness.hasFiles { emptyState } else { needsScanState }
+                        }
                         ForEach(messages) { entry in messageView(entry).id(entry.id) }
                         if !busy && !actions.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
-                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine) }
+                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine, answer: messages.last(where: { $0.role != "user" })?.text) }
                             }
                             .padding(.leading, 12)
                             .transition(.opacity)
@@ -120,19 +143,30 @@ struct ChatWorkbench: View {
                             .accessibilityElement(children: .combine)
                             if hasSelectionResults { selectionStrip.padding(.leading, 12) }
                         }
+                        Color.clear.frame(height: 1).id(ChatTranscriptTail.bottomID).accessibilityHidden(true)
                     }
                     .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16)
                     .padding(.vertical, isPage ? Theme.Metrics.pageInsetY : 16)
-                    .frame(maxWidth: isPage ? 760 : .infinity, alignment: .leading)
+                    .frame(maxWidth: isPage ? 760 + Theme.Metrics.pageInsetX * 2 : .infinity, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .onChange(of: messages.last?.id) { _, id in
-                    if let id { withAnimation(Theme.springStandard) { scroll.scrollTo(id, anchor: .bottom) } }
-                }
+                .onChange(of: ChatTranscriptTail(messages: messages, actions: actions, busy: busy)) { _, _ in scrollToEnd(scroll) }
+                .onAppear { scrollToEnd(scroll) }
             }
             if !isPage && !hits.isEmpty { inspectorSources }
             Hairline()
             composer
+        }
+    }
+
+    /// The cards and the busy row are laid out after the answer, and the lazy stack only estimates rows it has not drawn, so
+    /// a second jump follows the first once they have their real height.
+    private func scrollToEnd(_ scroll: ScrollViewProxy) {
+        Task { @MainActor in
+            for delay in [0, 150] {
+                if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) }
+                withAnimation(Theme.springStandard) { scroll.scrollTo(ChatTranscriptTail.bottomID, anchor: .bottom) }
+            }
         }
     }
 
@@ -188,9 +222,34 @@ struct ChatWorkbench: View {
         }
     }
 
+    private var needsScanState: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(readiness.chatTitle).font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
+            Text(readiness.chatMessage(chosenFolder: chosenFolderName))
+                .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
+            if readiness == .needsScan {
+                Button {
+                    if let folder = handoff.libraryRoot { engine.startScan(rootURL: folder) }
+                    else { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                } label: {
+                    Label(LibraryReadiness.scanButtonTitle(chosenFolder: chosenFolderName), systemImage: handoff.libraryRoot == nil ? "folder.badge.plus" : "play.fill")
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .buttonStyle(.dsPrimary)
+                .padding(.top, 4)
+                .accessibilityHint(chosenFolderName == nil ? "Opens the folder picker. FileID reads the folder you choose." : "FileID reads this folder. Nothing in it is moved or changed.")
+            } else {
+                IndeterminateBar().frame(width: 120).padding(.top, 4).accessibilityHidden(true)
+            }
+        }
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+    }
+
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Find the moment.").font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
+            Text("Ask your library.").font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
             Text("Ask about files, people and moments in this library, or ask FileID to do something. Answers cite the files they come from, and anything that moves or deletes files waits for your OK.")
                 .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -212,7 +271,7 @@ struct ChatWorkbench: View {
                     .accessibilityHint("Puts this question in the message field")
                 }
             }
-            .frame(maxWidth: 460)
+            .frame(maxWidth: 460, alignment: .leading)
         }
         .padding(.vertical, 8)
     }
@@ -247,7 +306,7 @@ struct ChatWorkbench: View {
                 ChatScopeChip(scope: scope) { withAnimation(Theme.springStandard) { handoff.chatScope = nil } }
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField(handoff.chatScope == nil ? "Ask about your files…" : "Ask about the selected files…", text: $input, axis: .vertical)
+                TextField(readiness.chatComposerPlaceholder ?? (handoff.chatScope == nil ? "Ask about your files…" : "Ask about the selected files…"), text: $input, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(Theme.Font.body(13.5))
                     .foregroundStyle(Theme.text1)
@@ -255,11 +314,12 @@ struct ChatWorkbench: View {
                     .focused($inputFocused)
                     .onSubmit(send)
                     .accessibilityLabel("Message")
+                    .disabled(!readiness.hasFiles)
+                    .opacity(readiness.hasFiles ? 1 : 0.55)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .frame(minHeight: Theme.Metrics.controlLarge)
-                    .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
-                    .overlay { if inputFocused { RoundedRectangle(cornerRadius: Theme.Radius.s + 3, style: .continuous).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
+                    .background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                    .dsFieldBorder(focused: inputFocused)
                 if busy {
                     Button("Stop") { control("cancel") }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
@@ -268,15 +328,17 @@ struct ChatWorkbench: View {
                 } else {
                     Button("Send", action: send)
                         .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
-                        .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
-                        .help(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type a question first" : input.count > 2000 ? "Shorten the question to 2,000 characters" : "Send (Return)")
+                        .disabled(!readiness.hasFiles || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
+                        .help(!readiness.hasFiles ? (readiness.chatComposerPlaceholder ?? "") : input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type a question first" : input.count > 2000 ? "Shorten the question to 2,000 characters" : "Send (Return)")
                 }
             }
             HStack(spacing: 10) {
-                Toggle("Summarize with local AI", isOn: $useModel)
+                Toggle(isPage ? "Summarize with local AI" : "Summarize with AI", isOn: $useModel)
                     .toggleStyle(DSToggleStyle())
                     .font(Theme.Font.body(12.5))
                     .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .fixedSize()
                 Button { modelsPresented = true } label: {
                     Label("AI model", systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
                 }
@@ -285,8 +347,10 @@ struct ChatWorkbench: View {
                 .help(useModel ? "Choose the AI that writes answers. Now using \(modelName)." : "Turn on Summarize with local AI to choose a model")
                 .accessibilityLabel("Choose the AI model for Chat")
                 if useModel {
-                    MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
-                        .help(modelName)
+                    if isPage {
+                        MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
+                            .help(modelName)
+                    }
                     if !followsDescribe {
                         Button("Use the same one") { chatModelKind = "" }
                             .buttonStyle(.dsGhost)
@@ -294,6 +358,9 @@ struct ChatWorkbench: View {
                     }
                 }
                 Spacer(minLength: 0)
+            }
+            if let note = readiness.readingNote {
+                MetaText(note, size: 12)
             }
             if !busy && !message.isEmpty && message != messages.last(where: { $0.role != "user" })?.text {
                 Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(3).textSelection(.enabled)
@@ -310,10 +377,14 @@ struct ChatWorkbench: View {
 
     private var sourcesPane: some View {
         VStack(spacing: 0) {
-            HStack {
-                SectionLabel("Sources")
-                Spacer()
-                MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    SectionLabel("Sources")
+                    Spacer()
+                    MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
+                }
+                // Same height as the chip row beside it, so both section labels sit on one line.
+                TagChip(text: "Names").hidden()
             }
             .padding(.horizontal, 14)
             .frame(height: Theme.Metrics.paneHeaderHeight)
@@ -337,7 +408,7 @@ struct ChatWorkbench: View {
             }
             .overlay {
                 if hits.isEmpty {
-                    MetaText("Files an answer draws on show here. Click one to open it.")
+                    MetaText("Files an answer cites appear here. Click one to open it.")
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }
             }
@@ -410,7 +481,7 @@ struct ChatWorkbench: View {
     }
 
     private func send() {
-        guard !busy, !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, input.count <= 2000 else { return }
+        guard readiness.hasFiles, !busy, !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, input.count <= 2000 else { return }
         let text = input
         let requestID = UUID().uuidString
         activeRequest = requestID
@@ -453,7 +524,7 @@ struct ChatWorkbench: View {
         selectionNote = "Saving the group…"
         Task {
             let response = await TakeRequests.send(engine, request, timeout: 30)
-            selectionNote = response?.status == "ok" ? "Saved \(ids.count) files as a group in Best Takes." : (response?.message ?? "The group couldn't be saved. Try again.")
+            selectionNote = response?.status == "ok" ? "Saved \(Plural.noun(ids.count, "file", "files")) as a group in Best Takes." : (response?.message ?? "The group couldn’t be saved. Try again.")
         }
     }
 
@@ -515,7 +586,7 @@ private struct SourceRow: View {
         let meta = sourceMeta(hit)
         RailRow(selected: selected, action: action) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("[\(index)]").font(Theme.Font.mono(11.5, .semibold)).foregroundStyle(Theme.gold).frame(width: 30, alignment: .leading)
+                Text("[\(index)]").font(Theme.Font.mono(11.5, .semibold)).foregroundStyle(Theme.gold).fixedSize().frame(minWidth: Theme.Font.scaled(30), alignment: .leading)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(name).font(Theme.Font.mono(12, .medium)).foregroundStyle(Theme.text1).lineLimit(1).truncationMode(.middle)
                     if !meta.isEmpty {

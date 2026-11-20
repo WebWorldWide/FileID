@@ -2,8 +2,7 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>The Video tool picker's choices and the recipe each one sends: Export keeps the
-/// video export recipe; trim, remux, audio, proxy and rotate send only the fields they take.</summary>
+/// <summary>The Video tool picker's choices and the recipe each one sends: Export keeps the video export recipe; trim, remux, audio, proxy and rotate send only the fields they take.</summary>
 internal sealed class MediaToolChoice
 {
     public static readonly IReadOnlyList<(string Id, string Label)> Tools =
@@ -24,7 +23,6 @@ internal sealed class MediaToolChoice
 
     public bool IsExport => Tool == "export";
 
-    /// <summary>Export, plus each common-media tool the engine reports available.</summary>
     public static IReadOnlyList<(string Id, string Label)> Available(IEnumerable<ToolCapability> capabilities)
     {
         var available = capabilities.Where(capability => capability.Available).Select(capability => capability.Id).ToHashSet(StringComparer.Ordinal);
@@ -69,7 +67,7 @@ internal sealed class MediaToolChoice
         if (disabled.Contains(Container) && Containers.FirstOrDefault(container => !disabled.Contains(container)) is { } allowed) Container = allowed;
     }
 
-    /// <summary>Null for Export. Fields a recipe does not take stay null; the engine refuses them otherwise.</summary>
+    /// <summary>Fields a recipe does not take stay null; the engine refuses them otherwise.</summary>
     public ToolRecipe? Recipe() => Tool switch
     {
         "trim" => new ToolRecipe("trim", Format, 1920, TrimStartSeconds: TrimStart, TrimEndSeconds: TrimEnd, TrimMode: TrimExact ? "exact" : "keyframe"),

@@ -7,33 +7,22 @@ use anyhow::Context;
 
 use super::deep_analyze::{parse_vlm_tags, sanitize_proposed_name, AnalyzeMode};
 
-/// Whether `model_kind` has weights on disk. Only routes 3D models between the
-/// render and metadata paths; loading still goes through verified job weights.
+/// Only routes 3D models between the render and metadata paths; loading still goes through verified job weights.
 pub(crate) fn vlm_weights_installed(model_kind: &str) -> bool {
     crate::models::vlm::find_weights(model_kind).is_some()
 }
 
 pub(crate) const MAX_VLM_DECODED_PIXELS: u64 = 50_000_000;
 
-/// Longest-edge cap for images handed to the VLM. Qwen2.5-VL's dynamic-
-/// resolution vision encoder tokenizes proportionally to pixel count, so a
-/// native 24-48 MP photo multiplies prefill time (and llama.cpp's CPU-side
-/// mtmd preprocessing) several-fold over what caption/tag/rename quality
-/// needs — descriptions plateau around ~1-2 MP input. 1568 px matches the
-/// model family's documented high-detail operating point.
+/// Longest-edge cap for VLM input. Qwen2.5-VL tokenizes proportionally to pixel count, so a native 24-48 MP photo multiplies prefill time several-fold, while caption/tag/rename quality plateaus around 1-2 MP. 1568 px is the model family's documented high-detail point.
 pub(crate) const MAX_VLM_INPUT_EDGE: u32 = 1568;
 
-/// True for 3D-model extensions whose embedded names we can parse. Wavefront `.obj`
-/// only for now (its `o`/`g`/`usemtl` directives are a simple text format); other
-/// formats (stl/ply/gltf/fbx) need their own parsers — future.
+/// Wavefront `.obj` only for now (its `o`/`g`/`usemtl` directives are simple text); stl/ply/gltf/fbx need their own parsers.
 pub(crate) fn is_3d_model_ext(ext: &str) -> bool {
     ext == "obj"
 }
 
-/// Build a descriptive filename stem for an audio file from its embedded tags:
-/// "Artist - Title" when both are present, else the title alone, else None (no usable
-/// metadata — keep the original name; artist-only isn't descriptive enough). Case-
-/// preserving + filesystem-safe. Pure + lockstep with the Swift `buildAudioName`.
+/// "Artist - Title" when both are present, else the title alone, else None (artist-only isn't descriptive enough). Case-preserving and filesystem-safe; lockstep with the Swift `buildAudioName`.
 pub(crate) fn build_audio_name(title: Option<&str>, artist: Option<&str>) -> Option<String> {
     let title = title.map(str::trim).filter(|s| !s.is_empty());
     let artist = artist.map(str::trim).filter(|s| !s.is_empty());
@@ -46,10 +35,7 @@ pub(crate) fn build_audio_name(title: Option<&str>, artist: Option<&str>) -> Opt
     if safe.is_empty() || safe == "_" { None } else { Some(safe) }
 }
 
-/// Build a descriptive name for a 3D model from its embedded object/group names (the
-/// modeler's labels for the thing), falling back to material names. Skips generic
-/// placeholder names ("default", "object", "mesh", pure numbers, …) that carry no
-/// content signal. None when nothing usable. Pure + lockstep with `buildObjName`.
+/// Name from embedded object/group names, falling back to material names, skipping generic placeholders ("default", "object", "mesh", pure numbers). None when nothing is usable. Lockstep with `buildObjName`.
 pub(crate) fn build_obj_name(objects: &[String], materials: &[String]) -> Option<String> {
     let pick = |names: &[String]| -> Option<String> {
         names
@@ -62,16 +48,14 @@ pub(crate) fn build_obj_name(objects: &[String], materials: &[String]) -> Option
     if safe.is_empty() || safe == "_" { None } else { Some(safe) }
 }
 
-/// A 3D object/material name that carries content signal — not a tool's placeholder.
-/// Rejects pure-numeric/punctuation tokens and the common generic names (exact, or
-/// generic + a numeric suffix like "object1"/"mesh.001"), but keeps real words.
+/// Rejects pure-numeric/punctuation tokens and common generic names (exact, or generic + a numeric suffix like "object1"/"mesh.001"); keeps real words.
 pub(crate) fn is_meaningful_model_name(s: &str) -> bool {
     let s = s.trim();
     if s.chars().count() < 2 {
         return false;
     }
     if s.chars().all(|c| !c.is_alphabetic()) {
-        return false; // pure numbers/punctuation ("001", "_", "1.2")
+        return false;
     }
     const GENERIC: &[&str] = &[
         "default", "defaultobject", "none", "object", "obj", "mesh", "group",
@@ -92,21 +76,11 @@ pub(crate) fn push_unique(v: &mut Vec<String>, s: &str) {
     }
 }
 
-/// Scan a Wavefront `.obj` (and its referenced `.mtl`) for the modeler's semantic
-/// labels: object (`o`) + group (`g`) names, and material (`usemtl`/`newmtl`) names.
-/// Bounded by BOTH a line count (`MAX_OBJ_SCAN_LINES`) and a hard byte cap
-/// (`MAX_OBJ_SCAN_BYTES`) so a multi-GB or newline-sparse mesh can neither
-/// stall the rename pass nor OOM the engine on a single unbounded line; we
-/// only need the distinct name set, which is tiny. Dedup, order-preserving.
+/// Scans a Wavefront `.obj` (and its `.mtl`) for object (`o`), group (`g`) and material (`usemtl`/`newmtl`) names. Bounded by BOTH a line count and a hard byte cap (`MAX_OBJ_SCAN_BYTES`) so a multi-GB or newline-sparse mesh can neither stall the rename pass nor OOM on one unbounded line. Dedup, order-preserving.
 pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
     use std::io::{BufRead, Read};
     const MAX_OBJ_SCAN_LINES: usize = 200_000;
-    // SEC: `lines()` allocates each line up to the next '\n' with no byte
-    // bound — a newline-sparse file would materialize one gigantic String and
-    // abort the engine on alloc failure. The line-COUNT caps below run only
-    // AFTER a line is already read, so they can't bound a single huge line;
-    // hard-cap the bytes pulled from each reader instead (matches the
-    // `take(MAX_*_BYTES)` convention in the sibling doc_extract.rs).
+    // SEC: `lines()` allocates each line up to the next '\n' with no bound, so a newline-sparse file would abort the engine on alloc failure; the line-COUNT caps run only after a line is read, so the bytes pulled from each reader are hard-capped too (like `take(MAX_*_BYTES)` in doc_extract.rs).
     const MAX_OBJ_SCAN_BYTES: u64 = 16 * 1024 * 1024;
     const MAX_MTL_SCAN_BYTES: u64 = 4 * 1024 * 1024;
     let mut objects: Vec<String> = Vec::new();
@@ -131,14 +105,7 @@ pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<Strin
                 }
         }
     }
-    // Pull `newmtl` names from the referenced .mtl too (often richer than the
-    // `usemtl` refs).
-    //
-    // SEC: the `mtllib` value is untrusted .obj content. Accept it ONLY as a
-    // safe single-component filename inside the .obj's own folder. An absolute
-    // value (`mtllib C:\pagefile.sys`) would otherwise REPLACE `parent` via
-    // join() and redirect the bounded read below to an arbitrary on-disk file
-    // — OOM bait plus a narrow info-leak of that file's `newmtl` lines.
+    // `newmtl` names also come from the referenced .mtl (often richer than `usemtl`). SEC: the `mtllib` value is untrusted .obj content, accepted ONLY as a safe single-component filename inside the .obj's folder; an absolute value would REPLACE `parent` via join() and redirect the read to an arbitrary file (OOM bait plus a narrow info-leak of its `newmtl` lines).
     let mtllib = mtllib.filter(|m| crate::util::path_safety::is_safe_filename(m));
     if let (Some(mtl), Some(parent)) = (mtllib, path.parent()) {
         let mtl_path = parent.join(&mtl);
@@ -158,7 +125,6 @@ pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<Strin
     (objects, materials)
 }
 
-/// Human-readable caption for an audio file's metadata (Deep Analyze "description").
 pub(crate) fn audio_description(m: &crate::pipeline::audio_meta::AudioTags) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(t) = m.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -177,7 +143,6 @@ pub(crate) fn audio_description(m: &crate::pipeline::audio_meta::AudioTags) -> O
     }
 }
 
-/// Human-readable caption for a 3D model's embedded names.
 pub(crate) fn obj_description(objects: &[String], materials: &[String]) -> Option<String> {
     if objects.is_empty() && materials.is_empty() {
         return None;
@@ -194,8 +159,7 @@ pub(crate) fn obj_description(objects: &[String], materials: &[String]) -> Optio
     Some(format!("3D model \u{2014} {}", parts.join("; ")))
 }
 
-/// First ~8 transcript words → a sanitized filename stem; the leading sentence → a
-/// caption. Pure + unit-tested. None for an empty transcript.
+/// First ~8 transcript words → a sanitized filename stem; the leading sentence → a caption. None for an empty transcript.
 pub(crate) fn name_from_transcript(transcript: &str) -> Option<(String, String)> {
     let t = transcript.trim();
     if t.is_empty() {
@@ -512,13 +476,9 @@ pub(crate) fn vetted_generated_proposed_name(
         .filter(|name| has_minimum_generated_filename_words(name)))
 }
 
-/// Words a generated name needs. The engine the Mac app hosts follows the
-/// Swift engine (`DeepAnalyze.hasMinimumGeneratedFilenameWords`, two words);
-/// other platforms keep three.
+/// Words a generated name needs: the Mac app-hosted engine follows the Swift engine (`DeepAnalyze.hasMinimumGeneratedFilenameWords`, two); other platforms keep three.
 pub(crate) const MIN_GENERATED_NAME_WORDS: usize = if crate::paths::APP_HOSTED { 2 } else { 3 };
 
-/// The Mac app-hosted engine reserves each proposed name per folder within a
-/// run, as `DeepAnalyzeRunner.reserveProposedName` does (`Name (2)`, ...).
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) const RESERVES_PROPOSED_NAMES: bool = crate::paths::APP_HOSTED;
 
@@ -526,8 +486,7 @@ pub(crate) fn has_minimum_generated_filename_words(name: &str) -> bool {
     name.split(['-', '_']).filter(|word| !word.is_empty()).count() >= MIN_GENERATED_NAME_WORDS
 }
 
-/// `DeepAnalyzeRunner.reserveProposedName`: the first use of a name in a
-/// folder keeps it; later ones get ` (2)`, ` (3)`, ... within 60 characters.
+/// `DeepAnalyzeRunner.reserveProposedName`: the first use of a name in a folder keeps it; later ones get ` (2)`, ` (3)`, ... within 60 characters.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) fn reserve_proposed_name(
     name: Option<String>,
@@ -782,12 +741,9 @@ mod tests {
             build_audio_name(Some("Hey Jude"), Some("The Beatles")).as_deref(),
             Some("The Beatles - Hey Jude")
         );
-        // Title-only → the title (case preserved).
         assert_eq!(build_audio_name(Some("Clair de Lune"), None).as_deref(), Some("Clair de Lune"));
-        // Artist-only or nothing → not descriptive enough.
         assert_eq!(build_audio_name(None, Some("The Beatles")), None);
         assert_eq!(build_audio_name(None, None), None);
-        // Illegal path chars are sanitized, case preserved.
         assert_eq!(
             build_audio_name(Some("AC/DC: Live"), Some("Band")).as_deref(),
             Some("Band - AC_DC_ Live")
@@ -796,30 +752,25 @@ mod tests {
 
     #[test]
     fn name_from_transcript_takes_leading_words() {
-        // A voice memo / podcast → first ~8 words become the name, the lead a caption.
         let (name, desc) =
             name_from_transcript("  This is a quick meeting about the Q3 budget and headcount  ")
                 .unwrap();
         assert_eq!(name, "This is a quick meeting about the Q3");
         assert!(desc.starts_with("Audio transcript: This is a quick meeting"));
-        // Empty / whitespace-only transcript → no name (keep the original).
         assert_eq!(name_from_transcript("   \n  "), None);
         assert_eq!(name_from_transcript(""), None);
     }
 
     #[test]
     fn build_obj_name_prefers_meaningful_object_then_material() {
-        // The real object name wins over a leading generic placeholder.
         assert_eq!(
             build_obj_name(&["default".into(), "Spaceship".into()], &[]).as_deref(),
             Some("Spaceship")
         );
-        // No usable object name → fall back to a material name.
         assert_eq!(
             build_obj_name(&["Object".into(), "mesh.001".into()], &["BrushedSteel".into()]).as_deref(),
             Some("BrushedSteel")
         );
-        // Nothing meaningful → None (keep the original filename).
         assert_eq!(build_obj_name(&["Cube".into(), "001".into()], &["default".into()]), None);
         assert_eq!(build_obj_name(&[], &[]), None);
     }
@@ -855,21 +806,17 @@ mod tests {
 
         let (objects, materials) = parse_obj_names(&dir.join("ship.obj"));
         assert_eq!(objects, vec!["Spaceship".to_string(), "Wing".to_string()]);
-        // usemtl "Hull" deduped; newmtl adds "Cockpit".
         assert!(materials.contains(&"Hull".to_string()));
         assert!(materials.contains(&"Cockpit".to_string()));
         assert_eq!(materials.iter().filter(|m| *m == "Hull").count(), 1);
 
-        // End-to-end name: the first meaningful object wins.
         assert_eq!(build_obj_name(&objects, &materials).as_deref(), Some("Spaceship"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn parse_obj_names_ignores_absolute_mtllib_redirection() {
-        // SEC: an ABSOLUTE `mtllib` path must not be followed. Without the
-        // guard, `parent.join(<absolute>)` replaces the parent and the read is
-        // redirected to an arbitrary on-disk file, leaking its `newmtl` lines.
+        // SEC: an ABSOLUTE `mtllib` path must not be followed; `parent.join(<absolute>)` would replace the parent and leak an arbitrary file's `newmtl` lines.
         let base = std::env::temp_dir().join(format!("fileid-obj-absmtl-{}", std::process::id()));
         let objdir = base.join("model");
         let secretdir = base.join("secret");
@@ -901,7 +848,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&objdir).unwrap();
 
-        // Secret sits in the PARENT of the .obj's folder.
         std::fs::write(base.join("secret.mtl"), "newmtl Leaked\n").unwrap();
 
         let obj = objdir.join("model.obj");
@@ -917,10 +863,7 @@ mod tests {
 
     #[test]
     fn parse_obj_names_caps_obj_byte_read() {
-        // The byte cap (16 MiB) must stop the read before a directive that
-        // sits past it — proving `lines()` can't pull an unbounded blob into a
-        // single String. Long (~1 KiB) lines so the BYTE cap trips on bytes
-        // alone, well under the 200 000-line cap (≈17.5k lines here).
+        // The byte cap (16 MiB) must stop the read before a directive past it, so `lines()` can't pull an unbounded blob into one String. Long (~1 KiB) lines make the BYTE cap trip well under the 200 000-line cap.
         let dir = std::env::temp_dir().join(format!("fileid-obj-bytecap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import CoreText
 
-// MARK: - Theme (Prototype v3)
 // Rounded continuous corners, 1 px hairlines, Archivo text, serif page titles.
 // Gold is the only action/selection accent; lavender means a model is
 // running, cyan is information, pink is "done". Text and hairline tokens
@@ -18,6 +17,7 @@ enum Theme {
     static let info    = Color(hex: 0xA0E2EA)
     static let delight = Color(hex: 0xF2A6C0)
     static let danger  = Color(hex: 0xFF6A5E)
+    static let dangerSolid = Color(hex: 0xE8433A)
     static let warning = Color(hex: 0xE0A340)
     static let paused  = Color(red: 185/255, green: 190/255, blue: 196/255).opacity(0.5)
 
@@ -26,7 +26,14 @@ enum Theme {
     static let text2 = adaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
     static let text3 = adaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let label = Color(hex: 0xAEB4BB)
-    static let textOnPanel = Color(hex: 0xE2E5E8)
+
+    /// Neutral surfaces behind pages, sheets and popovers.
+    static let surfaceBase    = Color(red: 15/255, green: 15/255, blue: 17/255)
+    static let pageSurface    = surfaceBase.opacity(0.8)
+    static let sheetFill      = Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94)
+    static let chromeFill     = Color(hex: 0x161618)
+    static let canvas         = Color(hex: 0x0C0C0E)
+    static let popoverFill    = Color(hex: 0x1A1A1D).opacity(0.85)
 
     static let panel          = Color(red: 24/255, green: 24/255, blue: 27/255).opacity(0.78)
     static let panelHeader    = Color.white.opacity(0.02)
@@ -46,16 +53,25 @@ enum Theme {
                 .map { $0.rawValue.contains("HighContrast") } == true ? increased : normal
         }
     }
+    static let nsText1 = NSColor(hex: 0xF0F1F2)
+    static let nsTextOnPanel = NSColor(hex: 0xE2E5E8)
+    static let nsGold = NSColor(hex: 0xFFCC00)
+    static let nsWarning = NSColor(hex: 0xE0A340)
     static let nsText2 = nsAdaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
     static let nsText3 = nsAdaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let nsHairline = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
     static let nsHairlineHover = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.28), increased: NSColor.white.withAlphaComponent(0.6))
     static let controlBorderHover = adaptive(normal: NSColor.white.withAlphaComponent(0.24), increased: NSColor.white.withAlphaComponent(0.6))
     static let focusRing      = gold.opacity(0.9)
+    /// A disabled primary button is a neutral chip, not faded gold, which turns muddy over dark.
+    static let disabledFill   = Color.white.opacity(0.08)
+    static let disabledLabel  = text3.opacity(0.8)
+    /// Other disabled controls keep their style at this strength so their text stays legible.
+    static let disabledOpacity = 0.55
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
 
-    /// Subtle corners (cosmic-studio): 6 controls, 8 cards and rows, 10 panels.
+    /// Corner radii: 6 for controls, 8 for cards and rows, 10 for panels.
     enum Radius {
         static let xs: CGFloat = 4
         static let s:  CGFloat = 6
@@ -159,8 +175,6 @@ extension Color {
     }
 }
 
-// MARK: - BadgePill → square mono chip
-
 struct BadgePill: View {
     let label:  String
     var color:  Color = Theme.gold
@@ -182,8 +196,6 @@ struct BadgePill: View {
             .overlay { if onImage { shape.stroke(color.opacity(0.6), lineWidth: 1) } }
     }
 }
-
-// MARK: - SettingToggleRow
 
 struct SettingToggleRow: View {
     let title: String

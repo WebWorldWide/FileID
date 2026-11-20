@@ -1,7 +1,6 @@
 // People actions that need an answer from the engine: undoing a merge
 // (`revertMerge`), "Not the same person" on a merge suggestion
 // (`markPersonsDifferent`) and moving photos to another person
-// (`reassignFace`). The wording is the macOS wording.
 
 use std::cell::RefCell;
 use std::rc::Rc;

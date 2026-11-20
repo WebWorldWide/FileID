@@ -22,7 +22,6 @@ fn space() -> Space {
     Space { model: MODEL.into(), processing: crate::commands::face_refresh::MAC_PROCESSING.into() }
 }
 
-/// Unit vector near axis `identity`, nudged by `jitter` along axis 100 + `face`.
 fn vector(identity: usize, face: usize, jitter: f32) -> Vec<u8> {
     let mut values = vec![0.0f32; DIM];
     values[identity] = 1.0;
@@ -42,7 +41,6 @@ impl Catalog {
         Self { conn, dir: tempdir() }
     }
 
-    /// A photo on disk with one face, stamped as the Swift engine stamps it.
     fn face(&self, id: i64, identity: usize, quality: f64, person: Option<i64>) {
         let path = self.dir.0.join(format!("{id}.jpg"));
         std::fs::write(&path, format!("photo {id}")).unwrap();
@@ -119,6 +117,26 @@ fn a_swift_catalog_keeps_person_ids_names_and_unknowns() {
     assert_eq!(outcome.result.face_count, 8);
     let (again, _) = catalog.run();
     assert_eq!(again.assignments(), before);
+}
+
+#[test]
+fn person_count_is_the_number_of_people_the_page_shows() {
+    let catalog = Catalog::new();
+    catalog.person(10, Some("Alex"), false);
+    catalog.person(20, None, false);
+    catalog.person(40, None, false);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 1, 0.6, Some(20));
+    }
+    let (catalog, outcome) = catalog.run();
+    let stored: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+    let shown = crate::read::people::active_people(&catalog.conn, None).unwrap().len();
+    assert_eq!(stored, 3, "the emptied person stays in the catalog");
+    assert_eq!(shown, 2);
+    assert_eq!(outcome.result.person_count as usize, shown);
 }
 
 #[test]

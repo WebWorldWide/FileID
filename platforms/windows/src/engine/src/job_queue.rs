@@ -1,12 +1,6 @@
-// JobQueue — single-FIFO queue for background work the engine runs.
-//
-// Categories: Scan, FaceCluster, DeepAnalyze. Only one job runs at a time;
-// new requests append to the pending list. Each push/pop emits a
-// `queueState` IPC event so the app's sidebar queue list stays in sync.
-//
-// The queue itself doesn't run jobs — it tracks them. Job runners push
-// before they start and pop when done; the dispatcher in main.rs wires
-// command → push → run → pop.
+// Single-FIFO queue tracking the engine's background work (Scan, FaceCluster, DeepAnalyze); one job runs at a time.
+// Each push/pop emits a `queueState` IPC event so the app's sidebar stays in sync. Runners push before they start and
+// pop when done (main.rs dispatcher); the queue itself runs nothing.
 
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -38,9 +32,6 @@ impl JobQueue {
         }
     }
 
-    /// Subscribe to queue-state changes. Each call to push/pop/promote
-    /// fires every registered listener with the latest snapshot. The
-    /// engine's IPC sink subscribes here.
     pub fn on_change<F>(&self, listener: F)
     where
         F: Fn(QueueState) + Send + Sync + 'static,
@@ -53,7 +44,6 @@ impl JobQueue {
         self.inner.lock().on_change.clear();
     }
 
-    /// Append a job to the pending list. Returns the job's ID.
     pub fn push(&self, category: JobCategory, title: impl Into<String>, eta_seconds: Option<f64>) -> JobId {
         let job = QueuedJob {
             id: Uuid::new_v4().to_string(),
@@ -68,8 +58,6 @@ impl JobQueue {
         id
     }
 
-    /// Move the next pending job to running. Returns it, or None if the
-    /// pending list was empty.
     pub fn promote_next(&self) -> Option<QueuedJob> {
         let mut inner = self.inner.lock();
         if inner.running.is_some() {
@@ -84,19 +72,24 @@ impl JobQueue {
         Some(next)
     }
 
-    /// True when a job of any category other than `category` is running or queued.
+    /// Renames the job and refreshes its remaining time, emitting `queueState`; nothing happens once it has finished.
+    pub fn retitle(&self, id: &str, title: impl Into<String>, eta_seconds: Option<f64>) {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let Some(job) = inner.running.iter_mut().chain(inner.pending.iter_mut()).find(|job| job.id == id) else { return };
+        job.title = title.into();
+        job.eta_seconds = eta_seconds;
+        Self::emit_locked(inner);
+    }
+
     pub fn has_active_besides(&self, category: JobCategory) -> bool {
         let inner = self.inner.lock();
         inner.running.iter().chain(inner.pending.iter()).any(|job| job.category != category)
     }
 
-    /// Terminal bookkeeping for a job wherever it sits: a running job
-    /// is completed and the next pending one promoted; a still-pending
-    /// job is dropped. RAII guards call this on Drop so a panicking
-    /// task can't wedge the sidebar queue. (Cross-category jobs can
-    /// genuinely overlap on this engine; the single-running model is a
-    /// sidebar approximation matching macOS's serialized JobQueue, and
-    /// it always converges as jobs finish.)
+    /// RAII guards call this on Drop so a panicking task can't wedge the sidebar queue. Cross-category jobs can
+    /// genuinely overlap on this engine; the single-running model is a sidebar approximation matching macOS's
+    /// serialized JobQueue and always converges as jobs finish.
     pub fn finish(&self, id: &str) {
         let mut inner = self.inner.lock();
         if inner.running.as_ref().is_some_and(|r| r.id == id) {
@@ -150,5 +143,30 @@ impl JobQueue {
 impl Default for JobQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retitle_changes_the_running_job_and_announces_it() {
+        let queue = JobQueue::new();
+        let seen = Arc::new(Mutex::new(Vec::<QueueState>::new()));
+        let sink = seen.clone();
+        queue.on_change(move |state| sink.lock().push(state));
+        let id = queue.push(JobCategory::FaceCluster, "Group faces", None);
+        queue.promote_next();
+        queue.retitle(&id, "Finding faces… 5 of 10", Some(3.0));
+        let last = seen.lock().last().cloned().unwrap();
+        let running = last.running.unwrap();
+        assert_eq!((running.title.as_str(), running.eta_seconds, last.total_eta_seconds), ("Finding faces… 5 of 10", Some(3.0), Some(3.0)));
+        let announced = seen.lock().len();
+        queue.finish(&id);
+        let after_finish = seen.lock().len();
+        queue.retitle(&id, "late", None);
+        assert_eq!(seen.lock().len(), after_finish, "a finished job is not retitled or announced");
+        assert!(after_finish > announced);
     }
 }

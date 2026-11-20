@@ -72,7 +72,6 @@ public sealed partial class LibrarySelectedPane : UserControl
         _ = DebugLog.SafeRunAsync("LibrarySelectedPane.Load", () => LoadAsync(tile, revision));
     }
 
-    /// <summary>Shows the OFFLINE note and disables Explorer/Open while the file's drive is unplugged.</summary>
     internal void ApplyOffline(bool offline, bool animate = true)
     {
         var wasVisible = OfflineRow.Visibility == Visibility.Visible;

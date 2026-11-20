@@ -652,7 +652,7 @@ fn capture_window_reaches_files_beyond_the_ranked_hundred() {
     assert!(hits.iter().all(|hit| hit.file_id >= 380));
 }
 #[test]
-fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good() {
+fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good_without_counting_it_strong() {
     let directory = Directory(std::env::temp_dir().join(format!("fileid-catalog-strength-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir(&directory.0).unwrap();
     let path = directory.0.join("catalog.sqlite");
@@ -684,11 +684,11 @@ fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good() 
     let strong = ids("strong");
     let weak: std::collections::HashSet<i64> = ids("order").into_iter().filter(|id| !strong.contains(id)).collect();
     assert_eq!(found.weak, Some(weak));
-    assert_eq!(found.response.message.as_deref(), Some("3 good matches, 1 weaker."));
+    assert_eq!(found.response.message.as_deref(), Some("3 matches (3 strong visual), 1 weaker."));
     let hybrid = request(serde_json::json!({"requestID":"h","action":"search","query":"dog","searchMode":"hybrid","queryVector":query,"embeddingModel":clip_space::model_id(),"limit":10,"resultScope":"files"}));
     let mixed = index.judged(&hybrid, &|_| None).unwrap();
     assert_eq!(mixed.weak, Some(std::collections::HashSet::new()));
-    assert_eq!(mixed.response.message.as_deref(), Some("4 good matches."));
+    assert_eq!(mixed.response.message.as_deref(), Some("4 matches (3 strong visual)."));
     let seeded = index.judged(&request(serde_json::json!({"requestID":"f","action":"search","searchMode":"semantic","fileID":1})), &|_| None).unwrap();
     assert!(seeded.weak.is_none());
     assert_eq!(seeded.response.message.as_deref(), Some("Visual similarity results."));
@@ -1022,8 +1022,6 @@ fn a_catalog_past_the_exact_limit_still_answers_with_keyword_rows_while_the_grap
     index.shutdown();
 }
 
-/// Index build and exact-scan times on a generated catalog:
-/// `cargo test --release exact_scan_and_build_times -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing run on generated vectors"]
 fn exact_scan_and_build_times() {

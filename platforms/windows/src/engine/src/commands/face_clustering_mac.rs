@@ -1,11 +1,7 @@
-//! `runFaceClustering` over macOS face spaces (Vision boxes and landmarks, the
-//! Swift alignment). A port of the Swift engine's `FaceClustering.runClustering`
-//! without its vector extraction, together with the `FaceClusterPersistence`,
-//! `StablePersonAssignments`, `ExactCosineJoin` and `FaceReview` holdout and
-//! assessment it relies on, so a Swift catalog clustered here keeps the same
-//! people, person ids, names, verdicts and queues. Keep in step with those
-//! Swift files; the portable pipeline in `face_clustering.rs` stays the default
-//! for every other face space.
+//! `runFaceClustering` over macOS face spaces (Vision boxes and landmarks, Swift alignment): a port of the Swift
+//! clustering, persistence, stable person ids, holdout and review so a Swift catalog keeps the same people, ids, names,
+//! verdicts and queues. Keep in step with those Swift files; the portable `face_clustering.rs` handles every other face
+//! space.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -62,13 +58,11 @@ fn env_bool(key: &str, default: bool) -> bool {
     std::env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// The face space to cluster with the Swift pipeline, or `None` for the
-/// portable one. The app-hosted engine on a Mac clusters its own namespace with
-/// the installed face model (or the one model the catalog used there); any
-/// engine clusters a catalog whose faces all sit in one macOS space the same way.
+/// The app-hosted Mac engine clusters its own namespace with the installed face model (or the one the catalog used);
+/// any engine clusters a catalog whose faces all sit in one macOS space the same way.
 pub(crate) fn selected_space(conn: &Connection) -> Option<Space> {
-    // A catalog with no macOS-space face at all is the common portable case;
-    // answer it from the index instead of reading every vector.
+    // A catalog with no macOS-space face is the common portable case; answer from the index instead of reading every
+    // vector.
     let any: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM face_prints WHERE processing_version >= ?1 AND processing_version < ?2)",
@@ -103,14 +97,10 @@ fn single_model(conn: &Connection, processing: &str) -> Option<String> {
     (models.len() == 1).then(|| models[0].clone())
 }
 
-// MARK: - Provenance (FaceCacheProvenance)
-
 fn source_revision(size: i64, modified: f64) -> String {
     format!("{size}:{}", modified.to_bits())
 }
 
-/// The catalog's modification time of a file (`catalog_unix_seconds`), the number the Swift
-/// engine stores too.
 pub(crate) fn catalog_mtime(metadata: &std::fs::Metadata) -> Option<f64> {
     metadata.modified().ok().and_then(crate::util::catalog_unix_seconds)
 }
@@ -154,8 +144,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     }
     sum
 }
-
-// MARK: - Selected partition
 
 #[derive(Debug, Clone, PartialEq)]
 struct FaceRow {
@@ -294,8 +282,6 @@ fn require_unchanged(conn: &Connection, original: &Partition, space: &Space, ski
     Ok(current.deferred)
 }
 
-// MARK: - Identities and verdicts
-
 #[derive(Debug, Clone, PartialEq)]
 struct Prior {
     id: i64,
@@ -419,8 +405,6 @@ fn verdicts(conn: &Connection, participants: Option<&HashSet<i64>>) -> Result<Ve
     Ok(out)
 }
 
-// MARK: - Clustering pass
-
 fn hyperparameters() -> (Hyperparameters, bool) {
     (
         Hyperparameters {
@@ -440,7 +424,6 @@ fn compare(a: &Neighbor, b: &Neighbor) -> std::cmp::Ordering {
     b.similarity.total_cmp(&a.similarity).then_with(|| a.idx.cmp(&b.idx))
 }
 
-/// Cosine as the Swift engine derives it from its HNSW index: 1 − L2²/2.
 fn l2_cosine(a: &[f32], b: &[f32]) -> f32 {
     let mut squared = 0.0f32;
     for index in 0..a.len().min(b.len()) {
@@ -451,8 +434,7 @@ fn l2_cosine(a: &[f32], b: &[f32]) -> f32 {
     1.0 - distance * distance / 2.0
 }
 
-/// Dense cluster id → dense indexes, through the shared identity pipeline with
-/// the Swift engine's calibration (exact kNN up to 5,000 faces, HNSW above).
+/// Through the shared identity pipeline with the Swift calibration (exact kNN up to 5,000 faces, HNSW above).
 fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     let (params, mutual) = hyperparameters();
     let k = params.k_nn + 1;
@@ -510,8 +492,6 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     }
     out
 }
-
-// MARK: - Persist
 
 #[derive(Debug, Default)]
 struct Stats {
@@ -761,8 +741,8 @@ fn cap(
     Ok((kept, truncated))
 }
 
-/// Stable person ids (`StablePersonAssignments.resolve`): a cluster keeps the
-/// person that owned at least half of that person's faces, largest overlap first.
+/// `StablePersonAssignments.resolve`: a cluster keeps the person that owned at least half of that person's faces,
+/// largest overlap first.
 fn stable_ids(priors: &[(i64, Vec<i64>)], clusters: &[(Vec<i64>, i64)], fixed: &[Option<i64>], preserved: &HashSet<i64>) -> Result<Vec<Option<i64>>> {
     ensure!(fixed.len() == clusters.len(), "invalid partition");
     let mut owner: HashMap<i64, i64> = HashMap::new();
@@ -819,7 +799,6 @@ struct Planned {
     radius: f32,
 }
 
-/// `FaceClusterPersistence.apply`: reuses or creates person rows, never deletes.
 fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: &HashSet<i64>, now: f64) -> Result<i64> {
     ensure!(now.is_finite(), "invalid plan");
     let mut seen: HashSet<i64> = HashSet::new();
@@ -855,7 +834,6 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
         |row| row.get(0),
     )?;
     ensure!(free as usize == seen.len(), "invalid plan");
-    // Only rows whose person changes are written; each write fires a trigger.
     tx.execute(
         "UPDATE face_prints SET person_id=NULL WHERE id IN (SELECT value FROM json_each(?1)) \
            AND person_id IS NOT NULL AND person_id NOT IN (SELECT value FROM json_each(?2)) \
@@ -895,7 +873,6 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
     Ok(tx.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?)
 }
 
-/// Prior identity per new cluster by face overlap (at least half of the prior's faces).
 fn match_priors(clusters: &[Vec<i64>], candidates: &[Prior]) -> Vec<Option<i64>> {
     let mut matches = vec![None; clusters.len()];
     let sets: Vec<HashSet<i64>> = clusters.iter().map(|faces| faces.iter().copied().collect()).collect();
@@ -1100,8 +1077,6 @@ fn persist(
     Ok(Stats { person_count, suppressed_faces, truncated_faces, deferred })
 }
 
-// MARK: - Centroid auto-merge (tightPairAutoMerge)
-
 struct VpNode {
     vantage: usize,
     threshold: f64,
@@ -1193,8 +1168,6 @@ impl Join<'_> {
         }
     }
 
-    /// `ExactCosineJoin.edges`: every qualifying pair, strongest first, or
-    /// `None` when a budget runs out.
     fn edges(mut self) -> Option<Vec<(f32, usize, usize)>> {
         let n = self.vectors.len();
         if n < 2 {
@@ -1442,8 +1415,6 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     tx.commit()?;
     Ok(absorbed)
 }
-
-// MARK: - Review (FaceReview.holdout / finish / assess)
 
 fn holdout(conn: &Connection, space: &Space, min_quality: f64) -> rusqlite::Result<HashSet<i64>> {
     let incremental: bool = conn.query_row(
@@ -1736,10 +1707,8 @@ fn finish(conn: &mut Connection, pool: &[i64], held: &HashSet<i64>, space: &Spac
     Ok(queued)
 }
 
-// MARK: - Run
-
 fn person_count(conn: &Connection) -> u32 {
-    conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get::<_, i64>(0)).map_or(0, |count| count as u32)
+    crate::read::people::active_person_count(conn).unwrap_or(0)
 }
 
 fn result(person_count: u32, face_count: usize, unmatched: usize, started: Instant) -> FaceClusteringResult {
@@ -1753,8 +1722,6 @@ fn result(person_count: u32, face_count: usize, unmatched: usize, started: Insta
     }
 }
 
-/// One clustering pass in `space`, as the Swift engine runs it: the error kind
-/// it reports (if any) and the summary it always sends afterwards.
 pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let started = Instant::now();
     let min_quality = env_double("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0..=1.0);

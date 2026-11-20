@@ -1,17 +1,4 @@
-﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage
-// tests, checked against the canonical contract itself. For every
-// CommandPayload / EventPayload variant we keep an exemplar instance,
-// serialize it through IpcCoder (the exact wire path), and assert against
-// shared/ipc-schema/ipc.schema.json (copied beside the test binary):
-//   1. the payload object carries exactly one variant tag,
-//   2. serialized keys are a subset of the schema variant's properties,
-//      recursively wherever the schema declares additionalProperties:false,
-//   3. the schema variant's required keys all appear in the serialized form,
-//   4. the C# tag set equals the schema's oneOf tag set in BOTH directions,
-//      modulo the documented platform-divergence allowlists below.
-//
-// When you add a payload variant, the reflection tests fail until you add
-// an exemplar here — that is the point.
+﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage tests, checked against the canonical contract itself. For every CommandPayload / EventPayload variant an exemplar instance is serialized through IpcCoder (the exact wire path) and asserted against shared/ipc-schema/ipc.schema.json (copied beside the test binary): exactly one variant tag per payload, serialized keys a subset of the schema variant's properties (recursively wherever it declares additionalProperties:false), all required keys present, and the C# tag set equal to the schema's oneOf tag set in BOTH directions modulo the documented platform-divergence allowlists below. When you add a payload variant, the reflection tests fail until you add an exemplar here — that is the point.
 
 using System.Text.Json;
 using Xunit;
@@ -24,16 +11,11 @@ public class SchemaConformanceTests
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ipc.schema.json")));
 
     // The allowlists cover only variants intentionally present on one platform.
-    // The canonical schema includes optional root bookmarks on startScan.
-    // App Store builds send a security-scoped bookmark with the root path.
-    // IpcCommandTests covers default omission and bookmark round trips.
-    // All current command and event variants are shared across platforms.
     private static readonly IReadOnlySet<string> _schemaOnlyCommandTags = new HashSet<string>(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> _csharpOnlyCommandTags = new HashSet<string>(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> _schemaOnlyEventTags = new HashSet<string>(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> _csharpOnlyEventTags = new HashSet<string>(StringComparer.Ordinal);
 
-    // Hoisted constant arrays (CA1861) shared by the exemplars.
     private static readonly long[] _exampleFileIds = { 1, 2, 3 };
     private static readonly string[] _exampleTags = { "hawaii", "sunset" };
     private static readonly string[] _exampleTunedArguments = { "-ngl", "99" };
@@ -101,10 +83,7 @@ public class SchemaConformanceTests
             "EventPayload");
     }
 
-    // Negative self-tests, twinned with the Rust suite's
-    // checker_rejects_wrong_cased_key / checker_rejects_missing_required_key:
-    // the checker must reject the exact L1 drift class (fileId vs fileID)
-    // and a missing schema-required key, or this suite guards nothing.
+    // Negative self-tests, twinned with the Rust suite's checker_rejects_wrong_cased_key / checker_rejects_missing_required_key: the checker must reject the exact L1 drift class (fileId vs fileID) and a missing schema-required key, or this suite guards nothing.
 
     [Fact]
     public void Checker_RejectsWrongCasedKey()
@@ -194,10 +173,7 @@ public class SchemaConformanceTests
         Assert.False(legacyDocument.RootElement.GetProperty("payload").GetProperty("toolRequest").GetProperty("request").GetProperty("recipe").TryGetProperty("videoStabilization", out _));
     }
 
-    // ── Exemplars ────────────────────────────────────────────────────────
-    // One fully-populated instance per variant, constructed exactly as the
-    // app constructs them. Optional fields are set so the serialized keys
-    // exercise the variant's full schema property surface.
+    // Optional fields are set so the serialized keys exercise the variant's full schema property surface.
 
     private static CatalogChapter ExampleChapter() => new("chapter-1", 42, 12.5, 20, "Gift Opening", "Grandma opens a gift", "100:123", "user", 1, true, false);
 
@@ -272,10 +248,10 @@ public class SchemaConformanceTests
         {
             new LibraryRoot(1, "/Volumes/Photos", "Photos", "external", true, true, 1200, 3_400_000_000, 1_700_000_000.0, "completed"),
         })),
-        new ModelCatalogEvent(new ModelCatalog("models-1", 16, 6144, new[]
+        new ModelCatalogEvent(new ModelCatalog("models-1", 16, 9000, 6144, "qwen3_vl_2b_instruct_gguf_q4_k_m", new[]
         {
             new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",
-                "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true,
+                "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true, true,
                 new ModelBenchmark("2026-10-13T22:00:00Z", "x86_64 · 16 GB · RTX 2060 6 GB", 3.2, 900, 55, 1.4, 2.6, 0.95, 0.8, _exampleTunedArguments)),
         })),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
@@ -335,8 +311,6 @@ public class SchemaConformanceTests
         QnnPackPresent: false,
         Recommendation: "");
 
-    // ── Schema plumbing ──────────────────────────────────────────────────
-
     private static void AssertExemplarsCoverUnion(Type unionBase, IEnumerable<Type> exemplarTypes)
     {
         var concrete = unionBase.Assembly.GetTypes()
@@ -385,10 +359,6 @@ public class SchemaConformanceTests
         }
     }
 
-    /// <summary>
-    /// Maps each oneOf entry's single tag name to the schema for the tag's
-    /// value (the variant body, or its $ref).
-    /// </summary>
     private static Dictionary<string, JsonElement> SchemaVariants(string unionName)
     {
         var variants = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
@@ -421,14 +391,7 @@ public class SchemaConformanceTests
         return Assert.Single(doc.RootElement.GetProperty("payload").EnumerateObject()).Name;
     }
 
-    /// <summary>
-    /// Structural subset check: serialized keys must exist in the schema's
-    /// properties wherever additionalProperties is false, required keys must
-    /// be present, string enums must match, and types must be compatible.
-    /// Follows $ref, anyOf, and array items recursively. Deliberately not a
-    /// full JSON Schema validator — just the drift classes that have bitten
-    /// (renamed keys, missing fields, wrong wrapper shape, enum casing).
-    /// </summary>
+    /// <summary>Structural subset check: serialized keys must exist in the schema's properties wherever additionalProperties is false, required keys must be present, string enums must match, and types must be compatible.</summary>
     private static void CheckValue(JsonElement schema, JsonElement value, string path, List<string> errors)
     {
         schema = Resolve(schema);

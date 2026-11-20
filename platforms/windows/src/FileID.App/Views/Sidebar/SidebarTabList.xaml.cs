@@ -1,6 +1,5 @@
 ﻿// SidebarTabList code-behind. Builds the area switcher and every page row
-// once (stable containers), then only toggles visibility, text and brushes
-// as AppViewModel / EngineClient change.
+// once (stable containers), then only toggles visibility, text and brushes as AppViewModel / EngineClient change.
 
 using System.ComponentModel;
 using FileID.IpcSchema;
@@ -23,8 +22,7 @@ public sealed partial class SidebarTabList : UserControl
     private readonly Dictionary<string, (Button Button, TextBlock Label)> _areaButtons = new();
     private string _shownArea = "Browse";
 
-    // Cached at ctor (UI thread): selection and badge syncs fire on every tab
-    // switch and on the ~10 Hz scan progress stream.
+    // Cached at ctor (UI thread): selection and badge syncs fire on every tab switch and on the ~10 Hz scan progress stream.
     private readonly Brush _gold;
     private readonly Brush _ai;
     private readonly Brush _warning;
@@ -235,8 +233,6 @@ public sealed partial class SidebarTabList : UserControl
             row.Label.FontWeight = selected ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
             AutomationProperties.SetItemStatus(row.Button, selected ? "Selected" : string.Empty);
 
-            // Pages that read the library stay disabled until a folder is picked
-            // (macOS "Pick a folder to start").
             bool enabled = vm.HasFolder || !row.Tab.RequiresFolder;
             row.Button.IsEnabled = enabled;
         }

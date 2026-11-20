@@ -1,7 +1,5 @@
-// Manual Best Takes groups (DESIGN_V3_PORT "Best Takes", manual groups), kept
-// free of GTK: the clip pool, when a group can be saved or scored, take card
-// wording and the feedback each card button sends. Mirrors the macOS
-// TakeWorkbench / TakeCard.
+// Manual Best Takes groups, free of GTK: the clip pool, when a group can be saved or scored,
+// card wording, and the feedback each card button sends.
 
 use std::collections::BTreeSet;
 

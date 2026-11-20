@@ -17,6 +17,13 @@ struct SelfShotPlanTests {
         #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_CLUSTER": "1"], available: all)?.clusterFaces == true)
     }
 
+    @Test func no_scan_is_opt_in() {
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x"], available: all)?.openOnly == false)
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_NO_SCAN": "1"], available: all)?.openOnly == true)
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x"], available: all)?.scanSettle == 1)
+        #expect(SelfShotPlan.from(environment: [SelfShotPlan.dirKey: "/tmp/x", "FILEID_SELF_SHOT_SCAN_SETTLE": "6"], available: all)?.scanSettle == 6)
+    }
+
     @Test func slugs() {
         #expect(SelfShotPlan.slug("Search & Moments") == "search-moments")
         #expect(SelfShotPlan.slug("Deep Analyze") == "deep-analyze")
@@ -58,6 +65,11 @@ struct SelfShotPlanTests {
     @Test func views_parse_preview_file() {
         let views = SelfShotView.parse("big=Library?query=huge&preview=huge%206500.jpg", available: all)
         #expect(views.first?.preview == "huge 6500.jpg" && views.first?.query == "huge")
+    }
+
+    @Test func views_parse_action() {
+        let views = SelfShotView.parse("pane=Library?act=select:C0030T01.JPG;picked=Library?act=checks:3;plain=Library", available: all)
+        #expect(views.map(\.action) == ["select:C0030T01.JPG", "checks:3", nil])
     }
 }
 #endif

@@ -1,23 +1,7 @@
-// CLIP zero-shot scene-tagging vocabulary + scorer.
-//
-// macOS produces scan-time scene tags from Apple's Vision classifier — a
-// *scene* taxonomy ("beach", "kitchen", "document"). Windows has no
-// OS-native classifier of comparable quality, so the port previously used a
-// MobileNetV3 ImageNet-1k classifier: an *object* classifier whose argmax
-// labels ("breakwater", "radio telescope") are the wrong taxonomy for
-// "what's in this photo" tags, and which the user reported as "horrible".
-//
-// This module replaces it with CLIP zero-shot classification. The scan
-// pipeline already computes a CLIP ViT-B/32 image embedding per file (for
-// dedup + semantic search); we score that embedding against a curated
-// vocabulary of scene/content labels embedded with the matching CLIP text
-// encoder, so both share one 512-d space. The label matrix is generated
-// offline by `examples/gen_scene_matrix.rs` and compiled into the binary, so
-// scene tagging needs no text model at scan time.
-//
-// Cost: the per-file marginal work is a tiny [N×512] mat-vec, much cheaper
-// than the ONNX classifier inference it replaces.
+// CLIP zero-shot scene tags: the image embedding (already computed for dedup and search) is scored against a label
+// matrix precomputed by `examples/gen_scene_matrix.rs`, so scene tagging needs no text model at scan time.
 
+use crate::util::vector_math::l2_normalize;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
@@ -36,60 +20,43 @@ mod scene_embeddings {
 pub use scene_embeddings::SCENE_EMBEDDINGS;
 
 
-/// Curated 1-2 word scene/content labels scored by CLIP zero-shot. Chosen to
-/// cover the common contents of a personal file library — outdoor/indoor
-/// scenes, people, animals, food, documents, and graphic types — and to read
-/// well as a one-word chip after `TagChip.FormatTag` title-cases them. This
-/// is the primary accuracy lever: edit here, force a re-scan, inspect the
-/// persisted `tags.score`, and adjust. Keep entries lowercase and natural so
-/// the prompt templates ("a photo of a {}") read like real captions.
+/// Keep entries lowercase and natural: they fill the "a photo of a {}" templates and are title-cased by
+/// `TagChip.FormatTag`.
 pub static SCENE_LABELS: &[&str] = &[
-    // ── Outdoor scenes
     "beach", "ocean", "lake", "river", "waterfall", "mountain", "hill",
     "forest", "jungle", "desert", "field", "meadow", "garden", "park",
     "snow", "glacier", "canyon", "cave", "volcano", "island", "harbor",
     "sunset", "sunrise", "night sky", "rainbow", "storm", "fog",
     "city street", "city skyline", "bridge", "road", "highway", "alley",
     "countryside", "farm", "vineyard", "ruins", "cemetery",
-    // ── Indoor scenes
     "kitchen", "bedroom", "living room", "bathroom", "dining room",
     "office", "classroom", "library", "restaurant", "cafe", "bar",
     "store", "shopping mall", "gym", "hospital", "church", "temple",
     "museum", "theater", "stage", "concert", "warehouse", "garage",
     "hallway", "staircase", "rooftop", "balcony", "swimming pool",
-    // ── People
     "portrait", "selfie", "group photo", "crowd", "baby", "child",
     "wedding", "graduation", "birthday party", "dancing", "sports game",
     "running", "hiking", "skiing", "surfing", "fishing",
-    // ── Animals
     "dog", "cat", "bird", "horse", "fish", "wildlife", "insect",
     "butterfly", "farm animal", "zoo animal", "reptile", "pet",
-    // ── Food & drink
     "food", "meal", "dessert", "cake", "pizza", "fruit", "vegetables",
     "coffee", "cocktail", "barbecue", "breakfast",
-    // ── Plants
     "flower", "tree", "houseplant", "leaves", "mushroom",
-    // ── Vehicles & objects
     "car", "motorcycle", "bicycle", "boat", "ship", "airplane", "train",
     "bus", "truck", "furniture", "jewelry", "clothing", "shoes",
     "electronics", "machinery", "tools", "books", "toys", "artwork",
     "statue", "fireworks",
-    // ── Documents & text
     "document", "handwriting", "screenshot", "receipt", "invoice",
     "spreadsheet", "presentation slide", "menu", "business card", "form",
     "certificate", "book page", "newspaper", "sign", "poster", "ticket",
     "map", "chart", "diagram", "user interface",
-    // ── Graphic / art types
     "painting", "drawing", "sketch", "illustration", "comic", "logo",
     "meme", "infographic", "pattern", "texture",
-    // ── Built environment
     "architecture", "building interior", "construction site",
 ];
 
-/// CLIP zero-shot prompt ensembling: each label is embedded with every
-/// template and the embeddings are averaged + renormalized. A few templates
-/// recover a few percent of accuracy over a single one at no per-file cost
-/// (the averaging happens once at matrix-build time). `{}` is the label.
+/// Each label is embedded with every template, averaged and renormalized (done once at matrix-build time); `{}` is the
+/// label.
 pub static PROMPT_TEMPLATES: &[&str] = &[
     "a photo of a {}.",
     "a photo of the {}.",
@@ -98,60 +65,30 @@ pub static PROMPT_TEMPLATES: &[&str] = &[
     "a {}.",
 ];
 
-/// Minimum **cosine similarity** (NOT a softmax probability) for a label to be
-/// emitted as a tag. Both the image embedding and each label embedding are
-/// L2-normalized, so their dot product is the cosine in [-1, 1]. Thresholding
-/// the raw cosine is the correct CLIP zero-shot deployment: it emits only
-/// genuine matches and emits NOTHING when the image matches no label.
-///
-/// The prior code softmaxed cosine×100 over the whole vocabulary and
-/// thresholded the *probability*, which is razor-peaky — the single top label
-/// scored ~0.99 even when its true cosine was mediocre, so every file got a
-/// confident WRONG tag. That was the "10% accurate / worthless" report.
-///
-/// 0.15 is the tuned floor for MobileCLIP-S2; this is the primary accuracy
-/// lever. History: 0.24 filtered out almost everything → 0.18 surfaced some
-/// chips but many images still came back with no scene tag (year-only).
-/// 0.15 biases harder toward recall — CLIP scene tags are now the canonical
-/// auto-tagger (no VLM auto-tag pass behind them), so an approximate chip
-/// beats a blank chip. Force a re-tag and inspect persisted `tags.score`
-/// (the raw cosine) to tune: raise to drop weak/wrong tags, lower for more
-/// recall.
+/// Minimum cosine (not a softmax probability) to emit a label, so an image matching nothing emits nothing; a softmax
+/// over cosine×100 made the top label look confident at a mediocre cosine. Tune against the persisted `tags.score`.
 pub const SCENE_COSINE_THRESHOLD: f32 = 0.15;
 
-/// Max scene tags emitted per file. macOS Vision surfaces a handful of
-/// labels per image; the Library card shows the top 2, the rest are
-/// searchable.
+/// The Library card shows the top 2; the rest are searchable.
 pub const SCENE_TOP_K: usize = 4;
 
-/// Prompts text-encoded per ONNX batch when building the label matrix.
 const BUILD_BATCH: usize = 64;
 
-/// The label-embedding matrix used for zero-shot scoring. Holds one
-/// L2-normalized, prompt-ensembled embedding per `SCENE_LABELS` entry.
 pub struct SceneLabeler {
     matrix: Vec<Vec<f32>>,
 }
 
 impl SceneLabeler {
-    /// Resolve a label index (returned by [`SceneLabeler::score`]) to its
-    /// human-readable label string. Method (not assoc fn) for call-site
-    /// ergonomics: `labeler.label(idx)` reads better than `SceneLabeler::label`.
     #[allow(clippy::unused_self)]
     pub fn label(&self, idx: usize) -> &'static str {
         SCENE_LABELS[idx]
     }
 
-    /// Read-only view of the prompt-ensembled label matrix (one L2-normalized
-    /// row per `SCENE_LABELS` entry). Used by the offline matrix-regeneration
-    /// harness (`examples/gen_scene_matrix.rs`); not referenced at runtime.
+    /// Used only by the offline `examples/gen_scene_matrix.rs`.
     pub fn matrix(&self) -> &[Vec<f32>] {
         &self.matrix
     }
 
-    /// Build the label matrix from an already-loaded CLIP text encoder.
-    /// Embeds every label×template prompt (batched), averages each label's
-    /// template embeddings, and L2-renormalizes.
     pub fn build(model: &mut ClipText) -> Result<Self> {
         let started = std::time::Instant::now();
         let templates = PROMPT_TEMPLATES.len();
@@ -163,14 +100,8 @@ impl SceneLabeler {
         }
 
         let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(prompts.len());
-        // Fast path: one ONNX run per BUILD_BATCH prompts, assuming the text
-        // export has a dynamic batch axis. If it instead pins batch=1 (some
-        // Xenova exports do), the batched run errors on a shape mismatch. Don't
-        // let that bubble up and disable scene tagging entirely (labeler =
-        // None → every file silently gets zero scene tags) — fall back to a
-        // per-prompt embed(), which uses a (1,77) input and works against a
-        // batch-pinned model. Once batched fails we stay sequential for the
-        // remaining chunks rather than re-failing (and re-logging) each batch.
+        // One batched ONNX run per BUILD_BATCH prompts; exports that pin batch=1 fall back to per-prompt embed()
+        // instead of disabling scene tagging.
         let mut use_sequential = false;
         for chunk in prompts.chunks(BUILD_BATCH) {
             if !use_sequential {
@@ -222,32 +153,22 @@ impl SceneLabeler {
         Ok(Self { matrix })
     }
 
-    /// The matrix compiled in from `scene_embeddings_precomputed.rs`.
     pub fn precomputed() -> Self {
         Self { matrix: SCENE_EMBEDDINGS.iter().map(|row| row.to_vec()).collect() }
     }
 
-    /// Score an image embedding against the vocabulary. Returns up to
-    /// `top_k` `(label_index, cosine_similarity)` pairs whose cosine clears
-    /// `threshold`, highest first. Empty when nothing matches.
     pub fn score(&self, image_emb: &[f32], threshold: f32, top_k: usize) -> Vec<(usize, f32)> {
         score_labels(image_emb, &self.matrix, threshold, top_k)
     }
 }
 
-/// Process-static labeler, materialized once per engine launch on first use.
 pub fn shared_scene_labeler() -> Arc<SceneLabeler> {
     static LABELER: OnceLock<Arc<SceneLabeler>> = OnceLock::new();
     LABELER.get_or_init(|| Arc::new(SceneLabeler::precomputed())).clone()
 }
 
-/// Pure zero-shot scorer: cosine similarity (a dot product, since both sides
-/// are L2-normalized), thresholded directly, and truncated to the top `top_k`
-/// by cosine. NO softmax — emitting the argmax of a peaky softmax tagged every
-/// image with a confident wrong label; thresholding the raw cosine emits only
-/// genuine matches (and nothing when the image matches no label). Kept a free
-/// function with no I/O so it's deterministic and unit-testable with synthetic
-/// embeddings.
+/// Free function with no I/O so it is unit-testable. No softmax: the argmax of a peaky softmax tagged every image with
+/// a confident wrong label; thresholding the raw cosine emits only genuine matches.
 pub(crate) fn score_labels(
     image_emb: &[f32],
     matrix: &[Vec<f32>],
@@ -264,7 +185,6 @@ pub(crate) fn score_labels(
         .map(|(i, label)| (i, dot(image_emb, label)))
         .filter(|&(_, cos)| cos >= threshold)
         .collect();
-    // Highest cosine first; deterministic index tie-break.
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -283,13 +203,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    for x in v.iter_mut() {
-        *x /= norm;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +217,7 @@ mod tests {
     fn exact_match_clears_threshold_with_cosine_one() {
         let dim = 8;
         let matrix: Vec<Vec<f32>> = (0..4).map(|i| basis(dim, i)).collect();
-        let img = basis(dim, 2); // identical to matrix[2] → cosine 1.0
+        let img = basis(dim, 2);
         let out = score_labels(&img, &matrix, 0.5, 4);
         assert_eq!(out.len(), 1, "only the matching label clears 0.5: {out:?}");
         assert_eq!(out[0].0, 2, "the matching label must rank first");
@@ -315,9 +228,7 @@ mod tests {
     fn orthogonal_below_threshold_yields_no_tags() {
         let dim = 8;
         let matrix: Vec<Vec<f32>> = (0..4).map(|i| basis(dim, i)).collect();
-        // Orthogonal to every label → all cosines 0 → nothing clears a positive
-        // threshold (the key property: a no-match image gets NO tag, not a
-        // confident wrong one).
+        // Orthogonal to every label: a no-match image must get NO tag.
         let img = basis(dim, 7);
         let out = score_labels(&img, &matrix, 0.24, 4);
         assert!(out.is_empty(), "no-match image must emit nothing: {out:?}");
@@ -328,9 +239,9 @@ mod tests {
         let dim = 8;
         let matrix: Vec<Vec<f32>> = (0..4).map(|i| basis(dim, i)).collect();
         let mut img = vec![0f32; dim];
-        img[0] = 0.8; // strongest toward label 0
-        img[1] = 0.6; // then label 1
-        l2_normalize(&mut img); // already unit, but keep parity with real path
+        img[0] = 0.8;
+        img[1] = 0.6;
+        l2_normalize(&mut img);
         let out = score_labels(&img, &matrix, 0.1, 2);
         assert_eq!(out.len(), 2, "top_k must cap the result count");
         assert_eq!(out[0].0, 0);

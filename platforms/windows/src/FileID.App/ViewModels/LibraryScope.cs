@@ -4,11 +4,7 @@ using FileID.IpcSchema;
 
 namespace FileID.ViewModels;
 
-/// <summary>One library location that Library, Search &amp; Moments and Chat are scoped to (macOS
-/// LibraryScope). A file belongs to it when its path is the location's path or lies under it, never a
-/// sibling that shares the prefix (/Camera never holds /Camera2), and never inside a deeper location:
-/// the most specific location owns a file, as in OfflineRoots. Paths compare ordinally, like the
-/// engines' rootID filter.</summary>
+/// <summary>A file belongs to it when its path is the location's path or lies under it, never a sibling that shares the prefix (/Camera never holds /Camera2), and never inside a deeper location: the most specific location owns a file, as in OfflineRoots.</summary>
 internal sealed class LibraryScope
 {
     private readonly string[] _bounds;
@@ -24,7 +20,6 @@ internal sealed class LibraryScope
 
     public LibraryRoot Root { get; }
 
-    /// <summary>JSON bound to <see cref="Sql"/>'s parameter.</summary>
     public string Param { get; }
 
     public static LibraryScope? For(long? rootId, IReadOnlyList<LibraryRoot> roots)
@@ -43,16 +38,12 @@ internal sealed class LibraryScope
         return new LibraryScope(root, own, deeper);
     }
 
-    /// <summary>The stored choice once the location list is known: kept while the list is still
-    /// empty (not loaded yet), dropped when its location is gone.</summary>
     public static long? Reconciled(long? stored, IReadOnlyList<LibraryRoot> roots)
     {
         if (stored is not { } id || roots.Count == 0) return stored;
         return roots.Any(r => r.Id == id) ? id : null;
     }
 
-    /// <summary>Title-bar label: the location's name, "All locations", or the folder being worked
-    /// on before anything is cataloged.</summary>
     public static string Title(LibraryScope? scope, IReadOnlyList<LibraryRoot> roots, string? folderName)
     {
         if (scope is not null) return scope.Root.Display;
@@ -64,7 +55,6 @@ internal sealed class LibraryScope
 
     public static string LocationCountText(int count) => count == 1 ? "1 location" : $"{count:N0} locations";
 
-    /// <summary>Spoken name of one location row in the switcher.</summary>
     public static string Spoken(LibraryRoot root) =>
         $"{root.Display}, {FileCountText(root.FileCount)}" + (root.Online ? "" : ", offline");
 
@@ -78,8 +68,6 @@ internal sealed class LibraryScope
         return true;
     }
 
-    /// <summary>SQL that is true when <paramref name="column"/> lies in the scope bound to
-    /// <paramref name="parameter"/>, or when that value is NULL. Binds the parameter once.</summary>
     public static string Sql(string column, string parameter)
     {
         string Inside(string bounds) =>
@@ -87,8 +75,6 @@ internal sealed class LibraryScope
         return $"(SELECT s.v IS NULL OR ({Inside("s.v")} AND NOT EXISTS (SELECT 1 FROM json_each(s.v,'$[3]') d WHERE {Inside("d.value")})) FROM (SELECT {parameter} AS v) s)";
     }
 
-    /// <summary>Half-open range of every path under <paramref name="root"/>: <c>root/</c> up to
-    /// <c>root0</c> (<c>]</c> follows <c>\</c>). Matches the engines' listRoots counts.</summary>
     internal static string[] SubtreeBounds(string root)
     {
         var windows = root.Contains('\\') && !root.Contains('/');

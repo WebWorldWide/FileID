@@ -9,7 +9,7 @@ exists for users who want one download with no runtime, no sandbox, and no store
 `build-appimage.sh` produces `FileID-x86_64.AppImage` containing:
 
 - `fileid-linux` — the GTK4 app, and `FileIDEngine` — the engine it spawns.
-- ONNX Runtime is statically linked into `FileIDEngine`; there is no runtime
+- The model runtime (tract) is compiled into `FileIDEngine`; there is no runtime
   `.so` to locate or bundle.
 - `usr/bin/RuntimeBundles/llama.cpp/` — `llama-server` and its ggml libraries,
   built from the pinned llama.cpp b9254 source archive by
@@ -53,12 +53,11 @@ iteration**: either build GTK 4.14 into the old-baseline image, or accept the
 22.04/24.04 floor. The Flatpak sidesteps this entirely by shipping the GNOME 49
 runtime, which is why it is primary.
 
-## ONNX Runtime
+## Inference runtime
 
-Linux portable builds enable `ort`'s `download-binaries` without
-`load-dynamic`, which statically links the CPU runtime into `FileIDEngine`.
-CPU inference therefore works out of the box with no AppRun loader hook. GPU
-execution providers remain future work.
+The engine runs its models on tract, compiled into `FileIDEngine`, so CPU
+inference works out of the box with no AppRun loader hook. GPU execution
+providers remain future work.
 
 ## Privacy
 

@@ -9,7 +9,7 @@ import FileIDShared
 @MainActor
 enum CatalogWrites {
     static let notReady = "FileID is still getting ready. Try again in a moment."
-    static let noAnswer = "FileID didn't answer in time. Check the files before trying again."
+    static let noAnswer = "FileID didn’t answer in time. Check the files before trying again."
 
     /// Sends `command` and waits for its reply. `id` picks this request's
     /// reply out of others with the same action (a reply without per-item
@@ -310,7 +310,7 @@ enum CatalogWrites {
 @Observable
 final class MergeUndoModel {
     static let shared = MergeUndoModel()
-    static let failed = "The merge couldn't be undone. Try again in a moment."
+    static let failed = "The merge couldn’t be undone. Try again in a moment."
 
     private(set) var operationID: String?
     private(set) var busy = false
@@ -322,7 +322,7 @@ final class MergeUndoModel {
 
     func offer(_ engine: EngineClient, store: ReadStore, operations: [String]) async {
         await refresh(engine)
-        let text = operations.count == 1 ? "Merged into one person." : "Finished \(operations.count) merges."
+        let text = operations.count == 1 ? "Merged into one person." : "Finished \(Plural.noun(operations.count, "merge", "merges"))."
         ToastCenter.shared.show(text, actionLabel: "Undo", duration: 10) {
             Task { @MainActor in
                 let result = await self.undo(engine, store: store, operations: operations)
@@ -332,8 +332,8 @@ final class MergeUndoModel {
     }
 
     static func summary(_ result: (undone: Int, message: String?), of total: Int) -> String {
-        if result.undone == total { return total == 1 ? "Merge undone. Both people are back." : "\(total) merges undone." }
-        if result.undone > 0 { return "\(result.undone) of \(total) merges undone. \(result.message ?? failed)" }
+        if result.undone == total { return total == 1 ? "Merge undone. Both people are back." : "\(Plural.noun(total, "merge", "merges")) undone." }
+        if result.undone > 0 { return "\(result.undone.formatted()) of \(Plural.noun(total, "merge", "merges")) undone. \(result.message ?? failed)" }
         return result.message ?? failed
     }
 

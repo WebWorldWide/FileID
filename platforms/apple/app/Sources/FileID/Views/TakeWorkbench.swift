@@ -154,11 +154,9 @@ struct TakeWorkbench: View {
 
     private var groupsPane: some View {
         VStack(spacing: 0) {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
-                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
-                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     HStack(spacing: 6) {
                         SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)
                         Spacer(minLength: 4)
@@ -177,6 +175,7 @@ struct TakeWorkbench: View {
                     }
                     ForEach(autoGroups) { group in
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
+                            .id(group.groupKey)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
@@ -184,20 +183,28 @@ struct TakeWorkbench: View {
                         RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil && selectedProposalKey == nil, action: { open(event) }) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(event.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
-                                Text("\(event.fileIDs.count) takes · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
+                                Text("\(Plural.noun(event.fileIDs.count, "take", "takes")) · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
                             }
                             .padding(.vertical, 7)
                         }
-                        .accessibilityLabel("\(event.title), \(event.fileIDs.count) takes, goal: \(event.goal)")
+                        .accessibilityLabel("\(event.title), \(Plural.noun(event.fileIDs.count, "take", "takes")), goal: \(event.goal)")
                     }
                     if events.isEmpty {
                         MetaText("Groups you make by hand, with a goal, show up here.", size: 12).padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
+                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
+                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
+                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     manualSection
                 }
                 .padding(.bottom, 10)
+            }
+            .onChange(of: selectedAutoKey ?? selectedProposalKey) { _, key in
+                guard let key else { return }
+                withAnimation(Theme.springStandard) { proxy.scrollTo(key, anchor: .center) }
+            }
             }
             if !lastTrashBatch.isEmpty {
                 Hairline()
@@ -295,7 +302,7 @@ struct TakeWorkbench: View {
                 if pendingID.isEmpty == false { IndeterminateBar().frame(width: 60) }
                 if let event = selectedEvent {
                     Button("Undo last save") { send("undoEventEdit", eventID: event.id) }.buttonStyle(.dsGhost)
-                        .help("Puts this group's name, goal and takes back to how they were before you last saved it")
+                        .help("Puts this group’s name, goal and takes back to how they were before you last saved it")
                     Button("Delete group") { confirmDeleteGroup = true }
                         .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                 }
@@ -355,7 +362,7 @@ struct TakeWorkbench: View {
     private func fieldRow<Field: View>(_ label: String, @ViewBuilder field: () -> Field) -> some View {
         HStack(spacing: 12) {
             Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: Theme.Font.scaled(44), alignment: .leading)
                 .accessibilityHidden(true)
             field()
         }
@@ -378,7 +385,7 @@ struct TakeWorkbench: View {
         }
         let verdict: String
         switch recommendation.status.lowercased() {
-        case "ranked": verdict = "FileID's pick"
+        case "ranked": verdict = "FileID’s pick"
         case "preferred": verdict = "Your pick"
         case "tie": verdict = "Too close to call"
         default: verdict = "Not enough to go on yet"
@@ -460,7 +467,7 @@ struct TakeWorkbench: View {
         Task {
             let request = CatalogRequest(requestID: UUID().uuidString, action: action, jobID: job.id)
             guard let response = await TakeRequests.send(engine, request, timeout: 30), response.status == "ok" else {
-                ToastCenter.shared.show("That didn't work. Try again.")
+                ToastCenter.shared.show("That didn’t work. Try again.")
                 return
             }
             if let next = TakeProposals.job(response.jobs) { withAnimation(Theme.springStandard) { groupingJob = next } }
@@ -601,7 +608,7 @@ struct TakeWorkbench: View {
             goalJobID = nil
             load(eventID)
         } else if job.state == "failed" {
-            message = job.error ?? "Scoring didn't finish. Scores you already reviewed are kept."
+            message = job.error ?? "Scoring didn’t finish. Scores you already reviewed are kept."
         }
     }
 
@@ -715,7 +722,7 @@ private struct SuggestionRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(names.joined(separator: ", ")).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text1).lineLimit(2)
             HStack(spacing: 8) {
-                Text("\(names.count) takes · \(suggestion.similarity >= 0.9 ? "nearly identical" : (suggestion.similarity >= 0.75 ? "very alike" : "somewhat alike"))")
+                Text("\(Plural.noun(names.count, "take", "takes")) · \(suggestion.similarity >= 0.9 ? "nearly identical" : (suggestion.similarity >= 0.75 ? "very alike" : "somewhat alike"))")
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.ai)
                     .help("\(Int((suggestion.similarity * 100).rounded()))% alike")
                 Spacer(minLength: 4)
@@ -754,9 +761,9 @@ private struct TakeCard: View {
         if take.stale { return ("Needs review: the file changed", Theme.warning) }
         guard let score = take.outcomeScore else {
             if reviewedByUser { return ("Unclear", Theme.text2) }
-            return (isDraft ? "FileID couldn't tell" : "Not scored yet", Theme.text3)
+            return (isDraft ? "FileID couldn’t tell" : "Not scored yet", Theme.text3)
         }
-        let prefix = isDraft ? "FileID's guess · " : ""
+        let prefix = isDraft ? "FileID’s guess · " : ""
         return score >= 0.5 ? (prefix + "Goal met", Theme.delight) : (prefix + "Goal missed", Theme.danger)
     }
 
@@ -777,7 +784,7 @@ private struct TakeCard: View {
                 Spacer(minLength: 4)
                 Circle().fill(reviewedByUser ? Theme.gold : (isDraft ? Theme.ai : Theme.text3)).frame(width: 7, height: 7)
                     .help(reviewedByUser ? "Reviewed by you" : (isDraft ? "Suggested by FileID from a few frames" : "No score yet"))
-                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "FileID's guess" : "No score"))
+                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "FileID’s guess" : "No score"))
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
             .overlay(alignment: .bottom) { Hairline() }
@@ -811,9 +818,9 @@ private struct TakeCard: View {
                 }
                 if let quality = take.qualityScore {
                     HStack(spacing: 8) {
-                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
+                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(64), alignment: .leading)
                         GrainProgressBar(progress: quality, tone: .neutral, height: 4)
-                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 44, alignment: .trailing)
+                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(44), alignment: .trailing)
                     }
                     .help("Sharpness \(Int((quality * 100).rounded())) out of 100")
                     .accessibilityElement(children: .ignore)

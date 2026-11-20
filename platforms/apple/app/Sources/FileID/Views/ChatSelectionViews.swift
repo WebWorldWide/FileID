@@ -58,14 +58,14 @@ struct ChatScopeChip: View {
             Text(scope.label).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
             Button(action: onRemove) {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.text2)
-                    .frame(width: 18, height: 18)
+                    .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget)
             }
             .buttonStyle(DSBareButtonStyle(radius: 9))
             .help("Ask about the whole library again")
             .accessibilityLabel("Remove \(scope.label) from the question")
         }
-        .padding(.leading, 9).padding(.trailing, 4)
-        .frame(height: 26)
+        .padding(.leading, 9).padding(.trailing, 0)
+        .frame(height: Theme.Metrics.hitTarget)
         .background(Theme.gold.opacity(0.12), in: Capsule())
         .overlay(Capsule().stroke(Theme.gold.opacity(0.5), lineWidth: 1))
         .accessibilityElement(children: .contain)
@@ -133,7 +133,7 @@ struct SelectionResultsStrip: View {
                 .disabled(target.count < 2)
                 .help(target.count < 2 ? "Choose at least two files" : "Save these as a group in Best Takes")
             Button(chosen.count == hits.count ? "Clear" : "Select all") {
-                withAnimation(Theme.springStandard) { chosen = chosen.count == hits.count ? [] : Set(hits.map(\.fileID)) }
+                withAnimation(Theme.spring) { chosen = chosen.count == hits.count ? [] : Set(hits.map(\.fileID)) }
             }
             .buttonStyle(.dsGhost)
             .accessibilityLabel(chosen.count == hits.count ? "Clear the selection" : "Select every file in this answer")
@@ -141,7 +141,7 @@ struct SelectionResultsStrip: View {
     }
 
     private func toggle(_ id: Int64) {
-        withAnimation(Theme.springStandard) { if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) } }
+        withAnimation(Theme.spring) { if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) } }
     }
 }
 

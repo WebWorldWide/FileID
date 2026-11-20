@@ -33,8 +33,6 @@ struct TreeDiffView: View {
     @State private var sourceRows: [SourceRow] = []
     @State private var destRows: [DestRow] = []
 
-    // MARK: - Data
-
     private struct SourceRow: Identifiable {
         var id: String { folder }
         let folder: String
@@ -83,8 +81,6 @@ struct TreeDiffView: View {
             .sorted { $0.bucket.localizedCaseInsensitiveCompare($1.bucket) == .orderedAscending }
     }
 
-    // MARK: - Body
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -102,7 +98,7 @@ struct TreeDiffView: View {
                     sourceRowView(row)
                 }
                 paneCard(title: "After",
-                         subtitle: "Where they'll live",
+                         subtitle: "Where they’ll live",
                          rows: destRows) { row in
                     destRowView(row)
                 }
@@ -129,15 +125,11 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 16, height: 16)
                 .background(Circle().fill(tint))
-            Text(label).font(Theme.Font.body(11)).foregroundStyle(Theme.text2)
+            Text(label).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2)
         }
     }
 
-    // Rows are passed as DATA + a @ViewBuilder, not a pre-materialized
-    // [AnyView]. The old version eagerly built every row into an AnyView on
-    // each render, defeating LazyVStack virtualization (and erasing row
-    // identity) — fatal at 100k+ proposals. Now ForEach over Identifiable
-    // data lets the LazyVStack build only the visible rows.
+    // Rows are passed as data plus @ViewBuilder, not as [AnyView]: an eager AnyView per row defeats LazyVStack virtualization at 100k+ proposals.
     @ViewBuilder
     private func paneCard<Row: Identifiable, RowContent: View>(
         title: String, subtitle: String,
@@ -147,7 +139,7 @@ struct TreeDiffView: View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
-                Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(subtitle).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
@@ -165,8 +157,6 @@ struct TreeDiffView: View {
         .frame(minHeight: 280, idealHeight: 420, maxHeight: 600)
     }
 
-    // MARK: - Row views
-
     @ViewBuilder
     private func sourceRowView(_ row: SourceRow) -> some View {
         let (letter, tint) = sourceLetter(for: row.kind)
@@ -179,7 +169,7 @@ struct TreeDiffView: View {
         .onHover { hovering in
             hoverBus.set(hovering ? .sourceFolder(row.folder) : nil)
         }
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(Theme.quick, value: isHighlighted)
     }
 
     @ViewBuilder
@@ -192,7 +182,7 @@ struct TreeDiffView: View {
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
             Image(systemName: "folder.fill")
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
             Text(row.displayName)
                 .font(Theme.Font.mono(11))
@@ -227,7 +217,7 @@ struct TreeDiffView: View {
         .onHover { hovering in
             hoverBus.set(hovering ? .destBucket(row.bucket) : nil)
         }
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(Theme.quick, value: isHighlighted)
     }
 
     @ViewBuilder
@@ -240,7 +230,7 @@ struct TreeDiffView: View {
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
             Image(systemName: bucketIconName(row.bucket))
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
             Text(row.bucket)
                 .font(Theme.Font.mono(11))

@@ -9,9 +9,9 @@ Surfaces × OS:
 | Desktop app | Swift/SwiftUI + MLX/CoreML | WinUI 3 / .NET 10 | GTK4 + libadwaita |
 | CLI (`fileid`) | ✓ (engine, ONNX) | ✓ | ✓ |
 | TUI (`fileid-tui`) | ✓ (engine, ONNX) | ✓ | ✓ |
-| Engine (`FileIDEngine`) | ONNX Runtime¹ | ONNX Runtime (DirectML/CUDA) | ONNX Runtime |
+| Engine (`FileIDEngine`) | tract (CPU)¹ | tract (CPU) | tract (CPU) |
 
-¹ macOS engine needs `libonnxruntime.dylib` provisioned (`fileid runtime install`); the **desktop app** does NOT — it uses MLX/CoreML. See [Per-OS prerequisites](#per-os-prerequisites).
+¹ tract is compiled into the engine; there is nothing to provision. The macOS **desktop app** runs scan CLIP and RAM++ on MLX through the engine's adapters. See [Per-OS prerequisites](#per-os-prerequisites).
 
 ---
 
@@ -176,7 +176,7 @@ printf '%s\n' '{"id":"t","payload":{"startScan":{"rootPath":"/tmp/fid_corpus","r
   | "$ENGINE" 2>/tmp/engine_err.txt | head -20      # events on stdout
 tail -30 /tmp/engine_err.txt                          # the REAL error/logs
 ```
-Expect a `ready` event (with hardware/EP detection), `queueState`, `phaseChanged`, `progress`, then `scanComplete` — or a structured `error{kind,message}` (e.g. `models_not_installed`, `model_load_failed`). The engine is authoritative; if the engine reports a clear error but the front-end doesn't show it, the bug is in the front-end's event handling.
+Expect a `ready` event (with hardware detection), `queueState`, `phaseChanged`, `progress`, then `scanComplete` — or a structured `error{kind,message}` (e.g. `models_not_installed`, `model_load_failed`). The engine is authoritative; if the engine reports a clear error but the front-end doesn't show it, the bug is in the front-end's event handling.
 
 ---
 
@@ -187,11 +187,11 @@ These need the real OS + GPU/NPU; they cannot be verified headlessly. For each, 
 ### macOS (Swift / MLX / CoreML) — `platforms/apple`
 - Build/run from Xcode (or `swift build`); for a clean scratch run use the scratch `run.sh` (NEVER against the real library).
 - E2E: pick a copied photo folder → scan → watch live progress (target throughput on the ref box; RAM++ Swin-L bounds it to ~1 file/s, that's expected) → tags appear (verify real RAM++ tags, not the 4585-count fallback) → People clusters faces → preview opens, **arrow-keys + click navigate between photos** → Cleanup finds dupes → Restructure previews a plan and **only moves on explicit apply** → Settings toggles persist.
-- This app uses MLX/CoreML, so it needs **no** ONNX runtime and no `fileid models download`.
+- This app uses MLX/CoreML for scan CLIP and RAM++, and the engine's tract runtime for the rest, so it needs no runtime install and no `fileid models download`.
 
 ### Windows (WinUI 3 / .NET 10) — `platforms/windows`
-- `dotnet build`; run the packaged app. Engine auto-detects the execution provider (the current dev box has an RTX 5080; CPU fallback remains available).
-- E2E: same six-tab walk. Verify the Win2D `LavaLampBackground` port renders, springs feel right, and the gold palette. Run `iterate.ps1 -Corpus <path>` + `scan_assertions.py` against the current copied corpus for accuracy and throughput; record RTX 5080 DirectML and CUDA results separately (≥140 files/s remains the target, not a measured result).
+- `dotnet build`; run the packaged app. The engine runs its models on tract (CPU); the current dev box has an RTX 5080, used by llama.cpp only.
+- E2E: same six-tab walk. Verify the Win2D `LavaLampBackground` port renders, springs feel right, and the gold palette. Run `iterate.ps1 -Corpus <path>` + `scan_assertions.py` against the current copied corpus for accuracy and throughput; record the tract CPU result (≥140 files/s remains the target, not a measured result).
 - Pre-push gate: `dotnet build` + `dotnet test` + `dotnet format --verify-no-changes`.
 
 ### Linux (GTK4 + libadwaita) — `platforms/linux`
@@ -220,10 +220,8 @@ Parity check: the app under test must match the **macOS reference** — same pal
 | Need | macOS | Windows | Linux |
 |---|---|---|---|
 | AI models (mobileclip_s2, arcface, …) | `fileid models download …` → `~/.local/share/FileID/Models` | `%LOCALAPPDATA%\FileID\Models` | `~/.local/share/FileID/Models` |
-| ONNX Runtime (engine/CLI/TUI only) | **`fileid runtime install`** (provisions `libonnxruntime.dylib`)² | bundled EP pack (DirectML/CUDA) | system/bundled `libonnxruntime.so` |
 | System libs | — | — | `libgtk-4-dev libadwaita-1-dev`; `tesseract`, `ffmpeg` for OCR/video |
 
-² macOS engine ONNX provisioning — see `RUNTIME.md`. The macOS **desktop app** doesn't need this (MLX/CoreML). Until the runtime is installed, the Mac CLI/TUI do **metadata-only** scans (which work) and full-AI scans report a clear "run `fileid runtime install`" message.
 
 ---
 
@@ -240,26 +238,3 @@ A surface passes when, on its OS, against an isolated DB/corpus:
 8. Telemetry scan is clean.
 
 Record results in `STATE.md` (newest on top); file regressions in `NEXT.md`.
-
-## Explicit macOS significant-moment model evaluation
-
-Default Swift tests never download or load evaluation weights. Obtain the owner's download approval before enabling the download test. The 2026-10-07 session approval covered only the already registered Apache-2.0 Qwen3-VL 4B model. Its pinned MLX revision is `552af30c9952c44f1e1a27c7c5810ded58e892bc`; the existing downloader verifies the installed manifest and weight integrity.
-
-```bash
-cd platforms/apple
-FILEID_HF_CACHE_ROOT=/tmp/FileIDMomentQAData/huggingface \
-FILEID_DOWNLOAD_EVALUATION_MODEL=1 \
-swift test --scratch-path /tmp/fileid-next-build --jobs 4 \
-  --filter VisualModelEvaluationTests.downloadRegisteredModel
-```
-
-For inference, build the pinned Metal library with `FILEID_METALLIB_CACHE=/tmp/FileIDMomentQAData/mlx.metallib bash scripts/ensure_mlx_metallib.sh`. With the documented scratch path, the actual executable is `out/Products/Debug/EngineTests.xctest/Contents/MacOS/EngineTests`; the aggregate `FileIDPackageTests.xctest` is not the executable SwiftPM launches. Place the Metal library beside the EngineTests executable only after the test bundle has been built and signed, then use `swift test --skip-build` for the opt-in run. Copying a new library into the bundle before a normal build causes Xcode's ad-hoc codesign step to reject the unsigned subcomponent. For worker-backed media tests, set `FILEID_TEST_ENGINE_PATH` to the freshly built `out/Products/Debug/FileIDEngine` and run Swift tests without test parallelism; otherwise the test runner can launch itself instead of the engine worker. Supply an internal fixture directory containing `frame-0.png` through `frame-7.png` and `metadata.json`, the ordered metadata array returned by the native `--sample-video-sequence` worker. The test uses actual decoded timestamps and removes duplicate presentation times before inference. The 2026-10-08 16 GB Mac run reached `FileID.ModelMemoryAdmission` and safely declined model loading because available memory was below its existing reservation; no recognition quality was measured.
-
-```bash
-FILEID_HF_CACHE_ROOT=/tmp/FileIDMomentQAData/huggingface \
-FILEID_EVALUATION_FRAMES=/tmp/FileIDMomentQAData/model-sequence-fixture \
-swift test --scratch-path /tmp/fileid-next-build --jobs 4 \
-  --filter VisualModelEvaluationTests.evaluateMomentFrames
-```
-
-The existing available-memory safeguard must pass; do not weaken it for a test. This opt-in test checks the real multi-image path and bounded response format. Generated test patterns do not measure sports outcomes, gift appearances, faces or broad-event recognition. Those require consented, labeled positive/negative/uncertain fixtures and human review against the NEXT_VERSION.md acceptance criteria. Keep all media outputs, catalog data, models and logs internal; do not mount or access Adlon.

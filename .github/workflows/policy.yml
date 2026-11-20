@@ -32,10 +32,16 @@ jobs:
         run: python shared/scripts/check_bootstrap_supply_chain.py
       - name: Test runtime egress release gate
         run: python shared/scripts/test_check_runtime_egress.py
+      - name: Test conformance Trash guard
+        run: python3 shared/scripts/test_conformance_trash_guard.py
       - name: Reject unreviewed runtime egress additions
         run: python shared/scripts/check_runtime_egress.py --known-blockers
       - name: Enforce current documentation contracts
         run: python shared/scripts/check_current_docs.py
+      - name: Test model golden provenance check
+        run: python shared/scripts/test_check_model_golden_provenance.py
+      - name: Enforce model goldens come from the reference runtime
+        run: python shared/scripts/check_model_golden_provenance.py
       - name: Enforce catalog migration parity
         run: python shared/scripts/check_catalog_schema.py
       - name: Test Mac app command coverage check
@@ -58,3 +64,7 @@ jobs:
         run: python shared/scripts/gen_model_manifest.py --check
       - name: Enforce the compiled-in Mac model catalog matches model-catalog.json
         run: python shared/scripts/gen_model_catalog_swift.py --check
+      - name: Test third-party notices generator
+        run: python shared/scripts/test_gen_third_party_notices.py
+      - name: Enforce dependency licence allowlist and current third-party notices
+        run: python shared/scripts/gen_third_party_notices.py --check

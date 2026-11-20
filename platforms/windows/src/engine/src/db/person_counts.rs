@@ -1,14 +1,12 @@
-//! `persons.file_count`: the number of distinct files holding a counted face of
-//! the person. A face counts unless `excluded` is set. The Swift engine runs the
-//! same expressions (`Storage/PersonCounts.swift`).
+//! `persons.file_count`: distinct files holding a counted face (`excluded` unset); same expressions as Swift
+//! `Storage/PersonCounts.swift`.
 
 use rusqlite::{Connection, params};
 
 const COUNT: &str = "(SELECT COUNT(DISTINCT file_id) FROM face_prints \
                       WHERE person_id = persons.id AND COALESCE(excluded,0)=0)";
 
-/// Corrects every stored count that differs from the live one, including a
-/// person left with no counted face. Returns the number of rows changed.
+/// Corrects every stored count that differs from the live one, including a person left with no counted face. Returns the number of rows changed.
 pub fn recount_stale(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(
         &format!("UPDATE persons SET file_count = {COUNT} WHERE file_count IS NOT {COUNT}"),
@@ -16,7 +14,7 @@ pub fn recount_stale(conn: &Connection) -> rusqlite::Result<usize> {
     )
 }
 
-/// The persons with a face on any of `file_ids`: read these before the files go.
+/// Read these before the files go.
 pub fn persons_of_files(conn: &Connection, file_ids: &[i64]) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = conn.prepare_cached(
         "SELECT DISTINCT person_id FROM face_prints WHERE file_id = ?1 AND person_id IS NOT NULL",
@@ -32,8 +30,6 @@ pub fn persons_of_files(conn: &Connection, file_ids: &[i64]) -> rusqlite::Result
     Ok(out)
 }
 
-/// Recounts the given persons and points a dangling representative face at a
-/// surviving one (or NULL).
 pub fn reconcile(conn: &Connection, person_ids: &[i64]) -> rusqlite::Result<()> {
     for pid in person_ids {
         conn.execute(
@@ -81,12 +77,10 @@ mod tests {
         for id in 1..=4 {
             conn.execute("INSERT INTO persons(id,created_at,file_count) VALUES(?1,0,?2)", params![id, 99]).unwrap();
         }
-        // Person 1: two counted faces on file 1 and one on file 2, one excluded on file 3.
         face(&conn, 1, 1, Some(1), 0);
         face(&conn, 2, 1, Some(1), 0);
         face(&conn, 3, 2, Some(1), 0);
         face(&conn, 4, 3, Some(1), 1);
-        // Person 2 has only an excluded face; person 3 has none; person 4 has one.
         face(&conn, 5, 3, Some(2), 1);
         face(&conn, 6, 3, Some(4), 0);
         conn

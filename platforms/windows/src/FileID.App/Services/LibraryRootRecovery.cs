@@ -1,18 +1,4 @@
 ﻿// LibraryRootRecovery — heals a stale LastFolderPath at startup.
-//
-// app-settings.json can point at a folder that no longer exists (deleted,
-// renamed, or a test corpus cleaned up) while the engine DB still holds a
-// full scan of a DIFFERENT root. Without recovery the app boots into a
-// contradictory state: the sidebar header names the dead folder, Start Scan
-// targets it (and fails with a misleading "No supported files found"), and
-// the Library grid shows the DB's files from the other root.
-//
-// Recovery rule: if the saved folder is MISSING but the DB's most recent
-// scan root EXISTS on disk, fall back to that root (it is what the library
-// contents actually belong to). If neither exists — e.g. an unplugged
-// external drive — change nothing: the saved path may come back when the
-// drive is re-attached, and clearing it would bounce the user to onboarding
-// while their library data is still intact.
 
 using System;
 using System.Collections.Generic;
@@ -25,9 +11,6 @@ namespace FileID.Services;
 
 internal static class LibraryRootRecovery
 {
-    /// <summary>Pure decision rule (unit-testable): returns the replacement
-    /// root, or null when nothing should change. <paramref name="dirExists"/>
-    /// is injected so tests don't touch the filesystem.</summary>
     internal static string? PickRecoveredRoot(
         string? lastFolderPath,
         IReadOnlyList<string?> dbRootsNewestFirst,
@@ -58,9 +41,7 @@ internal static class LibraryRootRecovery
         return null; // nothing reachable — leave state alone (drive may return)
     }
 
-    /// <summary>Fire-and-forget startup pass. Filesystem + DB probes run on
-    /// the thread pool (Directory.Exists can stall on a dead network path);
-    /// the FolderPath swap is marshaled back to the UI dispatcher.</summary>
+    /// <summary>Filesystem + DB probes run on the thread pool (Directory.Exists can stall on a dead network path); the FolderPath swap is marshaled back to the UI dispatcher.</summary>
     public static async Task RunAsync(Microsoft.UI.Dispatching.DispatcherQueue ui)
     {
         var last = AppViewModel.Instance.FolderPath;
@@ -96,8 +77,7 @@ internal static class LibraryRootRecovery
         ui.TryEnqueue(() =>
         {
             var vm = AppViewModel.Instance;
-            // The user may have picked a new folder while we probed — never
-            // clobber a fresh deliberate choice.
+            // The user may have picked a new folder while we probed — never clobber a fresh deliberate choice.
             if (!string.Equals(vm.FolderPath, last, StringComparison.Ordinal)) return;
             DebugLog.Info($"[RECOVER] saved library folder missing ({PathRedactor.Redact(last)}); falling back to the DB's scanned root {PathRedactor.Redact(recovered)}.");
             vm.FolderPath = recovered;
@@ -121,9 +101,7 @@ internal static class LibraryRootRecovery
         catch { return false; }
     }
 
-    /// <summary>Most-recent scan roots from scan_sessions, newest first,
-    /// deduped case-insensitively. Empty on any failure (no DB yet, locked,
-    /// old schema) — recovery is strictly best-effort.</summary>
+    /// <summary>Empty on any failure (no DB yet, locked, old schema) — recovery is strictly best-effort.</summary>
     private static IReadOnlyList<string?> ReadRecentScanRoots(string dbPath, int limit)
     {
         var roots = new List<string?>();

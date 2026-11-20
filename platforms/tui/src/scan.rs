@@ -1,23 +1,4 @@
-//! Engine-spawn scan driver.
-//!
-//! `startScan` runs the engine's FULL ML pipeline (image tags, CLIP embeddings,
-//! face detect/embed, perceptual + content hashes, doc text). It owns its own
-//! async runtime + ORT sessions, so — exactly like the CLI's `scan --models`
-//! ([`platforms/cli/src/scan_models.rs`]) and the desktop clients — we can't run
-//! it from a library call. We spawn the `FileIDEngine` binary and speak
-//! newline-delimited JSON over stdio, reusing the engine's OWN
-//! [`fileid_engine::ipc`] `IpcCommand` / `IpcEvent` types so the wire contract
-//! can't drift.
-//!
-//! This runs on a worker thread and streams [`LoadMsg::Status`] over the same
-//! `mpsc` channel the DB loader uses, so the status line shows live scan
-//! progress. On completion it re-reads the DB (via [`crate::data::load`]) and
-//! sends [`LoadMsg::Done`], refreshing every view — no extra reload keystroke
-//! needed (though `r` still works).
-//!
-//! Crucial difference from the CLI: the engine's stderr is routed to
-//! [`Stdio::null`], NOT inherited. The TUI holds the alternate screen in raw
-//! mode; inheriting engine log lines would scribble over the UI.
+//! Engine-spawn scan driver. The engine owns its async runtime and model sessions, so the scan runs in a child `FileIDEngine` over newline-delimited JSON IPC. Engine stderr is captured, not inherited, because the TUI owns the alternate screen.
 
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -100,25 +81,12 @@ fn run_scan(
 ) -> Result<ScanSummary> {
     let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
-    // ── Pre-flight 1: models installed? Give a clear, actionable message
-    //    rather than a cryptic engine error mid-scan. Resolves against the SAME
-    //    dir the engine loads from (see `missing_models`), so this gate, the
-    //    standing banner, and the engine all agree. ──
+    // Check models before spawning: a clear message beats a cryptic mid-scan engine error.
     let missing = missing_required();
     if !missing.is_empty() {
         anyhow::bail!("{}", message_for_missing(&missing));
     }
 
-    // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? The engine's
-    //    `load-dynamic` build needs `libonnxruntime.dylib`, but `ort`'s
-    //    `download-binaries` ships only a static lib for arm64 — a separate,
-    //    one-time install from the model download. No-op off macOS. ──
-    #[cfg(target_os = "macos")]
-    if !fileid_engine::ort_runtime::is_available() {
-        anyhow::bail!("{}", runtime_missing_message());
-    }
-
-    // ── Pre-flight 2: engine binary located? ──
     let Some(engine_bin) = client::locate_engine() else {
         anyhow::bail!(
             "{} not found — set FILEID_ENGINE_BIN, put it on PATH/next to fileid-tui, or build \
@@ -132,16 +100,8 @@ fn run_scan(
         short(&root_abs.to_string_lossy())
     )));
 
-    // stderr → a captured pipe, NOT inherited: the TUI owns the alternate screen,
-    // so the engine must never write to the real terminal. stdout carries the
-    // newline-JSON event stream; stderr (engine logs/panics) is drained on a
-    // separate thread into a bounded ring so that if the engine dies WITHOUT an
-    // IPC `error` event (a crash/panic/dlopen failure), its tail still surfaces in
-    // the abort message instead of a blank "exited before the scan completed".
-    // In scratch mode, hand the engine the same data home the TUI resolved.
-    // its `paths::root()` honors, so the scan writes `<home>/FileID/fileid.sqlite`
-    // — exactly the scratch library the TUI opened and reloads. `prepare_scratch_dir`
-    // is best-effort layout setup (see its doc).
+    // stderr is a bounded capture drained on its own thread, never inherited. If the engine dies without an IPC `error` event, its tail still surfaces in the abort message.
+    // In scratch mode, hand the engine the data home the TUI resolved (what its `paths::root()` honors), so the scan writes `<home>/FileID/fileid.sqlite`, the scratch library the TUI reloads. `prepare_scratch_dir` is best-effort (see its doc).
     if let Some(home) = engine_data_home {
         prepare_scratch_dir(home);
     }
@@ -207,12 +167,6 @@ fn run_scan(
             if kind == "models_not_installed" {
                 anyhow::bail!("{}", message_for_missing(&missing_required()))
             }
-            // The engine's macOS `runtime_not_installed` (the pre-flight didn't
-            // catch it — e.g. the dylib vanished) maps to the one-time runtime
-            // install guidance, distinct from the model download (D).
-            if kind == "runtime_not_installed" {
-                anyhow::bail!("{}", runtime_missing_message())
-            }
             if kind.starts_with("face_clustering") {
                 anyhow::bail!("scan completed, but face grouping failed: {message}")
             }
@@ -273,18 +227,6 @@ pub fn missing_models_display() -> Vec<String> {
         .into_iter()
         .map(|missing| missing.display_name)
         .collect()
-}
-
-/// One-line "ONNX Runtime not installed" message (macOS). Distinct from the
-/// model download (D) — the runtime is the inference library that loads the
-/// models, and on macOS it's a separate one-time install. Shared by the scan
-/// pre-flight and the engine's `runtime_not_installed` mapping.
-fn runtime_missing_message() -> String {
-    format!(
-        "ONNX Runtime not installed — run `{}` in a shell (or `brew install onnxruntime`), \
-         then press s again. One-time setup, separate from the AI models (D).",
-        fileid_engine::ort_runtime::INSTALL_COMMAND
-    )
 }
 
 fn message_for_missing(missing: &[MissingModel]) -> String {
@@ -382,14 +324,7 @@ fn engine_storage_env<'a>(db: &'a Path, data_home: Option<&'a Path>) -> (&'stati
     }
 }
 
-/// Best-effort scratch-state setup before a scratch-mode scan. Ensures
-/// the engine's scratch root (`<data_home>/FileID`) exists, and on Linux/Windows
-/// — where the engine resolves its model dir from that same root — links the
-/// REAL model directory in so a scratch scan can still find weights. Everything
-/// is best-effort: each step swallows its error so this can never block or fail
-/// a scan. macOS resolves models from `~/Library/Application Support/FileID/…`
-/// independent of the data home, so no link is needed (and we make no symlink on
-/// the user's Mac).
+/// Best-effort scratch-state setup before a scratch-mode scan: creates `<data_home>/FileID` and, on Linux/Windows where the engine loads models from that root, links the real model dir in. Never fails the scan. macOS needs no link and none is made on the user's Mac.
 fn prepare_scratch_dir(data_home: &Path) {
     let root = data_home.join("FileID");
     let _ = std::fs::create_dir_all(&root);

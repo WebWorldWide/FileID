@@ -15,6 +15,7 @@ struct MainWindow: View {
     @AppStorage(LibraryScope.storageKey) private var scopeRootID: Int = 0
     @AppStorage(TextSize.storageKey) private var textSizeRaw: String = TextSize.standard.rawValue
     @State private var pickedURL: URL?
+    @State private var scanCounterThrottle = ScanCounterThrottle()
     @State private var isDragHovering = false
     @State private var chatPresented = false
     private let toasts = ToastCenter.shared
@@ -92,6 +93,10 @@ struct MainWindow: View {
             case .act:     return [.cleanup, .restructure, .tools]
             }
         }
+        static let lastUsedKey = "lastArea"
+        static func lastUsed(defaults: UserDefaults = .standard) -> Area {
+            defaults.string(forKey: lastUsedKey).flatMap(Area.init(rawValue:)) ?? .browse
+        }
         /// Switching areas returns to the page last used in that area.
         func remembered(current: Tab) -> Tab {
             if tabs.contains(current) { return current }
@@ -105,7 +110,10 @@ struct MainWindow: View {
         Binding(get: { Tab(rawValue: activeTabRaw) ?? .library },
                 set: { newValue in
                     activeTabRaw = newValue.rawValue
-                    if let area = newValue.area { UserDefaults.standard.set(newValue.rawValue, forKey: "lastTab.\(area.rawValue)") }
+                    if let area = newValue.area {
+                        UserDefaults.standard.set(newValue.rawValue, forKey: "lastTab.\(area.rawValue)")
+                        UserDefaults.standard.set(area.rawValue, forKey: Area.lastUsedKey)
+                    }
                 })
     }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .library }
@@ -161,16 +169,17 @@ struct MainWindow: View {
                            pickedURL: $pickedURL, onSwitchTab: { activeTabBinding.wrappedValue = $0 }, pickFolder: pickFolder)
                         .font(Theme.Font.body(13.5))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .engineUnavailableOverlay(engine: engine, activeTab: activeTab)
                         .focusSection()
                     // Chat stays beside the current page, as before the redesign;
                     // the Chat page is the same conversation at full width.
                     if chatPresented && activeTab != .chat {
                         VHairline()
-                        ChatWorkbench(engine: engine, onClose: { chatPresented = false })
+                        ChatWorkbench(engine: engine, store: store, onClose: { chatPresented = false })
                             .font(Theme.Font.body(13.5))
                             .frame(width: 380)
                             .focusSection()
-                            .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.86), ignoresSafeAreaEdges: [])
+                            .background(Theme.surfaceBase.opacity(0.86), ignoresSafeAreaEdges: [])
                             .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
                             .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
                     }
@@ -178,11 +187,17 @@ struct MainWindow: View {
                 }
             }
             .preferredColorScheme(.dark)
-            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: sidebarVisible)
-            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
+            .animation(reduceMotion ? nil : Theme.springStandard, value: sidebarVisible)
+            .animation(reduceMotion ? nil : Theme.springStandard, value: chatPresented)
             .accentColor(Theme.gold)
-            .background { shortcutHost }
             .onReceive(NotificationCenter.default.publisher(for: .fileIDChooseFolder)) { _ in pickFolder() }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDGoToTab)) { note in
+                if let raw = note.object as? String, let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleChat)) { _ in
+                if activeTab != .chat { chatPresented.toggle() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleMotion)) { _ in atmospherePaused.toggle() }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()
@@ -194,6 +209,7 @@ struct MainWindow: View {
                 handoff.navigate = { activeTabBinding.wrappedValue = $0 }
                 handoff.chooseFolder = { chooseProposed($0) }
                 #if DEBUG
+                if SelfShot.opensChatDrawer { chatPresented = true }
                 SelfShot.run(engine: engine, store: store,
                              navigate: { raw in if let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab } },
                              openFolder: { url, scan in if scan { choose(url) } else { pickedURL = url } })
@@ -208,12 +224,20 @@ struct MainWindow: View {
             .onChange(of: scopeRootID) { _, _ in applyScope(engine.libraryRoots) }
             // The counts in the sidebar and page header must catch up when a scan ends on any
             // page, not only while the Library page is the one on screen.
+            .onChange(of: engine.lastProgress?.processed) { _, _ in
+                if scanCounterThrottle.shouldRefresh(scanPhase: engine.lastProgress?.phase, now: Date()) { store.openIfPossible() }
+            }
             .onChange(of: engine.lastTerminalEventAt) { _, _ in
                 // A first scan creates the catalog after launch, so the reader may not be open yet.
                 store.openIfPossible()
                 store.notifyChanged()
             }
-            .onChange(of: engineReady, initial: true) { _, ready in if ready { engine.refreshLibraryRoots() } }
+            .onChange(of: engineReady, initial: true) { _, ready in
+                guard ready else { return }
+                store.openIfPossible()
+                store.notifyChanged()
+                engine.refreshLibraryRoots()
+            }
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
             .task(id: Self.jobsNeedRefresh(engine.catalogJobs)) {
@@ -225,13 +249,13 @@ struct MainWindow: View {
             }
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
                 guard let result = engine.lastFaceClustering, result.personCount > 0 else { return }
-                toasts.show("Scan complete · \(result.personCount) people grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
+                toasts.show("Scan complete · \(Plural.noun(result.personCount, "person", "people")) grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
                     activeTabBinding.wrappedValue = .people
                 }
             }
             .task(id: engine.deepAnalyzeComplete?.processed ?? -1) {
                 guard let done = engine.deepAnalyzeComplete, done.processed > 0 else { return }
-                toasts.show("Descriptions ready for \(done.processed.formatted()) files", actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
+                toasts.show(DescribeRunSummary.toast(processed: done.processed, ran: done.modelKind, chosen: DeepAnalyzeSettings.shared.activeKind), actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
                     activeTabBinding.wrappedValue = .library
                 }
             }
@@ -256,7 +280,7 @@ struct MainWindow: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: toasts.current?.id)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: toasts.current?.id)
         .environment(\.atmospherePaused, atmospherePaused)
         .onDrop(of: [.fileURL], isTargeted: $isDragHovering) { providers in
             guard let provider = providers.first else { return false }
@@ -271,8 +295,8 @@ struct MainWindow: View {
                     let folderName = url.lastPathComponent
                     DispatchQueue.main.async {
                         let alert = NSAlert()
-                        alert.messageText = "Folder isn't readable"
-                        alert.informativeText = "\"\(folderName)\" can't be read. If it's a network share, mount it and try again. If it's a system folder, pick a folder you own."
+                        alert.messageText = "Folder isn’t readable"
+                        alert.informativeText = "“\(folderName)” can’t be read. If it’s a network share, mount it and try again. If it’s a system folder, pick a folder you own."
                         alert.alertStyle = .warning
                         alert.runModal()
                     }
@@ -282,20 +306,6 @@ struct MainWindow: View {
             }
             return true
         }
-    }
-
-    /// ⌘1…⌘9 jump to pages; invisible buttons carry the shortcuts.
-    private var shortcutHost: some View {
-        Group {
-            ForEach(Array(Tab.order.enumerated()), id: \.offset) { index, tab in
-                Button("") { activeTabBinding.wrappedValue = tab }
-                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
-            }
-            Button("") { atmospherePaused.toggle() }.keyboardShortcut("m", modifiers: [.command, .shift])
-        }
-        .opacity(0)
-        .frame(width: 0, height: 0)
-        .accessibilityHidden(true)
     }
 
     // MARK: - Folder picking
@@ -323,8 +333,8 @@ struct MainWindow: View {
         if panel.runModal() == .OK, let url = panel.url {
             guard FileManager.default.isReadableFile(atPath: url.path) else {
                 let alert = NSAlert()
-                alert.messageText = "Can't read \(url.lastPathComponent)"
-                alert.informativeText = "FileID doesn't have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
+                alert.messageText = "Can’t read \(url.lastPathComponent)"
+                alert.informativeText = "FileID doesn’t have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
                 alert.runModal()

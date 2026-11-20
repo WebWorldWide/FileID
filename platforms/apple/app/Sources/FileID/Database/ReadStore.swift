@@ -31,17 +31,28 @@ public final class ReadStore: @unchecked Sendable {
     @ObservationIgnored private var duplicateTotals: (groups: Int, bytes: Int64, at: Date)?
     @ObservationIgnored private var duplicateTotalsStale = false
     private static let duplicateInterval: TimeInterval = 5
+    @ObservationIgnored private var retryTask: Task<Void, Never>?
+    @ObservationIgnored private var retryAttempts = 0
     private let dbURL: URL
     public private(set) var version: Int = 0
+    /// Bumps each time the read connection opens. A launch before the engine has created the catalog's -wal/-shm files cannot open it read-only, so the first listing reads nothing; views reload on this.
+    public private(set) var readerEpoch: Int = 0
     public private(set) var totalFiles: Int = 0
+    /// False until the first counters read lands, and again while the reader cannot open or the counters read fails;
+    /// `totalFiles` is then a placeholder, not a count of an empty library.
+    public private(set) var countersAvailable = false
+    /// `totalFiles` once it is a real count; nil while it is unknown.
+    var catalogedFileCount: Int? { countersAvailable ? totalFiles : nil }
     public private(set) var totalImages: Int = 0
     /// Files the scan could not decode or read; the Library hides them unless
     /// the Unreadable filter is chosen.
     public private(set) var unreadableFiles: Int = 0
+    /// The part of `unreadableFiles` that failed only because the machine was too busy; a later scan can still read them.
+    public private(set) var unreadableTimedOutFiles: Int = 0
     /// Files cataloged by name, size and dates only (archives, installers, unknown types).
     public private(set) var otherFiles: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
-    public private(set) var totalReclaimableMB: Double = 0
+    public private(set) var totalReclaimableBytes: Int64 = 0
     public private(set) var hasFacePrints = false
     public private(set) var hasNamedPerson = false
     public private(set) var hasCaptions = false
@@ -99,12 +110,14 @@ public final class ReadStore: @unchecked Sendable {
     public func openIfPossible() {
         guard FileManager.default.fileExists(atPath: dbURL.path) else {
             self.queue = nil
+            self.countersAvailable = true
             self.totalFiles = 0
             self.totalImages = 0
             self.unreadableFiles = 0
+            self.unreadableTimedOutFiles = 0
             self.otherFiles = 0
             self.totalDuplicateGroups = 0
-            self.totalReclaimableMB = 0
+            self.totalReclaimableBytes = 0
             self.hasFacePrints = false
             self.hasNamedPerson = false
             self.hasCaptions = false
@@ -114,12 +127,39 @@ public final class ReadStore: @unchecked Sendable {
             do {
                 try ReadOnlyLocations.requireWritable(dbURL)
                 self.queue = try Self.openReader(at: dbURL)
+                Task { @MainActor in self.readerEpoch &+= 1 }
             } catch {
                 reportError("Could not open DB: \(error)")
+                self.countersAvailable = false
+                scheduleRetry()
                 return
             }
         }
         refreshCounters()
+    }
+
+    /// A reader that cannot open the catalog, or a counters read that fails while the engine is still creating or
+    /// migrating it, is asked again with a growing delay until it works, so a launch never stays on a placeholder 0.
+    private func scheduleRetry() {
+        countersLock.withLock {
+            guard retryTask == nil else { return }
+            let delay = min(5.0, 0.5 * pow(2.0, Double(retryAttempts)))
+            retryAttempts += 1
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.countersLock.withLock { self.retryTask = nil }
+                await MainActor.run { self.openIfPossible() }
+            }
+        }
+    }
+
+    private func cancelRetry(resetBackoff: Bool) {
+        countersLock.withLock {
+            retryTask?.cancel()
+            retryTask = nil
+            if resetBackoff { retryAttempts = 0 }
+        }
     }
 
     public func notifyChanged() {
@@ -134,6 +174,7 @@ public final class ReadStore: @unchecked Sendable {
     /// until every in-flight read (each holding a strong `q`) drains, so
     /// closing never frees the connection out from under a reader.
     public func close() {
+        cancelRetry(resetBackoff: true)
         queue = nil
     }
 
@@ -141,12 +182,13 @@ public final class ReadStore: @unchecked Sendable {
         let totalFiles: Int
         let totalImages: Int
         let unreadableFiles: Int
+        let unreadableTimedOutFiles: Int
         let otherFiles: Int
         let scopedTotalFiles: Int
         let scopedUnreadableFiles: Int
         let scopedOtherFiles: Int
         let totalDuplicateGroups: Int
-        let totalReclaimableMB: Double
+        let totalReclaimableBytes: Int64
         let hasFacePrints: Bool
         let hasNamedPerson: Bool
         let hasCaptions: Bool
@@ -158,14 +200,7 @@ public final class ReadStore: @unchecked Sendable {
         case noDatabase
     }
 
-    /// Schedule a counters refresh off the main thread. The duplicate-group
-    /// window query is O(N log N) over the whole `files` table; run inline it
-    /// pegged the UI because a live scan calls `notifyChanged` up to once a
-    /// second from `@MainActor` views. A single background worker coalesces
-    /// bursts (one in-flight run, re-run once if more requests arrived while
-    /// it ran) and throttles successive heavy queries, so the main thread
-    /// never pays for scan ticks and the table is scanned at most ~once a
-    /// second during a burst. Property writes still land on the main actor.
+    /// Schedules a counters refresh off the main thread. The duplicate-group window query is O(N log N) and a live scan calls notifyChanged up to once a second, so one background worker coalesces bursts and throttles the heavy query.
     func refreshCounters() {
         countersLock.lock()
         countersDirty = true
@@ -178,11 +213,7 @@ public final class ReadStore: @unchecked Sendable {
 
         Task.detached(priority: .utility) { [weak self] in
             while let self {
-                // `withLock` (synchronous critical section) instead of bare
-                // lock()/unlock(): NSLock's lock() is unavailable in an async
-                // context under Swift 6 (it must never be held across a
-                // suspension point — it isn't here, but the scoped form makes
-                // that guarantee explicit and silences the diagnostic).
+                // `withLock` instead of lock()/unlock(): NSLock's lock() is unavailable in async contexts under Swift 6.
                 // nil: stop. Otherwise how long to wait first, which is non-zero
                 // only when the sole work left is a deferred duplicate total.
                 let wait = self.countersLock.withLock { () -> TimeInterval? in
@@ -204,9 +235,14 @@ public final class ReadStore: @unchecked Sendable {
 
                 switch self.computeCounters() {
                 case .ok(let snapshot):
+                    self.cancelRetry(resetBackoff: true)
                     await MainActor.run { self.applyCounters(snapshot) }
                 case .failure(let message):
-                    await MainActor.run { self.lastError = message }
+                    await MainActor.run {
+                        self.lastError = message
+                        self.countersAvailable = false
+                    }
+                    self.scheduleRetry()
                 case .noDatabase:
                     break
                 }
@@ -226,6 +262,7 @@ public final class ReadStore: @unchecked Sendable {
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL)") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
+                let unreadableTimedOutFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(Self.timedOutSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
                 var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
                 if let scope {
@@ -276,12 +313,13 @@ public final class ReadStore: @unchecked Sendable {
                     totalFiles: totalFiles,
                     totalImages: totalImages,
                     unreadableFiles: unreadableFiles,
+                    unreadableTimedOutFiles: unreadableTimedOutFiles,
                     otherFiles: otherFiles,
                     scopedTotalFiles: scoped.total,
                     scopedUnreadableFiles: scoped.unreadable,
                     scopedOtherFiles: scoped.other,
                     totalDuplicateGroups: groups,
-                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
+                    totalReclaimableBytes: reclaimableBytes,
                     hasFacePrints: hasFacePrints,
                     hasNamedPerson: hasNamedPerson,
                     hasCaptions: hasCaptions
@@ -295,15 +333,18 @@ public final class ReadStore: @unchecked Sendable {
     @MainActor
     private func applyCounters(_ snapshot: CounterSnapshot) {
         // Observation notifies on every set, changed or not; unchanged counters stay quiet.
+        if !self.countersAvailable { self.countersAvailable = true }
+        if self.lastError != nil { self.lastError = nil }
         if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
         if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
         if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }
+        if self.unreadableTimedOutFiles != snapshot.unreadableTimedOutFiles { self.unreadableTimedOutFiles = snapshot.unreadableTimedOutFiles }
         if self.otherFiles != snapshot.otherFiles { self.otherFiles = snapshot.otherFiles }
         if self.scopedTotalFiles != snapshot.scopedTotalFiles { self.scopedTotalFiles = snapshot.scopedTotalFiles }
         if self.scopedUnreadableFiles != snapshot.scopedUnreadableFiles { self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles }
         if self.scopedOtherFiles != snapshot.scopedOtherFiles { self.scopedOtherFiles = snapshot.scopedOtherFiles }
         if self.totalDuplicateGroups != snapshot.totalDuplicateGroups { self.totalDuplicateGroups = snapshot.totalDuplicateGroups }
-        if self.totalReclaimableMB != snapshot.totalReclaimableMB { self.totalReclaimableMB = snapshot.totalReclaimableMB }
+        if self.totalReclaimableBytes != snapshot.totalReclaimableBytes { self.totalReclaimableBytes = snapshot.totalReclaimableBytes }
         if self.hasFacePrints != snapshot.hasFacePrints { self.hasFacePrints = snapshot.hasFacePrints }
         if self.hasNamedPerson != snapshot.hasNamedPerson { self.hasNamedPerson = snapshot.hasNamedPerson }
         if self.hasCaptions != snapshot.hasCaptions { self.hasCaptions = snapshot.hasCaptions }
@@ -315,6 +356,14 @@ public final class ReadStore: @unchecked Sendable {
     public static let unreadableFilter = "unreadable"
     /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
     static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%' AND \(notEngineHiddenSQL)"
+    /// Stored `error_message` of a row that failed because the machine was too busy (`tagging.rs` `TIMEOUT_MESSAGES`, and the "ran out of time" wording that replaces them).
+    nonisolated static let timedOutMessages = ["per-file timeout after 60s", "Vision pass timed out"]
+    nonisolated static let timedOutSQL =
+        "(COALESCE(error_message, '') IN (\(timedOutMessages.map { "'" + $0 + "'" }.joined(separator: ", "))) OR COALESCE(error_message, '') LIKE '%ran out of time%')"
+    nonisolated static func isTimedOut(errorMessage: String?) -> Bool {
+        guard let errorMessage else { return false }
+        return timedOutMessages.contains(errorMessage) || errorMessage.contains("ran out of time")
+    }
     /// The two `failed = 1` reasons the Rust engine writes for a row that is not a broken file: one removed from
     /// its folder (kept 30 days so a returning file re-binds) and an empty one. Same exact strings as
     /// `scan_session.rs` `HIDDEN_ROW_MESSAGE` and `db/zero_byte.rs` `ZERO_BYTE_REASON`.
@@ -328,12 +377,13 @@ public final class ReadStore: @unchecked Sendable {
 
     public func files(offset: Int = 0, limit: Int = 200,
                       search: String = "",
-                      kindFilter: String? = nil) -> [FileRow] {
+                      kindFilter: String? = nil,
+                      sort: LibrarySort = .standard) -> [FileRow] {
         guard let q = queue else { return [] }
         let scope = self.scope
         do {
             return try q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
             }
         } catch {
             reportError("Library query failed: \(error)")
@@ -342,7 +392,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     private static func fetchFiles(_ db: Database, offset: Int, limit: Int, search: String,
-                                   kindFilter: String?, scope: LibraryScope?) throws -> [FileRow] {
+                                   kindFilter: String?, scope: LibraryScope?, sort: LibrarySort) throws -> [FileRow] {
         let unreadable = kindFilter == Self.unreadableFilter
         var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
         var args: StatementArguments = []
@@ -363,10 +413,6 @@ public final class ReadStore: @unchecked Sendable {
                 .replacingOccurrences(of: "_", with: "\\_")
             let like = "%\(escapedSearch)%"
             let ftsQuery = FTSQuery.quoted(trimmedSearch)
-            // Keyword search across filename, OCR text, extracted
-            // document text, vision tags, smart names, VLM captions,
-            // and person names. CLIP semantic search runs separately
-            // when the encoder is installed.
             sql += """
                  AND (
                       id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
@@ -397,27 +443,24 @@ public final class ReadStore: @unchecked Sendable {
             sql += " AND " + LibraryScope.sql("path_text")
             args += [scope.param]
         }
-        sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
+        sql += " ORDER BY \(sort.orderSQL) LIMIT ? OFFSET ?"
         args += [limit, offset]
         let rows = try Row.fetchAll(db, sql: sql, arguments: args)
         return rows.map { Self.toFileRow($0) }
     }
 
-    /// Off-main twin of `files(...)`. The keyword search runs a
-    /// multi-table FTS + LIKE + face-join query; on a live scan the view
-    /// reloaded it on the MainActor on every throttled batch event,
-    /// stuttering the UI. Callers debounce and await this so the query
-    /// runs on a background task and only the assignment lands on main.
+    /// Off-main twin of `files(...)`: the keyword search is a multi-table FTS + LIKE + face-join query that would stutter the UI on every throttled scan batch.
     public func filesAsync(offset: Int = 0, limit: Int = 200,
                            search: String = "",
-                           kindFilter: String? = nil) async -> [FileRow] {
+                           kindFilter: String? = nil,
+                           sort: LibrarySort = .standard) async -> [FileRow] {
         guard let q = queue else { return [] }
         let scope = self.scope
         do {
             // GRDB's async read interrupts the query when the calling task is
             // cancelled, so a superseded search stops instead of running out.
             return try await q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
             }
         } catch {
             if !(error is CancellationError), !Task.isCancelled { reportError("Library query failed: \(error)") }
@@ -595,20 +638,7 @@ public final class ReadStore: @unchecked Sendable {
         }
         do {
             return try q.read { db in
-                // Candidate SELECTION stays recipe-agnostic: membership is the
-                // whole same-size class (stored hashes are NEVER byte-proof —
-                // legacy BLAKE3/current SHA-256 rows and stale hashes must still
-                // meet in one class so verify()'s live read can pair them). The
-                // stored content_hash is used purely as a RANKING hint: classes
-                // whose members share a stored (hash, size) — near-certain real
-                // duplicates — load first, and each class is capped at
-                // memberCap files (same-hash twins ranked adjacently so the cap
-                // can't split a pair). Together those stop one dominant class of
-                // NON-duplicates (zero-byte files, fixed-size sidecars) from
-                // starving genuine groups out of the candidateCap file budget.
-                // `candidateCount` is the uncapped total membership so the
-                // partial-preview disclosure fires whenever any backstop drops
-                // real candidates.
+                // Candidate selection is recipe-agnostic: membership is the whole same-size class, since stored hashes are never byte-proof (legacy BLAKE3 and current SHA-256 rows and stale hashes must still meet in one class so verify()'s live read can pair them). The stored hash only ranks classes so near-certain duplicates load first, with same-hash twins ranked adjacently so memberCap can't split a pair; memberCap stops a dominant non-duplicate class from starving real groups out of candidateCap. candidateCount is uncapped so the partial-preview disclosure fires whenever a backstop drops candidates.
                 let candidateCount = try Int.fetchOne(db, sql: """
                     WITH candidate_sizes AS (
                         SELECT COUNT(*) AS n FROM files
@@ -721,21 +751,12 @@ public final class ReadStore: @unchecked Sendable {
     /// library would be ~1.25B comparisons.
     public static let nearDupImageCap = 20_000
 
-    /// Display caps for the perceptual (similar) grouping below. Restored here
-    /// after the exact-duplicate rewrite removed the shared constant block while
-    /// this similar path still references them: at most 200 groups, 5,000 total
-    /// visible members across all groups, 500 members per group.
+    /// Display caps for similar-image grouping: at most 200 groups, 5,000 members in total, 500 per group.
     private static let cleanupMaxGroups = 200
     private static let cleanupMaxVisibleMembers = 5_000
     private static let cleanupMaxVisibleMembersPerGroup = 500
 
-    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within
-    /// `maxHamming` (Hamming distance) of one another, transitively unioned. Same
-    /// keeper ranking as exact dupes (aesthetic ↓, size ↓, createdAt ↑, path len ↑).
-    /// Pure byte-exact groups (every member shares one content_hash) are dropped —
-    /// they already appear in the Exact view, so this surfaces genuinely-perceptual
-    /// matches. Returns groups of size >= 2. Heavy CPU work runs outside the read
-    /// transaction; call via `similarImageGroupsAsync` to keep it off the MainActor.
+    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within `maxHamming` of one another, transitively unioned. Byte-exact groups are dropped because the Exact view shows them. Heavy work runs outside the read transaction; use `similarImageGroupsAsync` to keep it off the MainActor.
     public func similarImageGroups(maxHamming: Int) -> [DuplicateGroup] {
         guard let q = queue else { return [] }
         let rows: [Row]
@@ -749,7 +770,7 @@ public final class ReadStore: @unchecked Sendable {
             }
             guard candidateCount <= Self.nearDupImageCap else {
                 reportError(
-                    "Visually similar comparison is unavailable for \(candidateCount.formatted()) images: " +
+                    "Visually similar comparison is unavailable for \(Plural.noun(candidateCount, "image", "images")): " +
                     "the exact Hamming matcher is capped at \(Self.nearDupImageCap.formatted()). " +
                     "Exact duplicate cleanup remains available.")
                 return []
@@ -783,10 +804,15 @@ public final class ReadStore: @unchecked Sendable {
             if let ch: Data = r["content_hash"] { contentHashByID[fr.id] = ch }
             items.append((id: fr.id, phash: ph))
         }
+        let pathByID = fileByID.mapValues(\.pathText)
+        let hashByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.phash) })
 
         var groups: [DuplicateGroup] = []
         var remaining = Self.cleanupMaxVisibleMembers
-        for ids in PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming) {
+        for ids in PerceptualGrouping.droppingRawTwins(
+            PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming),
+            paths: pathByID, hashes: hashByID, maxHamming: maxHamming
+        ) {
             var files = ids.compactMap { fileByID[$0] }
             guard files.count > 1 else { continue }
             // Drop pure byte-exact clusters — already shown under "Exact".
@@ -827,9 +853,7 @@ public final class ReadStore: @unchecked Sendable {
         return Array(groups.prefix(Self.cleanupMaxGroups))
     }
 
-    /// Off-main twin of `similarImageGroups`. The O(N²) Hamming scan + per-group
-    /// sort run on a background task; only the assignment lands on main. (mirrors
-    /// `duplicateGroupsAsync`)
+    /// Off-main twin of `similarImageGroups`; only the assignment lands on main.
     public func similarImageGroupsAsync(maxHamming: Int = ReadStore.defaultNearDupHamming) async -> [DuplicateGroup] {
         await Task.detached(priority: .userInitiated) { [self] in
             similarImageGroups(maxHamming: maxHamming)
@@ -1143,12 +1167,10 @@ public final class ReadStore: @unchecked Sendable {
             return a < b ? a : b
         }
 
-        // Union-find over every person id touched.
         var parent: [Int64: Int64] = [:]
         func find(_ x: Int64) -> Int64 {
             var r = x
             while let p = parent[r], p != r { r = p }
-            // Path compression.
             var cur = x
             while let p = parent[cur], p != r {
                 parent[cur] = r
@@ -1159,11 +1181,7 @@ public final class ReadStore: @unchecked Sendable {
         func union(target: Int64, source: Int64) {
             let rt = find(target), rs = find(source)
             if rt == rs { return }
-            // Keep the higher-priority root (named > larger file_count >
-            // lower id) so a typed name is never deleted when a chain of
-            // borderline pairs links a named and an unnamed cluster — per-pair
-            // preferredTarget does not compose transitively, so union order alone
-            // would pick the wrong (possibly unnamed) root.
+            // Keep the higher-priority root so a typed name is never deleted by a chain of borderline pairs (see the note above).
             let keep = preferredRoot(rt, rs)
             parent[keep == rt ? rs : rt] = keep
         }
@@ -1173,7 +1191,6 @@ public final class ReadStore: @unchecked Sendable {
             union(target: t, source: s)
         }
 
-        // Collect: per-final-target → list of source ids being absorbed.
         var byTarget: [Int64: [Int64]] = [:]
         for id in parent.keys {
             let root = find(id)
@@ -1219,18 +1236,16 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Deep Analyze queries
 
-    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int) {
-        guard let q = queue else { return (0, 0) }
+    /// `pending`: files the chosen model has not described (a run with "only files not described yet" does these). `undescribed`: files no model has described.
+    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int, undescribed: Int) {
+        guard let q = queue else { return (0, 0, 0) }
         return (try? q.read { db in
-            let total = try Int.fetchOne(db, sql:
-                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0") ?? 0
-            let pending = try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM files
-                WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
-                  AND (vlm_full_model IS NULL OR vlm_full_model != ?)
-                """, arguments: [modelKey]) ?? 0
-            return (total, pending)
-        }) ?? (0, 0)
+            let describable = "kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0"
+            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable)") ?? 0
+            let pending = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND (vlm_full_model IS NULL OR vlm_full_model != ?)", arguments: [modelKey]) ?? 0
+            let undescribed = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND vlm_full_model IS NULL") ?? 0
+            return (total, pending, undescribed)
+        }) ?? (0, 0, 0)
     }
 
     /// All non-failed image files that have a non-empty
@@ -1343,6 +1358,21 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// Files in the library under `root` and every folder below it, the set an Organize Folders plan
+    /// for that root covers. The range `root/` … `root0` holds exactly the paths below `root`
+    /// ('0' sorts right after '/').
+    public func countFiles(under root: String) -> Int {
+        guard let q = queue else { return 0 }
+        var base = root
+        while base.count > 1, base.hasSuffix("/") { base.removeLast() }
+        let prefix = base == "/" ? "/" : base + "/"
+        let upper = String(prefix.dropLast()) + "0"
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND path_text >= ? AND path_text < ?",
+                             arguments: [prefix, upper]) ?? 0
+        }) ?? 0
+    }
+
     /// Count-only twin of `filesWithProposedNames` — the badge/refresh
     /// paths only need the number, and SELECT * deserialized up to
     /// 5000 full rows per refresh. The inner LIMIT keeps the cap
@@ -1409,6 +1439,7 @@ public final class ReadStore: @unchecked Sendable {
         config.maximumReaderCount = 6
         config.busyMode = .timeout(2)
         config.prepareDatabase { db in
+            db.add(collation: DatabaseCollation(LibrarySort.nameCollation) { $0.localizedStandardCompare($1) })
             try db.execute(sql: "PRAGMA cache_size = -32768")
             try db.execute(sql: "PRAGMA mmap_size = 268435456")
             try db.execute(sql: "PRAGMA temp_store = MEMORY")

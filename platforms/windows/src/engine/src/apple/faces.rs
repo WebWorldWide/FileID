@@ -1,18 +1,12 @@
-//! Stage 6: faces on the Mac, end to end. Vision (landmarks, capture quality,
-//! human rectangles) and the ImageIO / HEIF decode run in FileIDAppleKit; the
-//! landmark match, the one-buffer alignment, SFace and every decision stay
-//! here. The result lands in the Swift engine's face space
-//! (`macos-landmark-overlap-v3-orientation`), so People computed by either
-//! engine keep comparing.
-//!
-//! [`extract_file`] is the Swift engine's `FaceClustering.extractOneFile`: the
-//! scan, clustering and the face refresh all call it with a photo's stored
-//! boxes. [`VisionFaces`] is the Mac `TakeFaceAnalyzer`.
+//! Faces on the Mac: Vision (landmarks, capture quality, human rectangles) and ImageIO/HEIF decode run in
+//! FileIDAppleKit; landmark match, one-buffer alignment, SFace and every decision stay here, landing in the Swift
+//! engine's face space (`macos-landmark-overlap-v3-orientation`) so People computed by either engine keep comparing.
+//! [`extract_file`] is `FaceClustering.extractOneFile`; [`VisionFaces`] is the Mac `TakeFaceAnalyzer`.
 
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use parking_lot::Mutex;
 use serde::Deserialize;
 
@@ -20,11 +14,11 @@ use super::{c_path, ffi, take_string};
 use crate::models::face_align;
 use crate::models::face_landmark_match::{self, NormRect};
 
-/// Long edge of the decode faces are embedded from (`FaceClustering.loadCGImage`).
 pub const EXTRACT_LONG_SIDE: u32 = 2048;
+const DECODE_LONG_SIDES: [u32; 3] = [1024, 1536, EXTRACT_LONG_SIDE];
+fn min_face_pixels() -> f64 { std::env::var("FILEID_X_MINFACE").ok().and_then(|v| v.parse().ok()).unwrap_or(128.0) }
 
-/// One Vision landmark detection: its normalized bottom-left box and five
-/// points in top-left pixels of the decoded image.
+/// Normalized bottom-left box and five points in top-left pixels of the decoded image.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Landmarks {
     pub bounds: NormRect,
@@ -45,7 +39,6 @@ struct LandmarksJson {
     points: [u32; 10],
 }
 
-/// A photo decoded upright by the adapter, held there until dropped.
 pub struct FaceImage {
     handle: u64,
     pub width: u32,
@@ -55,9 +48,7 @@ pub struct FaceImage {
 }
 
 impl FaceImage {
-    /// Decode `path` at most `max_pixel_size` on its long edge; with
-    /// `landmarks`, Vision's face landmarks run once on the image. `None` when
-    /// the file is tiny, unreadable or carries an invalid orientation.
+    /// `None` when the file is tiny, unreadable or carries an invalid orientation.
     pub fn open(path: &Path, max_pixel_size: u32, landmarks: bool) -> Option<Self> {
         let path = c_path(path).ok()?;
         let mut json: *mut c_char = std::ptr::null_mut();
@@ -85,9 +76,7 @@ impl FaceImage {
         Some(Self { handle, width: opened.width, height: opened.height, orientation: opened.orientation, landmarks })
     }
 
-    /// The image as tightly packed device-RGB RGBA8 (`FaceAlign.pixels`).
-    /// Read in place and freed on drop: the whole image is too large to copy
-    /// once more per photo.
+    /// Read in place and freed on drop: the image is too large to copy once more per photo.
     pub fn pixels(&self) -> Option<AdapterBytes> {
         let (mut pointer, mut length, mut width, mut height) = (std::ptr::null_mut::<u8>(), 0usize, 0u32, 0u32);
         // SAFETY: the handle is live; the out-pointers point at locals.
@@ -96,8 +85,6 @@ impl FaceImage {
         (ok && width == self.width && height == self.height && bytes.len() == width as usize * height as usize * 4).then_some(bytes)
     }
 
-    /// An integral pixel rect drawn at 112×112 the way SFace's input is drawn,
-    /// and the rect's JPEG for `face_crops/`.
     pub fn crop_112(&self, rect: [i64; 4]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         let mut rgba = vec![0u8; 112 * 112 * 4];
         let (mut jpeg, mut length) = (std::ptr::null_mut::<u8>(), 0usize);
@@ -116,8 +103,6 @@ impl Drop for FaceImage {
     }
 }
 
-/// Takes ownership of an adapter-allocated buffer.
-/// Bytes the adapter allocated, released with its allocator on drop.
 pub struct AdapterBytes {
     pointer: *mut u8,
     length: usize,
@@ -155,7 +140,6 @@ fn take_bytes(pointer: *mut u8, length: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// JPEG (quality 0.85) of tightly packed RGBA8, as `face_crops/<id>.jpg`.
 pub fn jpeg_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     if rgba.len() != width as usize * height as usize * 4 || width == 0 || height == 0 {
         return None;
@@ -166,20 +150,45 @@ pub fn jpeg_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     take_bytes(pointer, length)
 }
 
-/// The 112×112 RGBA8 SFace input for one stored face box and whether it was
-/// aligned on matched landmarks, as `FaceClustering.extractOneFile` picks it.
 pub struct FaceCrop {
     pub rgba: Vec<u8>,
     pub jpeg: Option<Vec<u8>>,
     pub aligned: bool,
 }
 
-/// The face crops for `boxes` on one photo, `None` per box that yields no crop
-/// (and an empty list when the photo does not decode). Landmarks run only
-/// when alignment is on (`FILEID_FACE_ALIGN` is not `0`).
+fn smallest_box_side(boxes: &[String], width: u32, height: u32, orientation: u8) -> Option<f64> {
+    boxes
+        .iter()
+        .filter_map(|bbox| face_landmark_match::parse_normalized(bbox, width, height, orientation))
+        .map(|rect| (rect.w * f64::from(width)).min(rect.h * f64::from(height)))
+        .reduce(f64::min)
+}
+
+/// The smallest decode whose stored boxes all stay at least `min_face_pixels` across, taking the frame as narrow as 3:2
+/// so a portrait or panorama is checked again against its real size once decoded.
+fn first_long_side(boxes: &[String]) -> u32 {
+    let Some(smallest) = smallest_box_side(boxes, 1, 1, 1).filter(|side| *side > 0.0 && *side <= 1.0) else { return EXTRACT_LONG_SIDE };
+    DECODE_LONG_SIDES.into_iter().find(|side| smallest * f64::from(*side) * 2.0 / 3.0 >= min_face_pixels()).unwrap_or(EXTRACT_LONG_SIDE)
+}
+
+/// Decodes at the size the stored faces need, not always at 2048: a decode is most of what reading a photo costs. A
+/// photo whose smallest face is under `min_face_pixels` at that size is decoded again at 2048.
+fn open_for_faces(path: &Path, boxes: &[String], landmarks: bool) -> Option<FaceImage> {
+    let mut side = first_long_side(boxes);
+    loop {
+        let image = FaceImage::open(path, side, landmarks)?;
+        let enough = smallest_box_side(boxes, image.width, image.height, image.orientation).is_none_or(|smallest| smallest >= min_face_pixels());
+        if side >= EXTRACT_LONG_SIDE || enough || image.width.max(image.height) < side {
+            return Some(image);
+        }
+        side = EXTRACT_LONG_SIDE;
+    }
+}
+
+/// `None` per box that yields no crop; landmarks run only when `FILEID_FACE_ALIGN` is not `0`.
 pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
     let align = std::env::var("FILEID_FACE_ALIGN").as_deref() != Ok("0");
-    let Some(image) = FaceImage::open(path, EXTRACT_LONG_SIDE, align) else { return Vec::new() };
+    let Some(image) = open_for_faces(path, boxes, align) else { return Vec::new() };
     let pixels = if image.landmarks.is_empty() { None } else { image.pixels() };
     let detected: Vec<NormRect> = image.landmarks.iter().map(|l| l.bounds).collect();
     boxes
@@ -201,71 +210,39 @@ pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
         .collect()
 }
 
-/// SFace as the Mac pipeline runs it, shared by the extraction workers. `ort`
-/// runs a session through `&mut`, so a small pool of sessions lets workers
-/// embed at once as `ArcFaceService` does with one thread-safe ORT session.
+/// A session runs through `&mut`, so a small pool lets extraction workers embed at once.
 pub struct MacSFace {
     sessions: Vec<Mutex<crate::models::sface::SFace>>,
     next: std::sync::atomic::AtomicUsize,
     version: String,
-    provider: &'static str,
 }
 
-/// Sessions in the pool: two, so the four extraction workers rarely wait on
-/// one (`ArcFaceService` runs up to four calls on one thread-safe session);
-/// `FILEID_SFACE_SESSIONS` (1–4) overrides it. DECISIONS 2026-11-11.
+/// One per two extraction workers, two to four, so they rarely wait; `FILEID_SFACE_SESSIONS` (1–4) overrides.
 fn sface_sessions() -> usize {
-    std::env::var("FILEID_SFACE_SESSIONS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(2, |n| n.clamp(1, 4))
-}
-
-/// ORT CPU threads per session: the cores split between the sessions, never
-/// fewer than two (one thread changes the CPU partition's sums in the last bit,
-/// two or more give Swift's vectors exactly).
-fn sface_threads(sessions: usize) -> usize {
-    (std::thread::available_parallelism().map_or(2, usize::from) / sessions.max(1)).clamp(2, 4)
+    std::env::var("FILEID_SFACE_SESSIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map_or_else(|| (crate::commands::face_extract_mac::extraction_threads() / 2).clamp(2, 4), |n| n.clamp(1, 4))
 }
 
 impl MacSFace {
-    /// Loads the installed SFace weights as `ArcFaceService` does: the CoreML
-    /// execution provider (compiled program cached under `ModelCache/CoreML`),
-    /// ORT's CPU provider when CoreML cannot bind or `FILEID_FACE_EP=cpu`.
-    /// CoreML gives the Swift engine's vectors bit for bit (DECISIONS 2026-11-11).
     pub fn load() -> Result<Self> {
-        use crate::models::sface::{Provider, SFace};
+        use crate::models::sface::SFace;
         let path = crate::models::sface::default_weights_path()?;
         anyhow::ensure!(path.is_file(), "SFace weights missing");
-        let digest = crate::commands::face_refresh::current_model().context("SFace weights unreadable")?;
-        let cpu_only = std::env::var("FILEID_FACE_EP").is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
-        let cache = if cpu_only { None } else { Some(coreml_cache_dir(&digest)?) };
-        let intra_threads = sface_threads(sface_sessions());
-        let coreml = |cache_dir: PathBuf| Provider::CoreMl { cache_dir, intra_threads };
-        let first = cache
-            .clone()
-            .and_then(|cache_dir| SFace::load_with(&path, coreml(cache_dir)).map_err(|error| tracing::warn!(?error, "arcface_coreml_ep_unavailable")).ok());
-        let (first, provider) = match first {
-            Some(model) => (model, "coreml"),
-            None => (SFace::load_with(&path, Provider::Cpu)?, "cpu"),
-        };
+        let first = SFace::load(&path)?;
         let version = first.model_version().to_string();
         let mut sessions = vec![Mutex::new(first)];
         while sessions.len() < sface_sessions() {
-            let provider = match (&cache, provider) {
-                (Some(cache_dir), "coreml") => coreml(cache_dir.clone()),
-                _ => Provider::Cpu,
-            };
-            let model = SFace::load_with(&path, provider)?;
+            let model = SFace::load(&path)?;
             anyhow::ensure!(model.model_version() == version, "SFace weights changed during load");
             sessions.push(Mutex::new(model));
         }
-        Ok(Self { sessions, next: std::sync::atomic::AtomicUsize::new(0), version, provider })
+        Ok(Self { sessions, next: std::sync::atomic::AtomicUsize::new(0), version })
     }
 
     pub fn model_version(&self) -> &str {
         &self.version
-    }
-
-    pub fn provider(&self) -> &'static str {
-        self.provider
     }
 
     pub fn embed(&self, rgba_112: &[u8]) -> Option<Vec<f32>> {
@@ -274,43 +251,20 @@ impl MacSFace {
         let mut session = (0..count)
             .find_map(|offset| self.sessions[(start + offset) % count].try_lock())
             .unwrap_or_else(|| self.sessions[start % count].lock());
-        session.embed_rgba(rgba_112).map_err(|error| tracing::warn!(?error, "SFace embed failed")).ok()
+        // The extraction workers already fill the cores; a 112 px face split over the shared matmul pool only spins its threads.
+        tract_linalg::multithread::multithread_tract_scope(tract_linalg::multithread::Executor::SingleThread, || session.embed_rgba(rgba_112))
+            .map_err(|error| tracing::warn!(?error, "SFace embed failed"))
+            .ok()
     }
 }
 
-/// `ModelCache/CoreML/<digest>-mlprogram-sub-ort<release>-macos<version>`,
-/// named like the Swift engine's `ORTSessions.CoreMLCache`.
-fn coreml_cache_dir(model: &str) -> Result<PathBuf> {
-    let digest = model.rsplit(':').next().unwrap_or(model);
-    let digest: String = digest.chars().take(32).collect();
-    let name = format!("{digest}-mlprogram-sub-ort{}-macos{}", crate::models::sface::runtime_release(), macos_version());
-    Ok(crate::paths::root()?.join("ModelCache").join("CoreML").join(name))
-}
-
-fn macos_version() -> String {
-    let mut buffer = [0u8; 64];
-    let mut length = buffer.len();
-    // SAFETY: the name is NUL-terminated; `buffer` holds `length` bytes.
-    let status = unsafe {
-        libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buffer.as_mut_ptr().cast(), &raw mut length, std::ptr::null_mut(), 0)
-    };
-    if status != 0 || length == 0 {
-        return "unknown".into();
-    }
-    String::from_utf8_lossy(&buffer[..length.min(buffer.len())]).trim_end_matches('\0').to_string()
-}
-
-/// One stored face's vector and crop JPEG.
 pub struct Extracted {
     pub embedding: Vec<f32>,
     pub jpeg: Option<Vec<u8>>,
 }
 
-/// `FaceClustering.extractOneFile` without the file-identity checks (the
-/// callers hold the catalog's size and time): per box, its SFace vector from
-/// the aligned crop when one Vision landmark set matches the box clearly, else
-/// from the padded box crop; `None` when neither embeds. Returns the number
-/// of aligned faces too.
+/// `FaceClustering.extractOneFile` without the file-identity checks (callers hold the catalog's size and time): the
+/// aligned crop when one landmark set matches the box clearly, else the padded box crop.
 pub fn extract_file(path: &Path, boxes: &[String], sface: &MacSFace) -> (Vec<Option<Extracted>>, usize) {
     let crops = face_crops(path, boxes);
     if crops.is_empty() {
@@ -343,8 +297,7 @@ impl crate::commands::face_extract_mac::Extractor for MacSFace {
     }
 }
 
-/// The process's SFace, loaded once (as `ArcFaceService.shared`) and again
-/// when the installed weights change. `None` when no weights are installed.
+/// Loaded once (as `ArcFaceService.shared`) and again when the installed weights change.
 pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
     static SHARED: Mutex<Option<std::sync::Arc<MacSFace>>> = Mutex::new(None);
     let installed = crate::commands::face_refresh::current_model()?;
@@ -356,18 +309,16 @@ pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
     }
     let started = std::time::Instant::now();
     Some(MacSFace::load().map(|model| {
-        tracing::info!(ep = model.provider(), ms = started.elapsed().as_millis() as u64, "arcface_model_loaded");
+        tracing::info!(ep = crate::models::inference::TRACT_CPU, ms = started.elapsed().as_millis() as u64, "arcface_model_loaded");
         let model = std::sync::Arc::new(model);
         *shared = Some(model.clone());
         model
     }))
 }
 
-/// Phase 1 of the Swift engine's `runClustering`: embed every pending face in
-/// the Mac face space with the installed SFace, leaving out faces of people
-/// marked Unknown. Without weights nothing runs (the clustering pass then works
-/// over the vectors the catalog has).
-pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>) {
+/// Phase 1 of the Swift `runClustering`: embeds every pending face except those of people marked Unknown. Without
+/// weights nothing runs.
+pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>, progress: crate::commands::face_extract_mac::Progress) {
     let processing = crate::commands::face_refresh::processing();
     if !processing.starts_with(crate::commands::face_clustering_mac::MAC_PREFIX) {
         return;
@@ -394,26 +345,19 @@ pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Conne
         }
     };
     let crops = crate::paths::faces_dir().ok();
-    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), &|| false) {
+    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), &|| false, progress) {
         Ok(summary) => tracing::info!(?summary, "face_print_extract_finished"),
         Err(error) => tracing::error!(?error, "face_print_persist_failed"),
     }
 }
 
-// MARK: - Best Takes (VisionTakeFaceAnalyzer, TakeMediaAnalysis.signals)
-
-/// Which decode of a photo Best Takes reads (`fileid_apple_take_decode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TakeDecode {
-    /// `decodeBoundedImage`, fitted into sRGB at most the given long side.
     Analysis = 0,
-    /// `decodeScanImage` drawn unscaled (Face Mesh's detail image).
     Detail = 1,
-    /// `decodeBoundedImage` drawn unscaled (the tile source).
     Wide = 2,
 }
 
-/// Packed sRGB RGB8 of a photo and the file's long side.
 pub struct TakeImage {
     pub rgb: Vec<u8>,
     pub width: u32,
@@ -461,7 +405,6 @@ struct TakeAnalysisJson {
     people: Option<Vec<TakePersonJson>>,
 }
 
-/// Faces Vision found, kept in the adapter for Face Mesh inputs at another size.
 struct KeptFaces(u64);
 
 impl KeptFaces {
@@ -481,7 +424,6 @@ impl Drop for KeptFaces {
     }
 }
 
-/// Best Takes' tile source held by the adapter as decoded.
 pub struct TakeTiles {
     handle: u64,
     pub width: u32,
@@ -497,8 +439,6 @@ impl TakeTiles {
         (handle != 0).then_some(Self { handle, width, height })
     }
 
-    /// Vision's analysis of `tile` cropped from the source, the kept faces and,
-    /// when `pixels`, the crop's RGB8.
     fn faces(&self, tile: &crate::pipeline::take_scoring::Tile, pixels: bool) -> Option<(TakeAnalysisJson, KeptFaces, Option<AdapterBytes>)> {
         let (mut rgb, mut length, mut kept) = (std::ptr::null_mut::<u8>(), 0usize, 0u64);
         let out_rgb = if pixels { &raw mut rgb } else { std::ptr::null_mut() };
@@ -544,21 +484,16 @@ fn mesh_detection(mesh: &MeshJson) -> crate::models::face_geometry::Detection {
     }
 }
 
-/// The Mac `TakeFaceAnalyzer` (`VisionTakeFaceAnalyzer`): Vision faces with
-/// capture quality and people; eye openness from Face Mesh when its model is
-/// installed, else from Vision's eye contours.
+/// The Mac `TakeFaceAnalyzer`: eye openness from Face Mesh when installed, else from Vision's eye contours.
 pub struct VisionFaces {
     mesh: Option<crate::models::face_mesh::FaceMesh>,
 }
 
 impl VisionFaces {
-    /// One analyzer per take worker (at most four, as `CatalogTakeAuto`); each
-    /// holds its own Face Mesh session when the model is installed.
-    /// The workers' Face Mesh sessions share the cores between them.
+    /// One per take worker (at most four, as `CatalogTakeAuto`).
     pub fn load_workers() -> Vec<Self> {
-        let cores = std::thread::available_parallelism().map_or(1, usize::from);
-        let workers = cores.clamp(1, 4);
-        (0..workers).map(|_| Self::with_mesh(|path| crate::models::face_mesh::FaceMesh::load_cpu(path, (cores / workers).max(1)))).collect()
+        let workers = std::thread::available_parallelism().map_or(1, usize::from).clamp(1, 4);
+        (0..workers).map(|_| Self::with_mesh(crate::models::face_mesh::FaceMesh::load_cpu)).collect()
     }
 
     pub fn load() -> Self {
@@ -573,7 +508,6 @@ impl VisionFaces {
         Self { mesh }
     }
 
-    /// `VisionTakeFaceAnalyzer.faces(_:qualities:mesh:image:detail:)`.
     fn run(
         &mut self,
         rgb: &[u8],
@@ -586,8 +520,6 @@ impl VisionFaces {
         self.finish(analysis, &kept, rgb, width, height, detail)
     }
 
-    /// Faces and people from one Vision analysis of a `width` × `height` image
-    /// whose pixels (`rgb`) Face Mesh reads unless `detail` is larger.
     fn finish(
         &mut self,
         analysis: TakeAnalysisJson,
@@ -689,9 +621,6 @@ impl crate::commands::catalog_take_auto::TakeFaceAnalyzer for VisionFaces {
     }
 }
 
-/// `TakeMediaAnalysis.signals` for a photo: the analysis decode (1024 px),
-/// the detail decode for Face Mesh and wide frames, 2×2 tiles of a 2048 px
-/// decode when small faces may hide, all through the adapter's decoders.
 pub fn take_image_signals(
     path: &Path,
     faces: &mut dyn crate::commands::catalog_take_auto::TakeFaceAnalyzer,
@@ -800,6 +729,40 @@ mod tests {
         assert!(signals.faces.is_empty());
         assert_eq!(signals.face_long_side, Some(2048), "a large frame without faces is tiled");
         assert!(take_image_signals(&dir.path().join("missing.jpg"), &mut faces).is_none());
+    }
+
+    #[test]
+    fn the_decode_size_follows_the_smallest_stored_face() {
+        let one = |bbox: &str| first_long_side(&[bbox.to_string()]);
+        assert_eq!(one("0.4,0.4,0.3,0.3"), 1024);
+        assert_eq!(one("0.4,0.4,0.2,0.2"), 1024);
+        assert_eq!(one("0.4,0.4,0.15,0.15"), 1536);
+        assert_eq!(one("0.4,0.4,0.1,0.1"), 2048);
+        assert_eq!(one("0.4,0.4,0.03,0.03"), 2048);
+        assert_eq!(first_long_side(&["0.4,0.4,0.3,0.3".into(), "0.1,0.1,0.03,0.03".into()]), 2048, "the smallest face decides");
+        assert_eq!(first_long_side(&["garbage".into()]), 2048);
+        assert_eq!(first_long_side(&[]), 2048);
+        assert_eq!(first_long_side(&[r#"{"x":10,"y":10,"w":900,"h":900}"#.into()]), 2048, "pixel boxes are sized once decoded");
+    }
+
+    #[test]
+    fn a_photo_is_decoded_small_for_large_faces_and_again_at_full_size_for_small_ones() {
+        let dir = Scratch::new();
+        let path = write_gradient_jpeg(dir.path(), 3000, 2000);
+        let large = open_for_faces(&path, &["0.3,0.3,0.4,0.4".into()], false).expect("decoded");
+        assert_eq!((large.width, large.height), (1024, 683));
+        let small = open_for_faces(&path, &["0.3,0.3,0.03,0.03".into()], false).expect("decoded");
+        assert_eq!((small.width, small.height), (2048, 1365));
+        let panorama = dir.path().join("panorama");
+        std::fs::create_dir(&panorama).unwrap();
+        let wide = write_gradient_jpeg(&panorama, 3000, 1000);
+        let opened = open_for_faces(&wide, &["0.3,0.3,0.15,0.15".into()], false).expect("decoded");
+        assert_eq!(opened.width, 2048, "a face short in pixels on a wide frame is decoded again at full size");
+        let small_dir = dir.path().join("small");
+        std::fs::create_dir(&small_dir).unwrap();
+        let tiny = write_gradient_jpeg(&small_dir, 400, 300);
+        let kept = open_for_faces(&tiny, &["0.3,0.3,0.15,0.15".into()], false).expect("decoded");
+        assert_eq!(kept.width, 400, "a photo already smaller than the decode is not decoded twice");
     }
 
     #[test]

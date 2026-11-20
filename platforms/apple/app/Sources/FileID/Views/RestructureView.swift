@@ -1,21 +1,5 @@
-// Restructure tab — three-tier "assistant" model (Anchor / Mixed / Junk).
-// We respect the user's existing organization decisions:
-//
-//   Anchor folder (meaningful name + homogeneous content):
-//     File stays in place. Nothing about its folder changes.
-//   Mixed folder (meaningful name but a few outliers):
-//     The matching files stay; outliers move out into their proper
-//     anchor bucket via the standard People → Places → Documents →
-//     Year heuristic.
-//   Junk folder (generic name OR fully heterogeneous):
-//     Every file dissolves — re-buckets via the heuristic.
-//
-// The plan + apply now route through the ENGINE butler
-// (Restructure.proposeAll / Restructure.apply via IPC), not the app-side
-// classifier. `requestPlan()` sends `planRestructure`; the engine's
-// `restructurePlan` event is mapped onto the view's `Proposal`/`AssistantSummary`
-// model in `applyPlan()` and drives the Sankey + TreeDiff + recommendation rows.
-// Apply sends `applyRestructure` and reacts to `restructureApplyResult`.
+// Restructure tab. Folders are classed Anchor (kept), Mixed (outliers move out) or Junk (dissolved); see shared/docs/RESTRUCTURE.md.
+// Plans and applies go through the engine butler (`planRestructure` / `applyRestructure`).
 import SwiftUI
 import AppKit
 import GRDB
@@ -158,13 +142,9 @@ struct RestructureView: View {
         let filename: String
         let sourceName: String
         let kind: ProposalKind
-        // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) + the
-        // engine's plain-language "why filed here". Surfaced per the deep-research
-        // finding that showing confidence + reason is the #1 trust signal. (item D1)
+        // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) and the engine's "why filed here": the main trust signal.
         var confidence: String = ""
         var reason: String? = nil
-        /// True for the top "auto" band — drives the "Select confident" helper.
-        var isHighConfidence: Bool { confidence.lowercased() == "auto" }
     }
 
     struct Group: Identifiable, Sendable {
@@ -193,8 +173,7 @@ struct RestructureView: View {
     }
 
     var body: some View {
-        // The step cells stay pinned above the scrolling plan so the Move
-        // action is visible the moment a plan lands. (owner request)
+        // Step cells stay pinned above the scrolling plan so Move is visible as soon as a plan lands.
         VStack(alignment: .leading, spacing: 0) {
             if libraryRoot != nil {
                 stepCells
@@ -289,20 +268,12 @@ struct RestructureView: View {
             moveOutcome = nil
             if selectedRoot != nil { requestPlan() }
         }
-        // Re-request a plan only on Deep Analyze terminal events
-        // (`.deepAnalyzeComplete`). The previous per-file 3-s throttle
-        // still triggered up to 50K full re-plans during a long batch —
-        // `proposeAll` walks every file in the library, so even at 3-s
-        // spacing it caused UI stutters and slowed the engine. Terminal-only
-        // is the right granularity: Deep Analyze is a single batch run, and
-        // proposals don't need to track mid-flight progress.
+        // Re-plan only on .deepAnalyzeComplete: proposeAll walks the whole library, so even a 3-s per-file throttle caused up to 50K re-plans in a long batch.
         .onChangeWhileActive(of: engine.deepAnalyzeComplete?.processed ?? -1) {
             guard libraryRoot != nil else { return }
             store.notifyChanged()
             requestPlan()
         }
-        // Engine-authoritative plan arrived — map it onto the
-        // view's proposal model + summary and rebuild the render caches.
         .onChange(of: engine.restructurePlanSignal) { _, _ in
             applyPlan()
         }
@@ -327,10 +298,10 @@ struct RestructureView: View {
             let files = "\(n.formatted()) file\(n == 1 ? "" : "s")"
             let failed = result.failed
             if let priv = result.privilegeError, !priv.isEmpty {
-                moveOutcome = MoveOutcome(title: "The move couldn't start", detail: priv, warning: true)
+                moveOutcome = MoveOutcome(title: "The move couldn’t start", detail: priv, warning: true)
             } else if wasUndo {
                 moveOutcome = failed > 0 || result.cancelled
-                    ? MoveOutcome(title: "Put back \(files), \(failed.formatted()) couldn't be put back",
+                    ? MoveOutcome(title: "Put back \(files), \(failed.formatted()) couldn’t be put back",
                                   detail: "The rest are still in their new folders. Press Undo move to try again.", warning: true)
                     : MoveOutcome(title: "Put back \(files)", detail: "Every file is back where it was.", warning: false)
             } else if result.cancelled {
@@ -338,8 +309,8 @@ struct RestructureView: View {
                                           detail: "The rest stayed where they were. Undo move puts the moved files back.", warning: false)
             } else if failed > 0 {
                 moveOutcome = MoveOutcome(
-                    title: "Moved \(files), \(failed.formatted()) couldn't be moved",
-                    detail: "The \(failed.formatted()) file\(failed == 1 ? "" : "s") that didn't move \(failed == 1 ? "is" : "are") still where \(failed == 1 ? "it was" : "they were"), usually because a file changed, went missing, or its drive was disconnected. FileID doesn't get a list of which ones; any that still need a new home show up in the plan again.",
+                    title: "Moved \(files), \(failed.formatted()) couldn’t be moved",
+                    detail: "The \(failed.formatted()) file\(failed == 1 ? "" : "s") that didn’t move \(failed == 1 ? "is" : "are") still where \(failed == 1 ? "it was" : "they were"), usually because a file changed, went missing, or its drive was disconnected. FileID doesn’t get a list of which ones; any that still need a new home show up in the plan again.",
                     warning: true)
             } else {
                 moveOutcome = MoveOutcome(title: "Moved \(files)", detail: "Undo move puts every file back where it was.", warning: false)
@@ -380,12 +351,11 @@ struct RestructureView: View {
             switch kind {
             case "plan_restructure_failed", "db_unavailable":
                 loading = false
-                status = "FileID couldn't work out a plan. Try again."
+                status = "FileID couldn’t work out a plan. Try again."
                 statusIsError = true
-            // The shared engine (engine.backend rust) names its plan failures.
             case "plan_restructure_root":
                 loading = false
-                status = "This folder isn't available. Reconnect it, then try again."
+                status = "This folder isn’t available. Reconnect it, then try again."
                 statusIsError = true
             case "plan_restructure_cancelled":
                 loading = false
@@ -393,7 +363,7 @@ struct RestructureView: View {
                 statusIsError = false
             case let other where other.hasPrefix("plan_restructure_"):
                 loading = false
-                status = "FileID couldn't work out a plan. Try again."
+                status = "FileID couldn’t work out a plan. Try again."
                 statusIsError = true
             case "ipc_frame_too_large":
                 loading = false
@@ -455,6 +425,18 @@ struct RestructureView: View {
         return "This plan is too large to list file by file. It sorts files into: \(shown)\(tail). Only the moves FileID is sure about happen now; the rest stay put. Nothing is deleted, and Undo move puts every file back."
     }
 
+    /// An Organize waits to be undone: this session's own apply, or one a relaunch found in the engine's journal for this folder.
+    private var undoAvailable: Bool {
+        guard engine.canUndoRestructure else { return false }
+        guard let pending = engine.restructureUndoRoot, let root = libraryRoot else { return true }
+        return Self.sameFolder(pending, root.path)
+    }
+
+    nonisolated static func sameFolder(_ left: String, _ right: String) -> Bool {
+        URL(fileURLWithPath: left).standardizedFileURL.resolvingSymlinksInPath().path
+            == URL(fileURLWithPath: right).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     private func undoLastMove() {
         guard let root = libraryRoot, !applying else { return }
         applying = true
@@ -472,7 +454,7 @@ struct RestructureView: View {
     }
 
     private var stepCells: some View {
-        let moved = engine.canUndoRestructure
+        let moved = undoAvailable
         let previewState: RestructureStepState = loading ? .current : (planReady || moved ? .done : .current)
         let reviewState: RestructureStepState = !planReady ? .upcoming : (applyCount > 0 || moved ? .done : .current)
         let moveState: RestructureStepState = applying ? .current : (moved ? .done : (planReady && applyCount > 0 ? .current : .upcoming))
@@ -492,7 +474,7 @@ struct RestructureView: View {
             }
             VHairline()
             RestructureStepCell(number: 2, title: "Review", state: reviewState,
-                                detail: !planReady ? "Check each group of moves and skip any you don't want."
+                                detail: !planReady ? "Check each group of moves and skip any you don’t want."
                                     : (storedPlanMoveCount > 0
                                         ? "Too many moves to list one by one. Only the \(applyCount.formatted()) FileID is sure about will move; the rest stay put."
                                         : "\(applyCount.formatted()) of \(plannedMoveCount.formatted()) moves selected")) {
@@ -522,7 +504,7 @@ struct RestructureView: View {
                             .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
                             .disabled(largeApplyBlocked)
                             .help(largeApplyBlocked
-                                  ? "This plan is too large to show, so it can't be checked. Choose a smaller folder."
+                                  ? "This plan is too large to show, so it can’t be checked. Choose a smaller folder."
                                   : "Move the chosen files into their new folders. You confirm first, and you can undo.")
                         if largeApplyBlocked {
                             MetaText("Too large to check. Choose a smaller folder.", color: Theme.warning, size: 11.5)
@@ -589,10 +571,10 @@ struct RestructureView: View {
 
     private var missingContentModelsBanner: some View {
         notice(tone: Theme.warning,
-               title: clipModelInstalled ? "Rescan so FileID can see what's in your photos" : "Sorting by date only",
+               title: clipModelInstalled ? "Rescan so FileID can see what’s in your photos" : "Sorting by date only",
                body: clipModelInstalled
                 ? "This folder was scanned before the Search by description model was downloaded. A rescan looks at the photos again; files already up to date are skipped."
-                : "Without the Search by description and Documents models, FileID can't see what files contain, so loose files go into year and month folders. Download them in Settings, then rescan.") {
+                : "Without the Search by description and Documents models, FileID can’t see what files contain, so loose files go into year and month folders. Download them in Settings, then rescan.") {
             Button {
                 if clipModelInstalled, let root = libraryRoot {
                     engine.startScan(rootURL: root)
@@ -614,7 +596,7 @@ struct RestructureView: View {
                title: "Better suggestions with descriptions",
                body: captioned == 0
                 ? "Right now files are sorted by folder name and people. Describing files lets FileID see what each one shows, so receipts go to Documents and screenshots to Photos."
-                : "\(captioned.formatted()) of \(totalAnalyzableFiles.formatted()) files are described (\(pct)%). Describing the rest gives the plan more to work with.") {
+                : "\(captioned.formatted()) of \(Plural.noun(totalAnalyzableFiles, "file", "files")) are described (\(pct)%). Describing the rest gives the plan more to work with.") {
             HStack(spacing: 6) {
                 Button("Not now") { dismissedDeepAnalyzeHint = true }
                     .buttonStyle(.dsGhost)
@@ -695,7 +677,7 @@ struct RestructureView: View {
                     RestructureRecommendationRow(
                         outcome: .tidy,
                         headline: "Tidy \(summary.mixedFolders) folder\(summary.mixedFolders == 1 ? "" : "s"): move \(summary.movedOutFiles.formatted()) misplaced file\(summary.movedOutFiles == 1 ? "" : "s")",
-                        bodyText: "Mostly organized folders with a few files that don't fit. The folder stays; the misplaced files move to where they belong.",
+                        bodyText: "Mostly organized folders with a few files that don’t fit. The folder stays; the misplaced files move to where they belong.",
                         fileCount: summary.movedOutFiles,
                         folderCount: summary.mixedFolders,
                         isApproved: !skippedOutcomes.contains(.tidy),
@@ -712,7 +694,7 @@ struct RestructureView: View {
                     RestructureRecommendationRow(
                         outcome: .reorganize,
                         headline: "Reorganize \(summary.junkFolders) folder\(summary.junkFolders == 1 ? "" : "s"): sort \(summary.dissolvedFiles.formatted()) file\(summary.dissolvedFiles == 1 ? "" : "s")",
-                        bodyText: "Folders with generic names like \"Untitled\" or \"Camera Roll\". Their files are sorted into People, Places, Documents, events or Photos by year.",
+                        bodyText: "Folders with generic names like “Untitled” or “Camera Roll”. Their files are sorted into People, Places, Documents, events or Photos by year.",
                         fileCount: summary.dissolvedFiles,
                         folderCount: summary.junkFolders,
                         isApproved: !skippedOutcomes.contains(.reorganize),
@@ -753,25 +735,34 @@ struct RestructureView: View {
                     .help(root.path)
                     .accessibilityLabel("Library folder \(root.path)")
             }
+            if undoAvailable && proposals.isEmpty && !applying && moveOutcome == nil {
+                Text("Your last Organize can still be undone.")
+                    .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+            }
         }
+    }
+
+    nonisolated static func nothingToMoveBody(rootName: String?) -> String {
+        let inside = rootName.map { "inside “\($0)”" } ?? "in it"
+        return "Your folders \(inside) are already well organized. FileID doesn’t rename the folder you chose."
     }
 
     private var nothingToMoveCard: some View {
         notice(tone: Theme.delight, title: "Nothing to move",
-               body: "This library is already organized: every folder has a clear name and matching contents.") { EmptyView() }
+               body: Self.nothingToMoveBody(rootName: libraryRoot?.lastPathComponent)) { EmptyView() }
     }
 
     @ViewBuilder
     private var largePlanCard: some View {
         let sure = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
         let heldBack = max(0, storedPlanMoveCount - sure)
-        let scope = "FileID found \(storedPlanMoveCount.formatted()) files to move, too many to list one by one."
+        let scope = "FileID found \(Plural.noun(storedPlanMoveCount, "file", "files")) to move, too many to list one by one."
         if largeApplyBlocked {
             notice(tone: Theme.warning, title: "This plan is too large to check",
                    body: "\(scope) Choose a smaller folder, such as one year or one project, so you can see every move before it happens.") { EmptyView() }
         } else {
             notice(tone: Theme.gold, title: "A large plan",
-                   body: "\(scope) Move takes the \(sure.formatted()) FileID is sure about\(heldBack > 0 ? " and leaves the other \(heldBack.formatted()) where they are" : ""). To check every move first, choose a smaller folder.") { EmptyView() }
+                   body: "\(scope) Move takes \(Plural.noun(sure, "file", "files")) that FileID is sure about\(heldBack > 0 ? " and leaves \(Plural.noun(heldBack, "other file", "other files")) where \(heldBack == 1 ? "it is" : "they are")" : ""). To check every move first, choose a smaller folder.") { EmptyView() }
             Panel {
                 PanelHeader("Where the files would go") {
                     MetaText("\(storedPlanFolders.count.formatted()) folder\(storedPlanFolders.count == 1 ? "" : "s") · counts cover the whole plan", size: 12)
@@ -941,10 +932,7 @@ struct RestructureView: View {
         .accessibilityHint(on ? "Included in the move. Press to skip it." : "Skipped. Press to include it in the move.")
     }
 
-    /// Item D1: at-a-glance confidence badge for a proposed move. The research's
-    /// #1 UX pattern — tier auto/review/ask so the user trusts the sure ones and
-    /// scrutinizes the unsure. Nothing shown when the engine didn't stamp a band
-    /// (rule-cascade moves), so it never adds noise.
+    /// Confidence badge for a proposed move. Shown only when the engine stamped a band; rule-cascade moves get none.
     @ViewBuilder
     private func confidenceBadge(_ confidence: String) -> some View {
         switch confidence.lowercased() {
@@ -981,9 +969,6 @@ struct RestructureView: View {
     /// `engine.restructurePlanSignal`) maps it onto the view's proposal model.
     private func requestPlan() {
         guard let root = libraryRoot else { return }
-        // Capture per-file deselections BEFORE the new plan lands so a re-plan
-        // (e.g. after Deep Analyze finishes mid-review) doesn't re-check rows
-        // the user unchecked. Re-applied in applyPlan().
         priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
         storedPlanID = nil
         storedPlanMoveCount = 0
@@ -1012,7 +997,7 @@ struct RestructureView: View {
             guard let planID = plan.planID,
                   let totalMoves = plan.totalMoves, totalMoves > 0 else {
                 loading = false
-                status = "The saved plan couldn't be opened. Press Suggest a layout to make a new one."
+                status = "The saved plan couldn’t be opened. Press Suggest a layout to make a new one."
                 statusIsError = true
                 return
             }
@@ -1041,14 +1026,13 @@ struct RestructureView: View {
 
         // Up to 100k moves: mapping, grouping and the two catalog reads run off
         // the main actor; only the assignments below happen on it.
-        let libraryFiles = store.totalFiles
         let deselected = priorDeselectedIDs
         let skipped = skippedOutcomes
         let store = store
         planBuild?.cancel()
         planBuild = Task {
             let model = await Task.detached(priority: .userInitiated) {
-                Self.buildModel(from: plan, libraryFiles: libraryFiles,
+                Self.buildModel(from: plan, libraryFiles: store.countFiles(under: plan.libraryRoot),
                                 deselected: deselected, skipped: skipped, store: store)
             }.value
             guard !Task.isCancelled, let current = libraryRoot,
@@ -1086,7 +1070,6 @@ struct RestructureView: View {
         for p in mapped where p.confidence.lowercased() == "ask" {
             selectedIDs.remove(p.fileID)
         }
-        // Re-apply per-file deselections that carried into the fresh set.
         selectedIDs.subtract(deselected)
         // Preserve the user's "Skip these" choices: re-exclude any persisted
         // skipped outcome's proposals (otherwise skipped rows render dimmed but
@@ -1127,14 +1110,7 @@ struct RestructureView: View {
             embeddings: store.contentEmbeddingCounts())
     }
 
-    /// Apply the selected, non-skipped moves through the engine butler.
-    /// Single-flight: `applying` gates the apply-bar buttons and is
-    /// cleared when `restructureApplyResult` arrives (or the engine resets).
-    /// Selected ∧ not-skipped moves from the CURRENT
-    /// plan/selection. Snapshotted into `pendingMoves` at dialog-present time so a
-    /// background re-plan can't change the set the confirm action applies.
-    /// Belt-and-suspenders: filter the engine plan's own moves so a skipped
-    /// outcome never moves.
+    /// Applies the selected, non-skipped moves through the engine butler. Single-flight: `applying` clears when `restructureApplyResult` arrives. Moves are snapshotted into `pendingMoves` at dialog time so a background re-plan can't change the set.
     private func eligibleMoves() -> [RestructureMove] {
         guard let plan = engine.restructurePlan else { return [] }
         let eligible = Set(
@@ -1174,11 +1150,7 @@ struct RestructureView: View {
 
     // MARK: - Engine plan → view-model mapping
 
-    /// Build the view's proposal model from the engine plan. The display
-    /// `bucket` is the destination's parent directory relative to the library
-    /// root (e.g. "Photos/2023/January", "People/Marie Curie/2023") so the
-    /// Sankey/TreeDiff bucket icons + grouping match the prior app-side output;
-    /// `kind` comes from the engine's per-move folder tier when present.
+    /// Builds the view's proposal model from the engine plan. `bucket` is the destination's parent directory relative to the library root, so the Sankey and TreeDiff icons and grouping match.
     nonisolated static func mapProposals(from plan: RestructurePlan) -> [Proposal] {
         plan.moves.map { m in
             Proposal(
@@ -1262,11 +1234,7 @@ struct RestructureView: View {
         }
     }
 
-    /// Inline file-list view for a recommendation card. Reads from
-    /// the precomputed `inlineGroupsByOutcome` cache populated in
-    /// `applyPlan()` — no `proposals.filter` or `Dictionary(grouping:)`
-    /// runs on the render path. The cache covers `.outcome(...)`
-    /// scopes, which are the only scopes inline lists ever receive.
+    /// Inline file list for a recommendation card. Reads the cache built in `applyPlan()`, so the render path does no filtering or grouping.
     @ViewBuilder
     private func inlineFileList(for scope: DrillDownScope) -> some View {
         if case .outcome(let outcome) = scope,
@@ -1282,7 +1250,7 @@ struct RestructureView: View {
                     HStack {
                         Spacer()
                         Button { drillDown = scope } label: {
-                            Label("See all \(matchedCount.formatted()) files", systemImage: "arrow.up.right.square")
+                            Label("See all \(Plural.noun(matchedCount, "file", "files"))", systemImage: "arrow.up.right.square")
                         }
                         .buttonStyle(.dsGhost)
                     }
@@ -1323,9 +1291,7 @@ struct RestructureView: View {
 
     @ViewBuilder
     private func drillDownSheet(_ scope: DrillDownScope) -> some View {
-        // Read the grouping cached in `drillDownGroups` (rebuilt only when
-        // the scope changes) so a per-row checkbox tap doesn't re-filter +
-        // re-group the whole proposal set on every render.
+        // Uses the grouping cached in `drillDownGroups`: a checkbox tap must not re-filter the set.
         let groups = drillDownGroups
         let matchedCount = groups.reduce(0) { $0 + $1.proposals.count }
         let title = drillDownTitle(scope, count: matchedCount)
@@ -1361,8 +1327,8 @@ struct RestructureView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 480)
-        .background(LavaLampBackground())
-        .preferredColorScheme(.dark)
+        .sheetSurface()
+        .dsEscapeCancels { drillDown = nil }
     }
 
     /// Recompute the filtered + bucketed proposals for a drill-down scope.

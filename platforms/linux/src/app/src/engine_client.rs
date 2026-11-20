@@ -1,23 +1,6 @@
-// Engine client — the app side of the two-binary IPC design
-// (`shared/docs/ARCHITECTURE.md`). Mirrors macOS `EngineClient` + Windows
-// `EngineClient.cs`:
-//
-//   * spawns the shared Rust engine as a child process,
-//   * sends `IpcCommand`s as newline-delimited JSON on its stdin — reusing the
-//     engine crate's own serde types so the wire contract can never drift,
-//   * parses bounded `IpcEvent` frames off a reader thread and fans them out to
-//     every UI subscriber on the GTK main context; each subscriber has its own
-//     queue (`event_queue`), so the pump never waits on a listener,
-//   * writes commands on one ordered writer thread, never on the GTK thread,
-//   * proves readiness with a per-spawn health-check nonce, and respawns the
-//     engine with capped backoff if it dies.
-//
-// File listing is NOT an IPC command — the engine is the single DB *writer*;
-// the app reads file rows directly from the same SQLite WAL DB on one
-// latest-request-wins worker, exactly like macOS / Windows `ReadStore`.
-//
-// Thumbnails are decoded by a bounded fixed-size worker pool; only pixel
-// buffers cross back to the main thread, where textures are built.
+// Engine client: the app side of the two-binary IPC design (`shared/docs/ARCHITECTURE.md`). Spawns the shared Rust engine and sends `IpcCommand`s as NDJSON on its stdin, reusing the engine crate's serde types so the wire contract can't drift. Bounded `IpcEvent` frames are parsed on a reader thread and fanned out to UI subscribers on the GTK main context, each with its own queue so the pump never waits on a listener. Commands are written on one ordered writer thread, never the GTK thread. Readiness is proven by a per-spawn health-check nonce, and the engine respawns with capped backoff.
+// File listing is NOT an IPC command: the engine is the single DB *writer*, and the app reads rows from the same SQLite WAL DB on one latest-request-wins worker, like macOS / Windows `ReadStore`.
+// Thumbnails are decoded by a bounded worker pool; only pixel buffers cross back to the main thread, where textures are built.
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
@@ -55,8 +38,6 @@ pub enum EngineState {
     DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone),
     DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete),
     Spawning,
-    /// The engine of the current spawn generation answered our health probe.
-    /// `is_ready` is already true when this is delivered.
     Ready,
     Scanning,
     ScanComplete(u64),
@@ -64,6 +45,7 @@ pub enum EngineState {
     FaceClusteringComplete(fileid_engine::ipc::FaceClusteringResult),
     FaceClusteringFailed(String),
     FaceClusteringBusy(String),
+    FaceClusteringCancelled(String),
     BulkActionResult(fileid_engine::ipc::BulkActionResult),
     MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
     FaceReview(fileid_engine::ipc::FaceReviewPage),
@@ -75,7 +57,6 @@ pub enum EngineState {
     QueueState(fileid_engine::ipc::QueueState),
     Error { kind: String, message: String, model_kind: Option<String> },
     Failed(String),
-    /// The engine process exited; a respawn follows unless the app is closing.
     Exited,
 }
 
@@ -149,7 +130,6 @@ impl QueryChannel {
     }
 }
 
-/// The most rows one read returns, whatever a caller asks for.
 const QUERY_MAX_ROWS: i64 = 20_000;
 
 #[derive(Debug, Clone, Default)]
@@ -157,9 +137,7 @@ pub struct QuerySpec {
     pub search: String,
     pub kind: Option<String>,
     pub limit: i64,
-    /// Rows to skip; the Library pages in as the grid nears its end.
     pub offset: i64,
-    /// A location's `RootScope::param`; `None` reads every location.
     pub scope: Option<String>,
     pub channel: QueryChannel,
     /// A total counted moments ago for this same query. A live reload during
@@ -330,13 +308,10 @@ const THUMB_MAX_BYTES: u64 = 48 * 1024 * 1024;
 
 pub struct EngineClient {
     child: Option<Child>,
-    /// Feeds the writer thread; dropping it closes the engine's stdin once
-    /// every line already queued has been written.
     stdin: Option<std::sync::mpsc::Sender<String>>,
     raw_tx: Sender<RawEvent>,
     raw_rx: Option<Receiver<RawEvent>>,
     subscribers: Vec<EventSender>,
-    /// The newest event of each job still running, for pages built late.
     replay: crate::job_replay::JobReplay,
     replaying: bool,
     thumbs: Arc<ThumbQueue>,
@@ -380,8 +355,6 @@ impl EngineClient {
         }
     }
 
-    /// Each call returns a receiver that sees every reply and terminal event
-    /// from now on, and the newest of each kind of progress event.
     pub fn subscribe(&mut self) -> EventReceiver {
         let (tx, rx) = crate::event_queue::channel();
         if self.replaying {
@@ -413,8 +386,6 @@ impl EngineClient {
         self.publish(&Rc::new(event));
     }
 
-    /// True only once a health probe minted for the current spawn generation
-    /// has been answered with its own nonce; a bare `ready` is not enough.
     pub fn is_ready(&self) -> bool {
         self.ready
     }
@@ -490,8 +461,6 @@ impl EngineClient {
         }
     }
 
-    /// Settings ▸ Advanced ▸ Stop Engine: close stdin so the engine exits and
-    /// stays down until `restart`.
     pub fn stop_engine(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
         self.ready = false;
@@ -523,15 +492,11 @@ impl EngineClient {
         }
     }
 
-    /// Factory reset: stop the engine for good and hand back its process so
-    /// the caller can wait for it to release the database before deleting.
     pub fn take_engine_for_reset(&mut self) -> Option<Child> {
         self.stop_engine();
         self.child.take()
     }
 
-    /// Boot the engine and thumbnail workers and start the main-context
-    /// fan-out pump, which also drives health probes and respawns.
     pub fn start(this: &Rc<RefCell<Self>>) {
         let raw_rx = {
             let mut client = this.borrow_mut();
@@ -651,8 +616,6 @@ impl EngineClient {
         self.send_with_id(payload).map(drop)
     }
 
-    /// Sends a command and returns the id it went out under, which the engine
-    /// echoes on a bulk result so the sender can recognise its reply.
     pub fn send_with_id(&mut self, payload: CommandPayload) -> Result<String> {
         let shutdown = matches!(payload, CommandPayload::Shutdown(_));
         self.next_id = self.next_id.wrapping_add(1);
@@ -672,15 +635,12 @@ impl EngineClient {
         Ok(command.id)
     }
 
-    /// Queue a read on the query worker. Within one `QueryChannel` the latest
-    /// request wins and a superseded receiver closes without a result.
     pub fn query_files(&self, spec: QuerySpec) -> Receiver<Result<(Vec<FileRow>, i64)>> {
         let (reply, rx) = async_channel::bounded(1);
         self.query_worker.submit(QueryJob { spec, reply });
         rx
     }
 
-    /// First-in-first-out decode on the shared bounded workers.
     pub fn request_scaled_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
         self.background_plain(ThumbWork::Image { path, dim })
     }
@@ -713,7 +673,6 @@ impl EngineClient {
         rx
     }
 
-    /// Any bounded decode (face crops) on the shared workers, in order.
     pub fn request_decode(
         &self,
         decode: impl FnOnce() -> Option<DecodedImage> + Send + 'static,
@@ -917,6 +876,7 @@ fn map_engine_payload(payload: EventPayload) -> Option<RawEvent> {
         EventPayload::Error(error) => match error.inner.kind.as_str() {
             "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
             "face_clustering_busy" => EngineState::FaceClusteringBusy(error.inner.message),
+            "face_clustering_cancelled" => EngineState::FaceClusteringCancelled(error.inner.message),
             _ => EngineState::Error {
                 kind: error.inner.kind,
                 message: error.inner.message,
@@ -998,8 +958,6 @@ fn file_row_on(conn: &rusqlite::Connection, id: i64) -> Result<Option<FileRow>> 
         .optional()?)
 }
 
-/// Runs `read` on a fresh read-only connection off the main loop; the
-/// default value when no library database exists yet or it can't be opened.
 pub fn read_db<T, F>(read: F) -> Receiver<T>
 where
     T: Default + Send + 'static,
@@ -1018,7 +976,6 @@ where
     rx
 }
 
-/// One file's current row (the preview refreshes what it shows after a scan).
 pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
     read_db(move |conn| file_row_on(conn, id).ok().flatten())
 }
@@ -1085,7 +1042,6 @@ pub type CancelToken = Arc<AtomicBool>;
 pub enum ThumbReply {
     Image(DecodedImage),
     Failed,
-    /// Evicted, cancelled or superseded before it was decoded.
     Dropped,
 }
 
@@ -1232,7 +1188,6 @@ impl ThumbQueue {
         self.ready.notify_one();
     }
 
-    /// Tiles newest-first (what is on screen now), then background work.
     fn next(&self) -> Option<ThumbJob> {
         let mut queues = self.queues.lock().expect("thumbnail queue poisoned");
         loop {
@@ -1548,6 +1503,19 @@ mod tests {
         assert!(matches!(&events[4], RawEvent::State(EngineState::FaceClusteringBusy(m)) if m == "busy"));
         assert!(matches!(events[5], RawEvent::State(EngineState::Exited)));
         assert_eq!(events.len(), 6);
+    }
+
+    #[test]
+    fn a_taken_over_grouping_pass_is_not_an_engine_error() {
+        let cancelled = IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "face_clustering_cancelled".to_owned(),
+            message: "FileID will finish grouping faces after the scan.".to_owned(),
+            path: None,
+            model_kind: None,
+        })));
+        let events = drain(format!("{}\n", serde_json::to_string(&cancelled).unwrap()));
+        assert!(matches!(&events[0], RawEvent::State(EngineState::FaceClusteringCancelled(m))
+            if m == "FileID will finish grouping faces after the scan."));
     }
 
     #[test]

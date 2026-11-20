@@ -5578,8 +5578,7 @@ def all_checks(value: Any) -> list[str]:
 
 
 def scan_state_logs(log_directory: Path) -> dict[str, Any]:
-    ort_pattern = re.compile(r"Loaded ONNX Runtime dylib with version '([^']+)'")
-    versions: list[str] = []
+    backends: list[str] = []
     bad_markers: list[str] = []
     files: list[str] = []
     if log_directory.is_dir():
@@ -5589,18 +5588,18 @@ def scan_state_logs(log_directory: Path) -> dict[str, Any]:
             files.append(str(path))
             with path.open("r", encoding="utf-8", errors="strict") as handle:
                 for line_number, line in enumerate(handle, 1):
-                    if match := ort_pattern.search(line):
-                        versions.append(match.group(1))
+                    if "inference backend" in line:
+                        backends.append("tract-cpu" if "tract-cpu" in line else line.strip()[:200])
                     if BAD_LOG_MARKER.search(line) and len(bad_markers) < 100:
                         bad_markers.append(f"{path.name}:{line_number}: {line.rstrip()}")
     return {
         "files": files,
-        "ortVersions": versions,
+        "inferenceBackends": backends,
         "badMarkers": bad_markers,
         "checks": {
-            "ortRuntimeObserved": bool(versions),
-            "ortRuntimeIs122": bool(versions)
-            and all(version.startswith("1.22.") for version in versions),
+            "inferenceBackendObserved": bool(backends),
+            "inferenceBackendIsTract": bool(backends)
+            and all(backend == "tract-cpu" for backend in backends),
             "noErrorOrPanicMarkers": not bad_markers,
         },
     }

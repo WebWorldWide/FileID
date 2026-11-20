@@ -1,13 +1,3 @@
-// ScanSession — top-level scan orchestrator. Drives Discovery → Tagging
-// → DBWriter end-to-end with phase + progress + per-batch summary
-// emission. Acquires a process-priority boost and a sleep-prevention
-// guard for the duration of the scan.
-//
-// One session = one "scan a folder" run. Holds the coordinator + child
-// pipeline tasks, calls into the IPC sink for `phaseChanged`, `progress`,
-// `batchSummary`, `scanComplete` events. Follow-on phases (face clustering,
-// deep analyze, restructure plan) each live in their own handler.
-
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -56,12 +46,54 @@ pub struct SessionResult {
     pub processed: u64,
     pub failed: u64,
     pub elapsed_seconds: f64,
-    /// Files under the root were added, renamed or deleted while this pass ran;
-    /// the caller runs one incremental follow-up pass, which reports the totals.
-    pub changed_during_scan: bool,
+    /// The caller runs one incremental follow-up pass, which reports the totals: files under the root
+    /// were added, renamed or deleted while this pass ran, or some files timed out and are read again.
+    pub needs_follow_up: bool,
+    /// Files this pass stored as failed only because a read timed out and that the follow-up pass reads again;
+    /// the follow-up's totals replace theirs.
+    pub timed_out: u64,
     /// Every photo's stored date already came from its EXIF in this scan (a
     /// forced rescan, or a root with no catalog rows when it started).
     pub capture_dates_current: bool,
+    pub progress_floor: ProgressFloor,
+}
+
+/// The largest counts the scan has shown so far. A follow-up pass restarts its own counters, so each of its snapshots
+/// is lifted to at least this much and the bar never moves backwards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProgressFloor {
+    total: u64,
+    discovered: u64,
+    processed: u64,
+}
+
+impl ProgressFloor {
+    fn raised_to(self, other: Self) -> Self {
+        Self {
+            total: self.total.max(other.total),
+            discovered: self.discovered.max(other.discovered),
+            processed: self.processed.max(other.processed),
+        }
+    }
+}
+
+/// Turns a follow-up pass's own counts into the scan's: what earlier passes finished is added and nothing falls below
+/// what was already shown. For the first pass it changes nothing.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProgressLift {
+    carried_processed: u64,
+    carried_failed: u64,
+    floor: ProgressFloor,
+}
+
+impl ProgressLift {
+    fn apply(&self, progress: &mut ScanProgress) {
+        progress.discovered = (progress.discovered + self.carried_processed).max(self.floor.discovered);
+        progress.processed = (progress.processed + self.carried_processed).max(self.floor.processed);
+        progress.failed += self.carried_failed;
+        let total = if progress.total > 0 { progress.total + self.carried_processed } else { 0 };
+        progress.total = total.max(self.floor.total);
+    }
 }
 
 pub struct ScanSession {
@@ -72,18 +104,24 @@ pub struct ScanSession {
     sink: Sink,
     models: Arc<ModelSource>,
     /// When true, skip the incremental-rescan skip set and reprocess
-    /// every file. Plumbed from `StartScanPayload::rescan`.
+    /// every file.
     rescan: bool,
     /// User-excluded folders, raw as received from the app. Resolved
-    /// against the root at run() time. Plumbed from
-    /// `StartScanPayload::excluded_paths`.
+    /// against the root at run() time.
     excluded_paths: Vec<String>,
     /// False for the follow-up pass, so a folder that keeps changing cannot loop.
     allow_follow_up: bool,
+    /// The follow-up reads timed-out files again, which a busy machine failed the first time.
+    retrying_timeouts: bool,
+    /// 0 for the scan's first pass; each pass that re-reads timed-out files counts one more, up to `TIMEOUT_RETRY_ROUNDS`.
+    retry_round: u32,
+    /// The label the app gave the folder (`startScan.rootDisplay`); Locations shows it instead of the folder's name.
+    root_display: Option<String>,
     /// Counts from the pass this one follows up, added to its final totals.
     carried: (u64, u64, f64),
     /// Decided by the first pass; a follow-up starts with that pass's rows.
     capture_dates_current: Option<bool>,
+    progress_floor: ProgressFloor,
 }
 
 /// True when a directory the walk read was modified after `since` or is gone.
@@ -116,18 +154,48 @@ impl ScanSession {
             rescan,
             excluded_paths,
             allow_follow_up: true,
+            retrying_timeouts: false,
+            retry_round: 0,
+            root_display: None,
             carried: (0, 0, 0.0),
             capture_dates_current: None,
+            progress_floor: ProgressFloor::default(),
         }
     }
 
-    /// The incremental pass that follows a pass during which files changed.
-    pub fn follow_up(mut self, previous: &SessionResult) -> Self {
+    /// Runs under the id the app was already shown (the baseline progress and a follow-up pass use the same one).
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    pub fn with_root_display(mut self, label: Option<String>) -> Self {
+        self.root_display = label.map(|label| label.trim().to_owned()).filter(|label| !label.is_empty());
+        self
+    }
+
+    /// The incremental pass that follows a pass during which files changed or timed out. `round` is 1 for the first
+    /// follow-up; every further round of timed-out reads runs with half the workers of the one before.
+    pub fn follow_up(mut self, previous: &SessionResult, round: u32) -> Self {
         self.rescan = false;
         self.allow_follow_up = false;
-        self.carried = (previous.processed, previous.failed, previous.elapsed_seconds);
+        self.retry_round = round;
+        self.carried = (
+            previous.processed.saturating_sub(previous.timed_out),
+            previous.failed.saturating_sub(previous.timed_out),
+            previous.elapsed_seconds,
+        );
+        if previous.timed_out > 0 {
+            self.retrying_timeouts = true;
+            self.worker_count = (self.worker_count >> round.min(16)).max(1);
+        }
         self.capture_dates_current = Some(previous.capture_dates_current);
+        self.progress_floor = previous.progress_floor;
         self
+    }
+
+    fn progress_lift(&self) -> ProgressLift {
+        ProgressLift { carried_processed: self.carried.0, carried_failed: self.carried.1, floor: self.progress_floor }
     }
 
     /// Run an end-to-end scan against `root`. Returns when DBWriter has
@@ -164,7 +232,6 @@ impl ScanSession {
             let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
         };
 
-        // Guaranteed (blocking/backpressuring) terminal-phase emit.
         // Awaits channel capacity rather than dropping, so a cancelled/failed
         // terminal state can never be silently lost under sink backpressure.
         let emit_phase_guaranteed = |sink: &Sink, phase: SessionPhase| {
@@ -176,8 +243,9 @@ impl ScanSession {
             }
         };
 
+        // `handle_start_scan` announces Discovering before the models load; announcing it again here
+        // would show the app two phase changes for one scan.
         on_phase(SessionPhase::Discovering);
-        emit_phase(SessionPhase::Discovering);
 
         // Persist a scan_sessions row so Settings → Recent scans can list
         // past scans + offer Re-scan. Uses the engine's single-writer
@@ -201,8 +269,9 @@ impl ScanSession {
             let root_text = root.to_string_lossy();
             let kind = if root_text.starts_with("\\\\") { "network" } else if root_text.starts_with("/Volumes/") { "external" } else { "internal" };
             let _ = conn.execute(
-                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,?1,?2,?3,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'",
-                rusqlite::params![root_text, kind, started_unix],
+                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,COALESCE(?4,?1),?2,?3,'running') \
+                 ON CONFLICT(path) DO UPDATE SET last_status='running', display=COALESCE(?4,display)",
+                rusqlite::params![root_text, kind, started_unix, self.root_display],
             );
         }
 
@@ -237,14 +306,11 @@ impl ScanSession {
             let mut set =
                 std::collections::HashMap::<SkipFingerprint, (i64, Option<f64>)>::new();
             let root_prefix = root.to_string_lossy().to_string();
-            // Diagnostic counts so we can tell at a glance whether (a) the
-            // DB is empty, (b) the LIKE prefix is wrong, or (c) the
-            // scanned_at >= modified_at filter excludes everything.
             let total_files: i64 = conn
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
             let lo = root_descendant_prefix(root);
-            // P16: a BINARY range seek (`>= lo AND < hi`) is sargable on the
+            // A BINARY range seek (`>= lo AND < hi`) is sargable on the
             // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
             // non-sargable because LIKE defaults to case-insensitive and forces
             // a full table scan). Stored paths derive from THIS root so they
@@ -277,11 +343,11 @@ impl ScanSession {
             // dehydrated→hydrated file is reprocessed; a transient hash failure
             // re-scans too, which is the skip set's documented fail-safe.
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
-            // R-14 (lockstep with macOS Discovery): when BGE is installed, keep
+            // Lockstep with macOS Discovery: when BGE is installed, keep
             // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
             // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
             // isn't on disk (no doc could embed → don't force a perpetual re-walk).
-            let text_embed_gate = text_embed_gate(bge_installed(), crate::ort_runtime::is_available());
+            let text_embed_gate = text_embed_gate(bge_installed());
             // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
             // to backfill its rendered-shape CLIP vector (lockstep with macOS).
             let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
@@ -290,10 +356,8 @@ impl ScanSession {
             // which run in the same pass) — lockstep with macOS Discovery.
             let image_clip_gate = if clip_can_embed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
             let video_clip_gate = video_clip_gate();
-            // R4-01: drop the tautological `scanned_at >= modified_at` predicate
-            // (both are stored at scan time, so it's true for every scanned file
-            // and STAYS true after an edit). Fetch size+mtime instead and let
-            // discovery compare them against the live file.
+    // Both columns are stored at scan time, so `scanned_at >= modified_at` holds for every
+    // scanned file, even after an edit. Compare size+mtime against the live file in discovery.
             let select_sql = if hi.is_some() {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
@@ -363,10 +427,9 @@ impl ScanSession {
             std::sync::Arc::new(set)
         };
 
-        // Wire the three pipeline stages with bounded mpsc channels.
         // Capture the skip-set size before it moves into Discovery: a count==0
         // result with a non-empty skip set means "incremental rescan, all files
-        // already current" — NOT an empty/unsupported folder (#21).
+        // already current" — NOT an empty/unsupported folder.
         let skip_count = skip_paths.len();
         let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
         // Windows catalogs a cloud placeholder from its metadata; the content-hash
@@ -453,10 +516,8 @@ impl ScanSession {
         let root_for_tick = root.to_string_lossy().into_owned();
         let errors_for_tick = discovered_errors.clone();
         let cloud_only_for_tick = discovered_cloud_only.clone();
-        // Clone the discovery counter for the ticker; the original stays
-        // in scope so the tagging callback can also read it for Progress
-        // event totals.
         let discovered_count_for_tick = discovered_count.clone();
+        let lift_for_tick = self.progress_lift();
         // Single-shot guard shared with the post-drain fallback below: the tick
         // sleeps 250 ms before its first wake-up, so a folder that discovers and
         // drains faster than that (empty folder / fully-current rescan) would be
@@ -470,12 +531,10 @@ impl ScanSession {
         // The tick emits it on the normal path; the post-drain backstop below
         // covers the paths where the tick is aborted mid-sleep or returns early
         // on cancel. This shared single-shot flag keeps the two from double-
-        // emitting. (006)
+        // emitting.
         let discovery_complete_emitted =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let discovery_complete_emitted_for_tick = discovery_complete_emitted.clone();
-        // The tick takes `discovered_done` by move (async move); keep a clone for
-        // the post-drain fallback's done-check below.
         let discovered_done_post = discovered_done.clone();
         let tick = tokio::spawn(async move {
             loop {
@@ -485,26 +544,26 @@ impl ScanSession {
                 }
                 let count = discovered_count_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                 let finished = discovered_done.load(std::sync::atomic::Ordering::Acquire);
-                let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(
-                    ScanProgress {
-                        session_id: session_id_for_tick.clone(),
-                        phase: ScanPhase::Discovering,
-                        total: 0,
-                        discovered: count,
-                        processed: 0,
-                        failed: 0,
-                        files_per_second: 0.0,
-                        eta_seconds: None,
-                        resident_mb: crate::platform::process_memory_mb(),
-                        available_mb: 0,
-                    },
-                ))));
+                let mut progress = ScanProgress {
+                    session_id: session_id_for_tick.clone(),
+                    phase: ScanPhase::Discovering,
+                    total: 0,
+                    discovered: count,
+                    processed: 0,
+                    failed: 0,
+                    files_per_second: 0.0,
+                    eta_seconds: None,
+                    resident_mb: crate::platform::process_memory_mb(),
+                    available_mb: 0,
+                };
+                lift_for_tick.apply(&mut progress);
+                let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
                 if finished {
                     // IPC parity with macOS (FileIDEngineMain.swift:486):
                     // announce the discovery total once the walk ends —
                     // macOS emits it even for a cancel-truncated walk. Swap the
                     // shared flag first so the post-drain backstop never re-emits
-                    // what the tick already sent. (006)
+                    // what the tick already sent.
                     if !discovery_complete_emitted_for_tick
                         .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
@@ -521,7 +580,7 @@ impl ScanSession {
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
-                    // when a notice is actually delivered. (audit R3-21)
+                    // when a notice is actually delivered.
                     let cloud_only = cloud_only_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     let reachable = count != 0 || scan_root_reachable(Path::new(&root_for_tick));
                     let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick, reachable);
@@ -553,6 +612,7 @@ impl ScanSession {
         };
         let tagger = Tagger::with_model_source(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf())
+            .with_retrying_failures(self.retrying_timeouts)
             .with_legacy_hashes(
                 writer.rename_heal_enabled()
                     && legacy_hash_rows_possible(&self.db_conn.lock(), crate::paths::root().ok().as_deref()),
@@ -581,6 +641,7 @@ impl ScanSession {
         let cursor_db = self.db_conn.clone();
         let cursor_session = session_id.clone();
         let cursor_carried = self.carried.0;
+        let lift_for_batch = self.progress_lift();
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
@@ -603,6 +664,7 @@ impl ScanSession {
                     discovered,
                     heavy,
                     walk_done,
+                    &lift_for_batch,
                 );
             })
             .await;
@@ -691,16 +753,14 @@ impl ScanSession {
             );
             sink.send(crate::ipc::EngineError::new(
                 "discovery_partial",
-                format!(
-                        "{zero_byte_rejected} file(s) changed while FileID was scanning them. They will be picked up on the next scan."
-                    ),
+                changed_while_scanning_message(zero_byte_rejected),
             )
             .with_path(root.to_string_lossy().into_owned())
             .into_event())
             .await;
         }
 
-        // discoveryComplete backstop (006): the 250 ms tick emits this
+        // discoveryComplete backstop: the 250 ms tick emits this
         // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
         // rescan) aborts the tick mid-first-sleep, and a cancel-during-discovery
         // returns the tick early — both BEFORE it emits. The walk has ended by
@@ -751,10 +811,15 @@ impl ScanSession {
         if clean_walk {
             mark_heal_done(&CRASH_HEALED_ROOTS, &root_descendant_prefix(root));
         }
-        if clean_walk
-            && self.allow_follow_up
-            && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started)
-        {
+        // Files a busy machine timed out are read again once, with fewer workers, before the scan reports its totals.
+        let timed_out = if self.retry_round < TIMEOUT_RETRY_ROUNDS && !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+            count_retryable_timeouts(&self.db_conn.lock(), root, started_unix)
+        } else {
+            0
+        };
+        let files_changed =
+            clean_walk && self.allow_follow_up && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started);
+        if files_changed || timed_out > 0 {
             // Rows of files deleted after they were processed are in the seen set,
             // and renamed files were never visited, so the missing-file pass below
             // would be wrong. Hand over to the follow-up pass, which owns the
@@ -763,13 +828,20 @@ impl ScanSession {
                 .db_conn
                 .lock()
                 .execute("DELETE FROM scan_sessions WHERE id = ?1", rusqlite::params![session_id]);
-            tracing::info!(processed = total, "[SCAN] files changed during the scan; running a follow-up pass");
+            tracing::info!(processed = total, files_changed, timed_out, "[SCAN] running a follow-up pass");
             return Ok(SessionResult {
-                processed: total,
-                failed,
-                elapsed_seconds: started.elapsed().as_secs_f64(),
-                changed_during_scan: true,
+                processed: total + self.carried.0,
+                failed: failed + self.carried.1,
+                elapsed_seconds: started.elapsed().as_secs_f64() + self.carried.2,
+                needs_follow_up: true,
+                timed_out,
                 capture_dates_current,
+                progress_floor: ProgressFloor {
+                    total: total.max(discovered_count.load(std::sync::atomic::Ordering::Relaxed)) + self.carried.0,
+                    discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                    processed: total + self.carried.0,
+                }
+                .raised_to(self.progress_floor),
             });
         }
         // A root that is gone, empty or an unmounted drive's leftover folder lists nothing,
@@ -843,35 +915,61 @@ impl ScanSession {
         // rest stays owed.
         let mut post_scan_announced = false;
         if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
+            if self.rescan {
+                crate::pipeline::catch_up::forget_careful_reader_failures();
+            }
             let (owed_tags, owed_careful) = crate::pipeline::catch_up::owed(&self.db_conn.lock(), Some(root));
-            if owed_tags + owed_careful > 0 {
+            let reader_deferred = owed_tags == 0 && crate::pipeline::catch_up::careful_reader_deferred();
+            if reader_deferred {
+                tracing::info!(owed_careful, "[SCAN] careful text reads stay owed: the reader stopped answering recently");
+            }
+            if owed_tags + owed_careful > 0 && !reader_deferred {
                 on_phase(SessionPhase::PostScan);
                 emit_phase(SessionPhase::PostScan);
                 post_scan_announced = true;
                 match self.models.get().await {
                     Some(stack) => {
                         let analyzer = crate::pipeline::tagging::catch_up_analyzer(stack, self.coordinator.clone());
-                        let report = CatchUpProgress {
+                        let report = Arc::new(CatchUpProgress {
                             sink: sink.clone(),
                             session_id: session_id.clone(),
-                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
-                            processed: total,
-                            failed,
+                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                            processed: total + self.carried.0,
+                            failed: failed + self.carried.1,
+                            lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
                             state: Mutex::new((0, 0, Instant::now())),
-                        };
+                        });
+                        let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
+                        let report_pass = report.clone();
+                        let late_root = root.to_path_buf();
                         let (conn, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
                         let pass = tokio::task::spawn_blocking(move || {
-                            crate::pipeline::catch_up::run(
+                            let summary = crate::pipeline::catch_up::run(
                                 &conn,
                                 Some(&root),
                                 analyzer.as_ref(),
                                 &|| coordinator.is_cancelled(),
                                 &|| coordinator.is_paused(),
-                                &|event| report.report(event),
-                            )
+                                &|event| report_pass.report(event),
+                            );
+                            (summary, analyzer)
                         });
-                        if let Err(error) = pass.await {
-                            tracing::warn!(%error, "[SCAN] the catch-up pass stopped");
+                        let finished = pass.await;
+                        heartbeat.abort();
+                        let _ = heartbeat.await;
+                        if finished.as_ref().is_ok_and(|(summary, _)| summary.disk_full) {
+                            sink.send(crate::ipc::EngineError::event(
+                                "scan_disk_full",
+                                crate::util::user_message::DISK_ALMOST_FULL,
+                            ))
+                            .await;
+                        }
+                        match finished {
+                            Ok((summary, analyzer)) if summary.careful_waiting && !self.coordinator.is_cancelled() => {
+                                spawn_late_careful_reads(self.db_conn.clone(), late_root, analyzer);
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(%error, "[SCAN] the catch-up pass stopped"),
                         }
                     }
                     None => tracing::warn!("[SCAN] the catch-up pass was skipped: the models did not load"),
@@ -1003,10 +1101,69 @@ impl ScanSession {
             processed: total + self.carried.0,
             failed: failed + self.carried.1,
             elapsed_seconds: elapsed + self.carried.2,
-            changed_during_scan: false,
+            needs_follow_up: false,
+            timed_out: 0,
             capture_dates_current,
+            progress_floor: self.progress_floor,
         })
     }
+}
+
+/// Passes that read timed-out files again after the first one. A busy machine that failed a file once often fails it again straight away,
+/// so each pass waits longer (`timeout_retry_backoff`) and runs with fewer workers.
+pub const TIMEOUT_RETRY_ROUNDS: u32 = 3;
+
+/// How long to let the machine settle before retry round `round` (1-based).
+pub fn timeout_retry_backoff(round: u32) -> Duration {
+    Duration::from_secs(match round {
+        0 | 1 => 3,
+        2 => 8,
+        _ => 15,
+    })
+}
+
+/// Rows under `root` this scan (written at or after `since`) stored as failed because a read timed out and whose retries are not used up.
+pub(crate) fn count_retryable_timeouts(conn: &Connection, root: &Path, since: f64) -> u64 {
+    let lo = root_descendant_prefix(root);
+    let hi = prefix_upper_bound(&lo);
+    let [current, per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
+    let base = "SELECT COUNT(*) FROM files f WHERE f.failed = 1 AND f.error_message IN (?1, ?2, ?3) AND f.scanned_at >= ?4 \
+                AND f.path_text >= ?5 \
+                AND COALESCE((SELECT c.attempts FROM scan_failures c WHERE c.file_id = f.id), 0) < ?6";
+    let limit = crate::pipeline::catch_up::FAILURE_RETRY_LIMIT;
+    let count = match &hi {
+        Some(hi) => conn.query_row(
+            &format!("{base} AND f.path_text < ?7"),
+            rusqlite::params![current, per_file, vision, since, lo, limit, hi],
+            |row| row.get::<_, i64>(0),
+        ),
+        None => conn.query_row(base, rusqlite::params![current, per_file, vision, since, lo, limit], |row| row.get::<_, i64>(0)),
+    };
+    count.unwrap_or(0).max(0) as u64
+}
+
+static LATE_CAREFUL_READS_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The careful text reader was still warming up when the scan ended, so the scan finished without it. This waits for
+/// it in the background (one at a time) and reads what was left owed.
+fn spawn_late_careful_reads(
+    db_conn: Arc<Mutex<Connection>>,
+    root: std::path::PathBuf,
+    analyzer: Box<dyn crate::pipeline::catch_up::Analyzer + Send>,
+) {
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            LATE_CAREFUL_READS_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    if LATE_CAREFUL_READS_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        let _running = Running;
+        crate::pipeline::catch_up::finish_careful_when_ready(&db_conn, Some(&root), analyzer.as_ref(), &|| false);
+    });
 }
 
 /// Progress of the catch-up pass, reported in the post-scan phase the way the
@@ -1018,24 +1175,43 @@ struct CatchUpProgress {
     discovered: u64,
     processed: u64,
     failed: u64,
+    lift: ProgressLift,
     /// (owed, done, started)
     state: Mutex<(u64, u64, Instant)>,
 }
 
+/// How often the post-scan phase repeats its progress while a read is slow, so the app never sees a silent minute.
+const CATCH_UP_HEARTBEAT: Duration = Duration::from_secs(1);
+
 impl CatchUpProgress {
     fn report(&self, event: crate::pipeline::catch_up::Progress) {
-        let (owed, done, started) = {
-            let mut state = self.state.lock();
-            match event {
-                crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.1),
-                crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
+        let mut state = self.state.lock();
+        match event {
+            crate::pipeline::catch_up::Progress::Total(total) => state.0 = total.max(state.0).max(state.1),
+            crate::pipeline::catch_up::Progress::Advance(count) => state.1 = (state.1 + count).min(state.0),
+        }
+        self.send_snapshot(&state);
+    }
+
+    fn spawn_heartbeat(self: Arc<Self>, every: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(every);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                self.send_snapshot(&self.state.lock());
             }
-            *state
-        };
+        })
+    }
+
+    /// Sent while the caller holds the state lock, so a snapshot never overtakes a newer one.
+    fn send_snapshot(&self, state: &(u64, u64, Instant)) {
+        let (owed, done, started) = *state;
         let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
         let seconds = started.elapsed().as_secs_f64();
         let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
-        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
+        let mut progress = ScanProgress {
             session_id: self.session_id.clone(),
             phase: ScanPhase::PostScan,
             total,
@@ -1046,7 +1222,9 @@ impl CatchUpProgress {
             eta_seconds: (rate > 0.01).then(|| (owed - done) as f64 / rate),
             resident_mb: crate::platform::process_memory_mb(),
             available_mb: 0,
-        }))));
+        };
+        self.lift.apply(&mut progress);
+        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
     }
 }
 
@@ -1169,7 +1347,16 @@ impl ProgressState {
 
 /// Single source for the empty/rescan/partial discovery notice: the 250 ms
 /// tick and the post-drain backstop must emit byte-identical IPC, so the kind
-/// codes + messages live here once. (audit R3-21 / E3)
+/// codes + messages live here once.
+fn changed_while_scanning_message(files: u64) -> String {
+    format!(
+        "{} changed while FileID was scanning {}. {} picked up on the next scan.",
+        crate::util::display::count_noun(files as i64, "file", "files"),
+        if files == 1 { "it" } else { "them" },
+        if files == 1 { "It will be" } else { "They will be" },
+    )
+}
+
 fn discovery_notice(
     count: u64,
     skip_count: usize,
@@ -1218,9 +1405,10 @@ fn discovery_notice(
         (
             "discovery_partial",
             format!(
-                "Scanned {} file(s); {} path(s) couldn't be read \
+                "Scanned {}; {} couldn’t be read \
                  (permission denied or removed mid-scan). Scan continues.",
-                count, errs
+                crate::util::display::count_noun(count as i64, "file", "files"),
+                crate::util::display::count_noun(errs as i64, "item", "items")
             ),
         )
     } else {
@@ -1441,7 +1629,7 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
     "AND NOT (content_hash IS NULL \
       AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
 
-/// R-14 (lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`): keep any
+/// Lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`: keep any
 /// doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set, so an
 /// install-then-rescan re-emits it and the tagger backfills its BGE embedding. BGE is
 /// opt-in, so the first scan usually predates it — without this, those docs would be
@@ -1450,13 +1638,13 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
 /// `bge_installed`); leading space because it concatenates after the content gate.
 /// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-extracted
 /// but yielded no embeddable text (image-only PDF, iWork, empty file) — otherwise such a
-/// doc, never able to get a `text_embeddings` row, would re-walk forever (v19).
+/// doc, never able to get a `text_embeddings` row, would re-walk forever.
 pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
     " AND NOT (kind IN ('doc', 'pdf') AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM text_embeddings \
                       WHERE text_embeddings.file_id = files.id))";
 
-/// R-14 (lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`): keep a `.obj`
+/// Lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`: keep a `.obj`
 /// 3D model still LACKING a `clip_embeddings` row OUT of the skip set so its rendered-shape
 /// CLIP vector backfills on a rescan after the render→CLIP feature shipped. Limited to
 /// `extension = 'obj'` (the only format `obj_render` rasterizes). The `text_stage_done = 0`
@@ -1493,11 +1681,9 @@ fn video_clip_gate() -> &'static str {
     }
 }
 
-/// Whether this scan can give a picture its vector: the weights are installed and something can run them (the Mac
-/// adapters' own CLIP, or ONNX Runtime). With the weights and no runtime, the missing-vector gates would re-read
-/// every picture on every scan and never embed one.
+/// Whether this scan can give a picture its vector: the CLIP weights are installed.
 fn clip_can_embed() -> bool {
-    clip_installed() && (crate::pipeline::tagging::apple_scan_enabled() || crate::ort_runtime::is_available())
+    clip_installed()
 }
 
 fn clip_installed() -> bool {
@@ -1514,10 +1700,9 @@ fn bge_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// The gate applies only when a scan can actually embed a document: weights on disk and a runtime to run them.
-/// With the weights installed but no ONNX Runtime, every document would be re-read on every scan and never embed.
-fn text_embed_gate(installed: bool, runtime_available: bool) -> &'static str {
-    if installed && runtime_available {
+/// The gate applies only when a scan can actually embed a document: the weights are on disk.
+fn text_embed_gate(installed: bool) -> &'static str {
+    if installed {
         SKIP_SET_TEXT_EMBED_GATE
     } else {
         ""
@@ -1655,7 +1840,7 @@ fn soft_hide_missing_rows(
 /// end of the scan that hid the row, as the Swift engine does).
 pub(crate) const HIDDEN_ROW_RETENTION_DAYS: f64 = 30.0;
 const HIDDEN_PURGE_BATCH: usize = 200;
-const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
+pub(crate) const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
 
 pub(crate) fn hidden_retention_days() -> f64 {
     parse_retention_days(std::env::var("FILEID_HIDDEN_RETENTION_DAYS").ok().as_deref())
@@ -1864,6 +2049,7 @@ fn maybe_emit_progress(
     discovered_total: u64,
     discovered_heavy: u64,
     discovery_done: bool,
+    lift: &ProgressLift,
 ) {
     let now = Instant::now();
     let should_emit = {
@@ -1875,7 +2061,6 @@ fn maybe_emit_progress(
     if !should_emit {
         return;
     }
-    // Fold the new sample into the rolling wall-clock throughput under one lock.
     let (fps, eta_kind_aware) = {
         let mut st = state.lock();
         st.last_emit = now;
@@ -1912,7 +2097,7 @@ fn maybe_emit_progress(
         0
     };
     let eta_seconds = if total > 0 { eta_kind_aware } else { None };
-    let progress = ScanProgress {
+    let mut progress = ScanProgress {
         session_id: session_id.into(),
         phase: ScanPhase::Tagging,
         total,
@@ -1924,6 +2109,7 @@ fn maybe_emit_progress(
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
+    lift.apply(&mut progress);
     // Intentional try_send. Progress events are throttled to 10 Hz / 1k
     // files, so dropping is rare in practice — and the next emit (≤100ms
     // later) brings the UI back in sync.
@@ -1992,6 +2178,23 @@ mod tests {
     }
 
     #[test]
+    fn counts_in_scan_notices_read_singular_at_one() {
+        assert_eq!(
+            changed_while_scanning_message(1),
+            "1 file changed while FileID was scanning it. It will be picked up on the next scan."
+        );
+        assert_eq!(
+            changed_while_scanning_message(2),
+            "2 files changed while FileID was scanning them. They will be picked up on the next scan."
+        );
+        let partial = discovery_notice(1, 0, 1, 0, "/lib", true).unwrap();
+        assert_eq!(partial.kind, "discovery_partial");
+        assert!(partial.message.starts_with("Scanned 1 file; 1 item couldn’t be read"), "{}", partial.message);
+        let partial = discovery_notice(1200, 0, 3, 0, "/lib", true).unwrap();
+        assert!(partial.message.starts_with("Scanned 1,200 files; 3 items couldn’t be read"), "{}", partial.message);
+    }
+
+    #[test]
     fn cloud_only_files_are_reported_in_the_swift_engines_words() {
         let one = discovery_notice(12, 0, 0, 1, "/lib", true).unwrap();
         assert_eq!(one.kind, "discovery_partial");
@@ -2046,6 +2249,142 @@ mod tests {
 
         let mut everywhere = std::collections::HashMap::new();
         assert_eq!(add_given_up_failures(&conn, &mut everywhere, "", None), 2);
+    }
+
+    #[test]
+    fn only_this_scans_timed_out_files_with_retries_left_are_read_again() {
+        let conn = crate::db::test_support::memory_db();
+        let sep = std::path::MAIN_SEPARATOR;
+        let path = |name: &str| format!("{sep}lib{sep}{name}");
+        let [current, per_file, vision] = crate::pipeline::tagging::TIMEOUT_MESSAGES;
+        let add = |id: i64, name: &str, message: &str, scanned_at: f64, attempts: Option<i64>| {
+            crate::db::test_support::insert_file(&conn, id, &path(name), "image");
+            conn.execute(
+                "UPDATE files SET failed = 1, error_message = ?2, scanned_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, message, scanned_at],
+            )
+            .unwrap();
+            if let Some(attempts) = attempts {
+                conn.execute(
+                    "INSERT INTO scan_failures (file_id, size_bytes, modified_at, engine_build, attempts, failed_at) VALUES (?1, 100, 10, 'build', ?2, 0)",
+                    rusqlite::params![id, attempts],
+                )
+                .unwrap();
+            }
+        };
+        add(1, "vision.jpg", vision, 500.0, Some(1));
+        add(2, "per-file.jpg", per_file, 500.0, Some(2));
+        add(3, "transient.jpg", vision, 500.0, None);
+        add(4, "given-up.jpg", vision, 500.0, Some(3));
+        add(5, "earlier-scan.jpg", vision, 100.0, Some(1));
+        add(6, "corrupt.jpg", "Could not decode image", 500.0, Some(1));
+        add(9, "ran-out-of-time.jpg", current, 500.0, Some(1));
+        crate::db::test_support::insert_file(&conn, 7, &path("fine.jpg"), "image");
+        crate::db::test_support::insert_file(&conn, 8, &format!("{sep}elsewhere{sep}slow.jpg"), "image");
+        conn.execute("UPDATE files SET failed = 1, error_message = ?1, scanned_at = 500.0 WHERE id = 8", [vision]).unwrap();
+        assert_eq!(count_retryable_timeouts(&conn, Path::new(&format!("{sep}lib")), 400.0), 4);
+    }
+
+    fn tagging_snapshot(total: u64, discovered: u64, processed: u64, failed: u64) -> ScanProgress {
+        ScanProgress {
+            session_id: "s".into(),
+            phase: ScanPhase::Tagging,
+            total,
+            discovered,
+            processed,
+            failed,
+            files_per_second: 0.0,
+            eta_seconds: None,
+            resident_mb: 0,
+            available_mb: 0,
+        }
+    }
+
+    #[test]
+    fn the_first_pass_shows_its_own_counts() {
+        let mut snapshot = tagging_snapshot(4, 4, 3, 1);
+        ProgressLift::default().apply(&mut snapshot);
+        assert_eq!((snapshot.total, snapshot.discovered, snapshot.processed, snapshot.failed), (4, 4, 3, 1));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_retry_round_continues_the_scans_counts_instead_of_restarting_them() {
+        let first = SessionResult {
+            processed: 4,
+            failed: 2,
+            elapsed_seconds: 1.0,
+            needs_follow_up: true,
+            timed_out: 2,
+            capture_dates_current: true,
+            progress_floor: ProgressFloor { total: 4, discovered: 4, processed: 4 },
+        };
+        let (sink, _writer) = crate::ipc::sink::Sink::spawn();
+        let session = ScanSession::new(
+            ScanCoordinator::new(),
+            Arc::new(Mutex::new(crate::db::test_support::memory_db())),
+            8,
+            sink,
+            ModelSource::lazy(|| unreachable!("no model is needed to plan a follow-up")),
+            false,
+            Vec::new(),
+        )
+        .follow_up(&first, 1);
+        let lift = session.progress_lift();
+        let mut last = (4, 4, 4);
+        for (total, discovered, processed) in [(0, 0, 0), (0, 2, 0), (2, 2, 0), (2, 2, 1), (2, 2, 2)] {
+            let mut snapshot = tagging_snapshot(total, discovered, processed, 0);
+            lift.apply(&mut snapshot);
+            assert!(snapshot.discovered >= last.0 && snapshot.processed >= last.2, "{snapshot:?} fell below {last:?}");
+            assert!(snapshot.total == 0 || snapshot.total >= last.1, "{snapshot:?} fell below {last:?}");
+            if total == 0 {
+                assert_eq!(snapshot.total, 4, "the total shown before stays shown while the pass walks the folder");
+            }
+            last = (snapshot.discovered, snapshot.total, snapshot.processed);
+        }
+        assert_eq!(last, (4, 4, 4), "two files read again finish the four of the scan");
+    }
+
+    #[test]
+    fn a_later_round_with_more_new_files_raises_the_total() {
+        let lift = ProgressLift { carried_processed: 2, carried_failed: 0, floor: ProgressFloor { total: 4, discovered: 4, processed: 4 } };
+        let mut snapshot = tagging_snapshot(5, 5, 5, 0);
+        lift.apply(&mut snapshot);
+        assert_eq!((snapshot.total, snapshot.discovered, snapshot.processed), (7, 7, 7));
+    }
+
+    #[test]
+    fn each_timed_out_retry_round_waits_longer_and_there_are_three() {
+        let waits: Vec<_> = (1..=TIMEOUT_RETRY_ROUNDS).map(timeout_retry_backoff).collect();
+        assert_eq!(TIMEOUT_RETRY_ROUNDS, 3);
+        assert!(waits.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn the_follow_up_replaces_the_timed_out_files_counts_and_uses_fewer_workers() {
+        let first = SessionResult {
+            processed: 40,
+            failed: 14,
+            elapsed_seconds: 30.0,
+            needs_follow_up: true,
+            timed_out: 12,
+            capture_dates_current: true,
+            progress_floor: ProgressFloor::default(),
+        };
+        let (sink, _writer) = crate::ipc::sink::Sink::spawn();
+        let session = ScanSession::new(
+            ScanCoordinator::new(),
+            Arc::new(Mutex::new(crate::db::test_support::memory_db())),
+            8,
+            sink,
+            ModelSource::lazy(|| unreachable!("no model is needed to plan a follow-up")),
+            true,
+            Vec::new(),
+        )
+        .follow_up(&first, 2);
+        assert_eq!((session.carried.0, session.carried.1), (28, 2));
+        assert_eq!(session.worker_count, 2);
+        assert!(session.retrying_timeouts && !session.allow_follow_up && !session.rescan);
+        assert_eq!(session.retry_round, 2);
     }
 
     #[test]
@@ -2132,9 +2471,7 @@ mod tests {
         let mut st = ProgressState::new();
         let t0 = Instant::now();
         st.rate_anchor = t0;
-        // Window 1: 10 heavy in 1s → heavy rate ~10/s.
         let _ = st.observe_rate(10, 10, t0 + Duration::from_secs(1));
-        // Window 2: 400 light in 1s → light rate ~400/s, heavy rate HELD.
         let _ = st.observe_rate(410, 10, t0 + Duration::from_secs(2));
         assert!((st.rolling_heavy_fps - 10.0).abs() < 1.0, "heavy rate held: {}", st.rolling_heavy_fps);
         assert!(st.rolling_light_fps > 100.0, "light rate: {}", st.rolling_light_fps);
@@ -2142,7 +2479,6 @@ mod tests {
         // few seconds of light files — NOT (2000 / blended≈210) ≈ 9.5s.
         let eta = st.eta_seconds(1000, 1000).unwrap();
         assert!(eta > 90.0 && eta < 130.0, "eta: {eta}");
-        // No remaining work → no ETA.
         assert!(st.eta_seconds(0, 0).is_none());
     }
 
@@ -2162,12 +2498,10 @@ mod tests {
         let fps1 = st.observe_rate(5, 0, t0 + Duration::from_secs(1));
         assert!((fps1 - 5.0).abs() < 0.01, "first-interval rate should be 5/s, got {fps1}");
 
-        // Sustained 5/s → EMA stays ~5.
         let fps2 = st.observe_rate(10, 0, t0 + Duration::from_secs(2));
         assert!((fps2 - 5.0).abs() < 0.01, "sustained rate ~5/s, got {fps2}");
 
         // An ETA built on this rate is hours for tens of thousands remaining,
-        // not 13 seconds — proving the bug is gone.
         let eta = 18_000.0_f64 / fps2;
         assert!(eta > 3000.0, "eta should be ~hours ({eta}s)");
     }
@@ -2180,15 +2514,11 @@ mod tests {
         let lo = r"C:\Users\a\Photos";
         let hi = prefix_upper_bound(lo).unwrap();
         assert!(lo < hi.as_str(), "lo must sort before hi");
-        // A child path is inside [lo, hi).
         let child = r"C:\Users\a\Photos\2024\img.jpg";
         assert!(lo <= child && child < hi.as_str());
-        // A sibling that merely shares a shorter prefix is outside.
         let sibling = r"C:\Users\a\Pictures\x.jpg";
         assert!(!(lo <= sibling && sibling < hi.as_str()));
-        // Empty prefix → no finite bound.
         assert_eq!(prefix_upper_bound(""), None);
-        // Simple increment.
         assert_eq!(prefix_upper_bound("abc").as_deref(), Some("abd"));
     }
 
@@ -2548,10 +2878,9 @@ mod tests {
     }
 
     #[test]
-    fn text_embed_gate_needs_both_the_weights_and_a_runtime() {
-        assert_eq!(text_embed_gate(true, true), SKIP_SET_TEXT_EMBED_GATE);
-        assert_eq!(text_embed_gate(true, false), "", "weights without a runtime must not re-walk every document");
-        assert_eq!(text_embed_gate(false, true), "");
+    fn text_embed_gate_needs_the_weights() {
+        assert_eq!(text_embed_gate(true), SKIP_SET_TEXT_EMBED_GATE);
+        assert_eq!(text_embed_gate(false), "");
     }
 
     #[test]
@@ -2610,7 +2939,7 @@ mod tests {
         assert!(set.contains_key(&path_fingerprint_text("C:\\Lib\\b.jpg")), "b.jpg stays skipped");
     }
 
-    /// C1-013: the incremental skip-set must NOT skip a file whose
+    /// The incremental skip-set must NOT skip a file whose
     /// reparse/placeholder state changed (dehydrated→hydrated). A OneDrive
     /// online-only placeholder is recorded with `content_hash = NULL` and
     /// `scanned_at >= modified_at`; after the user hydrates it, the modified
@@ -2684,7 +3013,7 @@ mod tests {
         );
     }
 
-    /// R-14 (lockstep with macOS `skipSetTextBackfillExclusionSQL`): the BGE-text gate
+    /// Lockstep with macOS `skipSetTextBackfillExclusionSQL`: the BGE-text gate
     /// must keep a doc/pdf still lacking a `text_embeddings` row OUT of the skip set
     /// (so an install-then-rescan backfills it), while leaving docs that already have
     /// one — and non-doc kinds entirely — in the skip set.
@@ -2765,7 +3094,7 @@ mod tests {
         );
     }
 
-    /// R-14 (lockstep with macOS `skipSetModelClipBackfillExclusionSQL`): the model-CLIP
+    /// Lockstep with macOS `skipSetModelClipBackfillExclusionSQL`: the model-CLIP
     /// gate must keep a `.obj` still lacking a `clip_embeddings` row OUT of the skip set
     /// (so a rescan backfills its rendered-shape vector), while leaving an embedded `.obj`,
     /// a non-`.obj` 3D format (not renderable), and non-model kinds in the skip set.
@@ -2865,5 +3194,110 @@ mod tests {
         assert!(skip.contains("/v/embedded.mov"));
         assert!(skip.contains("/a/song.m4a"));
     }
-}
 
+    fn post_scan_progress(event: IpcEvent) -> ScanProgress {
+        match event.payload {
+            EventPayload::Progress(progress) => progress.inner,
+            other => panic!("expected progress, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_repeats_its_progress_while_a_read_is_slow() {
+        let (sink, mut events) = Sink::channel_for_test(256);
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 100,
+            processed: 100,
+            failed: 2,
+            lift: ProgressLift::default(),
+            state: Mutex::new((0, 0, Instant::now())),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(20));
+        report.report(crate::pipeline::catch_up::Progress::Total(30));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        report.report(crate::pipeline::catch_up::Progress::Advance(10));
+        report.report(crate::pipeline::catch_up::Progress::Total(25));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        heartbeat.abort();
+        let _ = heartbeat.await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(post_scan_progress(event));
+        }
+        assert!(seen.len() >= 8, "a progress event about every tick, got {}", seen.len());
+        assert!(seen.iter().all(|p| p.session_id == "one-session" && p.phase == ScanPhase::PostScan && p.failed == 2 && p.discovered == 100));
+        for pair in seen.windows(2) {
+            assert!(pair[1].total >= pair[0].total, "total never shrinks: {} then {}", pair[0].total, pair[1].total);
+            assert!(pair[1].processed >= pair[0].processed, "processed never shrinks: {} then {}", pair[0].processed, pair[1].processed);
+        }
+        let last = seen.last().unwrap();
+        assert_eq!((last.total, last.processed), (130, 110), "a smaller later estimate does not shrink the total");
+        assert!(seen.iter().all(|p| p.processed <= p.total));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn catch_up_snapshots_from_the_pass_and_the_heartbeat_never_go_backwards() {
+        let (sink, mut events) = Sink::channel_for_test(1 << 16);
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            lift: ProgressLift::default(),
+            state: Mutex::new((0, 0, Instant::now())),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
+        report.report(crate::pipeline::catch_up::Progress::Total(2000));
+        let passes: Vec<_> = (0..4)
+            .map(|_| {
+                let report = report.clone();
+                tokio::task::spawn_blocking(move || {
+                    for _ in 0..400 {
+                        report.report(crate::pipeline::catch_up::Progress::Advance(1));
+                    }
+                })
+            })
+            .collect();
+        for pass in passes {
+            pass.await.unwrap();
+        }
+        heartbeat.abort();
+        let _ = heartbeat.await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(post_scan_progress(event));
+        }
+        assert!(seen.len() >= 1600);
+        for pair in seen.windows(2) {
+            assert!(pair[1].processed >= pair[0].processed, "processed went back: {} then {}", pair[0].processed, pair[1].processed);
+            assert!(pair[1].total >= pair[0].total);
+        }
+        assert_eq!(seen.last().unwrap().processed, 10 + 1600);
+    }
+
+    #[tokio::test]
+    async fn no_catch_up_progress_follows_an_awaited_heartbeat_abort() {
+        let (sink, mut events) = Sink::channel_for_test(1 << 12);
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            lift: ProgressLift::default(),
+            state: Mutex::new((0, 0, Instant::now())),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        heartbeat.abort();
+        let _ = heartbeat.await;
+        while events.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(events.try_recv().is_err(), "the heartbeat stopped before the terminal event");
+    }
+}

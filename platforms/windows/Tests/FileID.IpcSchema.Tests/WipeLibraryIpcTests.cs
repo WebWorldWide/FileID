@@ -3,10 +3,7 @@ using Xunit;
 
 namespace FileID.IpcSchema.Tests;
 
-// Contract guard for the engine-side wipe: the app sends `wipeLibrary`
-// (empty-payload command) and the engine replies `libraryWiped` (a _0-wrapped
-// LibraryWiped). Both must round-trip in the externally-tagged shape the Swift/
-// Rust generators agree on, or the wipe flow silently breaks.
+// Both must round-trip in the externally-tagged shape the Swift/ Rust generators agree on, or the wipe flow silently breaks.
 public class WipeLibraryIpcTests
 {
     [Fact]
@@ -25,7 +22,6 @@ public class WipeLibraryIpcTests
     {
         var ev = new IpcEvent(System.DateTimeOffset.UtcNow, new LibraryWipedEvent(new LibraryWiped(true)));
         var json = IpcCoder.Encode(ev);
-        // Single-positional payload is wrapped in `_0`.
         Assert.Contains("\"_0\"", json);
         var back = IpcCoder.Decode<IpcEvent>(json);
         var payload = Assert.IsType<LibraryWipedEvent>(back.Payload);

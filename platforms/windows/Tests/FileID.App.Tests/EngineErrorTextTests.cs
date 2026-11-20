@@ -11,6 +11,8 @@ public sealed class EngineErrorTextTests
     [InlineData("scan_failed", "The scan stopped")]
     [InlineData("db_unavailable", "The library couldn't be opened")]
     [InlineData("db_open_failed", "The library couldn't be opened")]
+    [InlineData("db_disk_full", "Your disk is full")]
+    [InlineData("scan_disk_full", "Your disk is full")]
     [InlineData("db_newer_than_engine", "This library needs a newer FileID")]
     [InlineData("folder_access_denied", "FileID can't reach that folder")]
     [InlineData("command_decode_failed", "FileID couldn't do that")]

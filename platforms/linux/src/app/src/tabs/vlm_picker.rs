@@ -1,7 +1,6 @@
 // Describe Files model picker: the curated description models first, then the
 // shared engine's portable catalog vision models that run here, fit this
-// machine's memory (engine `listModels` fit: ~60% of RAM or VRAM with
-// headroom) and are licensed for commercial use.
+// machine's memory (the engine's `listModels` fit, which is its own memory admission) and are licensed for commercial use.
 
 use fileid_engine::ipc::ModelCatalogItem;
 
@@ -161,6 +160,7 @@ mod tests {
             runnable: true,
             installed: false,
             fits,
+            fits_now: fits,
             benchmark: None,
         }
     }

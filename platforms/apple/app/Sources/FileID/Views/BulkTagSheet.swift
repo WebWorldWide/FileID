@@ -20,7 +20,7 @@ struct BulkTagSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Apply tags to \(files.count) file\(files.count == 1 ? "" : "s")")
-                        .font(Theme.Font.body(20, .semibold))
+                        .font(Theme.Font.display(28))
                     Text("Comma-separated. Existing tags on each file are preserved — only new tags get added.")
                         .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
@@ -30,7 +30,7 @@ struct BulkTagSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
             TextField("e.g. Vacation, Family, Important", text: $rawTags)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .font(Theme.Font.body(13.5))
             if let s = status {
                 Text(s).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
@@ -45,13 +45,14 @@ struct BulkTagSheet: View {
                         .foregroundStyle(.black)
                         .font(Theme.Font.body(13.5, .semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .keyboardShortcut(.defaultAction)
                 .disabled(inFlight || parsedTags.isEmpty || files.isEmpty)
             }
         }
         .padding(20)
         .frame(width: 520)
+        .sheetSurface()
     }
 
     private var parsedTags: [String] {
@@ -66,9 +67,7 @@ struct BulkTagSheet: View {
         inFlight = true
         status = nil
         let urls = files.map(\.url)
-        // Work off-MainActor via `Task.detached().value`, then resume on
-        // MainActor for the UI updates. Avoids Swift 6 Sendable-capture
-        // issues with the view's onComplete closure.
+        // Off the MainActor via `Task.detached().value`, then back on MainActor for UI updates.
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 // journal: nil — the sheet owns the journal write so a
@@ -81,11 +80,11 @@ struct BulkTagSheet: View {
             }.value
             inFlight = false
             if result.failed == 0 && result.unchanged == 0 {
-                status = "Tagged \(result.added) file\(result.added == 1 ? "" : "s")"
+                status = "Tagged \(Plural.noun(result.added, "file", "files"))"
             } else if result.failed == 0 {
-                status = "Tagged \(result.added) · \(result.unchanged) already had these tags"
+                status = "Tagged \(result.added.formatted()) · \(result.unchanged.formatted()) already had these tags"
             } else {
-                status = "Tagged \(result.added) · \(result.unchanged) unchanged · \(result.failed) failed"
+                status = "Tagged \(result.added.formatted()) · \(result.unchanged.formatted()) unchanged · \(result.failed.formatted()) couldn’t be tagged"
                     + (result.firstError.map { " — \($0)" } ?? "")
             }
             store.notifyChanged()

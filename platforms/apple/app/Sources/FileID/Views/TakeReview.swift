@@ -5,7 +5,7 @@ import SwiftUI
 
 /// Review one suggested group of takes: side-by-side compare (best vs. the
 /// focused take), a filmstrip with the recommendation starred, plain reasons,
-/// keyboard (← → move, Space keep, Z zoom to face, ⌘⌫ keep the marked ones), and
+/// keyboard (← → move, Space keep, Z zoom to face, Return or ⌘⌫ keep the marked ones), and
 /// one primary action that moves the other takes to the Trash with Undo.
 struct TakeReview: View {
     @Bindable var engine: EngineClient
@@ -51,7 +51,7 @@ struct TakeReview: View {
                 if loading {
                     loadingState
                 } else if let failure {
-                    DashedNotice(title: "Couldn't compare these \(noun.many)", subtitle: failure)
+                    DashedNotice(title: "Couldn’t compare these \(noun.many)", subtitle: failure)
                 } else if !qualities.isEmpty {
                     compare
                     filmstrip
@@ -92,8 +92,16 @@ struct TakeReview: View {
             HStack(spacing: 8) {
                 Button(primaryTitle) { confirmTrash = true }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
-                    .disabled(loading || trashing || victims.isEmpty || keep.isEmpty)
-                    .keyboardShortcut(pageActive ? KeyboardShortcut(.delete, modifiers: .command) : nil)
+                    .disabled(primaryDisabled)
+                    .keyboardShortcut(pageActive ? .defaultAction : nil)
+                    .background {
+                        Button("") { confirmTrash = true }
+                            .keyboardShortcut(pageActive ? KeyboardShortcut(.delete, modifiers: .command) : nil)
+                            .disabled(primaryDisabled)
+                            .opacity(0)
+                            .frame(width: 0, height: 0)
+                            .accessibilityHidden(true)
+                    }
                     .help(primaryHelp)
                 Button("Keep all") { Task { await decide("keepAll") } }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.control))
@@ -135,17 +143,24 @@ struct TakeReview: View {
     }
 
     private var primaryTitle: String {
-        let others = victims.count
-        if keep.count <= 1, let best = bestID, keep.contains(best) {
-            return "Keep the best, move the other \(others) to Trash"
-        }
-        return "Keep \(keep.count), move the other \(others) to Trash"
+        Self.primaryTitle(loading: loading, hasTakes: !qualities.isEmpty, kept: keep.count, others: victims.count,
+                          keepsOnlyBest: bestID.map { keep.contains($0) } ?? false)
     }
+
+    /// The button never states a count before there is something to count: while the takes are still being checked, or when they could not be checked, it says so.
+    static func primaryTitle(loading: Bool, hasTakes: Bool, kept: Int, others: Int, keepsOnlyBest: Bool) -> String {
+        if loading { return "Checking these takes…" }
+        if !hasTakes { return "Move the others to Trash" }
+        if kept <= 1, keepsOnlyBest { return "Keep the best, move the other \(others) to Trash" }
+        return "Keep \(kept), move the other \(others) to Trash"
+    }
+
+    private var primaryDisabled: Bool { loading || trashing || victims.isEmpty || keep.isEmpty }
 
     private var primaryHelp: String {
         if keep.isEmpty { return "Mark at least one \(noun.one) to keep (Space)" }
         if victims.isEmpty { return "Everything here is marked keep. Use Keep all." }
-        return "Moves the other \(noun.many) to the Trash. You can put them back afterwards. (⌘⌫)"
+        return "Moves the other \(noun.many) to the Trash. You can put them back afterwards. (Return or ⌘⌫)"
     }
 
     private var confirmTitle: String {
@@ -155,7 +170,7 @@ struct TakeReview: View {
     private var confirmMessage: String {
         let files = victims.reduce(0) { $0 + $1.fileIDs.count }
         let kept = qualities.filter { keep.contains($0.primaryFileID) }.map { URL(fileURLWithPath: $0.path).lastPathComponent }
-        let extra = files > victims.count ? " (\(files) files, including RAW copies)" : ""
+        let extra = files > victims.count ? " (\(Plural.noun(files, "file", "files")), including RAW copies)" : ""
         return "Keeps \(kept.joined(separator: ", ")). The others\(extra) go to the Trash. Put back last move in Best Takes returns them."
     }
 
@@ -304,7 +319,7 @@ struct TakeReview: View {
                         ForEach(Array(qualities.enumerated()), id: \.element.primaryFileID) { index, q in
                             FilmstripTile(quality: q, index: index + 1, count: qualities.count, noun: noun.one,
                                           best: q.primaryFileID == bestID, kept: keep.contains(q.primaryFileID),
-                                          focused: index == focusedIndex,
+                                          focused: index == focusedIndex, stripFocused: stripFocused,
                                           onFocus: { focus(index) }, onToggleKeep: { toggleKeep(q) })
                                 .id(q.primaryFileID)
                         }
@@ -319,18 +334,13 @@ struct TakeReview: View {
             .focusable()
             .focused($stripFocused)
             .focusEffectDisabled()
-            .overlay {
-                if stripFocused {
-                    RoundedRectangle(cornerRadius: Theme.Radius.m + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false)
-                }
-            }
             .onKeyPress(.leftArrow) { focus(focusedIndex - 1); return .handled }
             .onKeyPress(.rightArrow) { focus(focusedIndex + 1); return .handled }
             .onKeyPress(.space) { if let q = qualities[safe: focusedIndex] { toggleKeep(q) }; return .handled }
             .onKeyPress(characters: CharacterSet(charactersIn: "zZ")) { _ in withAnimation(Theme.springStandard) { zoom.toggle() }; return .handled }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("\(qualities.count) \(noun.many). Left and right arrows move, Space marks keep.")
-            MetaText("← → move · Space keep · Z zoom · ⌘⌫ keeps the marked \(noun.many) and moves the rest to Trash", size: 11.5)
+            MetaText("← → move · Space keep · Z zoom · Return keeps the marked \(noun.many) and moves the rest to Trash", size: 11.5)
         }
     }
 
@@ -343,13 +353,17 @@ struct TakeReview: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    DSTextField(placeholder: "What should happen? e.g. Kyle gets a hit, everyone smiling", text: $goal, height: Theme.Metrics.control) {
+                    DSTextField(placeholder: "What should happen?", text: $goal, height: Theme.Metrics.control) {
                         Task { await rankWithGoal() }
                     }
+                    .help("For example: Kyle gets a hit, everyone smiling")
                     Button { Task { await rankWithGoal() } } label: { Label("Rank with AI", systemImage: "sparkles") }
                         .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.control))
                         .disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || rankingInFlight)
                         .help("Looks at all the \(noun.many) together, using the same AI as Describe Files. Runs on this Mac.")
+                }
+                if ranking == nil {
+                    MetaText("For example: Kyle gets a hit, everyone smiling", size: 11.5)
                 }
                 if let ranking {
                     HStack(alignment: .top, spacing: 10) {
@@ -401,7 +415,7 @@ struct TakeReview: View {
         player?.pause(); player = nil; playingID = nil
         let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "scoreTakes", fileIDs: group.fileIDs), timeout: 180)
         guard let response, response.status == "ok", let scored = response.takeQualities, !scored.isEmpty else {
-            failure = response?.message ?? "FileID didn't answer in time. Try again in a moment."
+            failure = response?.message ?? "FileID didn’t answer in time. Try again in a moment."
             loading = false
             return
         }
@@ -422,7 +436,7 @@ struct TakeReview: View {
         let order = qualities.sorted { $0.rank < $1.rank }.map(\.primaryFileID)
         let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "rankTakesWithGoal", query: text, fileIDs: order), timeout: 300)
         guard let response, response.status == "ok", let result = response.takeGoalRanking else {
-            ToastCenter.shared.show(response?.message ?? "The goal check didn't finish. The ranking stays on photo quality.")
+            ToastCenter.shared.show(response?.message ?? "The goal check didn’t finish. The ranking stays on photo quality.")
             return
         }
         withAnimation(Theme.springStandard) {
@@ -439,11 +453,11 @@ struct TakeReview: View {
         let request = CatalogRequest(requestID: UUID().uuidString, action: "decideTakeGroup",
                                      takeDecision: CatalogTakeDecision(groupKey: group.groupKey, decision: decision, fileIDs: group.fileIDs))
         guard let response = await TakeRequests.send(engine, request, timeout: 30), response.status == "ok" else {
-            ToastCenter.shared.show("That didn't save. Try again.")
+            ToastCenter.shared.show("That didn’t save. Try again.")
             return
         }
         let group = self.group, engine = self.engine, onResolved = self.onResolved
-        let text = decision == "keepAll" ? "Kept all \(group.shots.count). This group won't be suggested again." : "Skipped. It's at the bottom of the list."
+        let text = decision == "keepAll" ? "Kept all \(group.shots.count). This group won’t be suggested again." : "Skipped. It’s at the bottom of the list."
         ToastCenter.shared.show(text, actionLabel: "Undo", duration: 8) {
             Task {
                 _ = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "decideTakeGroup",
@@ -470,7 +484,7 @@ struct TakeReview: View {
         }
         let commandID = engine.lastSentCommandID
         guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", commandID: commandID, timeout: 120) else {
-            trashProblem = "Moving to Trash took too long, so FileID can't tell how many moved. Check the Trash before trying again."
+            trashProblem = "Moving to Trash took too long, so FileID can’t tell how many moved. Check the Trash before trying again."
             return
         }
         let keptIDs = keptShots.flatMap(\.fileIDs)
@@ -483,7 +497,7 @@ struct TakeReview: View {
         let movedShots = doomed.filter { !moved.isDisjoint(with: $0.fileIDs) }.count
         let batch = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         var text = "Moved \(movedShots) \(movedShots == 1 ? noun.one : noun.many) to Trash"
-        if result.failed > 0 { text += " · \(result.failed) couldn't be moved" }
+        if result.failed > 0 { text += " · \(result.failed.formatted()) couldn’t be moved" }
         let engine = self.engine, onResolved = self.onResolved, group = self.group, keepAllShots = keptShots.count >= 2
         if let batch {
             UserDefaults.standard.set(batch, forKey: TakeRequests.lastTrashBatchKey)
@@ -514,6 +528,18 @@ struct TakeReview: View {
 
     static func dateText(_ seconds: Double) -> String {
         Date(timeIntervalSince1970: seconds).formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+    }
+
+    static func shortDateText(_ seconds: Double) -> String {
+        Date(timeIntervalSince1970: seconds).formatted(.dateTime.day().month(.abbreviated).hour().minute())
+    }
+
+    static func dayText(_ seconds: Double) -> String {
+        Date(timeIntervalSince1970: seconds).formatted(.dateTime.day().month(.abbreviated))
+    }
+
+    static func clockTimeText(_ seconds: Double) -> String {
+        Date(timeIntervalSince1970: seconds).formatted(.dateTime.hour().minute())
     }
 
     static func scoreWord(_ score: Double) -> String {
@@ -551,7 +577,7 @@ private struct ReasonChips: View {
         if reasons.isEmpty {
             MetaText("Nothing stands out", size: 11.5)
         } else {
-            HStack(spacing: 6) {
+            FlowLayout(spacing: 6) {
                 ForEach(reasons, id: \.self) { reason in
                     let good = Self.positives.contains(reason)
                     Text(reason).font(Theme.Font.body(11.5, .medium))
@@ -559,7 +585,7 @@ private struct ReasonChips: View {
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background((good ? (reason.contains("goal") ? Theme.ai : Theme.gold) : Color.white).opacity(good ? 0.12 : 0.07),
                                     in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
-                        .lineLimit(1)
+                        .fixedSize()
                 }
             }
             .accessibilityElement(children: .ignore)
@@ -579,6 +605,8 @@ private struct FilmstripTile: View {
     let best: Bool
     let kept: Bool
     let focused: Bool
+    /// The strip has keyboard focus: the current tile wears the gold focus ring instead of the white marker.
+    let stripFocused: Bool
     let onFocus: () -> Void
     let onToggleKeep: () -> Void
 
@@ -592,7 +620,7 @@ private struct FilmstripTile: View {
                 HStack(spacing: 4) {
                     Text("\(index)").font(Theme.Font.mono(10.5, .semibold)).foregroundStyle(best ? Theme.onGold : Theme.text1)
                         .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(best ? Theme.gold : Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
+                        .background(best ? Theme.gold : Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
                     if best { Image(systemName: "star.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.gold) }
                 }
                 .padding(5)
@@ -604,7 +632,7 @@ private struct FilmstripTile: View {
                 }
             }
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
-                .stroke(focused ? Theme.text1 : (best ? Theme.gold : Theme.hairlineStrong), lineWidth: focused || best ? 2 : 1))
+                .strokeBorder(focused ? (stripFocused ? Theme.focusRing : Theme.text1) : (best ? Theme.gold : Theme.hairlineStrong), lineWidth: focused || best ? 2 : 1))
             .scaleEffect(focused ? 1.04 : 1)
         }
         .buttonStyle(.plain)
@@ -615,7 +643,7 @@ private struct FilmstripTile: View {
         .accessibilityLabel("\(noun.capitalized) \(index) of \(count), \(URL(fileURLWithPath: quality.path).lastPathComponent)\(best ? ", recommended" : "")\(kept ? ", keep" : ""), looks \(TakeReview.scoreWord(quality.score).lowercased())")
         .accessibilityHint(quality.reasons.joined(separator: ", "))
         .accessibilityAddTraits(focused ? .isSelected : [])
-        .accessibilityAction(named: kept ? "Don't keep" : "Keep", onToggleKeep)
+        .accessibilityAction(named: kept ? "Don’t keep" : "Keep", onToggleKeep)
     }
 }
 

@@ -1,9 +1,5 @@
 ﻿// AppPaths — C# mirror of the Rust engine's `paths.rs`.
-//
-// All app-side filesystem locations live under %LOCALAPPDATA%\FileID\.
-// Engine + app share the same directory layout so a DB written by the
-// engine is reachable by the app's read-only connection without any
-// path-translation logic.
+// Engine + app share the same directory layout so a DB written by the engine is reachable by the app's read-only connection without any path-translation logic.
 
 using System.IO;
 
@@ -11,7 +7,6 @@ namespace FileID.Services;
 
 internal static class AppPaths
 {
-    /// <summary>%LOCALAPPDATA%\FileID\</summary>
     public static string Root { get; } = ResolveRoot();
 
     public static string DbPath => ResolveDbPath(Root, Environment.GetEnvironmentVariable("FILEID_DB"));
@@ -23,11 +18,6 @@ internal static class AppPaths
     public static string SettingsPath => Path.Combine(Root, "app-settings.json");
     public static string AppLogPath => Path.Combine(LogsDir, "app.log");
 
-    /// <summary>
-    /// Engine binary path. Looks beside the app first (ship layout where
-    /// FileID.exe and FileIDEngine.exe sit in the same install dir) and
-    /// falls back to the dev build location for `dotnet run` workflows.
-    /// </summary>
     public static string EngineExePath
     {
         get
@@ -37,8 +27,7 @@ internal static class AppPaths
             {
                 return beside;
             }
-            // Dev fallback: ../../engine/target/{x86_64,aarch64}-pc-windows-msvc/release/FileIDEngine.exe
-            // The platform string varies by target triple; we try both.
+            // Dev fallback: ../../engine/target/{x86_64,aarch64}-pc-windows-msvc/release/FileIDEngine.exe The platform string varies by target triple; we try both.
             var arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
             string triple = arch == System.Runtime.InteropServices.Architecture.Arm64
                 ? "aarch64-pc-windows-msvc"
@@ -60,11 +49,7 @@ internal static class AppPaths
         }
     }
 
-    // Run-once guard. The app's directory tree does not vanish mid-session, so
-    // the six CreateDirectory syscalls only need to happen the first time. This
-    // matters most for the DebugLog.Write hot path, which calls EnsureDirectories
-    // per line (twice per inbound IPC event via the [APPLY:N] enter/exit lines):
-    // without this guard each log line paid ~6 fs syscalls.
+    // Run-once guard: the app's directory tree does not vanish mid-session, so the CreateDirectory syscalls only need to happen once. This matters most for the DebugLog.Write hot path, which calls EnsureDirectories per line (twice per inbound IPC event via the [APPLY:N] enter/exit lines): without this guard each log line paid ~6 fs syscalls.
     private static volatile bool _directoriesEnsured;
 
     public static void EnsureDirectories()

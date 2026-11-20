@@ -1,0 +1,64 @@
+{
+ "mtimes": {
+  "docs/a.txt": [
+   1724989629,
+   833179165
+  ],
+  "docs/b.txt": [
+   1603520313,
+   785102536
+  ],
+  "docs/c.txt": [
+   1704538783,
+   171373719
+  ],
+  "docs/d.txt": [
+   1700000000,
+   0
+  ],
+  "images/e.png": [
+   1719409671,
+   136042265
+  ],
+  "images/f.png": [
+   1635498135,
+   1905740
+  ]
+ },
+ "removed": [],
+ "vars": {
+  "fid": 3,
+  "first": [
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-modified-times-and-reviewed-rows/tree/docs/a.txt",
+    24,
+    1724989629.8331792
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-modified-times-and-reviewed-rows/tree/docs/b.txt",
+    24,
+    1603520313.7851026
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-modified-times-and-reviewed-rows/tree/docs/c.txt",
+    24,
+    1704538783.1713736
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-modified-times-and-reviewed-rows/tree/docs/d.txt",
+    24,
+    1700000000.0
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-modified-times-and-reviewed-rows/tree/images/e.png",
+    850,
+    1719409671.1360424
+   ],
+   [
+    "/private/tmp/fileid-conformance-fixture/swift-written-scan-modified-times-and-reviewed-rows/tree/images/f.png",
+    850,
+    1635498135.0019057
+   ]
+  ]
+ }
+}

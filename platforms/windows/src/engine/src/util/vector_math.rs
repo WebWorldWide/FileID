@@ -1,7 +1,5 @@
-//! Dot product and squared distance over eight independent accumulators.
-//! A single running `f32` sum cannot be reordered by the compiler, so it stays
-//! scalar; eight lanes vectorise. The lane order is fixed, so results are
-//! identical on every run and thread count.
+//! Dot product and squared distance over eight independent accumulators: a single f32 sum cannot be reordered so stays
+//! scalar, eight lanes vectorise, and the fixed lane order keeps results identical across runs and thread counts.
 
 const LANES: usize = 8;
 
@@ -36,6 +34,13 @@ pub(crate) fn squared_l2(a: &[f32], b: &[f32]) -> f32 {
     }
     let tail: f32 = a_tail.iter().zip(b_tail).map(|(x, y)| (x - y) * (x - y)).sum();
     lanes.iter().sum::<f32>() + tail
+}
+
+pub(crate) fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
 }
 
 #[cfg(test)]

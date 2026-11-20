@@ -26,7 +26,6 @@ fn unit(axis: usize) -> Vec<f32> {
     v
 }
 
-/// A photo on disk with `faces` boxes, stamped like a fresh Swift scan (no vectors).
 fn photo(conn: &Connection, dir: &Path, id: i64, faces: &[i64]) -> PathBuf {
     let path = dir.join(format!("{id}.jpg"));
     std::fs::write(&path, format!("photo {id}")).unwrap();
@@ -148,7 +147,7 @@ fn extract_pending_saves_vectors_crops_and_failures() {
     let crops = dir.0.join("face_crops");
     let fake = Fake { calls: AtomicUsize::new(0), fail_box: Some("0.1,0.1,0.2,0.21".into()) };
     let skip: HashSet<i64> = [60, 61].into_iter().collect();
-    let summary = extract_pending(&db, &fake, PROCESSING, &skip, Some(&crops), &|| false).unwrap();
+    let summary = extract_pending(&db, &fake, PROCESSING, &skip, Some(&crops), &|| false, &|_, _| {}).unwrap();
     assert_eq!(summary, Summary { pending: 11, extracted: 9, failed: 2, files: 6 });
     assert_eq!(fake.calls.load(Ordering::SeqCst), 5, "one call per readable photo; the missing one is not read");
     let conn = db.lock();
@@ -173,9 +172,31 @@ fn extract_pending_stops_when_cancelled() {
     photo(&conn, &dir.0, 1, &[1]);
     let db = database(conn);
     let fake = Fake { calls: AtomicUsize::new(0), fail_box: None };
-    let summary = extract_pending(&db, &fake, PROCESSING, &HashSet::new(), None, &|| true).unwrap();
+    let summary = extract_pending(&db, &fake, PROCESSING, &HashSet::new(), None, &|| true, &|_, _| {}).unwrap();
     assert_eq!(summary, Summary::default());
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     let failures: i64 = db.lock().query_row("SELECT COUNT(*) FROM face_refresh_failures", [], |r| r.get(0)).unwrap();
     assert_eq!(failures, 0);
+}
+
+#[test]
+fn extract_pending_reports_faces_read_out_of_all_pending() {
+    let dir = tempdir();
+    let conn = memory_db();
+    for file in 1..=4 {
+        photo(&conn, &dir.0, file, &[file * 10, file * 10 + 1]);
+    }
+    let db = database(conn);
+    let fake = Fake { calls: AtomicUsize::new(0), fail_box: None };
+    let skip: HashSet<i64> = [10].into_iter().collect();
+    let reports = Mutex::new(Vec::new());
+    extract_pending(&db, &fake, PROCESSING, &skip, None, &|| false, &|done, total| reports.lock().push((done, total))).unwrap();
+    let reports = reports.into_inner();
+    assert!(!reports.is_empty() && reports.iter().all(|&(done, total)| total == 7 && (1..=7).contains(&done)), "{reports:?}");
+    assert!(reports.windows(2).all(|pair| pair[0].0 <= pair[1].0), "{reports:?}");
+}
+
+#[test]
+fn extraction_runs_on_two_to_eight_threads() {
+    assert!((2..=8).contains(&extraction_threads()));
 }

@@ -1,10 +1,7 @@
 import Foundation
 import FileIDShared
 
-/// User-facing Deep Analyze model selection. Persists in UserDefaults
-/// under `deepAnalyzeActiveModel`; the engine reads the same key when it
-/// spawns. A valid persisted choice remains authoritative. The model picker
-/// and engine gate unsafe runs instead of silently replacing the user's pick.
+/// Persists in UserDefaults under `deepAnalyzeActiveModel`, which the engine also reads at spawn. A valid saved choice is never silently replaced.
 @Observable
 final class DeepAnalyzeSettings: @unchecked Sendable {
     static let shared = DeepAnalyzeSettings()
@@ -19,12 +16,7 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
         didSet { UserDefaults.standard.set(activeKind.rawValue, forKey: key) }
     }
 
-    /// Absolute folder paths to skip during a whole-library Deep Analyze
-    /// pass — separate from any scan exclusion: a folder can be fine to
-    /// catalog/tag/search but too slow or private to run the VLM over.
-    /// Persists as a plain string array in UserDefaults (mirrors `activeKind`'s
-    /// persistence pattern); sent fresh with every deepAnalyzeAll and ignored
-    /// whenever an explicit file selection (fileIDs) is present.
+    /// Absolute folder paths skipped by a whole-library Deep Analyze pass. Stored as a plain string array; sent with every deepAnalyzeAll and ignored when an explicit file selection is present.
     var excludedFolders: [String] {
         didSet { UserDefaults.standard.set(excludedFolders, forKey: Self.excludedFoldersKey) }
     }
@@ -56,11 +48,7 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
 
     /// Drop blank/relative entries, trim a trailing "/", dedupe, cap the
     /// list. Mirrors the Windows `AppSettings.SanitizeExcludedFolders` gate.
-    /// Case-sensitive dedupe/compare — unlike Windows' NTFS-driven
-    /// case-insensitive comparison, macOS paths are compared exactly the
-    /// same way the engine's SQL exclusion match does (plain `LIKE`, no
-    /// `COLLATE NOCASE`, matching `DeepAnalyzeRunner`'s existing
-    /// `.folder(prefix:)` scope convention).
+    /// Case-sensitive, to match the engine's plain `LIKE` exclusion match (unlike Windows' case-insensitive comparison).
     static func sanitizeExcludedFolders(_ raw: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
@@ -104,5 +92,15 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
 
     func removeExcludedFolder(_ path: String) {
         excludedFolders.removeAll { $0 == path }
+    }
+}
+
+extension AIModelKind {
+    /// The engine's pick for this Mac and the memory free right now, else the mirrored rule on the installed memory alone.
+    static func recommended(ramGB: Double, advice: VLMAdvice?, freeDiskBytes: Int64?) -> AIModelKind {
+        if let id = advice?.recommendedID, let kind = AIModelKind(rawValue: id), kind.fits(freeDiskBytes: freeDiskBytes) {
+            return kind
+        }
+        return safeDefaultFor(ramGB: ramGB, availableMB: advice.map { UInt64(max(0, $0.availableMB)) }, freeDiskBytes: freeDiskBytes)
     }
 }

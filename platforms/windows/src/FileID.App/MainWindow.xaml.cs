@@ -27,20 +27,9 @@ namespace FileID;
 
 public sealed partial class MainWindow : Window
 {
-    /// <summary>
-    /// Hard floor on window size. Below this, the sidebar's 260-DIP fixed
-    /// width starts crowding the detail pane and the welcome sheet's
-    /// 540-DIP MinWidth bleeds past the chrome.
-    /// </summary>
     private const int MinWidth = 1200;
     private const int MinHeight = 800;
 
-    /// <summary>
-    /// Launch size: comfortably bigger than the floor so the user sees a
-    /// real workspace on first launch. Sized to fit 1920×1080 with taskbar
-    /// margin AND look intentional at 2560×1440. Capped against the user's
-    /// actual display size so we never exceed the screen on smaller laptops.
-    /// </summary>
     private const int LaunchWidth = 1480;
     private const int LaunchHeight = 980;
 
@@ -295,9 +284,6 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Reserve the caption-button column and register every title-bar
-    /// control as a non-client passthrough rect. Everything else in row 0
-    /// stays the drag region. Rects are physical pixels in client space.</summary>
     private void UpdateTitleBarRegions()
     {
         try
@@ -367,7 +353,6 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Resize(new Windows.Graphics.SizeInt32(targetW, targetH));
 
-        // Center on the active display.
         int x = work.X + (work.Width - targetW) / 2;
         int y = work.Y + (work.Height - targetH) / 2;
         AppWindow.Move(new Windows.Graphics.PointInt32(x, y));
@@ -503,13 +488,8 @@ public sealed partial class MainWindow : Window
         _dpiSubclassProc = null;
     }
 
-    /// <summary>
-    /// Register every keyboard shortcut on the root layout so they fire
-    /// regardless of focus location.
-    /// </summary>
     private void WireKeyboardShortcuts()
     {
-        // Ctrl+O — pick folder
         AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, args) =>
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
@@ -542,7 +522,6 @@ public sealed partial class MainWindow : Window
             args.Handled = true;
         });
 
-        // Ctrl+Shift+S — toggle sidebar
         AddAccelerator(VirtualKey.S, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift,
             (_, args) =>
             {
@@ -551,7 +530,6 @@ public sealed partial class MainWindow : Window
                 args.Handled = true;
             });
 
-        // Ctrl+Z — undo last destructive action.
         AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, args) =>
         {
             if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
@@ -618,8 +596,6 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        // ShortcutsCheatSheet (F1 / Ctrl+?) removed for strict
-        // macOS parity — macOS has no centralized shortcuts panel.
     }
 
     private void AddAccelerator(VirtualKey key, VirtualKeyModifiers modifiers,
@@ -629,16 +605,12 @@ public sealed partial class MainWindow : Window
         {
             Key = key,
             Modifiers = modifiers,
-            // Window-scoped: fires regardless of focused element.
             ScopeOwner = null,
         };
         accel.Invoked += handler;
         ((FrameworkElement)Content).KeyboardAccelerators.Add(accel);
     }
 
-    /// <summary>
-    /// Raised by Ctrl+F. LibraryView listens and focuses the search box.
-    /// </summary>
     public event EventHandler? SearchFocusRequested;
 
     private void OnActivated(object sender, WindowActivatedEventArgs e)
@@ -803,7 +775,6 @@ public sealed partial class MainWindow : Window
         try { RemoveDpiHook(); } catch { /* swallow */ }
         AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
 
-        // Tell the engine to wrap up so the WAL gets checkpointed cleanly.
         try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
 
         // flush the debounced AppSettings.Save so pending edits
@@ -919,8 +890,6 @@ public sealed partial class MainWindow : Window
             return;
         }
         var items = await e.DataView.GetStorageItemsAsync();
-        // Take the first folder; ignore anything else (matches macOS — drop
-        // a single folder).
         foreach (var item in items)
         {
             if (item is Windows.Storage.StorageFolder folder)
@@ -978,7 +947,6 @@ public sealed partial class MainWindow : Window
                 return;
             }
         }
-        // No folder in drop — surface a gentle hint.
         try
         {
             await new ContentDialog

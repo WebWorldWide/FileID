@@ -57,7 +57,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // if a PropertyChanged event was dropped (singleton first-
             // touched off the UI thread, etc.).
             try { Svc.Refresh(); } catch { }
-            // sync the CUDA llama.cpp + cuDNN install buttons to
+            // sync the CUDA llama.cpp install button to
             // reflect already-installed state at page load. Before this
             // the buttons always showed "Install" and the user had to
             // click them just to see the state flip (matching engine's
@@ -71,14 +71,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // status equal to the cached field. NEXT.md tracked this
             // as the "install-state detection at page load" bug.
             try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
-            // Populate the Recent Scans card. Query is cheap (≤5 rows)
-            // so we do it inline on the dispatcher.
             try { _ = PopulateRecentScansAsync(); } catch { }
         };
     }
 
-    // Reads up to the 5 most-recent scan_sessions rows and renders one
-    // line per row in the Recent Scans card.
     private async System.Threading.Tasks.Task PopulateRecentScansAsync()
     {
         var rows = await System.Threading.Tasks.Task.Run(() =>
@@ -190,17 +186,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp is installed. Describe Files uses it on the next run.";
         }
-        // Gate on the ORT CUDA provider (the pack that actually enables the
-        // CUDA EP); cuDNN alone never flipped scanning off DirectML.
-        if (SentinelExists("ort_cuda_x64"))
-        {
-            InstallCudnnButton.Content = "Installed";
-            InstallCudnnButton.IsEnabled = false;
-            // Leave CudnnStatusText alone — SyncNvidiaSection owns it and
-            // already reflects whether the CUDA EP is actually active in
-            // the current engine session (which depends on engine restart,
-            // not just sentinel presence).
-        }
         // ArcFace requires the "arcface" sentinel (the engine bundles
         // SCRFD + ArcFace as one install in registry.rs).
         if (SentinelExists("arcface") && Svc.Arcface.Status != Services.ModelInstallStatus.Installed)
@@ -272,20 +257,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 OnPropertyChanged(nameof(GpuDiagnosticsText));
                 OnPropertyChanged(nameof(PowerDiagnosticsText));
                 OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
-                // SyncReprobeUi reads the live session's bound EP from Info, so
-                // refresh the cuDNN pill here too — after a restart re-binds CUDA
-                // the pill flips from "restart to switch" to "active".
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) { SyncNvidiaSection(); SyncReprobeUi(); } });
-            }
-            else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
-            {
-                Services.DebugLog.Info($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncReprobeUi(); });
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncNvidiaSection(); });
             }
         });
 
-    /// <summary>Toggle the NVIDIA acceleration card based on the detected
-    /// GPU vendor. The card configures the optional CUDA ORT execution provider.</summary>
     private void SyncNvidiaSection()
     {
         var hw = EngineClient.Instance.Info?.Hardware;
@@ -295,12 +270,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         if (isNvidia)
         {
             NvidiaAccelerationSection.Visibility = Visibility.Visible;
-            var ep = (hw?.ExecutionProvider ?? "").ToLowerInvariant();
-            CudnnStatusText.Text = ep == "cuda"
-                ? "✓ The current scan engine is using the CUDA execution provider."
-                : SentinelExists("ort_cuda_x64")
-                    ? "CUDA files are installed. Restart the engine to select the CUDA execution provider."
-                    : "Install a compatible CUDA provider and cuDNN locally, then verify the files below.";
         }
     }
 
@@ -314,7 +283,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             SelectRadio(LavaModeRadios, s.LavaMode);
             SelectRadio(TextSizeRadios, s.TextSize);
             SelectRadio(GranularityRadios, s.RestructureGranularity);
-            // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
             {
@@ -397,10 +365,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             var s = AppViewModel.Instance.Settings;
             s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
             s.Save();
-            // The engine reads this value at startup via runtime.rs's
-            // read_user_ep_override(); to apply a change live, the user
-            // must restart the engine (the Restart button in this view, or
-            // the prompt shown after installing a Performance Pack).
+            // The engine reads this value each time Describe Files starts
+            // (runtime.rs's user_forced_cpu()), so no restart is needed.
         });
 
     public string EngineVersionText
@@ -465,12 +431,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (hw is null) return string.Empty;
             return hw.ExecutionProvider switch
             {
-                "cuda" => "CUDA — NVIDIA-tuned (highest perf on RTX class)",
-                "tensorrt" => "TensorRT — NVIDIA optimized graph compilation",
-                "directml" => "DirectML — works on every Windows GPU vendor",
-                "openvino" => "OpenVINO — Intel-tuned",
-                "qnn" => "QNN — Snapdragon Hexagon NPU (most power-efficient on WoA)",
-                "cpu" => "CPU — AVX2 / NEON SIMD",
+                "tract-cpu" => "CPU — tract, the same on Windows, macOS and Linux",
                 _ => hw.ExecutionProvider,
             };
         }
@@ -605,7 +566,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── Storage card paths ───────────────────────────────────────────
     public string DbPathText => AppPaths.DbPath;
     public string ThumbCachePathText => AppPaths.ThumbsDir;
     public string ModelsPathText => AppPaths.ModelsDir;
@@ -787,8 +747,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── x:Bind helper functions (copied verbatim from WelcomeSheet) ───
-
     internal Visibility VisibleIfDownloading(Services.ModelInstallStatus s) =>
         s == Services.ModelInstallStatus.Downloading ? Visibility.Visible : Visibility.Collapsed;
 
@@ -865,138 +823,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         if (seconds < 3600) return $"{seconds / 60:0}m {seconds % 60:00}s";
         return $"{seconds / 3600:0}h {(seconds % 3600) / 60:00}m";
     }
-    private void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
-    {
-        var pack = Path.Combine(AppPaths.ModelsDir, "packs", "cuda");
-        var cudnn = Path.Combine(AppPaths.ModelsDir, "cudnn");
-        CudnnStatusText.Text = $"Place compatible ONNX Runtime CUDA and CUDA 12.4 files in {pack}, and cuDNN 9 files in {cudnn}. Then select Verify install. FileID does not download vendor runtimes.";
-    }
-
     private void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
     {
         var pack = Path.Combine(AppPaths.ModelsDir, "llama.cpp-cuda");
         CudaLlamaStatusText.Text = $"Place a compatible CUDA llama.cpp runtime in {pack}, then restart the engine. FileID does not download vendor runtimes.";
     }
 
-    /// <summary>F3c "Get cuDNN" link: opens NVIDIA's official cuDNN download
-    /// page in the user's default browser. No FileID-owned redistribution.
-    /// After install, the engine's system-CUDA probe (runtime.rs) picks up
-    /// cuDNN on next launch and the CUDA EP becomes available.</summary>
-
-    /// <summary>ask the engine to re-probe cuDNN availability after
-    /// the user manually installs it. The engine replies with a
-    /// HardwareReprobed event that lands on
-    /// <see cref="EngineClient.LastHardwareReprobe"/>; <see cref="SyncReprobeUi"/>
-    /// then renders the success pill or the diagnostics caption.</summary>
-    private async void OnVerifyCudnnClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            VerifyCudnnButton.IsEnabled = false;
-            VerifyCudnnButton.Content = "Verifying…";
-            await EngineClient.Instance.VerifyCudaPackAsync();
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Verify cuDNN failed: " + ex.Message);
-            CudnnDiagnosticsText.Text = "Couldn't check: " + ex.Message;
-            CudnnDiagnosticsText.Visibility = Visibility.Visible;
-        }
-        finally
-        {
-            // Restore label even before the event arrives; the SyncReprobeUi
-            // hook will update the rest of the row when the engine replies.
-            VerifyCudnnButton.IsEnabled = true;
-            VerifyCudnnButton.Content = "Verify install";
-        }
-    }
-
-    /// <summary>render the success pill / diagnostics caption after
-    /// the engine emits a HardwareReprobed event. Called from the engine
-    /// PropertyChanged hook on LastHardwareReprobe.</summary>
-    private void SyncReprobeUi()
-    {
-        var reprobe = EngineClient.Instance.LastHardwareReprobe;
-        if (reprobe is null) return;
-        var present = reprobe.Hardware.CudaPackPresent;
-        // The reprobe's ExecutionProvider is a FRESH probe (what the EP picker
-        // WOULD bind now), not the EP the running engine actually bound at
-        // startup — trusting it claims "CUDA active, no restart needed" while
-        // scans still run on DirectML. The authoritative active EP is the live
-        // session's bound EP that the engine reported on its ready event
-        // (Info.Hardware.ExecutionProvider). The full fix is engine-side: carry
-        // the bound EP on the reprobe event; until then, read it from Info.
-        var boundEp = (EngineClient.Instance.Info?.Hardware?.ExecutionProvider ?? "").ToLowerInvariant();
-
-        if (present)
-        {
-            CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
-            CudnnSuccessPill.Visibility = Visibility.Visible;
-            if (boundEp == "cuda")
-            {
-                // Running engine actually bound CUDA — no restart needed.
-                CudnnSuccessTitle.Text = "✓ cuDNN active — scanning uses CUDA EP.";
-                CudnnSuccessDetail.Text = $"Adapter: {reprobe.Hardware.AdapterName ?? "unknown"}. Execution provider: CUDA.";
-                RestartEngineButton.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                // CUDA pack is present but the running session bound a different
-                // EP at startup — a restart is required to re-pick CUDA. If the
-                // bound EP is unknown (Info not yet populated) say so, rather
-                // than implying CUDA is already live.
-                CudnnSuccessTitle.Text = "✓ cuDNN detected — restart engine to switch to CUDA";
-                var current = string.IsNullOrEmpty(boundEp) ? "detected (not necessarily active)" : boundEp;
-                CudnnSuccessDetail.Text = $"Current session: {current}. Restart so the engine re-picks the execution provider.";
-                RestartEngineButton.Visibility = Visibility.Visible;
-            }
-        }
-        else
-        {
-            CudnnSuccessPill.Visibility = Visibility.Collapsed;
-            var diag = reprobe.Diagnostics;
-            if (!string.IsNullOrWhiteSpace(diag))
-            {
-                CudnnDiagnosticsText.Text = diag!;
-                CudnnDiagnosticsText.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
-            }
-        }
-    }
-
-    /// <summary>shutdown + auto-respawn cycle so the engine re-runs
-    /// the EP picker. EngineClient's existing crash-respawn path picks the
-    /// new EP on the next spawn.</summary>
-    private async void OnRestartEngineClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            RestartEngineButton.IsEnabled = false;
-            RestartEngineButton.Content = "Restarting…";
-            await EngineClient.Instance.RestartAsync();
-            // After RestartAsync returns, Ready has been emitted; SyncReprobeUi
-            // will refresh on the next PropertyChanged via Info update.
-            DebugLog.Info("Engine restart requested by user after cuDNN install.");
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Engine restart failed: " + ex.Message);
-        }
-        finally
-        {
-            RestartEngineButton.IsEnabled = true;
-            RestartEngineButton.Content = "Restart engine";
-        }
-    }
-
-    /// <summary>PAR-148: always-available "Restart engine" in the Engine
-    /// card (the only other restart is buried in the conditional cuDNN
-    /// pill). Shutdown + auto-respawn so the engine re-runs the EP picker;
-    /// cancels any in-flight scan. Mirrors macOS SettingsView's "Restart
-    /// Engine" button.</summary>
     private async void OnRestartEngineCardClicked(object sender, RoutedEventArgs e)
     {
         try
@@ -1019,9 +851,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>PAR-148: always-available "Stop engine" in the Engine card.
-    /// Cleanly shuts the engine down (user-initiated, so no auto-respawn).
-    /// Mirrors macOS SettingsView's "Stop Engine" button.</summary>
     private async void OnStopEngineCardClicked(object sender, RoutedEventArgs e)
     {
         try

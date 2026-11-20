@@ -1,11 +1,7 @@
-//! Stage 7: MLX vision-language models for the engine the Mac app hosts.
-//!
-//! The sessions are the Swift engine's `DeepAnalyze` code compiled into
-//! FileIDAppleKit (`FileIDAppleVLM`), so prompts, decoding, the prefix and chat
-//! prompt caches and the 5-minute idle park are the Swift engine's own. This
-//! module decides what runs: it picks the model folder, checks the licence,
-//! holds the model's memory in the engine's [`ResourceScheduler`] while the
-//! weights are resident, and serializes users through [`MlxLease`].
+//! MLX vision-language models for the Mac-hosted engine. The sessions are the Swift `DeepAnalyze` code in
+//! FileIDAppleKit, so prompts, decoding, prompt caches and the 5-minute idle park are Swift's own; this module picks
+//! the model folder, checks the licence, holds the weights' memory in [`ResourceScheduler`] while resident, and
+//! serializes users through [`MlxLease`].
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -20,7 +16,6 @@ use tokio::sync::mpsc;
 use super::ffi;
 use crate::resource_scheduler::{Demand, Lease, Priority, ResourceScheduler};
 
-/// A request the user cancelled.
 #[derive(Debug)]
 pub struct Cancelled;
 
@@ -32,7 +27,6 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-/// Streamed output of a running request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Token(String),
@@ -51,7 +45,10 @@ fn message(event: u32, bytes: &[u8]) -> Message {
         ffi::VLM_PROGRESS => Message::Event(Event::Progress(serde_json::from_slice(bytes).unwrap_or(Value::Null))),
         ffi::VLM_DONE => match serde_json::from_slice(bytes) {
             Ok(value) => Message::Done(value),
-            Err(error) => Message::Failed { message: format!("Unreadable model reply: {error}"), cancelled: false },
+            Err(error) => {
+                tracing::warn!(%error, "description model reply could not be parsed");
+                Message::Failed { message: "The description model returned a reply FileID couldn’t use. Try again.".to_string(), cancelled: false }
+            }
         },
         ffi::VLM_FAILED => {
             let value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
@@ -64,7 +61,6 @@ fn message(event: u32, bytes: &[u8]) -> Message {
     }
 }
 
-/// An accepted request; dropping it before its terminal event cancels it.
 struct Submitted {
     handle: u64,
     finished: bool,
@@ -79,8 +75,7 @@ impl Drop for Submitted {
     }
 }
 
-/// Run one adapter request to its end. `cancel` is polled every 25 ms and
-/// forwarded once; the adapter still reports how the request ended.
+/// `cancel` is polled every 25 ms and forwarded once.
 pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> Result<Value> {
     let bytes = serde_json::to_vec(body)?;
     let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -94,7 +89,7 @@ pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut
     if handle == 0 {
         // SAFETY: a refused request never calls back, so the box is still ours.
         drop(unsafe { Box::from_raw(context.cast::<ffi::VlmReceiver>()) });
-        bail!("The model adapter refused the request");
+        bail!("The description model didn’t accept this request. Try again.");
     }
     let mut submitted = Submitted { handle, finished: false };
     let mut forwarded = false;
@@ -126,14 +121,12 @@ pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut
             }
             None => {
                 submitted.finished = true;
-                bail!("The model adapter ended the request without a reply");
+                bail!("The description model stopped without an answer. Try again.");
             }
         }
     }
 }
 
-/// Resident sizes and names the Swift engine uses for its built-in models
-/// (`AIModelKind.ramBudgetGB` / `displayName`).
 const MODELS: &[(&str, &str, f64)] = &[
     ("qwen2_5_vl_7b", "Qwen2.5-VL 7B (4-bit)", 7.0),
     ("qwen3_vl_2b", "Qwen3-VL 2B (4-bit)", 3.0),
@@ -143,18 +136,15 @@ const MODELS: &[(&str, &str, f64)] = &[
     ("gemma_3_4b", "Gemma 3 4B (QAT 4-bit)", 4.5),
     ("gemma_3_12b", "Gemma 3 12B (QAT 4-bit)", 9.0),
     ("mistral_small_3_2", "Mistral Small 3.2 24B (4-bit)", 16.0),
+    ("qwen3_5_122b", "Qwen3.5 122B-A10B (4-bit)", 72.0),
     ("paligemma_3b", "PaliGemma 3B (8-bit)", 4.0),
 ];
 
-/// The Swift engine's Hugging Face root (`models::mlx::cache_root`: the
-/// override, the sandbox container, or `~/Documents/huggingface` under the
-/// home CoreFoundation resolves, `CFFIXED_USER_HOME` first).
 pub fn huggingface_root() -> PathBuf {
     if let Some(root) = std::env::var_os("FILEID_HF_CACHE_ROOT").map(PathBuf::from).filter(|path| path.is_absolute()) {
         return root;
     }
-    // Tests never fall back to the owner's models: loading one rewrites its
-    // install markers. Without an explicit root nothing counts as installed.
+    // Tests never fall back to the owner's models: loading one rewrites its install markers.
     if cfg!(test) {
         return std::env::temp_dir().join(format!("fileid-test-no-hf-root-{}", std::process::id()));
     }
@@ -168,23 +158,28 @@ fn repo(kind: &str) -> Option<&'static crate::models::manifest::VlmRepo> {
         .find(|repo| repo.kind == kind && repo.platforms.iter().any(|platform| platform == "macos"))
 }
 
-/// Folder that holds a model's MLX weights.
 pub fn model_dir(kind: &str) -> Option<PathBuf> {
     let repo = repo(kind)?;
     Some(huggingface_root().join("models").join(&repo.repo))
 }
 
-/// The Swift engine's install test (`AIModelKind.isInstalledOnDisk`).
 pub fn installed(kind: &str) -> bool {
     MODELS.iter().any(|(id, _, _)| *id == kind) && model_dir(kind).is_some_and(|dir| dir.join("config.json").is_file())
 }
 
-/// Resident budget the scheduler holds while the weights are loaded.
 pub fn budget_mb(kind: &str) -> Option<u64> {
     MODELS.iter().find(|(id, _, _)| *id == kind).map(|(_, _, gb)| (gb * 1024.0).ceil() as u64)
 }
 
-/// Models under 4 GB get the main-subject confirmation in selection checks.
+/// Every installed model this Mac may run, with the memory its load asks for.
+pub fn installed_budgets() -> Vec<(String, u64)> {
+    MODELS
+        .iter()
+        .filter(|(kind, _, _)| installed(kind) && license_accepted(kind))
+        .filter_map(|(kind, _, _)| budget_mb(kind).map(|mb| ((*kind).to_owned(), mb)))
+        .collect()
+}
+
 pub fn is_small(kind: &str) -> bool {
     MODELS.iter().find(|(id, _, _)| *id == kind).is_some_and(|(_, _, gb)| *gb < 4.0)
 }
@@ -196,13 +191,12 @@ fn license_accepted(kind: &str) -> bool {
     }
 }
 
-/// What the adapter needs to load `kind` from its local folder.
 pub fn model_spec(kind: &str) -> Result<Value> {
     let (_, display, ram) = MODELS
         .iter()
         .find(|(id, _, _)| *id == kind)
-        .ok_or_else(|| anyhow!("{kind} isn't an MLX model on this Mac"))?;
-    let repo = repo(kind).ok_or_else(|| anyhow!("{kind} has no pinned MLX repository"))?;
+        .ok_or_else(|| anyhow!("This description model can’t run on this Mac."))?;
+    let repo = repo(kind).ok_or_else(|| anyhow!("This description model isn’t available to download yet."))?;
     let license_name = match repo.license.as_str() {
         "Apache-2.0" => "Apache License 2.0",
         "Gemma" => "Gemma Terms of Use",
@@ -221,7 +215,6 @@ pub fn model_spec(kind: &str) -> Result<Value> {
     }))
 }
 
-/// Adapter state (`status` reply).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
     pub loaded: Option<String>,
@@ -242,7 +235,6 @@ impl Status {
         }
     }
 
-    /// Weights in memory (loaded and not parked).
     pub fn resident(&self) -> bool {
         self.loaded.is_some() && !self.parked
     }
@@ -253,11 +245,9 @@ pub async fn status() -> Result<Status> {
     Ok(Status::from_reply(&request(&json!({"op": "status"}), &never, |_| {}).await?))
 }
 
-/// Deep Analyze of one file (`DeepAnalyze.analyze`).
 #[derive(Debug, Clone, Default)]
 pub struct AnalyzeRequest {
     pub path: PathBuf,
-    /// The Swift `FileKind` raw value (`image`, `video`, `pdf`, `doc`, `model`, …).
     pub media_kind: String,
     pub document_text: Option<String>,
     pub face_names: Vec<String>,
@@ -274,14 +264,12 @@ pub struct AnalyzeReply {
 }
 
 impl AnalyzeReply {
-    /// `DeepAnalyzeRunner.isAnalysisFailure(description)`.
     pub fn description_failed(&self) -> bool {
         self.description.starts_with("Inference failed")
             || self.description.starts_with("Could not decode")
             || self.description == "Model not loaded."
     }
 
-    /// `DeepAnalyzeRunner.isAnalysisFailure(result)`: a failure text, or nothing usable.
     pub fn failed(&self) -> bool {
         self.description_failed()
             || (self.description.trim().is_empty()
@@ -290,19 +278,14 @@ impl AnalyzeReply {
     }
 }
 
-/// Image for a `generate` request.
 #[derive(Debug, Clone)]
 pub enum Image<'a> {
     None,
-    /// The benchmark's deterministic test card.
     TestCard,
-    /// A file decoded with the Swift selection-check rules: bounded to this many
-    /// pixels on the long side (a video's middle frame), or whole with `None`.
+    /// Bounded to this many pixels on the long side (a video's middle frame), or whole with `None`.
     File(&'a Path, Option<u32>),
 }
 
-/// The engine's single MLX model: serializes users, keeps the scheduler's
-/// memory lease in step with the adapter's residency.
 pub struct Resident {
     state: Arc<tokio::sync::Mutex<State>>,
     waiters: AtomicUsize,
@@ -315,7 +298,6 @@ struct State {
     memory: Option<Lease>,
 }
 
-/// Exclusive use of the loaded model.
 pub struct MlxLease {
     kind: String,
     state: tokio::sync::OwnedMutexGuard<State>,
@@ -351,13 +333,10 @@ impl Resident {
         })
     }
 
-    /// Another job (a Chat answer) is waiting for the model.
     pub fn has_waiters(&self) -> bool {
         self.waiters.load(Ordering::Acquire) > 0
     }
 
-    /// Load `kind` (or reuse it), holding its memory in the scheduler, and take
-    /// exclusive use of it. `progress` gets the adapter's load events.
     pub async fn acquire(&self, kind: &str, cancel: &Arc<AtomicBool>, mut progress: impl FnMut(Event)) -> Result<MlxLease> {
         let spec = model_spec(kind)?;
         if !installed(kind) {
@@ -392,8 +371,6 @@ impl Resident {
         Ok(MlxLease { kind: kind.to_owned(), state, scheduler: self.scheduler.clone() })
     }
 
-    /// Release the scheduler's memory once the adapter parks or drops the
-    /// weights; unload under memory pressure when nobody is using the model.
     async fn sweep(&self) {
         let Ok(mut state) = self.state.clone().try_lock_owned() else { return };
         if state.memory.is_none() {
@@ -415,7 +392,6 @@ impl Resident {
         }
     }
 
-    /// Drop the weights (model switch in Settings, shutdown).
     pub async fn unload(&self) -> Result<()> {
         let mut state = self.state.clone().lock_owned().await;
         let never = AtomicBool::new(false);
@@ -437,8 +413,7 @@ impl MlxLease {
         &self.kind
     }
 
-    /// A parked model reloads inside the adapter on its next use; take its
-    /// memory back in the scheduler first.
+    /// A parked model reloads inside the adapter on next use; retake its scheduler memory first.
     async fn resident(&mut self, cancel: &Arc<AtomicBool>) -> Result<()> {
         if self.state.memory.is_some() && status().await?.resident() {
             return Ok(());
@@ -458,7 +433,6 @@ impl MlxLease {
         Ok(())
     }
 
-    /// Start decoding the next image while the current one runs (`DecodePrefetch`).
     pub async fn prefetch(&self, path: &Path) {
         let never = AtomicBool::new(false);
         let _ = request(&json!({"op": "prefetch", "path": path, "maxPixelSize": 768}), &never, |_| {}).await;
@@ -490,8 +464,6 @@ impl MlxLease {
         })
     }
 
-    /// One greedy generation (`DeepAnalyze.benchmarkPass`): selection checks,
-    /// goal ranking and benchmarks.
     pub async fn generate(&mut self, prompt: &str, image: Image<'_>, max_tokens: u32, image_side: u32, cancel: &Arc<AtomicBool>) -> Result<String> {
         self.resident(cancel).await?;
         let mut body = json!({"op": "generate", "prompt": prompt, "maxTokens": max_tokens, "imageSide": image_side});
@@ -509,7 +481,6 @@ impl MlxLease {
         Ok(reply["output"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// A catalog answer with the chat prompt cache (`DeepAnalyze.answerCatalog`).
     pub async fn chat(&mut self, prompt: &str, cancel: &Arc<AtomicBool>, mut on_token: impl FnMut(&str)) -> Result<String> {
         self.resident(cancel).await?;
         let reply = request(&json!({"op": "chat", "prompt": prompt}), cancel, |event| {
@@ -521,14 +492,12 @@ impl MlxLease {
         Ok(reply["answer"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// Greedy transcription of the text in a photo or PDF page (`DeepAnalyze.transcribeText`).
     pub async fn transcribe(&mut self, path: &Path, pdf: bool, cancel: &Arc<AtomicBool>) -> Result<String> {
         self.resident(cancel).await?;
         let reply = request(&json!({"op": "transcribe", "path": path, "quickLook": pdf, "maxPixelSize": 1536}), cancel, |_| {}).await?;
         Ok(reply["text"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// Describe 2–8 ordered frames: a timeline moment, or a take's outcome for `goal`.
     pub async fn sequence(&mut self, frames: &[PathBuf], times: &[f64], goal: Option<&str>, cancel: &Arc<AtomicBool>) -> Result<String> {
         self.resident(cancel).await?;
         let mut body = json!({"op": "sequence", "paths": frames, "times": times});
@@ -539,12 +508,10 @@ impl MlxLease {
         Ok(reply["description"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// The Swift engine's MLX benchmark (`ModelBenchmarkRunner.run`); returns
-    /// the `ModelBenchmark` JSON object. It reloads the model cold.
+    /// Reloads the model cold.
     pub async fn benchmark(&mut self, cancel: &Arc<AtomicBool>, progress: impl FnMut(Event)) -> Result<Value> {
         let spec = model_spec(&self.kind)?;
         let reply = request(&json!({"op": "benchmark", "model": spec}), cancel, progress).await;
-        // The benchmark unloads and reloads the model; keep the memory lease only if it stayed.
         if !status().await.is_ok_and(|current| current.resident() && current.loaded.as_deref() == Some(&self.kind)) {
             self.state.memory = None;
             self.state.kind = None;
@@ -606,7 +573,6 @@ mod tests {
 
     #[tokio::test]
     async fn loading_a_missing_model_fails_without_a_download() {
-        // The test root (scratch or an empty temp path) holds no models.
         let spec = model_spec("qwen3_vl_2b").unwrap();
         let folder = model_dir("qwen3_vl_2b").unwrap();
         let existed = folder.exists();

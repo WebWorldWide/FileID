@@ -1,6 +1,5 @@
-// AIModelKind — VLM choices for Deep Analyze + AI face clustering.
-// The app uses this to render the model picker; the engine passes the
-// `rawValue` to MLX. Both sides must agree on rawValues used in IPC.
+// AIModelKind: VLM choices for Deep Analyze and face clustering. The app renders the picker; the engine passes `rawValue` to MLX.
+// rawValues must match the Windows engine's ids byte-for-byte so a shared DB round-trips the "analyzed" state.
 import Foundation
 
 public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, Codable {
@@ -19,14 +18,8 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
-    // Commercial-clean lineup (2026-05): the non-commercial Qwen2.5-VL-3B
-    // (Qwen Research license) was dropped for the Apache-2.0 7B. Gemma /
-    // PaliGemma stay (Gemma Terms permit commercial use); Mistral-Small-3.2
-    // (Apache-2.0) is the max-quality pick. Mirrors the Windows VLM ladder.
-    // rawValues are the canonical cross-platform model-kind tokens — they
-    // must match the Windows engine (registry.rs ids / AppSettings
-    // AllowedVlmKinds) byte-for-byte so a DB shared across platforms
-    // round-trips the "analyzed" state (skipExisting matches, badge lights).
+    // Commercial-clean lineup: Apache-2.0 models plus Gemma/PaliGemma (Gemma Terms permit commercial use). Qwen3.5 122B-A10B tops the ladder on Macs with 96 GB or more; Mistral-Small-3.2 is the pick below that.
+    // Mirrors the Windows VLM ladder.
     public static let qwen2VL7B = Self(registeredValue: "qwen2_5_vl_7b")
     public static let qwen3VL2B = Self(registeredValue: "qwen3_vl_2b")
     public static let qwen3VL4B = Self(registeredValue: "qwen3_vl_4b")
@@ -35,10 +28,11 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public static let gemma3_4B = Self(registeredValue: "gemma_3_4b")
     public static let gemma3_12B = Self(registeredValue: "gemma_3_12b")
     public static let mistralSmall32 = Self(registeredValue: "mistral_small_3_2")
+    public static let qwen35_122B = Self(registeredValue: "qwen3_5_122b")
     public static let paligemma3B = Self(registeredValue: "paligemma_3b")
 
 
-    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .paligemma3B]
+    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .qwen35_122B, .paligemma3B]
     public static var allCases: [Self] { favorites + MLXModelCatalog.entries.filter { entry in !favorites.contains { $0.sourceRepo == entry.repo } }.map { Self(registeredValue: $0.id) } }
     public var catalogEntry: CatalogModel? { MLXModelCatalog.entry(forRepo: sourceRepo) }
     public var supportsVision: Bool { MLXModelCatalog.entry(forID: rawValue)?.role != .text }
@@ -53,6 +47,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_4B:     return "Gemma 3 4B (QAT 4-bit)"
         case .gemma3_12B:    return "Gemma 3 12B (QAT 4-bit)"
         case .mistralSmall32: return "Mistral Small 3.2 24B (4-bit)"
+        case .qwen35_122B:   return "Qwen3.5 122B-A10B (4-bit)"
         case .paligemma3B:   return "PaliGemma 3B (8-bit)"
         default: return MLXModelCatalog.entry(forID: rawValue)?.displayName ?? rawValue
         }
@@ -68,6 +63,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_4B:     return "Made by Google. Good at answering questions about a picture. Fast, and works on Macs with 8 GB of memory."
         case .gemma3_12B:    return "Very detailed descriptions. About three times slower, and needs a Mac with 16 GB of memory or more."
         case .mistralSmall32: return "The most detailed descriptions. The slowest choice. Works best on a Mac with 32 GB of memory."
+        case .qwen35_122B:   return "The largest model, for Macs with 96 GB of memory or more. A 70 GB download."
         case .paligemma3B:   return "Good at finding things in a picture and reading text. Fast, and works on Macs with 8 GB of memory."
         default: return MLXModelCatalog.entry(forID: rawValue)?.summary ?? "Extra model"
         }
@@ -89,6 +85,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_4B:     return 4.5
         case .gemma3_12B:    return 9.0
         case .mistralSmall32: return 16.0
+        case .qwen35_122B:   return 72.0
         case .paligemma3B:   return 4.0
         default: return Double(approxBytes) / 1_073_741_824 * 1.5 + 2
         }
@@ -128,17 +125,31 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return policy.licenseURL.flatMap { URL(string: $0) }
     }
 
-    /// Top three picks for a given RAM tier, ranked best-first.
+    /// Picks for a given RAM tier, ranked best-first; the smaller Qwen3-VL models close each list so a busy Mac always has one that loads.
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
-        if ramGB >= 30       { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B] }
-        else if ramGB >= 16  { return [.qwen3VL8B, .qwen3VL4B, .qwen2VL7B] }
-        else                 { return [.qwen3VL4B, .gemma3_4B, .paligemma3B] }
+        if ramGB >= 80       { return [.qwen35_122B, .mistralSmall32, .qwen3VL8B, .qwen3VL4B, .qwen3VL2B] }
+        else if ramGB >= 30  { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B, .qwen3VL2B] }
+        else if ramGB >= 16  { return [.qwen3VL8B, .qwen3VL4B, .qwen2VL7B, .qwen3VL2B] }
+        else                 { return [.qwen3VL4B, .qwen3VL2B, .gemma3_4B, .paligemma3B] }
     }
 
+    /// What the engine's memory admission asks for when it loads this model.
+    public var requestedMB: UInt64 {
+        UInt64((ramBudgetGB * 1024).rounded(.up))
+    }
+
+    private static func totalMB(ramGB: Double) -> UInt64 {
+        UInt64(max(0, ramGB * 1024))
+    }
+
+    /// The engine's static rule: the model fits the installed memory after the system reserve.
     public func fits(ramGB: Double) -> Bool {
-        let reserve = max(2.0, min(8.0, ramGB * 0.35))
-        let headroom = max(0, ramGB - reserve)
-        return ramBudgetGB <= headroom
+        ModelMemoryRule.fitsBudget(totalMB: Self.totalMB(ramGB: ramGB), requestedMB: requestedMB)
+    }
+
+    /// The engine's live rule: the model would load with `availableMB` free right now.
+    public func fitsNow(ramGB: Double, availableMB: UInt64) -> Bool {
+        ModelMemoryRule.fitsNow(totalMB: Self.totalMB(ramGB: ramGB), availableMB: availableMB, requestedMB: requestedMB)
     }
 
     public var requiredFreeBytes: Int64 {
@@ -150,38 +161,39 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return freeDiskBytes >= requiredFreeBytes
     }
 
-    /// First recommendation that fits, falling back to Gemma 3 4B.
+    /// The recommendation the engine's rule accepts: the first that loads with `availableMB` free, else the smallest this Mac could ever run, falling back to Gemma 3 4B. `availableMB` nil asks only about the installed memory.
     public static func safeDefaultFor(ramGB: Double,
+                                      availableMB: UInt64? = nil,
                                       freeDiskBytes: Int64? = nil) -> AIModelKind {
-        let ranked = recommendedFor(ramGB: ramGB)
-        if let choice = ranked.first(where: {
-            $0.fits(ramGB: ramGB) && $0.fits(freeDiskBytes: freeDiskBytes)
-        }) {
-            return choice
+        let ranked = recommendedFor(ramGB: ramGB).filter { $0.fits(ramGB: ramGB) }
+        let diskOK = ranked.filter { $0.fits(freeDiskBytes: freeDiskBytes) }
+        for pool in [diskOK, ranked] where !pool.isEmpty {
+            if let availableMB {
+                let ladder = pool.map { (id: $0.rawValue, requestedMB: $0.requestedMB) }
+                if let id = ModelMemoryRule.recommend(ladder: ladder, totalMB: totalMB(ramGB: ramGB), availableMB: availableMB) {
+                    return pool.first { $0.rawValue == id } ?? pool[0]
+                }
+            }
+            return pool[0]
         }
-        return ranked.first(where: { $0.fits(ramGB: ramGB) }) ?? .gemma3_4B
+        return .gemma3_4B
     }
 
     public static func onboardingSelection(persistedRawValue: String?,
                                            ramGB: Double,
+                                           availableMB: UInt64? = nil,
                                            freeDiskBytes: Int64? = nil) -> AIModelKind {
         if let persistedRawValue, !persistedRawValue.isEmpty {
             return migrated(rawValue: persistedRawValue)
         }
-        return safeDefaultFor(ramGB: ramGB, freeDiskBytes: freeDiskBytes)
+        return safeDefaultFor(ramGB: ramGB, availableMB: availableMB, freeDiskBytes: freeDiskBytes)
     }
 
-    /// Migrate a persisted rawValue that may predate the commercial-clean
-    /// lineup (e.g. the dropped "qwen2_vl_3b") or the cross-platform
-    /// model-kind token rename (the rawValues now match the Windows engine
-    /// tokens exactly). Call this when decoding a stored selection so an old
-    /// value maps to a supported model instead of failing to decode. Mirrors
-    /// the Windows AppSettings v5 migration.
+    /// Migrates a persisted rawValue that predates the commercial-clean lineup or the Windows-canonical token rename, so an old value maps to a supported model instead of failing to decode.
     public static func migrated(rawValue: String) -> AIModelKind {
         if let kind = AIModelKind(rawValue: rawValue) { return kind }
         switch rawValue {
-        // Pre-rename tokens for kinds whose rawValue changed to the Windows
-        // canonical form (qwen2_vl_7b → qwen2_5_vl_7b, gemma3_* → gemma_3_*).
+        // Tokens persisted before the Windows-canonical rename.
         case "qwen2_vl_7b":                  return .qwen2VL7B
         case "gemma3_4b":                    return .gemma3_4B
         case "gemma3_12b":                   return .gemma3_12B
@@ -198,15 +210,9 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     }
 }
 
-// MARK: - FaceEmbedderKind
 
-/// Per-face embedder used for clustering. SFace (OpenCV Zoo, Apache-2.0,
-/// 128-d) — the commercial-clean replacement for the non-commercial
-/// InsightFace ArcFace. Still run as ONNX via ONNX Runtime + CoreML EP
-/// (same `ArcFaceService` path); only the model file, the embedding
-/// dimension (512 → 128), and the input preprocessing changed — SFace
-/// takes RAW [0,255] RGB (it bakes its own normalization) rather than
-/// ArcFace's `(px − 127.5) / 127.5`. See `ArcFaceService`.
+/// Per-face embedder for clustering: SFace (OpenCV Zoo, Apache-2.0, 128-d), the commercial-clean replacement for InsightFace ArcFace. Runs as ONNX via ONNX Runtime + CoreML EP through `ArcFaceService`.
+/// SFace takes raw [0,255] RGB and bakes in its own normalization, unlike ArcFace's (px − 127.5) / 127.5.
 public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
     case sface = "sface"
 
@@ -225,8 +231,7 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
 
     public var approxBytes: Int64 { 38_700_000 }   // ~37 MB ONNX
 
-    /// L2-normalized 128-d float32 (= 512-byte DB blob). Replaces ArcFace's
-    /// 512-d (2048-byte) — old prints are wiped by migration v12.
+    /// L2-normalized 128-d float32 (512-byte DB blob). ArcFace's 512-d prints are not compatible.
     public var embeddingDim: Int { 128 }
 
     /// Approximate per-face embedding cost on M1 Pro ANE (ms).
@@ -234,8 +239,7 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
 
     public var licenseName: String { "Apache License 2.0 (OpenCV Zoo)" }
 
-    /// SFace is the only (commercial-clean) embedder now; the `ramGB`
-    /// parameter is retained for call-site compatibility.
+    /// SFace is the only embedder; `ramGB` is kept for call-site compatibility.
     public static func defaultFor(ramGB _: Double) -> FaceEmbedderKind { .sface }
 
     /// Installation directory shared between engine + app. Both check

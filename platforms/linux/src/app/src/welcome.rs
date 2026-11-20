@@ -1,11 +1,5 @@
-// Welcome sheet — the Linux port of the Windows/macOS first-launch onboarding
-// modal. Presents the five core on-device models with live install state, a
-// one-click "Install everything" that fans out `prewarmModel` for whatever is
-// missing, and the machine-sized description model recommendation.
-//
-// Shown when any core model is missing, or on the very first launch
-// (`welcomeSheetSeen`, same key as Windows). Dismissable at any time — the
-// same installs remain available from Settings.
+// First-launch Welcome sheet. Shown when a core model is missing or on first launch
+// (`welcomeSheetSeen`, same key as Windows); dismissable at any time.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

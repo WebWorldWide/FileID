@@ -1,7 +1,4 @@
-// IPC protocol between the FileID app and the FileIDEngine CLI.
-// Wire format: newline-delimited JSON. Each line is an envelope
-// (`IPCCommand` from app→engine, `IPCEvent` from engine→app); the
-// `payload` enum picks the variant.
+// Newline-delimited JSON envelopes: IPCCommand (app→engine) and IPCEvent (engine→app). The `payload` enum picks the variant.
 import Foundation
 
 // MARK: - Envelope
@@ -16,16 +13,10 @@ public struct IPCCommand: Codable, Sendable {
     }
 
     public enum Payload: Codable, Sendable {
-        /// Grant the engine access through an implicit-scope bookmark created for
-        /// process handoff in sandboxed macOS builds.
+        /// Implicit-scope bookmark that lets the engine access the folder in sandboxed macOS builds.
         case grantFolderAccess(rootPath: String, rootBookmark: Data)
-        /// Absolute filesystem `rootPath`, an optional human-readable
-        /// `rootDisplay` (defaults to `rootPath` when nil), `rescan` (force
-        /// every file through the pipeline), and optional `excludedPaths`
-        /// (folders to prune from the walk). Mirrors the schema's StartScan
-        /// shape byte-for-byte.
-        /// `rootBookmark` carries a base64-encoded implicit-scope grant for the
-        /// receiving helper in sandboxed macOS builds; other platforms omit it.
+        /// `rootPath` is absolute; `rootDisplay` defaults to it. `rescan` forces every file through the pipeline; `excludedPaths` are pruned from the walk.
+        /// `rootBookmark` is base64 (sandboxed macOS only; other platforms omit it).
         case startScan(rootPath: String, rootBookmark: Data?, rootDisplay: String?, rescan: Bool?, excludedPaths: [String]?)
         case pauseScan
         case resumeScan
@@ -35,11 +26,9 @@ public struct IPCCommand: Codable, Sendable {
         case chatRequest(request: ChatRequest)
         case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
-        /// Library locations the catalog has scanned, with online state and
-        /// file counts. Read-only. Replies with `rootsList` (schema 1.18.0+).
+        /// Library locations with online state and file counts. Read-only; replies with `rootsList`.
         case listRoots(requestID: String)
-        /// Read-only model catalog with install state, hardware fit and any
-        /// local benchmark. Replies with `modelCatalog` (schema 1.14.0+).
+        /// Read-only model catalog with install state, hardware fit and local benchmark; replies with `modelCatalog`.
         case listModels(requestID: String, role: String?)
         /// On-device benchmark of one installed model; replies with
         /// `benchmarkProgress` events and one `benchmarkResult`.
@@ -50,49 +39,21 @@ public struct IPCCommand: Codable, Sendable {
         case runFaceClustering
         case deepAnalyzeFile(fileID: Int64, modelKind: String)
         case deepAnalyzeFolder(pathPrefix: String, modelKind: String)
-        /// `tagsOnly` runs the fast one-VLM-call/file pass (background
-        /// auto-tag chain) instead of full caption + smart-rename + tags;
-        /// `proposeRenames` (full pass) also proposes smart filenames.
-        /// Both are OPTIONAL in the schema — `tagsOnly` defaults false,
-        /// `proposeRenames` defaults true — and are modeled here as optional
-        /// associated values so a schema-conformant payload that omits either
-        /// still decodes on macOS (Swift's enum Codable synthesis uses
-        /// `decodeIfPresent` for optional associated values). Consumers apply
-        /// the documented defaults: `tagsOnly ?? false`, `proposeRenames ?? true`.
-        /// `fileIDs` optionally scopes the persistent batch to one bounded
-        /// selection; nil retains whole-library behavior.
-        /// `excludedFolders` skips these absolute folder paths during a
-        /// whole-library run (path-segment-boundary matching, e.g. excluding
-        /// "/Photos" does not exclude "/PhotosBackup"); IGNORED when
-        /// `fileIDs` is present — an explicit selection is a deliberate
-        /// per-file action and is never silently filtered. Optional; nil/empty
-        /// means no folder exclusions.
-        /// ( — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
-        /// excludedFolders mirrors schema 1.3.0 / Rust `exclusion_where_clause`.)
+        /// `tagsOnly` runs the fast one-VLM-call pass; `proposeRenames` also proposes smart filenames. Both are optional in the schema, defaulting to `false` / `true`
+        /// (`tagsOnly ?? false`, `proposeRenames ?? true`), so a conformant payload that omits them still decodes.
+        /// `fileIDs` scopes the batch to one selection; nil means the whole library. `excludedFolders` prunes absolute folder paths from a whole-library run
+        /// (path-segment matching: "/Photos" does not exclude "/PhotosBackup"). Ignored when `fileIDs` is present: an explicit selection is never filtered.
         case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?, excludedFolders: [String]?)
         case deepAnalyzeCancel
-        /// Pre-fetch a VLM's weights into the swift-transformers HF
-        /// cache without running inference. Used by the welcome-sheet
-        /// onboarding flow to download the recommended VLM up front
-        /// instead of having the user wait at first Deep Analyze run.
+        /// Pre-fetches a VLM's weights into the HF cache without running inference (welcome-sheet onboarding).
         case prewarmModel(modelKind: String)
-        /// Cancel an in-flight prewarmModel. Lands at the next
-        /// Task.checkCancellation point inside swift-transformers'
-        /// fetch loop — usually within ~1 s. Safe no-op if no prewarm
-        /// is active. `modelKind` is OPTIONAL (schema): a value cancels that
-        /// one model's download; `nil`/absent cancels ALL in-flight prewarms.
-        /// (mirrors Rust CancelPrewarmPayload + C# CancelPrewarmCommand.)
+        /// Cancels an in-flight prewarm at the next cancellation point. `modelKind` cancels that model's download; nil cancels all in-flight prewarms.
         case cancelPrewarm(modelKind: String?)
 
-        // ── Windows-originated commands ───────────────────────────
-        // These land on mac only when the schema needs to round-trip
-        // them (cross-platform tooling, shared test corpus).
+        // Windows-originated commands: they land on mac only so the schema round-trips (cross-platform tooling, shared test corpus).
         case planRestructure(libraryRoot: String, supportsPagedPlans: Bool?)
         case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool, planID: String?)
-        /// Reverse the most recent applyRestructure: move every file the last run
-        /// relocated back to its original location (the engine replays its on-disk
-        /// undo journal). Reply lands on `restructureApplyResult`, where `applied`
-        /// is the count of files moved back. (RESTRUCTURE.md §6 reversibility)
+        /// Reverses the most recent applyRestructure by replaying the engine's on-disk undo journal. Replies with `restructureApplyResult`; `applied` is the count moved back.
         case undoRestructure(libraryRoot: String, shortcutUndoToken: String? = nil)
         case applyTags(fileIDs: [Int64], tags: [String], mode: String)
         case renameFiles(renames: [RenameEntry])
@@ -101,7 +62,7 @@ public struct IPCCommand: Codable, Sendable {
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         /// Move one face to another person (or a new one when `createNewPerson`).
         case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
-        /// Face review queue (schema 1.23.0; queues, acceptAll, merge and split 1.25.0). Each replies with `faceReview`.
+        /// Face review queue; each replies with `faceReview`.
         case listFaceReview(requestID: String, personID: Int64?, offset: Int?, limit: Int?, queue: String? = nil)
         case resolveFaceReview(requestID: String, faceID: Int64?, personID: Int64, resolution: String, otherPersonID: Int64? = nil)
         case undoFaceReview(requestID: String, operationID: String)
@@ -110,11 +71,8 @@ public struct IPCCommand: Codable, Sendable {
         case markPersonsAsUnknown(personIDs: [Int64])
         case findMergeSuggestions
         case embedImageQuery(fileID: Int64, queryID: String)
-        /// Generate a JPEG thumbnail for a video on demand; the engine
-        /// replies with a `thumbnailGenerated` event, or with nothing when the
-        /// video can't be decoded. `modifiedAt` (optional) is echoed on the
-        /// reply for cache keying. `maxPixelSize` is the long side, clamped to
-        /// 64–2048; nil means 192.
+        /// Generates a JPEG thumbnail for a video on demand; no reply when the video can't be decoded. `modifiedAt` is echoed for cache keying.
+        /// `maxPixelSize` is the long side, clamped to 64–2048 (nil means 192).
         case generateVideoThumbnail(path: String, modifiedAt: Double?, maxPixelSize: Int? = nil)
         case restoreFromTrash(batchID: String)
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
@@ -123,12 +81,9 @@ public struct IPCCommand: Codable, Sendable {
         /// anchor face ids so it survives re-clustering. Both native engines
         /// persist it through their single-writer connection.
         case markPersonsDifferent(sourcePersonID: Int64, destinationPersonID: Int64, sourceAnchorFaceID: Int64, destinationAnchorFaceID: Int64)
-        /// Truncate all learned library state (tags, faces, captions,
-        /// embeddings) in-process on the engine's writer connection — no file
-        /// deletion. Engine replies with a `libraryWiped` event. Empty payload.
+        /// Truncates all learned library state in-process on the writer connection, with no file deletion. Replies with `libraryWiped`.
         case wipeLibrary
-        /// Windows-only: re-probe CUDA + cuDNN. Always returns
-        /// `not_applicable_on_platform` on mac.
+        /// Windows-only: always returns `not_applicable_on_platform` on mac.
         case verifyCudaPack
     }
 }
@@ -145,9 +100,7 @@ public struct RestructureMove: Codable, Sendable {
     public let confidence: String
     /// Plain-language "why filed here", shown in the drill-down.
     public let reason: String?
-    /// Plan-time source identity (schema 1.13.0). A plan is applied after an
-    /// arbitrary delay, so the engine re-checks these against the live file
-    /// before moving; the app must echo them back untouched.
+    /// Plan-time source identity. The engine re-checks these against the live file before moving, so the app echoes them back untouched.
     public let contentHash: String?
     public let sizeBytes: UInt64?
     public let fileRef: UInt64?
@@ -171,11 +124,7 @@ public struct RestructureMove: Codable, Sendable {
         self.modifiedAt = modifiedAt
     }
 
-    /// Custom decode so a move emitted by a Windows engine that omits
-    /// `confidence` (it's `skip_serializing_if = "String::is_empty"` there)
-    /// still decodes — `confidence` defaults to "" when absent, matching the
-    /// "empty on older engines" semantics. `tier`/`reason` are optional.
-    /// `encode(to:)` stays auto-synthesized.
+    /// Decodes a move that omits `confidence` (the Windows engine skips it when empty) as "". `tier` and `reason` are optional. `encode(to:)` stays synthesized.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         fileID = try c.decode(Int64.self, forKey: .fileID)
@@ -257,10 +206,7 @@ public struct IPCEvent: Codable, Sendable {
         case deepAnalyzeComplete(DeepAnalyzeComplete)
         case modelDownloadProgress(ModelDownloadProgress)
         case queueState(QueueState)
-        // ── Windows-originated reply events. The mac engine doesn't emit
-        //    these yet (the equivalent flows return synchronously on mac),
-        //    but the app must DECODE them so a shared/cross-platform engine
-        //    or test corpus round-trips. Each mirrors the schema's DTO. ──
+        // Windows-originated reply events. The mac engine doesn't emit these yet (the equivalent flows return synchronously), but the app must decode them.
         case restructurePlan(RestructurePlan)
         case restructureApplyResult(RestructureApplyResult)
         case bulkActionResult(BulkActionResult)
@@ -308,13 +254,17 @@ public struct RootsList: Codable, Sendable, Equatable {
 public struct ModelCatalog: Codable, Sendable {
     public let requestID: String
     public let physicalMemoryGB: Double
+    public let availableMemoryMB: Int64
     public let vramMB: Int64
+    public let recommendedID: String?
     public let models: [ModelCatalogItem]
 
-    public init(requestID: String, physicalMemoryGB: Double, vramMB: Int64, models: [ModelCatalogItem]) {
+    public init(requestID: String, physicalMemoryGB: Double, availableMemoryMB: Int64, vramMB: Int64, recommendedID: String? = nil, models: [ModelCatalogItem]) {
         self.requestID = requestID
         self.physicalMemoryGB = physicalMemoryGB
+        self.availableMemoryMB = availableMemoryMB
         self.vramMB = vramMB
+        self.recommendedID = recommendedID
         self.models = models
     }
 }
@@ -337,12 +287,13 @@ public struct ModelCatalogItem: Codable, Sendable, Equatable {
     public let runnable: Bool
     public let installed: Bool
     public let fits: Bool
+    public let fitsNow: Bool
     public let benchmark: ModelBenchmark?
 
     public init(id: String, name: String, family: String, upstream: String, role: String, format: String,
                 quantization: String, license: String, termsRequired: Bool, parametersBillion: Double?,
                 downloadBytes: Int64, estimatedResidentGB: Double, tier: String, status: String,
-                runnable: Bool, installed: Bool, fits: Bool, benchmark: ModelBenchmark? = nil) {
+                runnable: Bool, installed: Bool, fits: Bool, fitsNow: Bool, benchmark: ModelBenchmark? = nil) {
         self.id = id
         self.name = name
         self.family = family
@@ -360,6 +311,7 @@ public struct ModelCatalogItem: Codable, Sendable, Equatable {
         self.runnable = runnable
         self.installed = installed
         self.fits = fits
+        self.fitsNow = fitsNow
         self.benchmark = benchmark
     }
 
@@ -432,10 +384,9 @@ public struct EngineInfo: Codable, Sendable {
     public let pid: Int32
     public let workerCap: Int
     public let physicalMemoryGB: Double
-    /// Schema 1.26.0: "swift" or "rust"; nil from older engines.
+    /// "swift" or "rust"; nil from older engines.
     public let engine: String?
-    /// CPU + GPU detection result the engine made on startup. Optional so
-    /// older engines (that don't emit it) still decode — `nil` when absent.
+    /// Hardware detection the engine ran at startup; nil when an older engine omits it.
     public let hardware: HardwareInfo?
 
     public init(version: String, pid: Int32, workerCap: Int, physicalMemoryGB: Double,
@@ -449,10 +400,7 @@ public struct EngineInfo: Codable, Sendable {
     }
 }
 
-/// CPU/GPU/NPU detection snapshot. Mirrors the schema's HardwareInfo +
-/// the Windows engine's `HardwareInfo`. Every field is optional/defaulted so
-/// an older engine that omits the adaptive-utilization fields (or omits
-/// `hardware` entirely) still decodes cleanly.
+/// CPU/GPU/NPU detection snapshot. Every field is optional or defaulted so older engines still decode.
 public struct HardwareInfo: Codable, Sendable {
     /// "nvidia" / "amd" / "intel" / "qualcomm" / "other" / "none".
     public let gpuVendor: String
@@ -467,7 +415,6 @@ public struct HardwareInfo: Codable, Sendable {
     public let qnnPackPresent: Bool
     /// Contextual recommendation; empty when already on the optimal path.
     public let recommendation: String
-    // ── Adaptive-utilization diagnostics (all optional/defaulted). ──
     public let pCores: Int
     public let eCores: Int
     public let logicalCpuCores: Int
@@ -617,13 +564,7 @@ public struct FileDoneEvent: Codable, Sendable {
         self.skippedStages = skippedStages
     }
 
-    /// Custom decode so a `fileDone` frame that OMITS `skippedStages` still decodes —
-    /// the IPC schema marks it optional (`"default": []`) and the Rust engine elides it
-    /// when empty (`skip_serializing_if = "Vec::is_empty"`), so the synthesized
-    /// `Decodable` (which requires the key) would throw `keyNotFound` on such a frame.
-    /// Defaults to `[]` when absent, matching the schema + the C# DTO. Mirrors the
-    /// `RestructureMove.confidence` pattern; `encode(to:)` stays auto-synthesized.
-    /// (cross-platform IPC drift)
+    /// Decodes a `fileDone` frame that omits `skippedStages` as []: the schema marks it optional and the Rust engine elides it when empty.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         path = try c.decode(String.self, forKey: .path)
@@ -730,10 +671,7 @@ public struct QueueState: Codable, Sendable {
     public var depth: Int { (running == nil ? 0 : 1) + pending.count }
 }
 
-/// Streamed by the engine the moment a Deep Analyze command arrives,
-/// then again as the runner advances through model load / target
-/// resolution. Lets the UI show progressive feedback during the ~10s
-/// VLM cold-load before the first per-file `deepAnalyzeProgress` fires.
+/// Streamed as soon as a Deep Analyze command arrives, and again through model load and target resolution, so the UI shows progress during the ~10 s VLM cold load.
 public struct DeepAnalyzeStarting: Codable, Sendable {
     public let modelKind: String
     public let phase: Phase
@@ -758,9 +696,7 @@ public struct DeepAnalyzeProgress: Codable, Sendable {
     public let etaSeconds: Double?
     public let currentPath: String?
     public let modelKind: String
-    /// Partial caption text accumulated from per-token streaming.
-    /// Engine throttles emission to 4 Hz so a fast VLM doesn't flood the
-    /// sink. nil on pre-inference progress events ("starting file N").
+    /// Partial caption from per-token streaming, throttled to 4 Hz by the engine. nil on pre-inference events.
     public let currentCaption: String?
 
     public init(processed: Int, total: Int, etaSeconds: Double?, currentPath: String?, modelKind: String, currentCaption: String? = nil) {
@@ -809,15 +745,9 @@ public struct ModelDownloadProgress: Codable, Sendable {
     public let modelKind: String
     public let fraction: Double           // 0..1
     public let message: String
-    /// Real bytes downloaded so far. Sourced from swift-transformers'
-    /// `Progress.completedUnitCount`. Optional because some progress
-    /// callbacks (e.g. legacy ones, or non-byte-unit progresses) may
-    /// not have meaningful byte counts.
+    /// Bytes downloaded so far (swift-transformers `Progress.completedUnitCount`). Optional: some progress callbacks have no meaningful byte counts.
     public let bytesDone: Int64?
-    /// Real total bytes for the download. Sourced from swift-transformers'
-    /// `Progress.totalUnitCount`. The welcome sheet's ETA math uses this
-    /// instead of the hardcoded `AIModelKind.approxBytes` estimate so
-    /// rates and ETAs match reality.
+    /// Total bytes (swift-transformers `Progress.totalUnitCount`). The welcome sheet's ETA uses this rather than the `AIModelKind.approxBytes` estimate.
     public let totalBytes: Int64?
 
     public init(modelKind: String, fraction: Double, message: String,
@@ -854,7 +784,6 @@ public struct FaceClusteringResult: Codable, Sendable {
     }
 }
 
-/// One pending face review suggestion (schema 1.23.0).
 public struct FaceReviewItem: Codable, Sendable, Equatable, Identifiable {
     public let faceID: Int64
     public let fileID: Int64
@@ -869,7 +798,7 @@ public struct FaceReviewItem: Codable, Sendable, Equatable, Identifiable {
     public let runnerUpName: String?
     public let runnerUpScore: Double?
     public let createdAt: Double
-    /// Schema 1.25.0: failed the per-face quality gate; only ever an uncertain suggestion.
+    /// Failed the per-face quality gate; only ever an uncertain suggestion.
     public let lowQuality: Bool?
 
     public var id: Int64 { faceID }
@@ -885,7 +814,7 @@ public struct FaceReviewItem: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// Two existing people who may be one (schema 1.25.0). `personID` is kept; `otherPersonID` merges in.
+/// Two existing people who may be one. `personID` is kept; `otherPersonID` merges in.
 public struct FaceMergeSuggestion: Codable, Sendable, Equatable, Identifiable {
     public let personID: Int64
     public let personName: String?
@@ -910,7 +839,7 @@ public struct FaceMergeSuggestion: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// A person whose faces form two well-separated groups (schema 1.25.0).
+/// A person whose faces form two well-separated groups.
 public struct FaceSplitSuggestion: Codable, Sendable, Equatable, Identifiable {
     public let personID: Int64
     public let personName: String?
@@ -932,7 +861,7 @@ public struct FaceSplitSuggestion: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// The durable face refresh backlog for one model and processing version (schema 1.25.0).
+/// Durable face refresh backlog for one model and processing version.
 public struct FaceRefreshStatus: Codable, Sendable, Equatable {
     public let model: String
     public let processing: String
@@ -955,7 +884,7 @@ public struct FaceRefreshStatus: Codable, Sendable, Equatable {
     }
 }
 
-/// Reply to listFaceReview, resolveFaceReview and undoFaceReview (schema 1.23.0).
+/// Reply to listFaceReview, resolveFaceReview and undoFaceReview.
 public struct FaceReviewPage: Codable, Sendable, Equatable {
     public let requestID: String
     public let action: String
@@ -992,9 +921,7 @@ public struct EngineError: Codable, Sendable, Error {
     public let kind: String        // discovery_failed | vision_failed | db_failed | unknown
     public let message: String
     public let path: String?       // file path if applicable
-    /// For errors pertaining to a specific model/pack install (e.g.
-    /// `mobileclip_s2`, `cuda_pack_x64`), the model id — lets the app route
-    /// the error to the right install slot. Optional/`nil` when absent.
+    /// For model or pack install errors (e.g. `mobileclip_s2`, `cuda_pack_x64`): the model id, so the app routes the error to the right install slot. nil when absent.
     public let modelKind: String?
 
     public init(kind: String, message: String, path: String? = nil, modelKind: String? = nil) {
@@ -1020,10 +947,7 @@ public struct LogLine: Codable, Sendable {
 }
 
 // MARK: - Windows-originated reply DTOs
-//
-// These mirror the schema's $defs (and the Windows engine's IPC structs)
-// so the macOS app can DECODE events emitted by a cross-platform engine /
-// the shared test corpus. The mac engine doesn't emit them yet.
+// These mirror the schema's $defs and the Windows engine's IPC structs. The mac engine doesn't emit them yet, but the app must decode them.
 
 public struct RestructureCategoryCount: Codable, Sendable {
     public let category: String
@@ -1067,7 +991,7 @@ public struct RestructurePlan: Codable, Sendable {
     public let categoryCounts: [RestructureCategoryCount]
     /// Full-plan confidence totals, including rows omitted from a bounded preview.
     public let confidenceCounts: RestructureConfidenceCounts?
-    /// Engine-authoritative folder classification counts. Nil on older engines.
+    /// Folder classification counts. nil on older engines.
     public let folderClassifications: FolderClassificationCounts?
     /// Opaque engine-owned plan handle when `moves` is a bounded preview.
     public let planID: String?
@@ -1152,9 +1076,9 @@ public struct BulkActionItem: Codable, Sendable {
     public let fileID: Int64?
     public let ok: Bool
     public let message: String?
-    /// Schema 1.27.0. trashFiles refusals: "changed", "protected", "missing" or "failed".
+    /// trashFiles refusals: "changed", "protected", "missing" or "failed".
     public let reason: String?
-    /// Schema 1.27.0. mergeClusters: the operation `undoFaceReview` takes to undo this merge.
+    /// mergeClusters: the operation `undoFaceReview` takes to undo this merge.
     public let operationID: String?
 
     public init(fileID: Int64? = nil, ok: Bool, message: String? = nil, reason: String? = nil, operationID: String? = nil) {
@@ -1173,8 +1097,7 @@ public struct BulkActionResult: Codable, Sendable {
     public let succeeded: Int
     public let failed: Int
     public let messages: [BulkActionItem]
-    /// Schema 1.28.0. The id of the command this result answers; nil from an
-    /// engine that does not echo it.
+    /// The id of the command this result answers; nil from an engine that doesn't echo it.
     public var commandID: String?
 
     public init(action: String, succeeded: Int, failed: Int, messages: [BulkActionItem], commandID: String? = nil) {
@@ -1229,8 +1152,7 @@ public struct MergeSuggestions: Codable, Sendable {
     }
 }
 
-/// Reply to `verifyCudaPack`. Fresh `HardwareInfo` snapshot + an optional
-/// human-readable `diagnostics` string explaining a negative probe.
+/// Reply to `verifyCudaPack`: a fresh HardwareInfo snapshot plus an optional `diagnostics` string explaining a negative probe.
 public struct HardwareReprobed: Codable, Sendable {
     public let hardware: HardwareInfo
     public let diagnostics: String?
@@ -1253,9 +1175,7 @@ public struct LibraryWiped: Codable, Sendable {
     }
 }
 
-/// Reply to `generateVideoThumbnail`. `bytes` is a base64-encoded JPEG
-/// (aspect-preserved, long side = the requested size, 192 by default) — a
-/// base64 String, NOT a number array.
+/// Reply to `generateVideoThumbnail`: `bytes` is a base64 JPEG (not a number array), long side = requested size (192 by default).
 public struct ThumbnailGenerated: Codable, Sendable {
     public let path: String
     public let modifiedAt: Double?
@@ -1266,4 +1186,22 @@ public struct ThumbnailGenerated: Codable, Sendable {
         self.modifiedAt = modifiedAt
         self.bytes = bytes
     }
+}
+
+/// The engine's answer to "which vision model fits this Mac right now": what the model picker and the first-run choice show instead of a rule of their own.
+public struct VLMAdvice: Sendable, Equatable {
+    public let availableMB: Int64
+    public let recommendedID: String?
+    private let fits: [String: Bool]
+    private let fitsNow: [String: Bool]
+
+    public init(_ catalog: ModelCatalog) {
+        availableMB = catalog.availableMemoryMB
+        recommendedID = catalog.recommendedID
+        fits = Dictionary(catalog.models.map { ($0.id, $0.fits) }, uniquingKeysWith: { first, _ in first })
+        fitsNow = Dictionary(catalog.models.map { ($0.id, $0.fitsNow) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    public func fits(_ id: String) -> Bool? { fits[id] }
+    public func fitsNow(_ id: String) -> Bool? { fitsNow[id] }
 }

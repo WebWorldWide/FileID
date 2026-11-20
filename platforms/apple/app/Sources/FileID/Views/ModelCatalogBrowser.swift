@@ -7,6 +7,7 @@ struct ModelCatalogBrowser: View {
     var initialSelection: AIModelKind?
     let onSelect: (AIModelKind) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var query = ""
     @State private var role = "all"
     @State private var fitsOnly = true
@@ -17,6 +18,13 @@ struct ModelCatalogBrowser: View {
     @State private var confirmDownload: AIModelKind?
     private var ramGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
     private var selected: AIModelKind? { selection.flatMap(AIModelKind.init(rawValue:)) }
+    private func moveSelection(by delta: Int) {
+        let ids = filtered.map(\.rawValue)
+        guard !ids.isEmpty else { return }
+        let current = selection.flatMap(ids.firstIndex(of:)) ?? (delta > 0 ? -1 : ids.count)
+        selection = ids[min(max(current + delta, 0), ids.count - 1)]
+    }
+
     private var filtered: [AIModelKind] {
         AIModelKind.allCases.filter { kind in
             (!visionOnly || kind.supportsVision) &&
@@ -30,7 +38,7 @@ struct ModelCatalogBrowser: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("More AI models").font(Theme.Font.body(20, .semibold))
+                    Text("More AI models").font(Theme.Font.display(28))
                     Text("For the curious: try a different AI for descriptions and Chat. The models suggested in Settings suit most people.")
                         .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -40,23 +48,24 @@ struct ModelCatalogBrowser: View {
                 Spacer()
                 DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .offset(y: -2)
             }
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(Theme.text3)
-                TextField("Search model, publisher or license", text: $query).textFieldStyle(.plain)
-                    .accessibilityLabel("Search models")
-            }.padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+            DSTextField(placeholder: "Search model, publisher or license", text: $query, icon: "magnifyingglass")
             HStack {
                 if !visionOnly {
-                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")], height: 26)
+                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")])
                 }
                 Spacer()
                 Toggle("Fits this Mac", isOn: $fitsOnly)
                 Toggle("Downloaded", isOn: $installedOnly)
-            }.font(Theme.Font.body(12))
+            }
+            .toggleStyle(DSCheckboxToggleStyle())
+            .font(Theme.Font.body(12))
             ScrollViewReader { proxy in
-            List(selection: $selection) {
+            ScrollView {
+                LazyVStack(spacing: 0) {
                 ForEach(filtered, id: \.rawValue) { kind in
+                    Button { selection = kind.rawValue } label: {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: kind.supportsVision ? "photo.on.rectangle" : "text.bubble")
                             .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
@@ -68,17 +77,32 @@ struct ModelCatalogBrowser: View {
                         .help("\(kind.sourceRepo) · \(kind.licenseName)")
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 4) {
-                            Text(ByteCountFormatter.string(fromByteCount: kind.approxBytes, countStyle: .file)).monospacedDigit()
+                            Text(ModelSize.label(kind.approxBytes)).monospacedDigit()
                             Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
-                                .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : .secondary)
+                                .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : Theme.text3)
                             if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
                             if let decode = engine.benchmarkResults[kind.rawValue]?.generatedTokensPerSecond {
                                 Text("\(Int(decode.rounded())) words per second (approx.)").foregroundStyle(Theme.gold).monospacedDigit()
                             }
                         }.font(Theme.Font.body(11))
-                    }.padding(.vertical, 6).tag(kind.rawValue)
+                    }
+                    .padding(.vertical, 8).padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(selection == kind.rawValue ? Theme.goldWash : Color.clear)
+                    .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                    }
+                    .buttonStyle(DSRowButtonStyle(radius: 0))
+                    .id(kind.rawValue)
+                    .accessibilityAddTraits(selection == kind.rawValue ? .isSelected : [])
                 }
-            }.dsList().listStyle(.inset).overlay {
+                }
+            }
+            .dsList()
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.downArrow) { moveSelection(by: 1); return .handled }
+            .onKeyPress(.upArrow) { moveSelection(by: -1); return .handled }
+            .overlay {
                 if filtered.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
@@ -91,7 +115,7 @@ struct ModelCatalogBrowser: View {
             .frame(minHeight: 220)
             .onChange(of: selection) { _, id in
                 guard let id else { return }
-                withAnimation(Theme.quick) { proxy.scrollTo(id) }
+                withAnimation(reduceMotion ? nil : Theme.quick) { proxy.scrollTo(id) }
             }
             .onChange(of: engine.benchmarkModelKind) { _, _ in
                 if let selection { proxy.scrollTo(selection) }
@@ -156,6 +180,7 @@ struct ModelCatalogBrowser: View {
                 }
             }
         }.padding(24).frame(minWidth: 640, idealWidth: 780, minHeight: 680, idealHeight: 760)
+            .sheetSurface()
             .onAppear { selection = initialSelection?.rawValue; engine.refreshModelCatalog() }
             .onChange(of: engine.lastErrorSignal) { _, _ in
                 guard let error = engine.lastError, selected != nil, error.kind != "prewarm_cancelled",
@@ -193,7 +218,7 @@ struct ModelCatalogBrowser: View {
     private func download(_ kind: AIModelKind) {
         engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
         guard engine.prewarmModel(kind.rawValue) else {
-            statusMessage = "FileID's helper isn't running. Quit and reopen FileID, then try again."
+            statusMessage = "FileID’s helper isn’t running. Quit and reopen FileID, then try again."
             return
         }
         onSelect(kind)
@@ -220,7 +245,7 @@ struct ModelBenchmarkPanel: View {
                     Button { engine.benchmarkModel(kind) } label: {
                         Label(engine.benchmarkResults[kind.rawValue] == nil ? "Measure speed" : "Measure again", systemImage: "speedometer")
                     }
-                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .disabled(!installed || engine.benchmarkModelKind != nil || engine.modelDownloadProgress != nil)
                     .help(installed ? "Runs a short test twice on this Mac. Nothing is downloaded." : "Download the model first. Measuring never downloads anything.")
                 }

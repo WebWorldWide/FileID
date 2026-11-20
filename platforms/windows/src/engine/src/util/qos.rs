@@ -1,10 +1,8 @@
-//! Interactive requests (search, chat, the catalog actions behind a click) run at
-//! the user-initiated QoS on macOS, as the Swift engine's database pool and IPC
-//! writer do. Threads left at the default QoS lose the CPU to busier processes and
-//! answer several times slower on a loaded Mac. A no-op on other platforms.
+//! Interactive requests run at the user-initiated QoS on macOS, as the Swift engine's database pool and IPC writer do:
+//! default-QoS threads lose the CPU to busier processes and answer several times slower on a loaded Mac. No-op
+//! elsewhere.
 
-/// Runs `work` on the calling thread at the user-initiated QoS, then restores the
-/// thread's previous class (blocking-pool threads are reused for other work).
+/// Restores the thread's previous class afterwards (blocking-pool threads are reused).
 pub fn interactive<R>(work: impl FnOnce() -> R) -> R {
     #[cfg(target_os = "macos")]
     {

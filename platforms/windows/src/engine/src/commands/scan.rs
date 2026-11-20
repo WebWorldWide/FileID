@@ -1,8 +1,3 @@
-//! `startScan` IPC handler — loads ML model weights, registers the scan
-//! coordinator in the shared state slot, runs the pipeline, clears the slot
-//! when done. Pre-flight checks that required models are installed and
-//! that no scan is already running.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +24,14 @@ impl Drop for ScanStateGuard {
     fn drop(&mut self) {
         clear_scan_slot(&self.0, &self.1);
         self.1.release_slot();
+    }
+}
+
+fn scan_failure_event(err: &anyhow::Error) -> (&'static str, &'static str) {
+    if crate::util::user_message::io_cause(err) == Some(crate::util::user_message::IoCause::DiskFull) {
+        ("scan_disk_full", "Your disk is full, so FileID couldn’t finish scanning. Free some space, then scan again.")
+    } else {
+        ("scan_failed", "FileID couldn't finish scanning this folder. Check that it is still connected, then scan again.")
     }
 }
 
@@ -83,79 +86,42 @@ async fn reject_gpu_device_removed(
     *scan_state.lock() = None;
 }
 
-/// A model load that outlived its timeout, with the crash breadcrumb armed for it.
-type LateLoader = Arc<Mutex<Option<(tokio::task::JoinHandle<ModelStack>, models::ep_guard::ArmGuard)>>>;
+type LateLoader = Arc<Mutex<Option<tokio::task::JoinHandle<ModelStack>>>>;
 
-/// Loads the scan's models, or hands back the stack the last scan left loaded.
-///
-/// Each model is a pool of N Sessions (one per worker slot) so ML inference
-/// parallelizes across the GPU command queue instead of serializing on a
-/// single Mutex; ORT session create can take 100-500 ms per model, so the load
-/// runs on a blocking thread.
-///
-/// Timeout is 120 s (not 30 s): on the FIRST launch the CLIP scene-label
-/// matrix is text-encoded inside load_default, which on a slow EP (DirectML
-/// / CPU) takes 20+ s on its own — a 30 s budget tripped a false "model file
-/// corrupted" on real 4 GB-VRAM hardware. The matrix is disk-cached after the
-/// first build (scene_vocab.rs), so later launches load in a few seconds;
-/// 120 s still catches a genuinely hung or corrupt model file.
+/// Each model is a pool of N sessions sharing one compiled graph, so inference parallelizes instead of serializing on
+/// one Mutex; loads on a blocking thread. The 120 s timeout: on first launch the CLIP scene-label matrix is
+/// text-encoded inside load_default (20+ s on a slow CPU), cached by scene_vocab.rs; 120 s still catches a hung or
+/// corrupt model file.
 async fn load_scan_models(
     coord: ScanCoordinator,
     key: scan_models::StackKey,
     worker_count: usize,
-    runtime_available: bool,
     missing_models: Vec<&'static str>,
     late_loader: LateLoader,
+    sink: Sink,
 ) -> Result<Arc<ModelStack>, ModelLoadFailure> {
     if let Some(stack) = scan_models::resident(&key) {
         tracing::info!("[SCAN] models are still loaded from the last scan");
         return Ok(stack);
     }
-    // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
-    // is where a bad GPU pack DLL crashes the process). A timed-out blocking load
-    // keeps both this guard and the scan reservation until the loader really exits.
-    // Arm the override-aware EP that will actually attempt the first native
-    // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
-    // active_provider() which ignores the override — see runtime::armed_provider.
-    //
-    // The guard disarms on drop too, so a GRACEFUL shutdown that aborts this
-    // task mid-load (before the `.await` returns) still clears the breadcrumb —
-    // otherwise the next launch would false-poison this healthy EP. A real
-    // native crash skips the drop (process gone) and keeps the breadcrumb.
-    let armed_ep = models::runtime::armed_provider();
-    let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
     let started = std::time::Instant::now();
     let load_result = wait_for_blocking(
-        tokio::task::spawn_blocking(move || ModelStack::load_for_scan(worker_count, runtime_available)),
+        tokio::task::spawn_blocking(move || ModelStack::load_for_scan(worker_count)),
         Duration::from_secs(120),
     )
     .await;
     let models = match load_result {
-        BlockingWait::Completed(Ok(m)) => {
-            drop(ep_guard);
-            Arc::new(m)
-        }
+        BlockingWait::Completed(Ok(m)) => Arc::new(m),
         BlockingWait::Completed(Err(err)) => {
-            drop(ep_guard);
             tracing::error!(?err, "model stack load panicked");
-            // macOS: a dylib that resolved at pre-flight but fails to load is
-            // almost always the wrong architecture or older than the required
-            // ONNX Runtime 1.22 (`ort` hard-panics on a lower minor version) —
-            // point at the one-time runtime reinstall in addition to the models.
-            #[cfg(target_os = "macos")]
-            let runtime_hint = "\nOn macOS this can also mean the ONNX Runtime is the wrong \
-                                architecture or older than 1.22 — reinstall it with \
-                                `fileid runtime install`.";
-            #[cfg(not(target_os = "macos"))]
-            let runtime_hint = "";
             return Err(ModelLoadFailure::new(
                 "model_load_failed",
-                format!("FileID couldn't load its AI models. Reinstall them in Settings, under Local AI.{runtime_hint}"),
+                "FileID couldn't load its AI models. Reinstall them in Settings, under Local AI.",
             ));
         }
         BlockingWait::TimedOut(load_task) => {
             tracing::error!("model stack load timed out after 120s; retaining scan reservation until the blocking loader exits");
-            *late_loader.lock() = Some((load_task, ep_guard));
+            *late_loader.lock() = Some(load_task);
             return Err(ModelLoadFailure::new(
                 "model_load_timeout",
                 "FileID's AI models took more than two minutes to load. FileID can't start \
@@ -172,44 +138,50 @@ async fn load_scan_models(
         return Err(ModelLoadFailure::new("gpu_device_removed", crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE));
     }
 
-    // A model that IS installed (missing ones were reported above) but whose
-    // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
-    // file, or an EP bind failure on every provider) must ABORT the scan — not
-    // silently skip its stage. A skipped stage still writes every file row with
-    // failed=0 and a fresh scanned_at; the incremental skip-set
-    // (scan_session.rs) is purely timestamp-based, so those files are NEVER
-    // re-tried on later default scans — the face / image-embedding stage stays
-    // permanently empty even after the model is repaired (a real "face scanning
-    // is totally broken, and stays broken" trap). Aborting (mirroring the
-    // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
-    // re-processes them once the model loads. The workers wait for this result
-    // before they analyse anything, so no file is written without its stages.
-    if runtime_available {
-        let failed_to_load = models_that_failed_to_load(&models, &missing_models);
-        if !failed_to_load.is_empty() {
-            tracing::error!(
-                models = ?failed_to_load,
-                "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
-            );
-            return Err(ModelLoadFailure::new(
-                "model_load_failed",
-                format!(
-                    "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
-                     Their files are probably incomplete or blocked by antivirus. \
-                     Reinstall them in Settings, under Local AI, then scan again. \
-                     (FileID stopped the scan so your files aren't marked as done \
-                     without these features.)",
-                    failed_to_load
-                        .iter()
-                        .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ));
-        }
+    // An installed model whose weights fail to load (corrupt or AV-quarantined .onnx, or a graph tract cannot compile)
+    // must abort the scan, not skip its stage: a skipped stage still stamps every file failed=0 with a fresh
+    // scanned_at, the incremental skip-set (scan_session.rs) never retries them, and the face/embedding stage stays
+    // empty even after repair. Aborting leaves files un-stamped for a later scan. Workers wait for this result, so no
+    // file is written without its stages.
+    let failed_to_load = models_that_failed_to_load(&models, &missing_models);
+    if !failed_to_load.is_empty() {
+        tracing::error!(
+            models = ?failed_to_load,
+            "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
+        );
+        return Err(ModelLoadFailure::new(
+            "model_load_failed",
+            format!(
+                "These AI models couldn't be loaded, so the scan was stopped: {}.\n\n\
+                 Their files are probably incomplete or blocked by antivirus. \
+                 Reinstall them in Settings, under Local AI, then scan again. \
+                 (FileID stopped the scan so your files aren't marked as done \
+                 without these features.)",
+                failed_to_load
+                    .iter()
+                    .map(|model| if *model == "image embedding" { "picture search" } else { "faces" })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     }
     scan_models::keep(key, models.clone());
+    if let Some(notice) = slower_path_notice(&models, &missing_models) {
+        sink.send(notice).await;
+    }
     Ok(models)
+}
+
+/// On the Mac, picture search runs on the graphics chip through MLX. When that cannot start (its Metal library is
+/// missing or unloadable) the scan falls back to the CPU and takes about eleven times as long, which should not be silent.
+fn slower_path_notice(models: &ModelStack, missing_models: &[&str]) -> Option<IpcEvent> {
+    (models.apple_scan && !models.apple_clip && !missing_models.contains(&"mobileclip_s2")).then(|| {
+        EngineError::event(
+            "scan_slower_path",
+            "Picture search can't use this Mac's graphics chip, so this scan will take much longer than usual. \
+             Reinstalling FileID usually fixes it.",
+        )
+    })
 }
 
 fn models_that_failed_to_load(models: &ModelStack, missing_models: &[&str]) -> Vec<&'static str> {
@@ -227,23 +199,10 @@ fn models_that_failed_to_load(models: &ModelStack, missing_models: &[&str]) -> V
     failed_to_load
 }
 
-#[cfg(target_os = "macos")]
-fn ort_runtime_available() -> bool {
-    crate::ort_runtime::is_available()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ort_runtime_available() -> bool {
-    true
-}
-
-/// An absolute path with no NUL, the only kind a scan may start from (the Swift engine's
-/// `isUsableScanRoot`).
 fn is_usable_scan_root(path: &str) -> bool {
     Path::new(path).is_absolute() && !path.contains('\0')
 }
 
-/// Whether the scan ran to the end (not refused, cancelled or failed).
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -255,8 +214,8 @@ pub(crate) async fn handle_start_scan(
 ) -> bool {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
-    // A relative or empty path would be resolved against the engine's own folder, and a NUL
-    // would cut it short: either would scan a folder the person never chose.
+    // A relative or empty path would resolve against the engine's own folder and a NUL would cut it short: either scans
+    // a folder the person never chose.
     if !is_usable_scan_root(&payload.root_path) {
         sink.send(EngineError::event("folder_access_denied", super::folder_access::SCAN_DENIED)).await;
         sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ipc::ScanComplete {
@@ -270,14 +229,9 @@ pub(crate) async fn handle_start_scan(
         return false;
     }
 
-    // Atomic check-and-reserve under one lock: gate + slot reservation must
-    // be a single critical section, or two StartScan commands queued back-to-
-    // back can both pass the gate before either reserves the slot. Construct
-    // the REAL coordinator now and park its clone, so a pause/cancel arriving
-    // after reservation lands on the coordinator the session actually uses —
-    // not a throwaway placeholder that the old code swapped out post-model-load
-    // (#20). If anyone else reaches here while we hold the slot, they bounce
-    // with `scan_already_running`.
+    // Atomic check-and-reserve under one lock, or two back-to-back StartScan commands can both pass the gate. The REAL
+    // coordinator is built and parked here so a pause/cancel after reservation lands on the one the session uses. A
+    // caller finding the slot held bounces with `scan_already_running`.
     let coord = ScanCoordinator::new();
     let finished_scan = coord.clone();
     let after_scan_db = db.clone();
@@ -350,11 +304,8 @@ pub(crate) async fn handle_start_scan(
         return false;
     }
 
-    // Missing models never block a scan (macOS parity): every file is still
-    // catalogued — kind, size, dates, content hash, perceptual hash, text — and
-    // only the stages whose weights are absent skip, each logging once at load.
-    // Front ends offer the install before scanning; a later rescan fills the
-    // embeddings and faces in.
+    // Missing models never block a scan: every file is still catalogued (kind, size, dates, hashes, text) and only
+    // stages whose weights are absent skip, each logging once at load. A later rescan fills in embeddings and faces.
     let missing_models: Vec<&str> = models::required::missing_required()
         .into_iter()
         .map(|missing| missing.kind)
@@ -362,31 +313,18 @@ pub(crate) async fn handle_start_scan(
     if !missing_models.is_empty() {
         tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; their stages will skip");
     }
-    // The macOS `load-dynamic` build cannot bind ONNX Runtime without an
-    // installed dylib (ORT's `download-binaries` ships only a static arm64 lib),
-    // so without it the scan runs with no models at all instead of panicking at
-    // the first session bind. Always true on Windows/Linux.
-    let runtime_available = ort_runtime_available();
-    if !runtime_available {
-        tracing::warn!("[SCAN] ONNX Runtime not installed; model stages will skip");
-    }
-
-    // Emit Discovering immediately so the UI flips out of IdlePanel within
-    // microseconds, regardless of how long ModelStack takes to load. Use
-    // .await (not try_send) so the event can't be silently dropped under
-    // sink load.
+    // Emit Discovering immediately so the UI leaves IdlePanel however long ModelStack takes; .await, not try_send, so
+    // it can't be dropped under sink load.
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Discovering,
     ))))
     .await;
 
-    // Baseline Progress so the sidebar stats flip from "—" to "0"
-    // immediately. Without it, if no file ever reaches DBWriter (empty
-    // folder, all-filtered, or a downstream stall), every stat row stays
-    // at "—" indefinitely — identical to "scan did nothing".
-    let session_id_baseline = uuid::Uuid::new_v4().to_string();
+    // Baseline Progress so sidebar stats flip from "—" to "0"; otherwise a scan where no file reaches DBWriter (empty
+    // folder, all filtered, downstream stall) looks like it did nothing.
+    let session_id = uuid::Uuid::new_v4().to_string();
     sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
-        session_id: session_id_baseline.clone(),
+        session_id: session_id.clone(),
         phase: ScanPhase::Discovering,
         total: 0,
         discovered: 0,
@@ -399,30 +337,23 @@ pub(crate) async fn handle_start_scan(
     }))))
     .await;
 
-    // (The real coordinator was reserved into scan_state above, before the
-    // first .await — no placeholder swap, so no pause/cancel can be lost #20.)
-
-    // The models load when the scan first has a file to analyse, alongside the
-    // walk, and stay loaded between scans (pipeline/scan_models.rs). A rescan
-    // that finds nothing new loads nothing.
+    // Models load when the scan first has a file to analyse and stay loaded between scans (pipeline/scan_models.rs); a
+    // rescan that finds nothing new loads nothing.
     let models_worker_count = platform::default_worker_cap() as usize;
-    let stack_key = scan_models::StackKey::current(models_worker_count, runtime_available);
+    let stack_key = scan_models::StackKey::current(models_worker_count);
     let evictions_before = scan_models::evictions();
     let late_loader: LateLoader = Arc::new(Mutex::new(None));
     let models = ModelSource::lazy({
-        let (coord, key, late) = (coord.clone(), stack_key.clone(), late_loader.clone());
+        let (coord, key, late, sink) = (coord.clone(), stack_key.clone(), late_loader.clone(), sink.clone());
         let missing: Vec<&'static str> = missing_models.clone();
         move || -> scan_models::LoadFuture {
-            Box::pin(load_scan_models(coord, key, models_worker_count, runtime_available, missing, late))
+            Box::pin(load_scan_models(coord, key, models_worker_count, missing, late, sink))
         }
     });
 
-    // The single largest live allocation during a scan is the set of full
-    // decoded RGB frames each in-flight worker future owns. On a low-RAM box
-    // (MemoryTier::Low, <8 GB) cap the worker count so that working set stays
-    // bounded; non-Low tiers keep the full CPU-topology cap unchanged. Pool
-    // arrays are indexed worker_idx % pool.len(), so worker_count and pool_size
-    // stay decoupled.
+    // The largest live allocation is the full decoded RGB frames each in-flight worker owns: on a low-RAM box
+    // (MemoryTier::Low, <8 GB) cap the worker count to bound it. Pool arrays are indexed worker_idx % pool.len(), so
+    // worker_count and pool_size stay decoupled.
     let worker_count = match platform::memory_tier() {
         platform::MemoryTier::Low => platform::default_worker_cap().min(6) as usize,
         _ => platform::default_worker_cap() as usize,
@@ -435,27 +366,40 @@ pub(crate) async fn handle_start_scan(
         models.clone(),
         payload.rescan,
         payload.excluded_paths.clone().unwrap_or_default(),
-    );
+    )
+    .with_session_id(session_id.clone())
+    .with_root_display(payload.root_display.clone());
     let root = PathBuf::from(payload.root_path.clone());
 
     let models_for_keep = models.clone();
-    let outcome = match session.run(&root, |_| {}).await {
-        Ok(first) if first.changed_during_scan => {
-            ScanSession::new(
-                coord,
-                db,
-                worker_count,
-                sink.clone(),
-                models,
-                false,
-                payload.excluded_paths.clone().unwrap_or_default(),
-            )
-            .follow_up(&first)
-            .run(&root, |_| {})
-            .await
+    let mut outcome = session.run(&root, |_| {}).await;
+    let mut round = 0;
+    while let Ok(previous) = &outcome
+        && previous.needs_follow_up
+    {
+        round += 1;
+        if previous.timed_out > 0 {
+            // Files a busy machine timed out fail again straight away; let it settle first.
+            let deadline = tokio::time::Instant::now() + crate::scan_session::timeout_retry_backoff(round);
+            while tokio::time::Instant::now() < deadline && !coord.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         }
-        other => other,
-    };
+        outcome = ScanSession::new(
+            coord.clone(),
+            db.clone(),
+            worker_count,
+            sink.clone(),
+            models.clone(),
+            false,
+            payload.excluded_paths.clone().unwrap_or_default(),
+        )
+        .with_session_id(session_id.clone())
+        .with_root_display(payload.root_display.clone())
+        .follow_up(previous, round)
+        .run(&root, |_| {})
+        .await;
+    }
     let result = match outcome {
         Ok(result) => result,
         Err(err) if err.downcast_ref::<ModelLoadFailure>().is_some() => {
@@ -467,12 +411,10 @@ pub(crate) async fn handle_start_scan(
                 sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Failed)))).await;
                 sink.send(EngineError::event(failure.kind, failure.message)).await;
             }
-            // A loader that outlived its two minutes keeps the scan slot (and
-            // its crash breadcrumb) until it really exits.
+            // A loader that outlived its two minutes keeps the scan slot until it really exits.
             let late = late_loader.lock().take();
-            if let Some((load_task, ep_guard)) = late {
+            if let Some(load_task) = late {
                 let late_result = load_task.await;
-                drop(ep_guard);
                 match late_result {
                     Ok(_) => tracing::warn!("[SCAN] timed-out model loader eventually exited"),
                     Err(err) => tracing::warn!(?err, "[SCAN] timed-out model loader eventually failed"),
@@ -487,10 +429,8 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(EngineError::new(
-                "scan_failed",
-                "FileID couldn't finish scanning this folder. Check that it is still connected, then scan again.",
-            )
+            let (kind, message) = scan_failure_event(&err);
+            sink.send(EngineError::new(kind, message)
             .with_path(payload.root_path)
             .into_event())
             .await;
@@ -499,8 +439,7 @@ pub(crate) async fn handle_start_scan(
         }
     };
 
-    // Keep the stack for the next scan, unless another model asked for the
-    // memory while this scan ran.
+    // Keep the stack for the next scan unless another model asked for the memory meanwhile.
     if let Some(stack) = models_for_keep.loaded()
         && scan_models::evictions() == evictions_before
     {
@@ -524,15 +463,31 @@ pub(crate) async fn handle_start_scan(
     !finished_scan.is_cancelled() && !finished_scan.is_gpu_dead()
 }
 
-/// `purgeExcluded` handler — immediately remove cataloged rows under the
-/// given excluded folders (files on disk untouched). Sent when the user adds
-/// an exclusion so the Library reflects it without waiting for a rescan; the
-/// same purge also runs at every scan start as the durable backstop.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_full_disk_is_named_instead_of_blaming_the_connection() {
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull)).context("writing the catalog");
+        let (kind, message) = scan_failure_event(&full);
+        assert_eq!(kind, "scan_disk_full");
+        assert!(message.contains("disk is full") && !message.contains("connected"), "{message}");
+        assert_eq!(scan_failure_event(&anyhow::anyhow!("walk failed")).0, "scan_failed");
+    }
+
+    #[test]
+    fn only_the_mac_scan_that_lost_the_graphics_chip_says_it_is_slower() {
+        let mut stack = ModelStack::empty();
+        assert!(slower_path_notice(&stack, &[]).is_none(), "not the Mac scan path");
+        stack.apple_scan = true;
+        assert!(slower_path_notice(&stack, &[]).is_some());
+        assert!(slower_path_notice(&stack, &["mobileclip_s2"]).is_none(), "no picture model to run at all");
+        stack.apple_clip = true;
+        assert!(slower_path_notice(&stack, &[]).is_none());
+    }
 
     #[test]
     fn a_scan_root_must_be_absolute_and_free_of_nul() {
@@ -614,6 +569,60 @@ mod tests {
         assert!(scan_state.lock().is_none());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_scan_is_one_session_and_one_discovering_phase() {
+        let folder = std::env::temp_dir().join(format!("fileid-one-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        for name in ["a.txt", "b.txt", "sub/c.txt"] {
+            std::fs::write(folder.join(name), name).unwrap();
+        }
+        let db = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let scan_state = Arc::new(Mutex::new(None));
+        let (sink, mut events) = Sink::channel_for_test(4096);
+        let payload = ipc::StartScanPayload {
+            root_path: folder.to_string_lossy().into_owned(),
+            root_bookmark: None,
+            root_display: None,
+            rescan: false,
+            excluded_paths: None,
+        };
+
+        let completed = handle_start_scan(sink, db, scan_state, payload, Arc::new(AtomicBool::new(false)), None, None).await;
+        assert!(completed);
+
+        let mut discovering = 0;
+        let mut session_ids = std::collections::BTreeSet::new();
+        let mut progress: Vec<ScanProgress> = Vec::new();
+        let mut completed_session = None;
+        while let Ok(event) = events.try_recv() {
+            match event.payload {
+                EventPayload::PhaseChanged(Wrap { inner: ScanPhase::Discovering }) => discovering += 1,
+                EventPayload::Progress(Wrap { inner }) => {
+                    session_ids.insert(inner.session_id.clone());
+                    progress.push(inner);
+                }
+                EventPayload::ScanComplete(Wrap { inner }) => {
+                    session_ids.insert(inner.session_id.clone());
+                    completed_session = Some(inner.session_id);
+                }
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+
+        assert_eq!(discovering, 1, "phaseChanged(discovering) once per scan");
+        assert!(completed_session.is_some(), "scanComplete was sent");
+        assert_eq!(session_ids.len(), 1, "one session id for every event of the scan: {session_ids:?}");
+        assert!(!progress.is_empty());
+        let mut floor = (0, 0);
+        for p in &progress {
+            assert!(p.total >= floor.0 && p.processed >= floor.1, "counters only grow: {floor:?} then ({}, {})", p.total, p.processed);
+            floor = (p.total, p.processed);
+        }
+        assert_eq!(progress.last().unwrap().phase, ScanPhase::Completed);
+    }
+
     #[tokio::test]
     async fn gpu_failure_rejection_is_terminal_and_releases_scan_slot() {
         let coordinator = ScanCoordinator::new();
@@ -639,6 +648,7 @@ mod tests {
     }
 }
 
+/// Removes cataloged rows under the excluded folders; files on disk are untouched. Sent when the user adds an exclusion, and the same purge runs at every scan start as the durable backstop.
 pub(crate) async fn handle_purge_excluded(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,

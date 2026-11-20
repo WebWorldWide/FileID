@@ -1,18 +1,10 @@
-// 5-point similarity-transform face alignment to the canonical 112x112 ArcFace
-// reference template (used by SFace). Least-squares 2D similarity (scale +
-// rotation + translation, no shear) from the detected 5 landmarks to the
-// template, then bilinear-sample the source into a 112x112 RGB crop. Matches
-// OpenCV FaceRecognizerSF::alignCrop so SFace embeddings line up with cv2.
+// 5-point similarity-transform face alignment to the 112x112 ArcFace template (SFace); matches OpenCV
+// FaceRecognizerSF::alignCrop so embeddings line up with cv2.
 
 const OUT: usize = 112;
 
-/// Reject the aligned crop when more than this fraction of its pixels sample
-/// OUTSIDE the source image. Those pixels are edge-clamp replication — long
-/// constant-color streaks that corrupt the SFace embedding (and look like a
-/// smear in the People card). A face this far off-frame, or one whose
-/// landmarks fit so badly the warp leaves the image, is better served by the
-/// bounds-clamped plain bbox crop the caller falls back to. Env-overridable.
-/// (audit 2026-07-15: found by inspecting real People-tab representative crops.)
+/// Reject the crop when more than this fraction of pixels sample outside the source: edge-clamp replication smears
+/// corrupt the SFace embedding, and the caller falls back to the bbox crop. Env-overridable.
 fn max_out_of_bounds_fraction() -> f32 {
     std::env::var("FILEID_FACE_ALIGN_MAX_OOB")
         .ok()
@@ -22,26 +14,22 @@ fn max_out_of_bounds_fraction() -> f32 {
         .unwrap_or(0.20)
 }
 
-/// Template in FileID landmark order [left_eye, right_eye, nose, mouth_left,
-/// mouth_right] (the standard ArcFace 5-point template, reordered from
-/// OpenCV's native [re, le, nt, rcm, lcm]).
+/// FileID landmark order [left_eye, right_eye, nose, mouth_left, mouth_right]; OpenCV's native order is [re, le, nt,
+/// rcm, lcm].
 const TEMPLATE: [[f32; 2]; 5] = [
-    [73.5318, 51.5014], // left_eye
-    [38.2946, 51.6963], // right_eye
-    [56.0252, 71.7366], // nose
-    [70.7299, 92.2041], // mouth_left
-    [41.5493, 92.3655], // mouth_right
+    [73.5318, 51.5014],
+    [38.2946, 51.6963],
+    [56.0252, 71.7366],
+    [70.7299, 92.2041],
+    [41.5493, 92.3655],
 ];
 
-/// Align a face to 112x112 RGB from its 5 landmarks (FileID order) in the
-/// source image's pixel coordinates. Returns 112*112*3 RGB8 bytes, or `None`
-/// if the fit is degenerate.
+/// Returns 112*112*3 RGB8 bytes, or `None` if the fit is degenerate.
 pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5]) -> Option<Vec<u8>> {
     let expected = (width as usize).checked_mul(height as usize)?.checked_mul(3)?;
     if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 || rgb.len() != expected {
         return None;
     }
-    // Fit similarity src->dst: dst = [[a,-b],[b,a]]·src + [tx,ty].
     let (a, b, tx, ty) = fit_similarity(landmarks, &TEMPLATE)?;
     let det = a * a + b * b;
     if !det.is_finite() || det.abs() < 1e-9 {
@@ -51,14 +39,11 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
     let mut oob = 0usize;
     for oy in 0..OUT {
         for ox in 0..OUT {
-            // Inverse map (dst->src): src = L^-1·(dst - t), L = [[a,-b],[b,a]].
             let dx = ox as f32 - tx;
             let dy = oy as f32 - ty;
             let sx = (a * dx + b * dy) / det;
             let sy = (-b * dx + a * dy) / det;
-            // A sample whose source center is outside the image is edge-clamp
-            // replication, not real face pixels. Count it so an over-warped or
-            // off-frame face can be rejected below.
+            // A sample centred outside the image is edge-clamp replication, not face pixels.
             if sx < 0.0 || sy < 0.0 || sx >= width as f32 || sy >= height as f32 {
                 oob += 1;
             }
@@ -69,20 +54,14 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
             out[o + 2] = px[2];
         }
     }
-    // Too much of the crop is replicated border smear — reject so the caller
-    // falls back to the bounds-clamped bbox crop, which is a real (if
-    // off-center) face rather than a streak that corrupts the SFace embedding.
     if (oob as f32) / ((OUT * OUT) as f32) > max_out_of_bounds_fraction() {
         return None;
     }
     Some(out)
 }
 
-/// The macOS engine's alignment (`FaceAlign.align112` over one rendered
-/// buffer): RGBA8 in (tightly packed, top-left origin), 112×112 RGBA8 out with
-/// alpha 255, and no off-frame rejection. Kept bit-identical to the Swift code
-/// so a face embedded here lands in the `macos-landmark-overlap-v3-orientation`
-/// space next to the Swift engine's vectors (`face-alignment.json` pins it).
+/// The macOS engine's alignment (`FaceAlign.align112`): RGBA8 in/out, no off-frame rejection. Kept bit-identical to
+/// Swift so embeddings land in the `macos-landmark-overlap-v3-orientation` space (`face-alignment.json` pins it).
 pub fn align_112_rgba(rgba: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5]) -> Option<Vec<u8>> {
     let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
     if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 || rgba.len() != expected {
@@ -108,13 +87,11 @@ pub fn align_112_rgba(rgba: &[u8], width: u32, height: u32, landmarks: &[[f32; 2
     Some(out)
 }
 
-/// The similarity fit `align_112_rgba` uses, exposed for the shared fixtures.
 pub fn fit_to_template(src: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
     fit_similarity(src, &TEMPLATE)
 }
 
-/// Least-squares 2D similarity fit: solve (a, b, tx, ty) minimizing
-/// Σ ‖[[a,-b],[b,a]]·src_i + [tx,ty] - dst_i‖² via the 4×4 normal equations.
+/// Least-squares (a, b, tx, ty) via the 4×4 normal equations.
 fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
     if src.iter().chain(dst).flatten().any(|value| !value.is_finite()) { return None; }
     let n = src.len() as f64;
@@ -126,10 +103,10 @@ fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32,
         sxx += x * x + y * y;
         sx += x;
         sy += y;
-        ba += x * cx + y * cy; // Σ(x·X + y·Y)
-        bb += x * cy - y * cx; // Σ(x·Y - y·X)
-        bxx += cx; // ΣX
-        byy += cy; // ΣY
+        ba += x * cx + y * cy;
+        bb += x * cy - y * cx;
+        bxx += cx;
+        byy += cy;
     }
     // [ sxx   0    sx   sy ] [a ]   [ ba  ]
     // [ 0    sxx  -sy   sx ] [b ] = [ bb  ]
@@ -146,7 +123,6 @@ fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32,
     Some((p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32))
 }
 
-/// 4×4 linear solve via Gaussian elimination with partial pivoting.
 fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
     for col in 0..4 {
         let mut piv = col;
@@ -179,13 +155,11 @@ fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
     Some(x)
 }
 
-/// Bilinear RGB sample with edge clamping.
 fn bilinear(rgb: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
     bilinear_strided(rgb, 3, width, height, x, y)
 }
 
-/// Bilinear RGB sample with edge clamping from pixels `stride` bytes apart
-/// (3 for RGB, 4 for RGBA with alpha ignored).
+/// `stride` is 3 for RGB, 4 for RGBA (alpha ignored).
 fn bilinear_strided(pixels: &[u8], stride: usize, width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
     let x = x.clamp(0.0, (width - 1) as f32);
     let y = y.clamp(0.0, (height - 1) as f32);
@@ -234,7 +208,6 @@ mod tests {
         }
     }
 
-    /// The source image the shared fixture describes in `pattern`.
     fn pattern(width: u32, height: u32) -> Vec<u8> {
         let mut out = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
@@ -270,8 +243,7 @@ mod tests {
         (fit, crop.map(|bytes| hex::encode(sha2::Sha256::digest(&bytes))))
     }
 
-    /// Bit for bit with the Swift engine's `FaceAlign` (FaceLandmarkMatchTests
-    /// checks the same fixture).
+    /// Bit for bit with the Swift engine's `FaceAlign` (FaceLandmarkMatchTests checks the same fixture).
     #[test]
     fn shared_aligned_crops_match_bit_for_bit() {
         let cases = aligned_fixtures();
@@ -283,7 +255,6 @@ mod tests {
         }
     }
 
-    /// Prints the fixture's expected values: `cargo test print_aligned_fixture -- --ignored --nocapture`.
     #[test]
     #[ignore = "prints fixture values"]
     fn print_aligned_fixture() {
@@ -342,14 +313,11 @@ mod tests {
         assert!((tx + 10.0).abs() < 1e-2 && (ty - 5.0).abs() < 1e-2, "tx={tx} ty={ty}");
     }
 
-    /// A well-placed face (landmarks near the ArcFace template inside a large
-    /// image) aligns without hitting the border, so it is accepted.
     #[test]
     fn in_frame_face_aligns() {
         let (w, h) = (160u32, 160u32);
         let rgb = vec![128u8; (w * h * 3) as usize];
-        // TEMPLATE is authored in the 112×112 output frame; offset it well
-        // inside the 160×160 source so no sample lands out of bounds.
+        // TEMPLATE is in the 112×112 output frame; offset it inside the 160×160 source so no sample is out of bounds.
         let mut lm = TEMPLATE;
         for p in &mut lm {
             p[0] += 24.0;
@@ -358,15 +326,11 @@ mod tests {
         assert!(align_112(&rgb, w, h, &lm).is_some());
     }
 
-    /// Landmarks in the far corner of a tiny image force most of the 112×112
-    /// sampling grid off-frame; that crop is edge-clamp smear and must be
-    /// rejected so the caller falls back to the plain bbox crop. (audit)
+/// Most of the sampling grid falls off-frame, so the caller falls back to the plain bbox crop.
     #[test]
     fn mostly_out_of_frame_face_is_rejected() {
         let (w, h) = (60u32, 60u32);
         let rgb = vec![90u8; (w * h * 3) as usize];
-        // Push the template landmarks past the bottom-right corner so the
-        // inverse-mapped source grid mostly falls outside [0,60)².
         let mut lm = TEMPLATE;
         for p in &mut lm {
             p[0] += 90.0;

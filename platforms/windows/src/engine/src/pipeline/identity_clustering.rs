@@ -1,65 +1,27 @@
-// Two-pass density clustering + quality validation for face identity.
-// Replaces Chinese Whispers, which collapsed bridge faces into mega-clusters.
-//
-//   Pass 1 — connected components on a kNN graph at cosine ≥ pass1Cosine.
-//            Components of size ≥ 2 become identity "cores".
-//   Pass 2 — each unassigned face joins its nearest core iff
-//            cosine ≥ pass2Cosine AND (top1 − top2 ≥ pass2Margin).
-//            The margin rule blocks the bridge-face merges that
-//            sank Chinese Whispers.
-//   Pass 3 — any cluster with low mean intra-cosine or high variance
-//            is split via 2-means in cosine space and re-validated;
-//            hard floor against mega-cluster collapse.
-//
-// Convergent with Immich (DBSCAN), FaceNet (agglomerative + verification
-// net), and InsightFace reference (DBSCAN/HDBSCAN, cosine 0.4–0.5).
+// Two-pass density clustering + quality validation for face identity (replaces Chinese Whispers, which collapsed bridge faces into mega-clusters).
+// Pass 1: connected components on a kNN graph at cosine ≥ pass1Cosine; size ≥ 2 become cores. Pass 2: each unassigned face joins its nearest core iff cosine ≥ pass2Cosine AND (top1 − top2 ≥ pass2Margin); the margin blocks bridge-face merges. Pass 3: clusters with low mean intra-cosine or high variance are split via 2-means and re-validated.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Hyperparameters {
-    /// Minimum cosine similarity for a Pass 1 edge. Strict per ArcFace
-    /// clustering literature; 0.40 is the verification threshold, where
-    /// errors don't compound across a chain.
+    /// Minimum cosine for a Pass 1 edge; strict (0.40 is the verification threshold) so errors don't compound along a chain.
     pub pass1_cosine: f32,
-    /// Minimum cosine to a core's centroid for Pass 2 assignment.
-    /// Looser than Pass 1 because we're comparing to a denoised centroid.
+    /// Minimum cosine to a core's centroid for Pass 2; looser than Pass 1 because it compares against a denoised centroid.
     pub pass2_cosine: f32,
-    /// Minimum gap between nearest and second-nearest core. The margin
-    /// rule blocks "Adam 0.50 / Brother 0.49" ambiguous merges.
+    /// Minimum gap between nearest and second-nearest core; blocks "Adam 0.50 / Brother 0.49" ambiguous merges.
     pub pass2_margin: f32,
-    /// Pass 3 splits if variance of cosines-to-centroid exceeds this.
     pub pass3_variance_threshold: f32,
-    /// Pass 3 splits if mean cosine to centroid drops below this.
     pub pass3_min_mean_cosine: f32,
-    /// Recursive split depth cap.
     pub pass3_max_splits: usize,
-    /// kNN k for Pass 1.
     pub k_nn: usize,
 }
 
 impl Default for Hyperparameters {
     fn default() -> Self {
-        // SFace defaults recalibrated on the isolated 41,855-face Family Photos
-        // catalog (RTX 5080, 2026-08-08) with an explicit crop oracle. The old
-        // 0.50/0.45 core admitted every reviewed impostor, including unrelated
-        // adults, children, siblings, and a non-face object. 0.66/0.54 with
-        // mutual-kNN separated every negative pair while retaining the reviewed
-        // clear same-person pair and lifting top-cluster p05 cohesion from 0.28
-        // to 0.47. Ambiguous low-quality faces are gated before this stage rather
-        // than being allowed to bridge otherwise-clean identities.
-        //
-        // All values remain env-overridable for corpus-specific sweeps
-        // (unset → these defaults): FILEID_FACE_PASS1_COSINE / _PASS2_COSINE /
-        // _PASS2_MARGIN / _MUTUAL_KNN / _PASS3_MIN_MEAN_COSINE /
-        // _PASS3_VARIANCE_THRESHOLD / _PASS3_MAX_SPLITS, plus the quality gate.
-        // Further recall gains require stronger labelled evidence or a stronger
-        // commercially clean embedder, not a blind reduction of these floors.
-        // Reject non-finite (NaN/inf) env values — they'd silently poison
-        // comparisons (e.g. `q < NaN` is always false). `clamp` for the cosine
-        // knobs keeps a fat-fingered env from making pass1 a value that makes
-        // every face a singleton (>1) or one mega-cluster (<0).
+        // SFace defaults, calibrated on a labelled 41,855-face catalog: 0.66/0.54 with mutual-kNN separates every reviewed negative pair. Env-overridable (FILEID_FACE_PASS1_COSINE and siblings) for corpus sweeps.
+        // Non-finite env values are rejected (`q < NaN` is always false) and the cosine knobs are clamped so a fat-fingered env can't make every face a singleton (>1) or one mega-cluster (<0).
         let env_f32 = |key: &str, default: f32| -> f32 {
             std::env::var(key)
                 .ok()
@@ -79,13 +41,7 @@ impl Default for Hyperparameters {
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .map(|v| v.clamp(1, 64))
                 .unwrap_or(7),
-            // k_nn caps how many neighbors Pass 1 sees per face; 10 truncated
-            // dense identities (anyone with >10 similar faces) into split cores
-            // that Pass 2/consolidate can't always rejoin. Measured on the full
-            // 84,582-face Adlon corpus (2026-07-14): k 10→32 alone cut person
-            // clusters 2,272 → 864 while the top clusters got TIGHTER (mean
-            // cosine-to-centroid up), i.e. it heals real fragmentation instead
-            // of chaining identities. Env-tunable for corpus-specific sweeps.
+        // k=10 split dense identities into cores that could not rejoin; k=32 heals fragmentation without chaining identities (measured on 84,582 faces).
             k_nn: std::env::var("FILEID_FACE_KNN")
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok())
@@ -97,31 +53,22 @@ impl Default for Hyperparameters {
 
 #[derive(Debug, Clone)]
 pub struct ClusterResult {
-    /// `cluster_ids[i]` = dense cluster ID for embedding i. Always
-    /// non-negative; every face gets a cluster (singleton if alone).
     pub cluster_ids: Vec<usize>,
     pub cluster_count: usize,
-    /// Components of size ≥ 2 from Pass 1 — pre-Pass-2-merging.
     pub core_count: usize,
-    /// Outliers merged into an existing core in Pass 2.
     pub outliers_assigned: usize,
-    /// Outliers that became their own singleton clusters.
     pub outliers_as_singletons: usize,
-    /// Total Pass-3 splits applied across all clusters.
     pub splits_applied: usize,
     pub duration_seconds: f64,
 }
 
-/// One kNN hit. `similarity` is cosine on pre-L2-normalized embeddings
-/// (i.e. dot product). FaceClustering supplies HNSW-backed neighbors.
+/// `similarity` is cosine on L2-normalized embeddings (a dot product); FaceClustering supplies HNSW-backed neighbors.
 #[derive(Debug, Clone, Copy)]
 pub struct Neighbor {
     pub idx: usize,
     pub similarity: f32,
 }
 
-/// Run the full pipeline. `embeddings[i]` must be L2-normalized.
-/// `searcher(i)` returns the kNN of face `i` with cosine similarities.
 pub fn cluster<E, F>(
     embeddings: &[E],
     searcher: F,
@@ -134,10 +81,7 @@ where
     cluster_with_cannot_links(embeddings, searcher, params, &[])
 }
 
-/// Run the identity pipeline while enforcing pairwise cannot-link evidence.
-/// A cannot-linked pair can never share a Pass-1 component or receive the same
-/// Pass-2 core, including through a transitive bridge. Face clustering supplies
-/// same-physical-file pairs; semantic Restructure uses the unconstrained wrapper.
+/// Enforces pairwise cannot-link evidence: a cannot-linked pair can never share a Pass-1 component or Pass-2 core, even through a transitive bridge. Face clustering supplies same-physical-file pairs; semantic Restructure uses the unconstrained wrapper.
 pub fn cluster_with_cannot_links<E, F>(
     embeddings: &[E],
     searcher: F,
@@ -148,14 +92,7 @@ where
     E: AsRef<[f32]>,
     F: FnMut(usize) -> Vec<Neighbor>,
 {
-    // MUTUAL-kNN is the DEFAULT here (label-validated 2026-07-05): an edge i—j is
-    // kept only when EACH face is in the other's above-threshold neighbourhood,
-    // which breaks the single "bridge" face that would otherwise chain two
-    // identities into one mega-cluster. Set FILEID_FACE_MUTUAL_KNN=0 to fall back
-    // to plain single-linkage (union i with every kNN hit above the threshold —
-    // simpler, zero extra allocation, but chains through bridge faces). Both fail
-    // toward over-split (UI-mergeable, the safe direction); Pass 3's 2-means split
-    // is unchanged either way.
+        // Mutual-kNN is the default: an edge is kept only when each face is in the other's neighbourhood, so one bridge face cannot chain two identities. FILEID_FACE_MUTUAL_KNN=0 falls back to single-linkage, which chains through bridge faces. Both fail toward over-split, the safe direction.
     let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
         .ok()
         .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
@@ -163,7 +100,6 @@ where
     cluster_with_options(embeddings, searcher, params, cannot_links, mutual_knn)
 }
 
-/// `cluster_with_cannot_links` with the mutual-kNN gate chosen by the caller.
 pub fn cluster_with_options<E, F>(
     embeddings: &[E],
     mut searcher: F,
@@ -176,7 +112,6 @@ where
     F: FnMut(usize) -> Vec<Neighbor>,
 {
     let started = Instant::now();
-    // Borrowed views: callers keep their vectors wherever they already live.
     let views: Vec<&[f32]> = embeddings.iter().map(AsRef::as_ref).collect();
     let embeddings = views.as_slice();
     let n = embeddings.len();
@@ -193,11 +128,7 @@ where
     }
     let dim = embeddings[0].len();
     if dim == 0 {
-        // Treat every face as its own singleton cluster so cluster_count ==
-        // cluster_ids.iter().max() + 1 and the caller can iterate 0..cluster_count
-        // without missing any id. Returning cluster_count: 0 with cluster_ids all
-        // set to 0 was contradictory: the caller skips People-tab population for
-        // ids >= cluster_count, orphaning all n faces.
+        // Every face is its own singleton so cluster_count == max(cluster_ids) + 1; cluster_count 0 with all ids 0 would make the caller skip People-tab population for ids >= cluster_count, orphaning all n faces.
         return ClusterResult {
             cluster_ids: (0..n).collect(),
             cluster_count: n,
@@ -209,7 +140,6 @@ where
         };
     }
 
-    // ── Pass 1: connected components above pass1_cosine ───────────
     let mut cannot_neighbors = vec![HashSet::new(); n];
     for &(a, b) in cannot_links {
         if a >= n || b >= n || a == b {
@@ -245,7 +175,6 @@ where
             });
         }
         for (_, i, j) in candidates {
-            // Union only mutual edges (j also lists i above threshold).
             if directed.contains(&(j, i)) {
                 if constrained {
                     constrained_union(&mut uf, &mut component_forbidden, i, j);
@@ -289,10 +218,7 @@ where
     for i in 0..n {
         root_members.entry(uf.find(i)).or_default().push(i);
     }
-    // Iterate in sorted-key order so cluster-ID assignment is deterministic
-    // across runs. Otherwise HashMap iteration order leaks all the way into
-    // People-tab cluster numbers, and a re-scan of the same library produces
-    // different IDs each time.
+    // Sorted-key iteration keeps cluster-ID assignment deterministic; HashMap order would leak into People-tab cluster numbers and change IDs on every re-scan.
     let mut sorted_groups: Vec<(usize, Vec<usize>)> = root_members.into_iter().collect();
     sorted_groups.sort_by_key(|(root, _)| *root);
     let mut cores: Vec<Vec<usize>> = Vec::new();
@@ -306,13 +232,7 @@ where
     }
     let pass1_cores = cores.len();
 
-    // ── Pass 2: outlier assignment with margin ────────────────────
-    // Maintain a parallel unnormalized running sum per core alongside the
-    // normalized centroid. Recomputing centroid_normalized over the full
-    // membership on every outlier add is O(S) per add → O(S^2) over a pass;
-    // folding the outlier into the running sum is O(dim) per add and the
-    // normalized copy is recomputed from that sum. Mathematically identical
-    // (only floating-point reassociation differs).
+        // Running unnormalized sum per core: an outlier add is O(dim) instead of recomputing the centroid over all members.
     let mut core_sums: Vec<Vec<f32>> = cores
         .iter()
         .map(|c| centroid_sum(c, embeddings, dim))
@@ -327,12 +247,7 @@ where
     }
     let mut outliers_assigned = 0;
     let mut outliers_as_singletons = 0;
-    // Snapshot the Pass-1 core count. An outlier may only join a
-    // genuine size>=2 Pass-1 core, never a singleton appended below. Without the
-    // bound the inner scan grows by every appended singleton (O(M^2) at scale)
-    // AND an outlier can order-dependently merge into a PRIOR outlier's singleton.
-    // Assigned-outlier centroid updates write in place at index < core_n, so real
-    // cores keep being re-scanned with fresh values; only the singletons are excluded.
+    // Snapshot the Pass-1 core count: an outlier may only join a genuine size>=2 core, never a singleton appended below, which would grow the inner scan to O(M²) at scale and let an outlier merge order-dependently into a prior outlier's singleton. Centroid updates write in place at index < core_n, so real cores are still re-scanned with fresh values.
     let core_n = core_centroids.len();
     for outlier in outliers {
         let v = &embeddings[outlier];
@@ -373,8 +288,6 @@ where
         } else {
             let singleton_index = cores.len();
             cores.push(vec![outlier]);
-            // A singleton's unnormalized sum is the embedding itself; its
-            // normalized centroid is the (already L2-normalized) embedding.
             core_sums.push(v.to_vec());
             core_centroids.push(v.to_vec());
             core_of_face[outlier] = Some(singleton_index);
@@ -382,7 +295,6 @@ where
         }
     }
 
-    // ── Pass 3: quality validation + 2-means split ────────────────
     let mut splits_applied = 0;
     let mut refined: Vec<Vec<usize>> = Vec::with_capacity(cores.len());
     for cluster_members in cores {
@@ -399,7 +311,6 @@ where
         refined.extend(parts);
     }
 
-    // ── Materialize result ────────────────────────────────────────
     let mut cluster_ids = vec![0usize; n];
     for (cid, members) in refined.iter().enumerate() {
         for &m in members {
@@ -417,22 +328,16 @@ where
     }
 }
 
-/// L2-normalized mean of the indexed embeddings.
 fn centroid_normalized(indices: &[usize], embeddings: &[&[f32]], dim: usize) -> Vec<f32> {
     let sum = centroid_sum(indices, embeddings, dim);
     normalize_sum(&sum, dim)
 }
 
-/// Unnormalized component-wise sum of the indexed embeddings. Pass 2 keeps this
-/// alongside the normalized centroid so an outlier add is O(dim), not O(S).
 fn centroid_sum(indices: &[usize], embeddings: &[&[f32]], dim: usize) -> Vec<f32> {
     let mut sum = vec![0f32; dim];
     for &i in indices {
         let v = &embeddings[i];
-        // Callers guarantee uniform dim (the face loader filters to the modal
-        // dimension; restructure passes one CLIP space). The `.min` is a
-        // release-safe backstop so a stray short vector can never index out of
-        // bounds and panic here.
+        // Callers guarantee uniform dim (the face loader filters to the modal dimension; restructure passes one CLIP space); `.min` is a release-safe backstop against out-of-bounds on a stray short vector.
         debug_assert_eq!(v.len(), dim, "centroid_sum: embedding dim mismatch");
         for d in 0..dim.min(v.len()) {
             sum[d] += v[d];
@@ -441,7 +346,6 @@ fn centroid_sum(indices: &[usize], embeddings: &[&[f32]], dim: usize) -> Vec<f32
     sum
 }
 
-/// L2-normalize a running sum vector into a unit centroid.
 fn normalize_sum(sum: &[f32], dim: usize) -> Vec<f32> {
     let mut out = vec![0f32; dim];
     let mut norm: f32 = 0.0;
@@ -455,16 +359,11 @@ fn normalize_sum(sum: &[f32], dim: usize) -> Vec<f32> {
     out
 }
 
-/// Cosine on pre-normalized vectors = dot product.
 #[inline]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     crate::util::vector_math::dot(a, b)
 }
 
-/// Recursively split a cluster if it fails the variance / mean-cosine
-/// quality bar. Returns one or more sub-clusters.
-// The 2-means split uses paired `seed_a_*` / `seed_b_*` names; the
-// pairing is the algorithm.
 #[allow(clippy::similar_names)]
 fn validate_and_split(
     cluster: Vec<usize>,
@@ -501,8 +400,6 @@ fn validate_and_split(
         return vec![cluster];
     }
 
-    // 2-means seeds: face farthest from centroid (lowest cosine), and
-    // the face farthest from THAT seed.
     let mut seed_a_idx = cluster[0];
     let mut seed_a_sim = sims[0];
     for (k, &s) in sims.iter().enumerate() {
@@ -549,7 +446,6 @@ fn validate_and_split(
         }
         let new_a = centroid_normalized(&group_a, embeddings, dim);
         let new_b = centroid_normalized(&group_b, embeddings, dim);
-        // Convergence: both centroids barely moved.
         let converged = dot(&new_a, &cent_a) > 0.999 && dot(&new_b, &cent_b) > 0.999;
         cent_a = new_a;
         cent_b = new_b;
@@ -566,7 +462,6 @@ fn validate_and_split(
     left
 }
 
-// ── Union-Find with path compression + union by rank ───────────────
 
 struct UnionFind {
     parent: Vec<usize>,
@@ -585,7 +480,6 @@ impl UnionFind {
         while self.parent[r] != r {
             r = self.parent[r];
         }
-        // Path compression.
         let mut cur = x;
         while self.parent[cur] != r {
             let next = self.parent[cur];
@@ -709,10 +603,7 @@ mod tests {
         assert_ne!(result.cluster_ids[0], result.cluster_ids[2]);
     }
 
-    /// All-identical embeddings (same person photographed N times) must
-    /// land in exactly one cluster. Guards against a regression where
-    /// the union-find or the post-DBSCAN refinement step splits a
-    /// genuinely-singular identity into per-instance clusters.
+    /// All-identical embeddings (same person photographed N times) must land in one cluster, guarding a regression that splits a singular identity into per-instance clusters.
     #[test]
     fn all_identical_embeddings_form_one_cluster() {
         let unit_vec = unit(vec![1.0, 0.0, 0.0, 0.0]);
@@ -735,12 +626,9 @@ mod tests {
         }
     }
 
-    /// Embeddings on orthogonal unit vectors (similarity = 0) must each
-    /// land in their own cluster — they're maximally dissimilar. With
-    /// dimension D ≥ N, we have N orthogonal basis vectors available.
+    /// Orthogonal unit vectors (similarity 0) must each land in their own cluster.
     #[test]
     fn orthogonal_embeddings_each_in_own_cluster() {
-        // 5 orthogonal unit vectors in 5-d space.
         let embeddings: Vec<Vec<f32>> = (0..5)
             .map(|i| {
                 let mut v = vec![0.0_f32; 5];
@@ -759,9 +647,6 @@ mod tests {
                 .collect()
         };
         let result = cluster(&embeddings, searcher, Hyperparameters::default());
-        // 5 orthogonal embeddings: each one is its own singleton OR
-        // outlier-as-singleton. Either way, the visible distinct
-        // cluster_ids count must be 5.
         let unique_ids: std::collections::HashSet<_> =
             result.cluster_ids.iter().copied().collect();
         assert_eq!(

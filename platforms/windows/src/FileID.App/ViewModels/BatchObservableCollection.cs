@@ -1,9 +1,5 @@
 ﻿// BatchObservableCollection — ObservableCollection<T> with an atomic
-// ReplaceAll that emits a single CollectionChanged(Reset) instead of
-// Clear+N Adds (which fires N+1 events and re-runs XAML layout each
-// time), and an AppendRange that emits one multi-item Add so an
-// ItemsRepeater keeps its realized elements (a Reset would clear and
-// reload every visible thumbnail). Used by LibraryViewModel + others.
+// ReplaceAll that emits a single CollectionChanged(Reset) instead of Clear+N Adds (which fires N+1 events and re-runs XAML layout each time), and an AppendRange that emits one multi-item Add so an ItemsRepeater keeps its realized elements (a Reset would clear and reload every visible thumbnail).
 
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -21,8 +17,6 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
         _suspend = true;
         try
         {
-            // Use the protected base list directly so per-item events
-            // don't fire while we mutate.
             Items.Clear();
             for (int i = 0; i < next.Count; i++)
             {
@@ -38,8 +32,6 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
         OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 
-    /// <summary>Appends a page with one multi-item Add event at the old end,
-    /// instead of one Add event per item. Realized elements are kept.</summary>
     public void AppendRange(IReadOnlyList<T> more)
     {
         if (more.Count == 0) return;
@@ -62,8 +54,6 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
             NotifyCollectionChangedAction.Add, (System.Collections.IList)new List<T>(more), start));
     }
 
-    /// <summary>Inserts a run of items at the front with one multi-item Add
-    /// event at index 0. Realized elements are kept.</summary>
     public void PrependRange(IReadOnlyList<T> more)
     {
         if (more.Count == 0) return;

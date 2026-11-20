@@ -199,7 +199,7 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
     }
     private void BuildEmptyState()
     {
-        var title = new TextBlock { Text = "Find the moment.", FontSize = 34, Foreground = ThemeHelper.GetBrushSafe("Text1Brush") };
+        var title = new TextBlock { Text = "Ask your library.", FontSize = 34, Foreground = ThemeHelper.GetBrushSafe("Text1Brush") };
         var body = new TextBlock
         {
             Text = "Ask about files, people and moments in this library, or ask FileID to do something. Answers list the files they come from, and anything that moves, renames or deletes files waits for your OK.",
@@ -432,8 +432,7 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
         if (action is "send" or "clear" || response.Actions is not null) RenderActions(ChatActionPolicy.Runnable(response.Actions));
     }
 
-    /// <summary>One card per proposed action under the latest answer (CHAT.md port note). Cards are
-    /// rebuilt only when the set of actions changes, so a running card keeps its state.</summary>
+    /// <summary>Cards are rebuilt only when the set of actions changes, so a running card keeps its state.</summary>
     private void RenderActions(IReadOnlyList<ChatAction> actions)
     {
         var shown = _actionsHost.Children.OfType<ChatActionCard>().Select(card => card.ActionID);
@@ -449,8 +448,6 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
             _messageScroll.ChangeView(null, _messageScroll.ScrollableHeight, null, ReducedMotion.Instance.IsReduced)));
     }
 
-    /// <summary>Updates the shown messages in place while a reply only adds to
-    /// them; rebuilds the list when the conversation changed underneath.</summary>
     private void RenderMessages(IReadOnlyList<ChatMessage> messages)
     {
         if (!ChatPresentation.ExtendsShown(_messageViews.Select(view => view.ID).ToArray(), messages))
@@ -477,8 +474,6 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
             _messageScroll.ChangeView(null, _messageScroll.ScrollableHeight, null, ReducedMotion.Instance.IsReduced)));
     }
 
-    /// <summary>One message (DESIGN_V3_PORT "Chat", Messages): 12 px inset beside a 2 px rail in the
-    /// role colour, the role label, the selectable body and room for citation chips.</summary>
     private MessageView BuildMessage(ChatMessage message)
     {
         var user = ChatPresentation.IsUser(message);
@@ -575,8 +570,6 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
         }
     }
 
-    /// <summary>Source rail rows (DESIGN_V3_PORT "Chat", Sources pane): "[n]" in gold, file name,
-    /// time or page (lavender for unchecked video frames) and up to three lines of matched text.</summary>
     private void RenderSources(IReadOnlyList<CatalogHit> hits)
     {
         _sourceHits = hits;
@@ -626,7 +619,6 @@ internal sealed partial class ChatWorkbench : WorkbenchPanel
         return menu;
     }
 
-    /// <summary>Selects the source and opens it: media plays in the panel below, other files open in their app.</summary>
     private void OpenSource(int position)
     {
         if (position < 0 || position >= _sourceHits.Count) return;

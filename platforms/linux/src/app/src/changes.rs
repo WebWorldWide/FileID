@@ -1,6 +1,4 @@
-// Session change log: what this session changed and what can still be put
-// back (Windows `ChangeLog` / `UndoStack`). Session-only; nothing is written
-// to disk. GTK main thread only.
+// Session-only change log with undo. Nothing is written to disk; GTK main thread only.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,7 +14,6 @@ pub enum Status {
     NotUndoable(String),
 }
 
-/// Starts putting the change back; false when it could not be started.
 pub type Reverse = Rc<dyn Fn() -> bool>;
 
 #[derive(Clone)]

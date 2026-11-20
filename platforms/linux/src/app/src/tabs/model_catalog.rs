@@ -1,6 +1,3 @@
-// Extended model catalog: browse curated and catalog models for this machine,
-// install a pinned model on request, and benchmark it locally.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -444,6 +441,7 @@ mod tests {
             runnable: true,
             installed: rate.is_some(),
             fits,
+            fits_now: fits,
             benchmark: rate.map(|r| ModelBenchmark {
                 measured_at: "t".into(),
                 hardware: "h".into(),

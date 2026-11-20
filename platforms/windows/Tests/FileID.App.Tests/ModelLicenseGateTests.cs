@@ -11,8 +11,6 @@ public sealed class ModelLicenseGateTests
     [InlineData("paligemma_3b", "Gemma")]
     [InlineData("cudnn_runtime_x64", "NVIDIA-cuDNN")]
     [InlineData("llama_runtime_cuda_x64", "NVIDIA-CUDA")]
-    // The ORT CUDA pack ships CUDA Toolkit redistributables (cudart/cublas/
-    // cuFFT/NVRTC) since 2026-07-21, so it is EULA-gated like the llama pack.
     [InlineData("ort_cuda_x64", "NVIDIA-CUDA")]
     public void RestrictedModelKindsRequireExpectedPolicy(string modelKind, string policy)
     {

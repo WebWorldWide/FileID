@@ -19,8 +19,6 @@ param(
     [Parameter(Mandatory)]
     [ValidatePattern("^[0-9A-Fa-f]{64}$")]
     [string]$ExpectedEngineSha256,
-    [string]$OrtRuntimeDirectory,
-    [string]$DirectMLPath,
     [Parameter(Mandatory)]
     [string]$LlamaRuntimePath,
     [string]$ModelsPath,
@@ -45,16 +43,6 @@ if (-not [string]::IsNullOrWhiteSpace($SeedDbPath)) {
     )
 }
 
-if ([string]::IsNullOrWhiteSpace($OrtRuntimeDirectory)) {
-    $OrtRuntimeDirectory = Join-Path `
-        $PSScriptRoot `
-        "runtime-cache\onnxruntime-1.22.0-dml-notelemetry\x64"
-}
-if ([string]::IsNullOrWhiteSpace($DirectMLPath)) {
-    $DirectMLPath = Join-Path `
-        $PSScriptRoot `
-        "runtime-cache\directml-1.15.4\bin\x64-win\DirectML.dll"
-}
 
 function Get-UtcTimestamp {
     return [DateTime]::UtcNow.ToString("o")
@@ -346,9 +334,6 @@ $packageId = [Guid]::NewGuid().ToString("D")
 $scriptPath = Resolve-ExistingFile `
     -Path (Join-Path $PSScriptRoot "sandbox-real-data-preflight.ps1") `
     -Label "sandbox preflight script"
-$ortProbeSource = Resolve-ExistingFile `
-    -Path (Join-Path $PSScriptRoot "ort_provider_probe.py") `
-    -Label "ORT provider probe"
 $harnessSource = Resolve-ExistingFile `
     -Path (Join-Path $PSScriptRoot "real_data_validation.py") `
     -Label "real-data harness"
@@ -385,15 +370,6 @@ if (-not $engineSourceSha256.Equals(
         "$($ExpectedEngineSha256.ToLowerInvariant()), got $engineSourceSha256"
     )
 }
-$ortRuntimeSource = Resolve-ExistingDirectory `
-    -Path $OrtRuntimeDirectory `
-    -Label "ONNX Runtime directory"
-$ortDllSource = Resolve-ExistingFile `
-    -Path (Join-Path $ortRuntimeSource "onnxruntime.dll") `
-    -Label "ONNX Runtime DLL"
-$directMLSource = Resolve-ExistingFile `
-    -Path $DirectMLPath `
-    -Label "DirectML DLL"
 $llamaRuntimeSource = Resolve-ExistingDirectory `
     -Path $LlamaRuntimePath `
     -Label "llama.cpp runtime"
@@ -565,11 +541,7 @@ if (
         (Test-PathsOverlap -Left $modelsSource -Right $llamaRuntimeSource) -or
         (Test-PathsOverlap `
             -Left $modelsSource `
-            -Right (Split-Path -Parent $engineSource)) -or
-        (Test-PathsOverlap -Left $modelsSource -Right $ortRuntimeSource) -or
-        (Test-PathsOverlap `
-            -Left $modelsSource `
-            -Right (Split-Path -Parent $directMLSource))
+            -Right (Split-Path -Parent $engineSource))
     )
 ) {
     throw (
@@ -606,9 +578,6 @@ Copy-Item `
 Copy-Item `
     -LiteralPath $scriptPath `
     -Destination (Join-Path $harnessDestination "sandbox-real-data-preflight.ps1")
-Copy-Item `
-    -LiteralPath $ortProbeSource `
-    -Destination (Join-Path $harnessDestination "ort_provider_probe.py")
 
 $engineDestination = Join-Path $toolsRoot "engine"
 New-Item -ItemType Directory -Path $engineDestination | Out-Null
@@ -640,20 +609,6 @@ foreach ($dll in Get-ChildItem `
         -Label "engine runtime DLL"
     Copy-Item -LiteralPath $dllSource -Destination $engineDestination -Force
 }
-foreach ($dll in Get-ChildItem `
-    -LiteralPath $ortRuntimeSource `
-    -Filter "*.dll" `
-    -File `
-    -Force) {
-    $dllSource = Resolve-ExistingFile `
-        -Path $dll.FullName `
-        -Label "ONNX Runtime DLL"
-    Copy-Item -LiteralPath $dllSource -Destination $engineDestination -Force
-}
-Copy-Item `
-    -LiteralPath $directMLSource `
-    -Destination (Join-Path $engineDestination "DirectML.dll") `
-    -Force
 
 $stagedLlamaRuntime = Join-Path $toolsRoot "llama-runtime"
 Copy-DirectoryContents `
@@ -716,10 +671,7 @@ $criticalPaths = @(
     $stagedPython
     $stagedHarness
     (Join-Path $harnessDestination "sandbox-real-data-preflight.ps1")
-    (Join-Path $harnessDestination "ort_provider_probe.py")
     $stagedEngine
-    (Join-Path $engineDestination "onnxruntime.dll")
-    (Join-Path $engineDestination "DirectML.dll")
     $stagedLlamaCli
 )
 $pythonDlls = @(
@@ -850,7 +802,6 @@ $configuration = [ordered]@{
     paths = [ordered]@{
         python = "python\python.exe"
         harness = "harness\real_data_validation.py"
-        ortProbe = "harness\ort_provider_probe.py"
         engineDirectory = "engine"
         engine = "engine\FileIDEngine.exe"
         llamaMtmdCli = $llamaRelativePath
@@ -1016,9 +967,6 @@ $hostChecks = [ordered]@{
         $ExpectedEngineSha256,
         [StringComparison]::OrdinalIgnoreCase
     )
-    ortStaged = Test-Path `
-        -LiteralPath (Join-Path $engineDestination "onnxruntime.dll") `
-        -PathType Leaf
     llamaStaged = Test-Path -LiteralPath $stagedLlamaCli -PathType Leaf
     engineLaunchDisabled = -not [bool]$configuration.harnessLaunchPermitted
 }

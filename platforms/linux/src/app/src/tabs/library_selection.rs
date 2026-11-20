@@ -1,8 +1,5 @@
-// Library multi-select, the parts that aren't widgets: what the Selected pane
-// shows for a selection and which grid positions to re-select after a reload
-// reorders or replaces the rows. Clicks and keys use GtkMultiSelection's own
-// rules (click selects one, Ctrl+click toggles, Shift+click and Shift+arrows
-// extend from the anchor).
+// Library multi-select helpers (no widgets): the Selected pane content and re-selection after a reload.
+// Clicks and keys use GtkMultiSelection's own rules.
 
 use std::collections::HashSet;
 

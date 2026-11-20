@@ -1,6 +1,5 @@
 ﻿// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
-// produced for single-positional cases AND that `discoveryComplete` (the
-// only named-parameter case) is NOT `_0`-wrapped.
+// produced for single-positional cases AND that `discoveryComplete` (the only named-parameter case) is NOT `_0`-wrapped.
 
 using System.Text.Json;
 using Xunit;
@@ -16,7 +15,6 @@ public class IpcEventTests
         var ev = IpcEvent.Now(new ReadyEvent(info));
         var json = IpcCoder.Encode(ev);
 
-        // {"t":"...","payload":{"ready":{"_0":{...}}}}
         Assert.Contains("\"ready\":{\"_0\":", json);
         Assert.Contains("\"version\":\"0.1.0\"", json);
         Assert.Contains("\"physicalMemoryGB\":16", json);
@@ -51,9 +49,7 @@ public class IpcEventTests
         var ev = IpcEvent.Now(new DiscoveryCompleteEvent(50_000));
         var json = IpcCoder.Encode(ev);
 
-        // {"t":"...","payload":{"discoveryComplete":{"totalFiles":50000}}}
         Assert.Contains("\"discoveryComplete\":{\"totalFiles\":50000}", json);
-        // Critically: no "_0" wrapper for this variant. Schema special-case.
         Assert.DoesNotContain("\"discoveryComplete\":{\"_0\"", json);
 
         var rt = IpcCoder.Decode<IpcEvent>(json);
@@ -78,7 +74,6 @@ public class IpcEventTests
         var ev = IpcEvent.Now(new ProgressEvent(prog));
         var json = IpcCoder.Encode(ev);
 
-        // Spot-check special property names that diverge from camelCase default.
         Assert.Contains("\"sessionID\":\"sess-1\"", json);
         Assert.Contains("\"residentMB\":612", json);
         Assert.Contains("\"availableMB\":4200", json);
@@ -134,9 +129,6 @@ public class IpcEventTests
     [Fact]
     public void EngineError_RoundTripsModelKindOnInstallFailure()
     {
-        // D-track regression: install failures must carry model_kind so the
-        // app routes the error to the right slot rather than guessing from
-        // the path string.
         var ev = IpcEvent.Now(new ErrorEvent(new EngineError(
             Kind: "model_download_failed",
             Message: "Couldn't download mobileclip_image.onnx: timeout",
@@ -153,9 +145,7 @@ public class IpcEventTests
     [Fact]
     public void EngineError_PackNotAvailableRoundTrips()
     {
-        // D-track soft-failure: a Performance Pack 404 emits pack_not_available
-        // instead of model_download_failed, and the app surfaces it without
-        // suggesting "check your internet" (the network is fine).
+        // D-track soft-failure: a Performance Pack 404 emits pack_not_available instead of model_download_failed, and the app surfaces it without suggesting "check your internet" (the network is fine).
         var ev = IpcEvent.Now(new ErrorEvent(new EngineError(
             Kind: "pack_not_available",
             Message: "CUDA Pack isn't published yet.",
@@ -210,10 +200,6 @@ public class IpcEventTests
         Assert.Throws<JsonException>(() => IpcCoder.Decode<IpcEvent>(bad));
     }
 
-    // IPC round-trip tests. Newly-added VerifyCudaPack
-    // command + HardwareReprobed event need coverage so a future schema
-    // edit doesn't silently break the Settings → Performance Verify flow.
-
     [Fact]
     public void HardwareReprobed_RoundTripsAllFields()
     {
@@ -226,14 +212,11 @@ public class IpcEventTests
             OpenvinoPackPresent: false,
             QnnPackPresent: false,
             Recommendation: "");
-        // Use a plain-ASCII diagnostics string so the test assertion isn't
-        // sensitive to JavaScriptEncoder's choice between literal-UTF8 and
-        // \uXXXX escape forms for non-ASCII characters.
+        // Use a plain-ASCII diagnostics string so the test assertion isn't sensitive to JavaScriptEncoder's choice between literal-UTF8 and \uXXXX escape forms for non-ASCII characters.
         var reprobe = new HardwareReprobed(hw, Diagnostics: "Verified at NVIDIA toolkit bin dir");
         var ev = IpcEvent.Now(new HardwareReprobedEvent(reprobe));
         var json = IpcCoder.Encode(ev);
 
-        // Wire shape: {"t":"…","payload":{"hardwareReprobed":{"_0":{"hardware":{…},"diagnostics":"…"}}}}
         Assert.Contains("\"hardwareReprobed\":{\"_0\":", json);
         Assert.Contains("\"gpuVendor\":\"nvidia\"", json);
         Assert.Contains("\"executionProvider\":\"cuda\"", json);
@@ -255,18 +238,13 @@ public class IpcEventTests
     [Fact]
     public void HardwareReprobed_OmitsNullDiagnostics()
     {
-        // Engine side serializes `Option<String>` with
-        // #[serde(skip_serializing_if = "Option::is_none")] — wire JSON
-        // should omit the key when the field is None. C# side accepts
-        // the absence + leaves the optional field null.
         var hw = new HardwareInfo("nvidia", "RTX 4070", "cuda", 16, true, false, false, "");
         var reprobe = new HardwareReprobed(hw, Diagnostics: null);
         var ev = IpcEvent.Now(new HardwareReprobedEvent(reprobe));
         var json = IpcCoder.Encode(ev);
 
         Assert.Contains("\"hardwareReprobed\":{\"_0\":", json);
-        // Round-trip: even if the C# encoder writes "diagnostics":null,
-        // the decoder must still produce a null Diagnostics field.
+        // Round-trip: even if the C# encoder writes "diagnostics":null, the decoder must still produce a null Diagnostics field.
         var rt = IpcCoder.Decode<IpcEvent>(json);
         var got = Assert.IsType<HardwareReprobedEvent>(rt.Payload).Result;
         Assert.Null(got.Diagnostics);
@@ -275,10 +253,7 @@ public class IpcEventTests
     [Fact]
     public void HardwareReprobed_DecodesEngineEmittedShapeWithoutDiagnostics()
     {
-        // Simulate the exact wire bytes the Rust engine emits when cuDNN
-        // is present (`Option<String>` = None → key omitted entirely).
-        // The C# decoder must accept the absence of `diagnostics` without
-        // throwing.
+        // The C# decoder must accept the absence of `diagnostics` without throwing.
         const string engineWire = """
             {"t":"2026-05-13T12:00:00+00:00","payload":{"hardwareReprobed":{"_0":{"hardware":{"gpuVendor":"nvidia","adapterName":"RTX 4070","executionProvider":"cuda","physicalCpuCores":16,"cudaPackPresent":true,"openvinoPackPresent":false,"qnnPackPresent":false,"recommendation":""}}}}}
             """;
@@ -287,11 +262,6 @@ public class IpcEventTests
         Assert.True(got.Hardware.CudaPackPresent);
         Assert.Null(got.Diagnostics);
     }
-
-    // Added `currentCaption: Option<String>` to
-    // DeepAnalyzeProgress so the UI renders the live token stream.
-    // Lock in the round-trip + absent-field decode so a wire-format
-    // regression shows up in CI.
 
     [Fact]
     public void DeepAnalyzeProgress_RoundTripsCurrentCaption()
@@ -318,8 +288,6 @@ public class IpcEventTests
     [Fact]
     public void DeepAnalyzeProgress_DecodesEngineEmittedShapeWithoutCurrentCaption()
     {
-        // Pre-inference progress events (`processed=idx, current_path=path`)
-        // don't have caption text yet — Rust emits None → key omitted.
         const string engineWire = """
             {"t":"2026-05-13T12:00:00+00:00","payload":{"deepAnalyzeProgress":{"_0":{"processed":1,"total":10,"modelKind":"qwen2_5_vl_7b"}}}}
             """;

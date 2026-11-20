@@ -1,9 +1,7 @@
-//! Judges CLIP text search hits: a photo is a good match when its score for
-//! "a photo of <words>." beats its score for a generic photo by the shared
-//! margin. A fixed cosine floor fails because some photos score high for every
-//! query; the generic baseline cancels that. Values come from
-//! shared/models/clip-search-baseline.json (calibration in DECISIONS.md) and
-//! mirror Swift `SearchStrength`.
+//! Judges CLIP text search hits: a photo is a good match when its score for "a photo of <words>." beats its
+//! generic-photo score by the shared margin (a fixed cosine floor fails because some photos score high for every
+//! query). Values come from shared/models/clip-search-baseline.json (calibration in DECISIONS.md) and mirror Swift
+//! `SearchStrength`.
 
 use std::sync::OnceLock;
 
@@ -34,8 +32,6 @@ pub fn prompt(words: &str) -> String {
     format!("a photo of {words}.")
 }
 
-/// The vector that ranks and judges a text search: the photo prompt when the
-/// text model can embed it, else the client's vector.
 pub fn scoring_vector(query: &str, supplied: &[f32], encode: &dyn Fn(&str) -> Option<Vec<f32>>) -> Vec<f32> {
     let words = query.trim();
     if words.is_empty() {
@@ -44,7 +40,6 @@ pub fn scoring_vector(query: &str, supplied: &[f32], encode: &dyn Fn(&str) -> Op
     encode(&prompt(words)).filter(|vector| vector.len() == supplied.len()).unwrap_or_else(|| supplied.to_vec())
 }
 
-/// The installed text model's embedding of `text`, without downloading.
 pub fn live_encoder(text: &str) -> Option<Vec<f32>> {
     super::clip_text::default_weights_path()
         .is_ok_and(|path| path.exists())
@@ -68,19 +63,19 @@ pub fn is_strong(margin: f32) -> bool {
     margin >= baseline().strong_margin
 }
 
-pub fn summary(good: usize, weak: usize) -> String {
+/// Good matches list first: files with a strong picture score (`strong`) and files found by name, tag or text.
+pub fn summary(good: usize, strong: usize, weak: usize) -> String {
     let noun = if good == 1 { "match" } else { "matches" };
     match (good, weak) {
         (0, 0) => "No matches.".into(),
         (0, _) => format!("No good matches, {weak} weaker."),
-        (_, 0) => format!("{good} good {noun}."),
-        _ => format!("{good} good {noun}, {weak} weaker."),
+        (_, 0) => format!("{good} {noun} ({strong} strong visual)."),
+        _ => format!("{good} {noun} ({strong} strong visual), {weak} weaker."),
     }
 }
 
 const SIMILAR_WORDS: [&str; 8] = ["similar", "closest", "nearest", "lookalike", "lookalikes", "resemble", "resembles", "resembling"];
 
-/// "show the closest photos of a dog" keeps weaker look-alikes.
 pub fn wants_similar(text: &str) -> bool {
     text.to_lowercase().split(|c: char| !c.is_alphabetic()).any(|word| SIMILAR_WORDS.contains(&word))
 }
@@ -112,6 +107,7 @@ mod tests {
     #[derive(Deserialize)]
     struct SummaryCase {
         good: usize,
+        strong: usize,
         weak: usize,
         text: String,
     }
@@ -164,7 +160,7 @@ mod tests {
     fn shared_summaries_and_similar_wording() {
         let fixture = fixture();
         for case in fixture.summaries {
-            assert_eq!(summary(case.good, case.weak), case.text);
+            assert_eq!(summary(case.good, case.strong, case.weak), case.text);
         }
         for case in fixture.similar {
             assert_eq!(wants_similar(&case.text), case.similar, "{}", case.text);

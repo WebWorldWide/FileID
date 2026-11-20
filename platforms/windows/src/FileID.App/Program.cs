@@ -183,13 +183,8 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>
-    /// Win32 MessageBox for fatal pre-XAML errors. Local-only surface; never
-    /// transmits.
-    /// </summary>
     private static void ShowFatalDialog(string title, string message)
     {
-        // P/Invoke kept inline rather than a helper class — only used here.
         // 0x10 = MB_ICONERROR
         _ = NativeMessageBox(System.IntPtr.Zero, message, title, 0x10u);
     }

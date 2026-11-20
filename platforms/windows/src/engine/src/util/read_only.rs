@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 const READ_ONLY_ROOT: &str = "/Volumes/Adlon";
 
 pub fn require_writable(path: &Path) -> std::io::Result<()> {
-    // Resolving the root costs a realpath (statfs on a mount point) and runs twice
-    // per restructure move; its resolution never changes while the engine runs.
+    // Resolving the root costs a realpath and runs twice per restructure move; the result never changes while the
+    // engine runs.
     static RESOLVED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     match RESOLVED.get_or_init(|| resolved(Path::new(READ_ONLY_ROOT)).ok()) {
         Some(root) => check_under(path, &[PathBuf::from(READ_ONLY_ROOT)], std::slice::from_ref(root)),

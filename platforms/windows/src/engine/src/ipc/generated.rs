@@ -1211,6 +1211,9 @@ pub struct LibraryRoot {
     pub last_status: Option<String>,
 }
 
+/// recommendedID is the engine's pick among the vision models: the best one that loads with the
+/// memory free right now, else the smallest this machine could ever run. Clients show it as the
+/// default and never apply their own memory rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalog {
@@ -1218,15 +1221,20 @@ pub struct ModelCatalog {
     pub request_id: String,
     #[serde(rename = "physicalMemoryGB")]
     pub physical_memory_gb: f64,
+    #[serde(rename = "availableMemoryMB")]
+    pub available_memory_mb: u64,
     #[serde(rename = "vramMB")]
     pub vram_mb: u64,
+    #[serde(rename = "recommendedID", default, skip_serializing_if = "Option::is_none")]
+    pub recommended_id: Option<String>,
     pub models: Vec<ModelCatalogItem>,
 }
 
 /// status is `curated` for the shipped defaults, `candidate` for catalog entries not yet
 /// benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this
-/// engine can load it on this platform today; fits compares the resident estimate with this
-/// machine's memory.
+/// engine can load it on this platform today; fits means the engine's memory admission could ever
+/// accept it on this machine (installed memory less the system reserve), and fitsNow that it would
+/// be accepted with the memory free right now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalogItem {
@@ -1249,6 +1257,7 @@ pub struct ModelCatalogItem {
     pub runnable: bool,
     pub installed: bool,
     pub fits: bool,
+    pub fits_now: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<ModelBenchmark>,
 }
@@ -1368,8 +1377,10 @@ pub struct EngineError {
     /// `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't
     /// recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was
     /// renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial)
-    /// are emitted by the Windows engine; the macOS engine surfaces those conditions through its
-    /// scan-completion flow rather than as distinct error kinds.
+    /// are emitted by the Windows engine; the macOS engine emits rescan_no_changes too and surfaces
+    /// the other conditions through its scan-completion flow rather than as distinct error kinds.
+    /// `ocr_accurate_disabled` (Swift engine, macOS only) reports that accurate text recognition
+    /// failed repeatedly and the engine fell back to fast recognition.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

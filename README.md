@@ -141,7 +141,7 @@ FileID is two programs that work together. The **app** is the window you click a
 ```
 
 - **One contract.** Every command and event is defined once in [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/) (currently v1.16.0) and mirrored as Swift, Rust and C# types. If they drift, the build breaks.
-- **Two engines, one database format.** macOS uses a Swift engine (GRDB, MLX, Core ML, Vision). Windows, Linux, the CLI and the TUI share one Rust engine (`rusqlite`, ONNX Runtime, llama.cpp). Both apply the same 24 append-only migrations byte for byte, so a library scanned on one platform opens on another.
+- **Two engines, one database format.** macOS uses a Swift engine (GRDB, MLX, Core ML, Vision). Windows, Linux, the CLI and the TUI share one Rust engine (`rusqlite`, tract, llama.cpp). Both apply the same 24 append-only migrations byte for byte, so a library scanned on one platform opens on another.
 - **Crash isolation.** The app spawns the engine, verifies its signature, and restarts it with backoff (1 s / 4 s / 16 s) if it exits. A parent-process watchdog stops the engine if the app goes away.
 - **Single writer, many readers.** The engine owns the only write connection to a SQLite WAL database. The app reads through a pool of read-only connections, so scrolling never waits on a scan.
 
@@ -171,11 +171,10 @@ Every default is permissively licensed and downloaded from its upstream Hugging 
 
 | Hardware | Path |
 |---|---|
-| Apple Silicon | Metal (MLX), Neural Engine and GPU (Core ML), Vision |
-| NVIDIA | DirectML by default; CUDA if you install NVIDIA's runtime yourself |
-| AMD, Intel | DirectML; OpenVINO opt-in on Intel |
-| Snapdragon X (Windows on ARM) | DirectML; QNN NPU opt-in |
-| Anything else | CPU with AVX2/AVX-512 or NEON |
+| Image, face and text models (CLIP, RAM++, faces, BGE) | tract on the CPU, the same on Windows, macOS and Linux (AVX2/AVX-512 or NEON, multithreaded matmul) |
+| Apple Silicon app scan and Describe Files | Metal (MLX), Vision for faces |
+| Describe Files and Chat on Windows and Linux (llama.cpp) | Vulkan on any GPU; CUDA on NVIDIA if you install NVIDIA's runtime yourself |
+| Anything else | CPU |
 
 ---
 
@@ -300,4 +299,4 @@ Read the root [`CLAUDE.md`](CLAUDE.md) for cross-platform principles (no telemet
 
 ## License
 
-[Apache-2.0](LICENSE). Bundled fonts (Instrument Serif, Archivo) are SIL Open Font License.
+[Apache-2.0](LICENSE). Bundled fonts (Instrument Serif, Archivo) are SIL Open Font License. Every third-party dependency, runtime and model licence is listed in [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt) (generated and policy-checked) and audited in [`shared/docs/LICENSES.md`](shared/docs/LICENSES.md).

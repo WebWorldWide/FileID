@@ -26,11 +26,24 @@ enum TakeProposals {
         }
     }
 
+    /// The chip marks exceptions: when most rows share one relation, repeating it on each adds nothing.
+    static func relationsShowingChip(among relations: [String?]) -> Set<String?> {
+        let distinct = Set(relations)
+        guard relations.count > 1 else { return distinct }
+        let counts = Dictionary(grouping: relations, by: { $0 }).mapValues(\.count)
+        guard let top = counts.max(by: { $0.value < $1.value }), top.value * 2 > relations.count else { return distinct }
+        return distinct.subtracting([top.key])
+    }
+
+    static func showsRelationChip(_ relation: String?, among relations: [String?]) -> Bool {
+        relationsShowingChip(among: relations).contains(relation)
+    }
+
     static func relationHelp(_ relation: String?) -> String? {
         switch relation {
         case "repeatedAttempts": "One camera took these one after another, so they are separate takes of the same shot."
         case "alternateViews": "Different cameras caught the same moment, so these are other angles or copies rather than separate takes."
-        case "uncertain": "Camera details are missing or mixed, so FileID can't tell separate takes from other angles."
+        case "uncertain": "Camera details are missing or mixed, so FileID can’t tell separate takes from other angles."
         default: nil
         }
     }

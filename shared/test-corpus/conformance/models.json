@@ -29,6 +29,9 @@
         },
         "expect": {
           "vramMB": 0,
+          "availableMemoryMB": {
+            "$tol": "present"
+          },
           "models": {
             "$tol": "prefix",
             "value": [
@@ -47,7 +50,13 @@
                 "tier": "medium",
                 "status": "curated",
                 "runnable": true,
-                "installed": false
+                "installed": false,
+                "fits": {
+                  "$tol": "present"
+                },
+                "fitsNow": {
+                  "$tol": "present"
+                }
               },
               {
                 "id": "qwen3_vl_2b",
@@ -282,220 +291,45 @@
     ]
   },
   {
-    "name": "cross-engine-mlx-install-record",
-    "description": "The Swift engine accepts a Rust-recorded MLX install, then the Rust engine accepts the identity record the Swift engine kept, both without a download.",
-    "os": [
-      "darwin"
-    ],
+    "name": "mlx-install-record-survives-restart",
+    "description": "The engine accepts a recorded MLX install, and after a restart accepts the identity record it kept, both without a download.",
+    "os": ["darwin"],
     "appHosted": true,
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "start": "rust",
-    "env": {
-      "FILEID_HF_CACHE_ROOT": "{root}/hf"
-    },
+    "env": {"FILEID_HF_CACHE_ROOT": "{root}/hf"},
     "tree": [
-      {
-        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json",
-        "content": "{}"
-      },
-      {
-        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
-        "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
-      }
+        {"path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json", "content": "{}"},
+        {"path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc", "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"}
     ],
     "steps": [
-      {
-        "label": "rust verifies",
-        "command": {
-          "prewarmModel": {
-            "modelKind": "qwen3_vl_2b"
-          }
-        },
-        "await": "modelDownloadProgress",
-        "filter": {
-          "modelKind": "qwen3_vl_2b",
-          "fraction": 1.0
-        }
-      },
-      {
-        "label": "to swift",
-        "restart": "swift"
-      },
-      {
-        "label": "swift verifies",
-        "command": {
-          "prewarmModel": {
-            "modelKind": "qwen3_vl_2b"
-          }
-        },
-        "await": "modelDownloadProgress",
-        "filter": {
-          "modelKind": "qwen3_vl_2b",
-          "fraction": 1.0
-        }
-      },
-      {
-        "label": "swift round trip",
-        "command": {
-          "healthCheck": {
-            "requestID": "after-swift"
-          }
-        },
-        "await": "healthCheckResult"
-      },
-      {
-        "label": "back to rust",
-        "restart": "rust"
-      },
-      {
-        "label": "rust verifies again",
-        "command": {
-          "prewarmModel": {
-            "modelKind": "qwen3_vl_2b"
-          }
-        },
-        "await": "modelDownloadProgress",
-        "filter": {
-          "modelKind": "qwen3_vl_2b",
-          "fraction": 1.0
-        }
-      },
-      {
-        "label": "records",
-        "fs": {
-          "exists": [
-            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed",
-            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
-          ],
-          "contents": {
-            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
-          }
-        }
-      },
-      {
-        "label": "shutdown",
-        "shutdown": {
-          "exitCode": 0
-        }
-      }
+        {"label": "rust verifies", "command": {"prewarmModel": {"modelKind": "qwen3_vl_2b"}}, "await": "modelDownloadProgress", "filter": {"modelKind": "qwen3_vl_2b", "fraction": 1.0}},
+        {"restart": true},
+        {"label": "rust verifies", "command": {"prewarmModel": {"modelKind": "qwen3_vl_2b"}}, "await": "modelDownloadProgress", "filter": {"modelKind": "qwen3_vl_2b", "fraction": 1.0}},
+        {"label": "rust round trip", "command": {"healthCheck": {"requestID": "after-swift"}}, "await": "healthCheckResult"},
+        {"restart": true},
+        {"label": "rust verifies again", "command": {"prewarmModel": {"modelKind": "qwen3_vl_2b"}}, "await": "modelDownloadProgress", "filter": {"modelKind": "qwen3_vl_2b", "fraction": 1.0}},
+        {"label": "records", "fs": {"exists": ["hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed", "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"], "contents": {"hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"}}},
+        {"label": "shutdown", "shutdown": {"exitCode": 0}}
     ]
   },
   {
-    "name": "cross-engine-mlx-install-record-swift-first",
-    "description": "The Rust engine accepts a Swift-recorded MLX install (the Swift encoder escapes '/' in paths) and the identity record the Swift engine wrote, then the Swift engine accepts the Rust engine's, all without a download.",
-    "os": [
-      "darwin"
-    ],
+    "name": "swift-written-mlx-install-record",
+    "description": "This engine accepts a Swift-recorded MLX install (the Swift encoder escapes '/' in paths) and the identity record the Swift engine wrote, without a download.",
+    "fixture": "swift-written-mlx-install-record",
+    "os": ["darwin"],
     "appHosted": true,
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "start": "swift",
-    "env": {
-      "FILEID_HF_CACHE_ROOT": "{root}/hf"
-    },
     "tree": [
-      {
-        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json",
-        "content": "{}"
-      },
-      {
-        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights/model.safetensors",
-        "content": "tensor-bytes"
-      },
-      {
-        "path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
-        "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
-      }
+        {"path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/config.json", "content": "{}"},
+        {"path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/weights/model.safetensors", "content": "tensor-bytes"},
+        {"path": "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc", "content": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"}
     ],
+    "env": {"FILEID_HF_CACHE_ROOT": "{root}/hf"},
     "steps": [
-      {
-        "label": "swift verifies",
-        "command": {
-          "prewarmModel": {
-            "modelKind": "qwen3_vl_2b"
-          }
-        },
-        "await": "modelDownloadProgress",
-        "filter": {
-          "modelKind": "qwen3_vl_2b",
-          "fraction": 1.0
-        }
-      },
-      {
-        "label": "swift round trip",
-        "command": {
-          "healthCheck": {
-            "requestID": "after-swift"
-          }
-        },
-        "await": "healthCheckResult"
-      },
-      {
-        "label": "to rust",
-        "restart": "rust"
-      },
-      {
-        "label": "rust verifies",
-        "command": {
-          "prewarmModel": {
-            "modelKind": "qwen3_vl_2b"
-          }
-        },
-        "await": "modelDownloadProgress",
-        "filter": {
-          "modelKind": "qwen3_vl_2b",
-          "fraction": 1.0
-        }
-      },
-      {
-        "label": "back to swift",
-        "restart": "swift"
-      },
-      {
-        "label": "swift verifies again",
-        "command": {
-          "prewarmModel": {
-            "modelKind": "qwen3_vl_2b"
-          }
-        },
-        "await": "modelDownloadProgress",
-        "filter": {
-          "modelKind": "qwen3_vl_2b",
-          "fraction": 1.0
-        }
-      },
-      {
-        "label": "swift round trip again",
-        "command": {
-          "healthCheck": {
-            "requestID": "after-swift-2"
-          }
-        },
-        "await": "healthCheckResult"
-      },
-      {
-        "label": "records",
-        "fs": {
-          "exists": [
-            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed",
-            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"
-          ],
-          "contents": {
-            "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"
-          }
-        }
-      },
-      {
-        "label": "shutdown",
-        "shutdown": {
-          "exitCode": 0
-        }
-      }
+        {"label": "rust verifies", "command": {"prewarmModel": {"modelKind": "qwen3_vl_2b"}}, "await": "modelDownloadProgress", "filter": {"modelKind": "qwen3_vl_2b", "fraction": 1.0}},
+        {"restart": true},
+        {"label": "rust verifies again", "command": {"prewarmModel": {"modelKind": "qwen3_vl_2b"}}, "await": "modelDownloadProgress", "filter": {"modelKind": "qwen3_vl_2b", "fraction": 1.0}},
+        {"label": "rust round trip again", "command": {"healthCheck": {"requestID": "after-swift-2"}}, "await": "healthCheckResult"},
+        {"label": "records", "fs": {"exists": ["hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-installed", "hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc-v2"], "contents": {"hf/models/mlx-community/Qwen3-VL-2B-Instruct-4bit/.fileid-verified-9c4f5209e57b31f4b9dfba735de3fb983739c9cc": "{\"files\":[{\"path\":\"config.json\",\"sha256\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"size\":2},{\"path\":\"weights\\/model.safetensors\",\"sha256\":\"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a\",\"size\":12}],\"revision\":\"9c4f5209e57b31f4b9dfba735de3fb983739c9cc\",\"version\":1}"}}},
+        {"label": "shutdown", "shutdown": {"exitCode": 0}}
     ]
   },
   {
@@ -564,111 +398,15 @@
   {
     "name": "models-mac-benchmarks-rust-format-import",
     "description": "The Rust engine the Mac app hosts imports its earlier model-benchmarks.json ({results:[{model,hardware,benchmark}]}) once, rewriting it in the Swift format, and lists the same benchmark fields as the shared-format case. The Swift engine never wrote that format.",
-    "os": [
-      "darwin"
-    ],
+    "os": ["darwin"],
     "appHosted": true,
-    "engines": [
-      "rust"
-    ],
-    "env": {
-      "FILEID_HF_CACHE_ROOT": "{root}/hf"
-    },
+    "env": {"FILEID_HF_CACHE_ROOT": "{root}/hf"},
     "tree": [
-      {
-        "path": "{state}/FileID/model-benchmarks.json",
-        "content": "{\n \"results\": [\n  {\n   \"model\": \"qwen3_vl_2b\",\n   \"hardware\": \"{hardware}\",\n   \"benchmark\": {\n    \"measuredAt\": \"2026-11-01T10:00:00Z\",\n    \"hardware\": \"{hardware}\",\n    \"loadSeconds\": 3.25,\n    \"promptTokensPerSecond\": 410.5,\n    \"generatedTokensPerSecond\": 62.4,\n    \"secondsPerImage\": 1.8,\n    \"peakResidentGB\": 2.7,\n    \"jsonValidRate\": 0.95,\n    \"probeAccuracy\": 0.8,\n    \"tunedArguments\": [\n     \"--flash-attn\"\n    ]\n   }\n  },\n  {\n   \"model\": \"qwen3_vl_4b\",\n   \"hardware\": \"Some Other Mac\",\n   \"benchmark\": {\n    \"measuredAt\": \"2026-11-01T10:00:00Z\",\n    \"hardware\": \"Some Other Mac\",\n    \"loadSeconds\": 9.0,\n    \"promptTokensPerSecond\": 410.5,\n    \"generatedTokensPerSecond\": 62.4,\n    \"secondsPerImage\": 1.8,\n    \"peakResidentGB\": 2.7,\n    \"jsonValidRate\": 0.95,\n    \"probeAccuracy\": 0.8,\n    \"tunedArguments\": [\n     \"--flash-attn\"\n    ]\n   }\n  }\n ]\n}"
-      }
+        {"path": "{state}/FileID/model-benchmarks.json", "content": "{\n \"results\": [\n  {\n   \"model\": \"qwen3_vl_2b\",\n   \"hardware\": \"{hardware}\",\n   \"benchmark\": {\n    \"measuredAt\": \"2026-11-01T10:00:00Z\",\n    \"hardware\": \"{hardware}\",\n    \"loadSeconds\": 3.25,\n    \"promptTokensPerSecond\": 410.5,\n    \"generatedTokensPerSecond\": 62.4,\n    \"secondsPerImage\": 1.8,\n    \"peakResidentGB\": 2.7,\n    \"jsonValidRate\": 0.95,\n    \"probeAccuracy\": 0.8,\n    \"tunedArguments\": [\n     \"--flash-attn\"\n    ]\n   }\n  },\n  {\n   \"model\": \"qwen3_vl_4b\",\n   \"hardware\": \"Some Other Mac\",\n   \"benchmark\": {\n    \"measuredAt\": \"2026-11-01T10:00:00Z\",\n    \"hardware\": \"Some Other Mac\",\n    \"loadSeconds\": 9.0,\n    \"promptTokensPerSecond\": 410.5,\n    \"generatedTokensPerSecond\": 62.4,\n    \"secondsPerImage\": 1.8,\n    \"peakResidentGB\": 2.7,\n    \"jsonValidRate\": 0.95,\n    \"probeAccuracy\": 0.8,\n    \"tunedArguments\": [\n     \"--flash-attn\"\n    ]\n   }\n  }\n ]\n}"}
     ],
     "steps": [
-      {
-        "label": "first read imports",
-        "command": {
-          "listModels": {
-            "requestID": "bench-import-1",
-            "role": "vision"
-          }
-        },
-        "await": "modelCatalog",
-        "filter": {
-          "requestID": "bench-import-1"
-        },
-        "expect": {
-          "models": {
-            "$tol": "contains",
-            "value": [
-              {
-                "id": "qwen3_vl_2b",
-                "benchmark": {
-                  "$tol": "exact",
-                  "value": {
-                    "measuredAt": "2026-11-01T10:00:00Z",
-                    "hardware": "{hardware}",
-                    "loadSeconds": 3.25,
-                    "promptTokensPerSecond": 410.5,
-                    "generatedTokensPerSecond": 62.4,
-                    "secondsPerImage": 1.8,
-                    "peakResidentGB": 2.7,
-                    "jsonValidRate": 0.95,
-                    "probeAccuracy": 0.8,
-                    "tunedArguments": [
-                      "--flash-attn"
-                    ]
-                  }
-                }
-              },
-              {
-                "id": "qwen3_vl_4b",
-                "benchmark": null
-              }
-            ]
-          }
-        }
-      },
-      {
-        "label": "second read is stable",
-        "command": {
-          "listModels": {
-            "requestID": "bench-import-2",
-            "role": "vision"
-          }
-        },
-        "await": "modelCatalog",
-        "filter": {
-          "requestID": "bench-import-2"
-        },
-        "expect": {
-          "models": {
-            "$tol": "contains",
-            "value": [
-              {
-                "id": "qwen3_vl_2b",
-                "benchmark": {
-                  "$tol": "exact",
-                  "value": {
-                    "measuredAt": "2026-11-01T10:00:00Z",
-                    "hardware": "{hardware}",
-                    "loadSeconds": 3.25,
-                    "promptTokensPerSecond": 410.5,
-                    "generatedTokensPerSecond": 62.4,
-                    "secondsPerImage": 1.8,
-                    "peakResidentGB": 2.7,
-                    "jsonValidRate": 0.95,
-                    "probeAccuracy": 0.8,
-                    "tunedArguments": [
-                      "--flash-attn"
-                    ]
-                  }
-                }
-              },
-              {
-                "id": "qwen3_vl_4b",
-                "benchmark": null
-              }
-            ]
-          }
-        }
-      }
+        {"label": "first read imports", "command": {"listModels": {"requestID": "bench-import-1", "role": "vision"}}, "await": "modelCatalog", "filter": {"requestID": "bench-import-1"}, "expect": {"models": {"$tol": "contains", "value": [{"id": "qwen3_vl_2b", "benchmark": {"$tol": "exact", "value": {"measuredAt": "2026-11-01T10:00:00Z", "hardware": "{hardware}", "loadSeconds": 3.25, "promptTokensPerSecond": 410.5, "generatedTokensPerSecond": 62.4, "secondsPerImage": 1.8, "peakResidentGB": 2.7, "jsonValidRate": 0.95, "probeAccuracy": 0.8, "tunedArguments": ["--flash-attn"]}}}, {"id": "qwen3_vl_4b", "benchmark": null}]}}},
+        {"label": "second read is stable", "command": {"listModels": {"requestID": "bench-import-2", "role": "vision"}}, "await": "modelCatalog", "filter": {"requestID": "bench-import-2"}, "expect": {"models": {"$tol": "contains", "value": [{"id": "qwen3_vl_2b", "benchmark": {"$tol": "exact", "value": {"measuredAt": "2026-11-01T10:00:00Z", "hardware": "{hardware}", "loadSeconds": 3.25, "promptTokensPerSecond": 410.5, "generatedTokensPerSecond": 62.4, "secondsPerImage": 1.8, "peakResidentGB": 2.7, "jsonValidRate": 0.95, "probeAccuracy": 0.8, "tunedArguments": ["--flash-attn"]}}}, {"id": "qwen3_vl_4b", "benchmark": null}]}}}
     ]
   }
 ]

@@ -1,6 +1,4 @@
-// Settings → Locations (macOS `LocationsCard`): every folder or drive the
-// catalog has scanned and whether it is reachable now. An unplugged drive
-// reads OFFLINE and its catalog rows are kept.
+// An unplugged drive reads OFFLINE and its catalog rows are kept.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

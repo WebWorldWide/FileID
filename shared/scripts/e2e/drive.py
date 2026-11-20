@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Isolated FileIDEngine driver for end-to-end checks. The engine gets FILEID_DATABASE_PATH inside a
 throwaway directory, so a run never touches the real catalog. Set FILEID_ENGINE to the engine binary."""
-import json, os, subprocess, sys, threading, time, uuid, queue
+import json, os, subprocess, threading, time, uuid, queue
 
 ENGINE = os.environ.get("FILEID_ENGINE") or os.path.expanduser("~/Library/Developer/FileIDBuild/debug/FileIDEngine")
 

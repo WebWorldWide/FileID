@@ -529,4 +529,24 @@ mod tests {
         assert_eq!(restored.recommendation.unwrap().file_ids, vec![2]);
         assert!(restored.takes.unwrap().iter().all(|take| !take.stale));
     }
+
+    #[tokio::test]
+    async fn failed_take_group_edits_reply_with_a_message() {
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(fixture()));
+        for value in [
+            serde_json::json!({"requestID":"a","action":"deleteEvent"}),
+            serde_json::json!({"requestID":"b","action":"deleteEvent","eventID":"missing"}),
+            serde_json::json!({"requestID":"c","action":"undoTakeFeedback","eventID":"missing","fileID":1}),
+            serde_json::json!({"requestID":"d","action":"undoTakeFeedback","eventID":"missing"}),
+            serde_json::json!({"requestID":"e","action":"setTakeFeedback"}),
+            serde_json::json!({"requestID":"f","action":"undoEventEdit","eventID":"missing"}),
+        ] {
+            let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(1);
+            crate::commands::catalog::handle(sink, Some(db.clone()), None, request(value)).await;
+            let event = events.recv().await.expect("catalog response");
+            let crate::ipc::EventPayload::CatalogResponse(reply) = event.payload else { panic!("expected CatalogResponse") };
+            assert_eq!(reply.inner.status, "error");
+            assert!(reply.inner.message.as_deref().is_some_and(|message| !message.trim().is_empty()), "{:?}", reply.inner.request_id);
+        }
+    }
 }

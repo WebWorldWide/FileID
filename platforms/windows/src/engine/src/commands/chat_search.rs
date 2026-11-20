@@ -1,12 +1,10 @@
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct SearchPlan {
     pub query: String,
     pub kinds: Vec<String>,
     pub person_ids: Vec<i64>,
     pub person_names: Vec<String>,
-    /// "Kyle and Maya": files with every named person, not any of them.
     pub all_people: bool,
-    /// "without Maya": people whose files are left out.
     pub excluded_person_ids: Vec<i64>,
     pub excluded_person_names: Vec<String>,
     pub event_ids: Vec<String>,
@@ -123,8 +121,6 @@ impl SearchPlan {
     pub fn resolve(text: &str, previous: Option<&Self>) -> Self {
         Self::resolve_known(text, previous, &[], &[], false)
     }
-    /// `follow_up` narrows `previous` even without a refinement word
-    /// ("how many are from 2018?").
     pub fn resolve_known(
         text: &str,
         previous: Option<&Self>,
@@ -177,10 +173,9 @@ impl SearchPlan {
             "of", "my", "files", "file", "with", "in", "all", "only", "just", "now", "these", "those", "instead",
             "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were", "do", "does", "did", "have", "has",
             "there", "any", "about", "that", "i", "mentioning", "mention", "mentions", "named", "called", "titled",
-            "regarding", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
+            "regarding", "every", "one", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
             "similar", "closest", "nearest", "lookalike", "lookalikes", "resemble", "resembles", "resembling",
         ];
-        // "how many of them show Alex?" and "what is he wearing?" point back at the last search.
         let refinement = follow_up
             || normalized.iter().any(|word| {
                 [
@@ -211,7 +206,8 @@ impl SearchPlan {
                     && !fillers.contains(&word.as_str())
                     && (negative || aliases(word).is_empty())
             })
-            .map(|(_, (word, _))| *word)
+            .map(|(_, (word, _))| word.trim_end_matches(['?', '!', '.', ',', ';', ':']))
+            .filter(|word| !word.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
         if refinement && !normalized.iter().any(|word| word == "all")
@@ -319,9 +315,8 @@ fn timestamp(value: &str) -> Option<f64> {
         values[0] * 3600 + values[1] * 60 + values[2]
     } as f64)
 }
-/// People named right after "without"/"except"/"not" (optionally "of"/"the",
-/// joined by "or"/"and"/","), with the words they used, negation included.
-/// Mirrors macOS `ChatSearchPlan.matchExclusions`.
+/// People named right after "without"/"except"/"not", with the words used, negation included (macOS
+/// `ChatSearchPlan.matchExclusions`).
 fn match_exclusions(
     words: &[String],
     negations: &[&str],

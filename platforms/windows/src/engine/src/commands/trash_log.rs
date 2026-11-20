@@ -1,13 +1,6 @@
-//! Sidecar undo log for `trashFiles` → `restoreFromTrash`.
-//!
-//! `trash_log.json` is an append-only NDJSON file capped at the last 1024
-//! entries. Lets the app's UndoStack stay process-local across restarts
-//! AND lets `restoreFromTrash` know which paths to bring back from the
-//! Recycle Bin without bloating the SQLite schema.
-//!
-//! This is the canonical Trash journal on every platform (DECISIONS
-//! 2026-11-10): the macOS Swift engine dual-writes it, and
-//! `journal_import` converts the Swift engine's older `trash-journal.json`.
+//! Sidecar undo log for `trashFiles` -> `restoreFromTrash`: append-only NDJSON capped at the last 1024 entries so the
+//! UndoStack survives restarts without bloating the SQLite schema. The canonical Trash journal on every platform: the
+//! Swift engine dual-writes it and `journal_import` converts its older `trash-journal.json`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -26,28 +19,26 @@ pub(crate) struct TrashLogEntry {
 pub(crate) struct TrashLogItem {
     pub(crate) file_id: i64,
     pub(crate) original_path: String,
-    /// Path the Trash backend recorded as the source. Identity-bound deletion
-    /// first claims a file under a unique sibling name; Windows restore looks
-    /// up that claimed path, then renames it back to `original_path`.
+    /// So a put back still finds its anchor after the catalog (and its scan sessions) was wiped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) library_root: Option<String>,
+    /// Identity-bound deletion first claims a file under a unique sibling name; Windows restore looks up that claimed
+    /// path, then renames it back to `original_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recycle_bin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recycle_physical_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source_identity: Option<crate::platform::FileIdentity>,
-    /// Where the macOS Trash put the item, once known. A write-ahead entry has
-    /// none; restore and startup recovery then find the item by its inode.
+    /// A write-ahead entry has none; restore and startup recovery then find the item by its inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) trashed_path: Option<String>,
-    /// The file's catalog rows (`SNAPSHOT_TABLES`) as they were before Trash,
-    /// put back on restore so tags, CLIP vector and take signals return at once.
+    /// Put back on restore so tags, CLIP vector and take signals return at once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) rows: Vec<SnapshotRow>,
 }
 
 impl TrashLogItem {
-    /// The inode the item had when it was trashed: the journaled identity, else
-    /// the snapshot's `file_ref` (Swift journals carry only that).
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     pub(crate) fn expected_inode(&self) -> Option<u64> {
         self.source_identity.map(|identity| identity.file).or_else(|| {
@@ -61,17 +52,17 @@ impl TrashLogItem {
     }
 }
 
-/// Catalog tables a Trash snapshot keeps, with the column naming the file.
 /// `files` comes first so the other rows' foreign keys resolve on restore.
-pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 4] = [
+pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 5] = [
     ("files", "id"),
     ("clip_embeddings", "file_id"),
     ("tags", "file_id"),
     ("take_quality", "file_id"),
+    ("face_prints", "file_id"),
 ];
 
-/// One SQLite value. Same JSON shape as the Swift engine's `TrashJournal.Value`
-/// (null is `{}`, blobs are standard base64), so either engine reads the other's.
+/// Same JSON shape as Swift's `TrashJournal.Value` (null is `{}`, blobs standard base64) so either engine reads the
+/// other's.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SnapshotValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,7 +123,6 @@ fn table_columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<V
     names.collect()
 }
 
-/// The file's rows in every `SNAPSHOT_TABLES` table this catalog has.
 pub(crate) fn snapshot_rows(
     conn: &rusqlite::Connection,
     file_id: i64,
@@ -156,10 +146,8 @@ pub(crate) fn snapshot_rows(
     Ok(out)
 }
 
-/// Puts a restored file's snapshot back, as the Swift engine does: only when
-/// neither its id nor its path is taken, every row with `INSERT OR IGNORE`,
-/// and only columns this catalog still has. Returns whether the `files` row
-/// was inserted (false: no snapshot, or the catalog already has the file).
+/// As Swift: only when neither the id nor the path is taken, every row `INSERT OR IGNORE`, only columns this catalog
+/// still has. Returns whether the `files` row was inserted.
 pub(crate) fn restore_snapshot(
     conn: &rusqlite::Connection,
     file_id: i64,
@@ -178,6 +166,7 @@ pub(crate) fn restore_snapshot(
         return Ok(false);
     }
     let mut inserted_file = false;
+    let mut restored_persons = Vec::new();
     for row in rows {
         let Some((table, key)) = SNAPSHOT_TABLES.iter().find(|(table, _)| *table == row.table) else {
             continue;
@@ -190,10 +179,26 @@ pub(crate) fn restore_snapshot(
         if names.is_empty() {
             continue;
         }
-        let values = names
+        let mut values = names
             .iter()
             .map(|name| row.columns[*name].to_sql())
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut face_person = None;
+        if *table == "face_prints"
+            && let Some(slot) = names.iter().position(|name| name.as_str() == "person_id")
+            && let rusqlite::types::Value::Integer(person) = values[slot]
+        {
+            let person_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
+                [person],
+                |row| row.get(0),
+            )?;
+            if person_exists {
+                face_person = Some(person);
+            } else {
+                values[slot] = rusqlite::types::Value::Null;
+            }
+        }
         let columns = names.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(",");
         let marks = vec!["?"; names.len()].join(",");
         let changed = conn.execute(
@@ -206,14 +211,25 @@ pub(crate) fn restore_snapshot(
                 return Ok(false);
             }
         }
+        if changed == 1 && let Some(person) = face_person {
+            restored_persons.push(person);
+        }
     }
+    if !rows.iter().any(|row| row.table == "face_prints") {
+        // A journal from before face rows were snapshotted: a NULL `modified_at` keeps the file out of the next scan's
+        // skip set, which detects its faces again.
+        conn.execute(
+            "UPDATE files SET has_faces = 0, modified_at = NULL WHERE id = ?1 AND has_faces <> 0",
+            [file_id],
+        )?;
+    }
+    restored_persons.sort_unstable();
+    restored_persons.dedup();
+    crate::db::person_counts::reconcile(conn, &restored_persons)?;
     Ok(inserted_file)
 }
 
-/// The append-only log is trimmed to the last `MAX_ENTRIES` lines so it can't
-/// grow without bound over a long-lived install (the module doc promises this
-/// cap). Trimming drops whole oldest lines verbatim — retained lines keep
-/// their HMAC, so `read_batch` still verifies them.
+/// Trimming drops whole oldest lines verbatim; retained lines keep their HMAC, so `read_batch` still verifies them.
 const MAX_ENTRIES: usize = 1024;
 
 #[cfg(unix)]
@@ -245,8 +261,7 @@ pub(crate) fn append_at(
         std::fs::create_dir_all(parent).ok();
     }
     let json = serde_json::to_string(entry)?;
-    // HMAC-sign each entry so a local attacker who appends a forged
-    // entry can't get it accepted by restoreFromTrash. Entry format is
+    // HMAC-sign each entry so a local attacker's forged append can't be accepted by restoreFromTrash. Format:
     // `{json}\t{hex_hmac}`.
     let mac = hmac::hmac_sha256_hex(key, json.as_bytes());
     {
@@ -255,19 +270,17 @@ pub(crate) fn append_at(
             .append(true)
             .open(path)?;
         writeln!(file, "{json}\t{mac}")?;
-        // Force flush so a crash immediately after delete-to-trash doesn't lose
-        // the log entry (which would orphan the Recycle Bin items).
+        // Force flush so a crash right after delete-to-trash doesn't lose the entry (which would orphan the Recycle Bin
+        // items).
         file.sync_all()?;
     }
     sync_parent(path)?;
-    // Enforce the documented cap. Best-effort: a trim failure must not fail the
-    // delete (the entry is already durably appended above).
+    // Best-effort: a trim failure must not fail the delete (the entry is already durably appended).
     trim_to_cap(path).ok();
     Ok(())
 }
 
-/// Every signed entry, keeping only the newest line of each batch (a later
-/// receipt supersedes the write-ahead line), oldest batch first.
+/// A later receipt supersedes the write-ahead line; oldest batch first.
 pub(crate) fn latest_entries(raw: &[u8], key: &[u8]) -> Vec<TrashLogEntry> {
     let mut order: Vec<String> = Vec::new();
     let mut latest: std::collections::HashMap<String, TrashLogEntry> = std::collections::HashMap::new();
@@ -291,12 +304,10 @@ pub(crate) fn latest_entries(raw: &[u8], key: &[u8]) -> Vec<TrashLogEntry> {
     order.into_iter().filter_map(|id| latest.remove(&id)).collect()
 }
 
-/// Keep only the last `MAX_ENTRIES` non-empty lines, atomically (temp + rename).
 fn trim_to_cap(path: &std::path::Path) -> anyhow::Result<()> {
-    // Read bytes, not read_to_string: one torn line cut mid-codepoint (power
-    // loss before append's fsync) would otherwise fail the WHOLE read forever
-    // and silently disable the cap. Undecodable lines are dropped per-line,
-    // like the HMAC-reject path.
+    // Read bytes, not read_to_string: one torn line cut mid-codepoint (power loss before append's fsync) would fail the
+    // WHOLE read forever and silently disable the cap. Undecodable lines are dropped per line, like the HMAC-reject
+    // path.
     let raw = std::fs::read(path)?;
     let lines: Vec<&str> = raw
         .split(|b| *b == b'\n')
@@ -332,9 +343,8 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
         return Ok(None);
     }
     let key = hmac::log_hmac_key()?;
-    // Read bytes, not read_to_string: a torn line ending inside a multi-byte
-    // character (power loss mid-append) would otherwise return InvalidData
-    // for the whole file and wedge restore for EVERY batch, old and new.
+    // Read bytes, not read_to_string: a torn line ending mid-character (power loss mid-append) would return InvalidData
+    // for the whole file and wedge restore for EVERY batch.
     let raw = std::fs::read(&path)?;
     Ok(find_batch_in(&raw, &key, batch_id))
 }
@@ -349,8 +359,7 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
         if line.trim().is_empty() {
             continue;
         }
-        // Split {json}\t{hex_hmac}. Entries without the HMAC suffix
-        // (legacy writes or forged appends) are rejected.
+        // Entries without the HMAC suffix (legacy writes or forged appends) are rejected.
         let Some(tab) = line.find('\t') else {
             tracing::warn!("trash_log entry missing HMAC suffix -- rejecting");
             continue;
@@ -369,8 +378,7 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
     None
 }
 
-/// Puts back files a killed `trashFiles` left under their hidden claim name
-/// (claimed, but not yet in the Trash or renamed back). Returns how many.
+/// Claimed but not yet in the Trash or renamed back. Returns how many.
 pub(crate) fn recover_stranded_claims() -> usize {
     let Some(raw) = paths::trash_log_path().ok().and_then(|path| std::fs::read(path).ok()) else {
         return 0;
@@ -380,10 +388,9 @@ pub(crate) fn recover_stranded_claims() -> usize {
         .unwrap_or(0)
 }
 
-/// Startup repair before the app reads the library: claims a killed
-/// `trashFiles` left behind, renames a kill left half done, the Swift engine's
-/// Trash journal when the Mac app hosts this engine, and (macOS) catalog rows of files a kill left in the
-/// Trash. Returns how many claims were put back.
+/// Before the app reads the library: claims a killed `trashFiles` left behind, renames a kill left half done, the Swift
+/// Trash journal when the Mac app hosts this engine, and (macOS) catalog rows of files a kill left in the Trash.
+/// Returns how many claims were put back.
 pub(crate) fn recover_at_startup(
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
 ) -> usize {
@@ -400,6 +407,12 @@ pub(crate) fn recover_at_startup(
         }
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         {
+            if let (Ok(path), Ok(key)) = (paths::trash_log_path(), hmac::log_hmac_key()) {
+                let put_back = put_back_interrupted_batch(&path, &key, db, |batch_id| super::trash::restore_batch(db, batch_id));
+                if put_back > 0 {
+                    tracing::warn!(put_back, "put back files a killed trashFiles had already moved to the Trash");
+                }
+            }
             let dropped = reconcile_trashed_rows(db, crate::shell::trash::locate);
             if dropped > 0 {
                 tracing::warn!(dropped, "dropped catalog rows of files a killed trashFiles left in the Trash");
@@ -409,14 +422,61 @@ pub(crate) fn recover_at_startup(
     reclaimed
 }
 
-/// Batches startup recovery looks at (the Swift engine keeps 50).
+/// A `trashFiles` killed partway leaves its write-ahead line as the newest word on the batch (no item carries a Trash
+/// location) and some files already gone from their folders while their catalog rows remain, since the catalog commits
+/// only after every move. Puts the whole batch back, as the Windows claim recovery does, so the user's folder is as it
+/// was before the interrupted delete. Returns how many files `restore` put back; a batch it can't find in the Trash stays
+/// as it is.
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+pub(crate) fn put_back_interrupted_batch(
+    path: &std::path::Path,
+    key: &[u8],
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    restore: impl Fn(&str) -> anyhow::Result<crate::ipc::BulkActionResult>,
+) -> usize {
+    let Ok(raw) = std::fs::read(path) else {
+        return 0;
+    };
+    let Some(newest) = latest_entries(&raw, key).pop() else {
+        return 0;
+    };
+    if newest.items.iter().any(|item| item.trashed_path.is_some()) {
+        return 0;
+    }
+    let stranded: Vec<&TrashLogItem> = newest
+        .items
+        .iter()
+        .filter(|item| {
+            std::fs::symlink_metadata(&item.original_path).is_err()
+                && db
+                    .lock()
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)",
+                        rusqlite::params![item.file_id, item.original_path],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+        })
+        .collect();
+    if stranded.is_empty() {
+        return 0;
+    }
+    if let Err(error) = restore(&newest.batch_id) {
+        tracing::warn!(?error, "could not put back an interrupted Trash batch");
+        return 0;
+    }
+    stranded
+        .iter()
+        .filter(|item| std::fs::symlink_metadata(&item.original_path).is_ok())
+        .count()
+}
+
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 const RECONCILE_BATCHES: usize = 50;
 
-/// A kill between the Trash move and the catalog commit leaves a row for a file
-/// that is now in the Trash. For the newest batches, drops each row whose file
-/// is gone from its path and provably in the Trash (`locate` checks identity),
-/// and journals a found location the write-ahead entry did not have yet.
+/// A kill between the Trash move and the catalog commit leaves a row for a file now in the Trash. For the newest
+/// batches, drops each row whose file is gone from its path and provably in the Trash (`locate` checks identity), and
+/// journals a found location the write-ahead entry lacked.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) fn reconcile_trashed_rows(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -472,8 +532,6 @@ pub(crate) fn reconcile_trashed_rows(
     dropped
 }
 
-/// Only signed entries count, the claim must still be the journaled file, and an
-/// occupied original is never replaced.
 fn recover_claims_in(raw: &[u8], key: &[u8]) -> usize {
     let mut restored = 0;
     for line in raw.split(|b| *b == b'\n') {
@@ -527,7 +585,6 @@ mod tests {
         (dir, original, claim, format!("{json}\t{mac}\n"))
     }
 
-    // A kill between the claim rename and the Trash move left the file under a hidden name.
     #[test]
     fn startup_puts_a_stranded_trash_claim_back() {
         let (dir, original, claim, raw) = claimed_fixture("back");
@@ -572,6 +629,123 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_trashed_row_recounts_its_people() {
+        let gone = std::env::temp_dir().join(format!("fileid-gone-{}", uuid::Uuid::new_v4())).join("face.jpg");
+        let gone_path = gone.to_string_lossy().into_owned();
+        let conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 9_001, &gone_path, "image");
+        crate::db::test_support::insert_file(&conn, 9_002, "/kept/other.jpg", "image");
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,9001,1,X'00','[]'),(2,9002,1,X'00','[]'),(3,9001,2,X'00','[]');",
+        )
+        .unwrap();
+        let mut entry = make_entry(&format!("recount-{}", uuid::Uuid::new_v4()));
+        entry.items[0].file_id = 9_001;
+        entry.items[0].original_path = gone_path.clone();
+        append(&entry).unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+
+        let dropped = reconcile_trashed_rows(&db, |item| (item.original_path == gone_path).then(|| std::path::PathBuf::from("/Trash/face.jpg")));
+
+        assert_eq!(dropped, 1);
+        let conn = db.lock();
+        let mut stmt = conn.prepare("SELECT id,file_count,representative_face_id FROM persons ORDER BY id").unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+    }
+
+    fn interrupted_batch_fixture(
+        items: usize,
+        in_trash: usize,
+    ) -> (std::path::PathBuf, std::path::PathBuf, Vec<std::path::PathBuf>, TrashLogEntry, std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>) {
+        let dir = std::env::temp_dir().join(format!("fileid-interrupted-trash-{}", uuid::Uuid::new_v4()));
+        let trash = dir.join("Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let mut entry = make_entry(&format!("interrupted-{}", uuid::Uuid::new_v4()));
+        entry.items.clear();
+        let mut originals = Vec::new();
+        for index in 0..items {
+            let original = dir.join(format!("photo-{index}.jpg"));
+            std::fs::write(&original, format!("bytes {index}")).unwrap();
+            crate::db::test_support::insert_file(&conn, index as i64 + 1, &original.to_string_lossy(), "image");
+            entry.items.push(TrashLogItem {
+                file_id: index as i64 + 1,
+                original_path: original.to_string_lossy().into_owned(),
+                ..Default::default()
+            });
+            if index < in_trash {
+                std::fs::rename(&original, trash.join(original.file_name().unwrap())).unwrap();
+            }
+            originals.push(original);
+        }
+        (dir, trash, originals, entry, std::sync::Arc::new(parking_lot::Mutex::new(conn)))
+    }
+
+    fn put_everything_back_from(trash: &std::path::Path, originals: &[std::path::PathBuf]) -> impl Fn(&str) -> anyhow::Result<crate::ipc::BulkActionResult> {
+        let trash = trash.to_path_buf();
+        let originals = originals.to_vec();
+        move |_| {
+            for original in &originals {
+                let parked = trash.join(original.file_name().unwrap());
+                if parked.exists() {
+                    std::fs::rename(parked, original)?;
+                }
+            }
+            Ok(crate::ipc::BulkActionResult { command_id: None, action: "restoreFromTrash".into(), succeeded: 0, failed: 0, messages: Vec::new() })
+        }
+    }
+
+    #[test]
+    fn a_trash_batch_killed_partway_is_put_back_at_the_next_start() {
+        let (dir, trash, originals, entry, db) = interrupted_batch_fixture(5, 2);
+        let (log, key) = (dir.join("trash_log.json"), b"test key".to_vec());
+        append_at(&log, &key, &entry).unwrap();
+
+        let put_back = put_back_interrupted_batch(&log, &key, &db, put_everything_back_from(&trash, &originals));
+
+        assert_eq!(put_back, 2, "the two files already in the Trash came back");
+        assert!(originals.iter().all(|original| original.exists()), "the folder is as it was before the delete");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_finished_or_untouched_trash_batch_is_left_alone() {
+        let called = std::cell::Cell::new(0);
+        let count = |_: &str| -> anyhow::Result<crate::ipc::BulkActionResult> {
+            called.set(called.get() + 1);
+            anyhow::bail!("must not be called")
+        };
+
+        let (dir, _trash, _originals, entry, db) = interrupted_batch_fixture(3, 0);
+        let (log, key) = (dir.join("trash_log.json"), b"test key".to_vec());
+        append_at(&log, &key, &entry).unwrap();
+        assert_eq!(put_back_interrupted_batch(&log, &key, &db, count), 0, "nothing left its folder");
+
+        let (dir2, _trash2, _originals2, mut receipted, db2) = interrupted_batch_fixture(3, 3);
+        receipted.items[0].trashed_path = Some("/Trash/photo-0.jpg".into());
+        let log2 = dir2.join("trash_log.json");
+        append_at(&log2, &key, &receipted).unwrap();
+        assert_eq!(put_back_interrupted_batch(&log2, &key, &db2, count), 0, "a batch with a receipt finished normally");
+        assert_eq!(called.get(), 0);
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(dir2).ok();
+    }
+
+    #[test]
+    fn the_recorded_library_root_round_trips_and_older_entries_have_none() {
+        let mut entry = make_entry("batch-root");
+        let without = serde_json::to_string(&entry).unwrap();
+        assert!(!without.contains("library_root"));
+        assert_eq!(serde_json::from_str::<TrashLogEntry>(&without).unwrap().items[0].library_root, None);
+        entry.items[0].library_root = Some("/lib".into());
+        let decoded: TrashLogEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(decoded.items[0].library_root.as_deref(), Some("/lib"));
+    }
+
+    #[test]
     fn entry_serde_round_trip() {
         let mut entry = make_entry("batch-1");
         entry.items[0].recycle_physical_path = Some(r"C:\$Recycle.Bin\$Rcat.jpg".into());
@@ -600,11 +774,7 @@ mod tests {
 
     #[test]
     fn forged_entry_rejected_by_hmac_check() {
-        // Manually simulate the file format:
-        //   {valid_json}\t{valid_hmac}\n
-        // Then a hostile appender:
-        //   {forged_json}\t{wrong_hmac}\n
-        // The hostile line must fail verification.
+        // A hostile appender's forged line must fail verification.
         let key = log_hmac_key().expect("hmac key");
 
         let real_entry = make_entry("real-batch");
@@ -615,8 +785,6 @@ mod tests {
         let forged_json = serde_json::to_string(&forged_entry).unwrap();
         let wrong_mac = hmac_sha256_hex(b"different-key", forged_json.as_bytes());
 
-        // Reconstruct the verification logic from read_batch inline so we
-        // don't have to touch the filesystem.
         let lines = vec![
             format!("{real_json}\t{real_mac}"),
             format!("{forged_json}\t{wrong_mac}"),
@@ -637,12 +805,8 @@ mod tests {
         assert_eq!(accepted_batches, vec!["real-batch".to_string()]);
     }
 
-    // Once an entry is appended (signed), restore can FIND it by batch
-    // id. This is the recoverability guarantee the bulk trash path now orders
-    // BEFORE the irreversible DELETE commit — so a trashed file always has a
-    // findable undo-journal entry (or the whole batch is rolled back + surfaced
-    // as an error, never silently unrecoverable). Pure: signs in-memory and
-    // round-trips through find_batch_in (no filesystem).
+    // A signed entry must be findable by batch id before the bulk trash path commits its irreversible DELETE, or a
+    // trashed file could be unrecoverable.
     #[test]
     fn latest_signed_receipt_for_batch_wins() {
         let key = log_hmac_key().expect("hmac key");
@@ -677,8 +841,121 @@ mod tests {
         assert_eq!(found.items.len(), 1);
         assert_eq!(found.items[0].original_path, entry.items[0].original_path);
 
-        // A batch that was never appended is NOT findable — the bulk path must
-        // therefore guarantee the append before claiming the trash succeeded.
+        // A never-appended batch is NOT findable: the bulk path must guarantee the append before claiming the trash
+        // succeeded.
         assert!(find_batch_in(raw.as_bytes(), &key, "never-written").is_none());
+    }
+
+    fn trashed_faces_catalog() -> rusqlite::Connection {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        crate::db::test_support::insert_file(&conn, 1, "/photos/a.jpg", "image");
+        crate::db::test_support::insert_file(&conn, 2, "/photos/b.jpg", "image");
+        conn.execute_batch(
+            "UPDATE files SET has_faces = 1;
+             INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,face_quality,excluded)
+               VALUES(1,1,1,X'00','[0,0,1,1]',0.9,0),(2,2,1,X'00','[0,0,1,1]',0.8,0),(3,1,2,X'00','[0,0,1,1]',0.7,1);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn face_rows(conn: &rusqlite::Connection) -> Vec<(i64, i64, Option<i64>, Option<f64>, i64)> {
+        let mut stmt = conn
+            .prepare("SELECT id,file_id,person_id,face_quality,COALESCE(excluded,0) FROM face_prints ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn person_counts(conn: &rusqlite::Connection) -> Vec<(i64, i64, Option<i64>)> {
+        let mut stmt = conn.prepare("SELECT id,file_count,representative_face_id FROM persons ORDER BY id").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_files_faces_and_put_back_restores_them() {
+        let conn = trashed_faces_catalog();
+        let rows = snapshot_rows(&conn, 1).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.table == "face_prints").count(), 2);
+        let persons = crate::db::person_counts::persons_of_files(&conn, &[1]).unwrap();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+        crate::db::person_counts::reconcile(&conn, &persons).unwrap();
+        assert_eq!(face_rows(&conn).len(), 1);
+        assert_eq!(person_counts(&conn), vec![(1, 1, Some(2)), (2, 0, None)]);
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        assert_eq!(
+            face_rows(&conn),
+            vec![(1, 1, Some(1), Some(0.9), 0), (2, 2, Some(1), Some(0.8), 0), (3, 1, Some(2), Some(0.7), 1)]
+        );
+        assert_eq!(person_counts(&conn), vec![(1, 2, Some(2)), (2, 0, Some(3))]);
+    }
+
+    #[test]
+    fn put_back_leaves_a_face_unassigned_when_its_person_is_gone() {
+        let conn = trashed_faces_catalog();
+        let rows = snapshot_rows(&conn, 1).unwrap();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+        conn.execute("UPDATE face_prints SET person_id = NULL WHERE person_id = 2", []).unwrap();
+        conn.execute("DELETE FROM persons WHERE id = 2", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        assert_eq!(face_rows(&conn)[2], (3, 1, None, Some(0.7), 1));
+        assert_eq!(person_counts(&conn), vec![(1, 2, Some(1))]);
+    }
+
+    #[test]
+    fn a_journal_from_before_faces_were_snapshotted_still_restores() {
+        let conn = trashed_faces_catalog();
+        let rows: Vec<SnapshotRow> =
+            snapshot_rows(&conn, 1).unwrap().into_iter().filter(|row| row.table != "face_prints").collect();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        assert_eq!(face_rows(&conn).len(), 1);
+        let restored: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(restored, 1);
+    }
+
+    #[test]
+    fn a_journal_from_before_faces_were_snapshotted_leaves_the_file_for_the_next_scan_to_detect() {
+        let conn = trashed_faces_catalog();
+        conn.execute("UPDATE files SET modified_at = 5.0", []).unwrap();
+        let rows: Vec<SnapshotRow> =
+            snapshot_rows(&conn, 1).unwrap().into_iter().filter(|row| row.table != "face_prints").collect();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        let (has_faces, modified): (i64, Option<f64>) = conn
+            .query_row("SELECT has_faces, modified_at FROM files WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((has_faces, modified), (0, None));
+        let untouched: (i64, Option<f64>) = conn
+            .query_row("SELECT has_faces, modified_at FROM files WHERE id = 2", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(untouched, (1, Some(5.0)));
+    }
+
+    #[test]
+    fn a_snapshot_with_faces_keeps_its_has_faces_and_modified_at() {
+        let conn = trashed_faces_catalog();
+        conn.execute("UPDATE files SET modified_at = 5.0", []).unwrap();
+        let rows = snapshot_rows(&conn, 1).unwrap();
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+
+        assert!(restore_snapshot(&conn, 1, "/photos/a.jpg", &rows).unwrap());
+
+        let restored: (i64, Option<f64>) = conn
+            .query_row("SELECT has_faces, modified_at FROM files WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(restored, (1, Some(5.0)));
     }
 }

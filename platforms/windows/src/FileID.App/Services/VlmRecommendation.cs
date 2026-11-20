@@ -78,9 +78,7 @@ internal static class VlmRecommendation
 
     internal static bool CanRun(string kind, VlmHardwareProfile profile)
     {
-        // No measured Qwen3 working set yet; these are explicit opt-in models,
-        // never chosen by PreferredOrder. Let the runtime report memory errors
-        // rather than fabricate a hardware exclusion threshold.
+        // No measured Qwen3 working set yet; these are explicit opt-in models, never chosen by PreferredOrder.
         if (kind is Qwen3Four or Qwen3Eight) return true;
         if (profile.Architecture == Architecture.Arm64 && kind != Gemma)
         {

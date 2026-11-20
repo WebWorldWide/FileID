@@ -23,12 +23,8 @@ struct NameStyleControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Name style").font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1)
-            Picker("Name style", selection: $style) {
-                ForEach(NameStyle.styles, id: \.id) { Text($0.title).tag($0.id) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .tint(Theme.gold)
+            SegmentedBar(selection: $style, options: NameStyle.styles.map { ($0.id, $0.title) })
+                .accessibilityLabel("Name style")
             HStack(spacing: 12) {
                 Slider(value: lengthBinding, in: Double(NameStyle.lengthRange.lowerBound)...Double(NameStyle.lengthRange.upperBound), step: 1) {
                     Text("Longest name")
@@ -71,7 +67,7 @@ private struct LearnedStyleRow: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Button("Reset") { Task { await load(reset: true); onReset() } }
-                .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                .buttonStyle(DSSecondaryButtonStyle())
                 .disabled(busy || learned.samples == 0)
                 .help("Forget the style FileID learned from your renames")
                 .accessibilityLabel("Reset learned name style")
@@ -122,9 +118,9 @@ enum StyledNames {
         guard !ids.isEmpty else { return .rows([]) }
         let request = NameStyle.request(id: "names-" + UUID().uuidString, fileIDs: ids, naming: naming)
         guard let response = await TakeRequests.send(engine, request, timeout: 30) else {
-            return .failed("FileID didn't answer in time. Try again in a moment.")
+            return .failed("FileID didn’t answer in time. Try again in a moment.")
         }
-        guard response.status == "ok" else { return .failed(response.message ?? "FileID couldn't suggest names right now.") }
+        guard response.status == "ok" else { return .failed(response.message ?? "FileID couldn’t suggest names right now.") }
         return .rows(NameStyle.rows(from: response.hits, previous: previous))
     }
 
@@ -138,13 +134,13 @@ enum StyledNames {
 
     static func renamedSummary(_ result: ReadStore.BulkRenameResult) -> String {
         "Renamed \(result.renamed.count.formatted()) file\(result.renamed.count == 1 ? "" : "s")"
-            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed" + (result.firstError.map { ": \($0)" } ?? "") : "") + "."
+            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed" : "") + "."
     }
 
     static func undoneSummary(_ result: (undone: Int, skipped: Int, failed: Int)) -> String {
         "Put back \(result.undone.formatted()) name\(result.undone == 1 ? "" : "s")"
             + (result.skipped > 0 ? " · \(result.skipped.formatted()) skipped because the file moved or changed" : "")
-            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn't be renamed back" : "") + "."
+            + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed back" : "") + "."
     }
 }
 
@@ -176,7 +172,7 @@ struct SmartNamePreviewSheet: View {
         NameStyle.naming(style: style, maxLength: maxLength, includePeople: includePeople, includeEvent: includeEvent,
                          includeDate: includeDate, learn: learn)
     }
-    private var rowSpring: Animation? { reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8) }
+    private var rowSpring: Animation? { Theme.spring }
     private var ready: [CatalogWrites.NamedRename] { NameStyle.renames(rows) }
 
     var body: some View {
@@ -197,7 +193,7 @@ struct SmartNamePreviewSheet: View {
         }
         .padding(20)
         .frame(minWidth: 680, minHeight: 520)
-        .background(LavaLampBackground())
+        .sheetSurface()
         .preferredColorScheme(.dark)
         .task { await preview() }
         .onChange(of: naming) { _, _ in schedulePreview() }

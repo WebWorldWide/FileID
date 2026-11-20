@@ -793,18 +793,21 @@
     },
     "ModelCatalog": {
       "type": "object", "additionalProperties": false,
-      "required": ["requestID", "physicalMemoryGB", "vramMB", "models"],
+      "description": "recommendedID is the engine's pick among the vision models: the best one that loads with the memory free right now, else the smallest this machine could ever run. Clients show it as the default and never apply their own memory rule.",
+      "required": ["requestID", "physicalMemoryGB", "availableMemoryMB", "vramMB", "models"],
       "properties": {
         "requestID": { "$ref": "#/$defs/HealthRequestID" },
         "physicalMemoryGB": { "type": "number", "minimum": 0 },
+        "availableMemoryMB": { "type": "integer", "minimum": 0 },
         "vramMB": { "type": "integer", "minimum": 0 },
+        "recommendedID": { "type": ["string", "null"], "maxLength": 128 },
         "models": { "type": "array", "maxItems": 4000, "items": { "$ref": "#/$defs/ModelCatalogItem" } }
       }
     },
     "ModelCatalogItem": {
       "type": "object", "additionalProperties": false,
-      "description": "status is `curated` for the shipped defaults, `candidate` for catalog entries not yet benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this engine can load it on this platform today; fits compares the resident estimate with this machine's memory.",
-      "required": ["id", "name", "family", "upstream", "role", "format", "quantization", "license", "termsRequired", "downloadBytes", "estimatedResidentGB", "tier", "status", "runnable", "installed", "fits"],
+      "description": "status is `curated` for the shipped defaults, `candidate` for catalog entries not yet benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this engine can load it on this platform today; fits means the engine's memory admission could ever accept it on this machine (installed memory less the system reserve), and fitsNow that it would be accepted with the memory free right now.",
+      "required": ["id", "name", "family", "upstream", "role", "format", "quantization", "license", "termsRequired", "downloadBytes", "estimatedResidentGB", "tier", "status", "runnable", "installed", "fits", "fitsNow"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "name": { "type": "string", "maxLength": 200 },
@@ -823,6 +826,7 @@
         "runnable": { "type": "boolean" },
         "installed": { "type": "boolean" },
         "fits": { "type": "boolean" },
+        "fitsNow": { "type": "boolean" },
         "benchmark": { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/ModelBenchmark" } ] }
       }
     },
@@ -1001,7 +1005,7 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":      { "type": "string", "description": "Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | download_tls_pin_failed | pack_not_available | face_clustering_failed | unknown_model | unknown | … . `face_clustering_failed` (Windows form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine; the macOS engine surfaces those conditions through its scan-completion flow rather than as distinct error kinds." },
+              "kind":      { "type": "string", "description": "Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | download_tls_pin_failed | pack_not_available | face_clustering_failed | unknown_model | unknown | … . `face_clustering_failed` (Windows form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine; the macOS engine emits rescan_no_changes too and surfaces the other conditions through its scan-completion flow rather than as distinct error kinds. `ocr_accurate_disabled` (Swift engine, macOS only) reports that accurate text recognition failed repeatedly and the engine fell back to fast recognition." },
               "message":   { "type": "string" },
               "path":      { "type": ["string", "null"] },
               "modelKind": { "type": ["string", "null"], "description": "For errors pertaining to a specific model/pack install (e.g. mobileclip_s2, cuda_pack_x64), the model id. Lets the app route errors to the right install slot without path-string heuristics." }

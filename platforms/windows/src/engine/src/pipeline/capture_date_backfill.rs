@@ -1,10 +1,4 @@
-//! Catalogs written before scans read EXIF capture times (or before the RAW
-//! readers existed) store the file's copy date for photos, and an incremental
-//! scan skips unchanged files, so those dates would never be corrected. After a
-//! library folder's next completed scan this reads each photo's EXIF time once
-//! (file headers only, no decode) and fixes rows that differ by more than a
-//! second. A marker per folder keeps it to one pass. Mirrors macOS
-//! `CaptureDateBackfill`.
+//! Mirrors macOS `CaptureDateBackfill`: corrects copy dates to EXIF capture times once per library folder.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +9,7 @@ use sha2::Digest;
 
 use crate::scan_session::{prefix_upper_bound, root_descendant_prefix};
 
-const VERSION: &str = "v1";
+const VERSION: &str = "v2";
 const WRITE_CHUNK: usize = 500;
 
 pub(crate) fn marker(state_dir: &Path, root: &Path) -> PathBuf {
@@ -39,7 +33,6 @@ pub(crate) fn catalog_has_rows(conn: &Connection, root: &Path) -> bool {
     .unwrap_or(true)
 }
 
-/// Marks `root` done without a pass: the scan just read every photo's EXIF.
 pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
     let mark = marker(state_dir, root);
     let written = mark.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&mark, b""));
@@ -48,7 +41,6 @@ pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
     }
 }
 
-/// Runs the pass for `root` unless its marker exists. Returns the rows fixed.
 /// Files are read with no database lock held; the writer is taken per chunk.
 pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root: &Path, cancelled: &dyn Fn() -> bool) -> usize {
     if marker(state_dir, root).exists() {
@@ -62,13 +54,17 @@ pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root
         }
     };
     let mut fixes: Vec<(i64, f64)> = Vec::new();
-    for (id, path, stored) in &photos {
+    for (id, path, stored, kind) in &photos {
         if cancelled() {
             return 0;
         }
         let path = Path::new(path);
         let readable_here = std::fs::metadata(path).is_ok_and(|metadata| !super::discovery::is_online_only(&metadata));
-        let Some(captured) = readable_here.then(|| super::tagging::capture_time_from_head(path)).flatten() else {
+        let read = |path: &Path| match kind.as_str() {
+            "video" => crate::util::video_creation_date::container_creation_unix(path),
+            _ => super::tagging::capture_time_from_head(path),
+        };
+        let Some(captured) = readable_here.then(|| read(path)).flatten() else {
             continue;
         };
         if stored.is_none_or(|stored| (stored - captured).abs() > 1.0) {
@@ -86,7 +82,7 @@ pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root
     fixes.len()
 }
 
-fn photos_under(database: &Mutex<Connection>, root: &Path) -> Result<Vec<(i64, String, Option<f64>)>> {
+fn photos_under(database: &Mutex<Connection>, root: &Path) -> Result<Vec<(i64, String, Option<f64>, String)>> {
     let path = database.lock().path().filter(|path| !path.is_empty()).map(PathBuf::from);
     match path {
         Some(path) => query_photos(&crate::db::open_read(&path)?, root),
@@ -94,15 +90,15 @@ fn photos_under(database: &Mutex<Connection>, root: &Path) -> Result<Vec<(i64, S
     }
 }
 
-fn query_photos(conn: &Connection, root: &Path) -> Result<Vec<(i64, String, Option<f64>)>> {
+fn query_photos(conn: &Connection, root: &Path) -> Result<Vec<(i64, String, Option<f64>, String)>> {
     let lo = root_descendant_prefix(root);
     let hi = prefix_upper_bound(&lo).unwrap_or_else(|| char::MAX.to_string());
     let mut statement = conn.prepare(
-        "SELECT id, path_text, created_at FROM files \
-         WHERE kind = 'image' AND failed = 0 AND path_text >= ?1 AND path_text < ?2",
+        "SELECT id, path_text, created_at, kind FROM files \
+         WHERE kind IN ('image', 'video') AND failed = 0 AND path_text >= ?1 AND path_text < ?2",
     )?;
     let rows = statement
-        .query_map(params![lo, hi], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .query_map(params![lo, hi], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -167,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_dates_on_photos_are_replaced_by_exif_times_once_per_folder() {
+    fn copy_dates_on_photos_and_videos_are_replaced_by_capture_times_once_per_folder() {
         let scratch = std::env::temp_dir().join(format!("fileid-capture-dates-{}", uuid::Uuid::new_v4()));
         let (root, state) = (scratch.join("Library"), scratch.join("state"));
         std::fs::create_dir_all(&root).unwrap();
@@ -179,14 +175,22 @@ mod tests {
         let mut encoded = std::io::Cursor::new(Vec::new());
         image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])).write_to(&mut encoded, image::ImageFormat::Jpeg).unwrap();
         std::fs::write(&plain, encoded.into_inner()).unwrap();
+        let clip = root.join("clip.mp4");
+        std::fs::write(&clip, crate::util::video_creation_date::tests::synthetic_mp4(1_791_128_655)).unwrap();
         let outside = scratch.join("Elsewhere.jpg");
         std::fs::write(&outside, jpeg_taken_at("2019:07:04 12:00:00", "+00:00", "")).unwrap();
 
         let conn = crate::db::test_support::memory_db();
-        for (id, path, created) in [(1, &dated, 1_700_000_000.0), (2, &plain, 1_700_000_000.0), (3, &close, 1_562_241_600.5), (4, &outside, 1_700_000_000.0)] {
+        for (id, path, created, kind) in [
+            (1, &dated, 1_700_000_000.0, "image"),
+            (2, &plain, 1_700_000_000.0, "image"),
+            (3, &close, 1_562_241_600.5, "image"),
+            (4, &outside, 1_700_000_000.0, "image"),
+            (5, &clip, 1_795_118_879.0, "video"),
+        ] {
             conn.execute(
-                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(?1,?2,?1,1,0,'image','jpg',?3)",
-                params![id, path.to_str().unwrap(), created],
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(?1,?2,?1,1,0,?4,'jpg',?3)",
+                params![id, path.to_str().unwrap(), created, kind],
             )
             .unwrap();
         }
@@ -196,13 +200,13 @@ mod tests {
 
         assert_eq!(run_if_needed(&database, &state, &root, &|| true), 0, "a cancelled pass changes nothing");
         assert!(!marker(&state, &root).exists());
-        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 1);
+        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 2);
         let stored: Vec<f64> = {
             let conn = database.lock();
             let mut statement = conn.prepare("SELECT created_at FROM files ORDER BY id").unwrap();
             statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
-        assert_eq!(stored, [1_562_241_600.25, 1_700_000_000.0, 1_562_241_600.5, 1_700_000_000.0]);
+        assert_eq!(stored, [1_562_241_600.25, 1_700_000_000.0, 1_562_241_600.5, 1_700_000_000.0, 1_791_128_655.0]);
         assert!(marker(&state, &root).exists());
         assert_eq!(marker(&state, &root), marker(&state, &root.join("")));
 

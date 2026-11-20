@@ -1,7 +1,5 @@
-/// Safe FTS5 MATCH expression: every whitespace token that contains a letter or
-/// digit becomes a quoted phrase (embedded `"` doubled), implicitly AND-ed.
-/// Punctuation-only tokens are dropped. Empty means "no usable terms" and must
-/// not be passed to MATCH.
+/// Whitespace tokens with a letter or digit become quoted phrases (embedded `"` doubled), AND-ed; punctuation-only
+/// tokens are dropped. Empty means no usable terms and must not reach MATCH.
 pub fn fts_phrase_query(raw: &str) -> String {
     raw.split_whitespace()
         .filter(|token| token.chars().any(char::is_alphanumeric))
@@ -10,8 +8,6 @@ pub fn fts_phrase_query(raw: &str) -> String {
         .join(" ")
 }
 
-/// Escape `\`, `%` and `_` so the text matches literally under
-/// `LIKE ?1 ESCAPE '\'`.
 pub fn escape_like(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {

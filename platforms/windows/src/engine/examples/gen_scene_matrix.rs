@@ -1,10 +1,6 @@
-//! Offline regeneration of `scene_embeddings_precomputed.rs` in the ACTIVE CLIP
-//! text-encoder space. Run AFTER swapping the CLIP model (MobileCLIP-S2 →
-//! ViT-B/32) with the new `clip_text.onnx` + `vocab.json`/`merges.txt` installed
-//! at the canonical path (`%LOCALAPPDATA%\FileID\Models\clip_text\`). Writes the
-//! engine-root `scene_embeddings_precomputed.rs` (the file `scene_vocab.rs`
-//! `include!`s). Must run from the engine crate dir.
-//!   $env:ORT_DYLIB_PATH = "<repo>\platforms\windows\build\runtime-cache\onnxruntime-1.22.0-dml-notelemetry\x64\onnxruntime.dll"
+//! Regenerates `scene_embeddings_precomputed.rs` (the engine-root file `scene_vocab.rs` `include!`s) in the ACTIVE CLIP
+//! text-encoder space. Run after any CLIP model swap with the new `clip_text.onnx` + `vocab.json`/`merges.txt` at the
+//! canonical path; must run from the engine crate dir.
 //!   cargo run --example gen_scene_matrix --target x86_64-pc-windows-msvc
 
 use std::fmt::Write as _;
@@ -18,7 +14,6 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
         .init();
 
-    // Construct the text encoder exactly as commands/embed.rs does.
     let weights = clip_text::default_weights_path()?;
     let dir = weights.parent().expect("clip_text weights have a parent dir");
     let vocab = std::fs::read_to_string(dir.join("vocab.json"))?;
@@ -26,7 +21,6 @@ fn main() -> anyhow::Result<()> {
     let tokenizer = ClipTokenizer::new(&vocab, &merges)?;
     let mut model = ClipText::load(&weights, tokenizer)?;
 
-    // Same algorithm the runtime scorer uses (embed templates → average → renorm).
     let labeler = SceneLabeler::build(&mut model)?;
     let matrix = labeler.matrix();
     assert_eq!(matrix.len(), SCENE_LABELS.len(), "matrix rows != label count");
@@ -49,8 +43,7 @@ fn main() -> anyhow::Result<()> {
             if j > 0 {
                 out.push_str(", ");
             }
-            // {:?} prints the shortest round-tripping f32 literal (always with a
-            // decimal point or exponent → valid in a [f32; N] literal).
+            // {:?} prints the shortest round-tripping f32 literal, always with a decimal point or exponent.
             write!(out, "{v:?}").unwrap();
         }
         out.push_str("],\n");

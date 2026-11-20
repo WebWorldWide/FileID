@@ -15,7 +15,7 @@ struct Detail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if pickedURL == nil && store.totalFiles == 0 && activeTab != .settings {
+            if pickedURL == nil && store.countersAvailable && store.totalFiles == 0 && activeTab != .settings {
                 EmptyState(onPickFolder: pickFolder)
             } else {
                 pageHeader
@@ -23,7 +23,7 @@ struct Detail: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.8), ignoresSafeAreaEdges: [])
+        .background(Theme.pageSurface, ignoresSafeAreaEdges: [])
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed, spotlightEnabled {
                 Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
@@ -49,14 +49,24 @@ struct Detail: View {
 
     private var pageMeta: String {
         switch activeTab {
-        case .library: return store.scopedTotalFiles > 0 ? "\(store.scopedTotalFiles.formatted()) files" + (store.scope.map { " in \($0.root.display)" } ?? "") : ""
+        case .library: return Self.libraryMeta(total: store.scopedTotalFiles, unreadable: store.scopedUnreadableFiles, location: store.scope?.root.display)
         case .deep:
-            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) / \(d.total.formatted())" }
+            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) of \(Plural.noun(d.total, "file", "files"))" }
             return ""
         case .settings: return ""
         case .restructure: return pickedURL?.lastPathComponent ?? ""
         default: return ""
         }
+    }
+
+    /// The grid lists only readable files, so the header counts those and names the rest.
+    static func libraryMeta(total: Int, unreadable: Int, location: String?) -> String {
+        guard total > 0 else { return "" }
+        let readable = max(0, total - unreadable)
+        var text = "\(readable.formatted()) file\(readable == 1 ? "" : "s")"
+        if let location { text += " in \(location)" }
+        if unreadable > 0 { text += " · \(unreadable.formatted()) couldn’t be read" }
+        return text
     }
 
     private var pageHeader: some View {
@@ -115,7 +125,7 @@ private struct PageStack: View {
             }
         }
         .background { PageAreaProbe(focus: focus).allowsHitTesting(false).accessibilityHidden(true) }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: activeTab)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: activeTab)
         .onChange(of: activeTab, initial: true) { old, new in
             if old != new { focus.release() }
             kept.visit(new)
@@ -129,7 +139,7 @@ private struct PageStack: View {
         case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
         case .moments:     CatalogWorkbench(engine: engine, store: store, onSwitchTab: onSwitchTab, inline: true)
         case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)
-        case .chat:        ChatWorkbench(engine: engine)
+        case .chat:        ChatWorkbench(engine: engine, store: store)
         case .takes:       TakeWorkbench(engine: engine, candidates: [], inline: true)
         case .cleanup:     CleanupView(engine: engine, store: store)
         case .restructure: RestructureView(store: store, engine: engine, selectedRoot: pickedURL)
@@ -145,55 +155,61 @@ private struct EmptyState: View {
     let onPickFolder: () -> Void
 
     private let steps: [(String, String, String)] = [
-        ("Library", "Scan a folder", "FileID reads each file, tags what's in your photos and finds faces. Nothing is moved or changed."),
+        ("Library", "Scan a folder", "FileID reads each file, tags what’s in your photos and finds faces. Nothing is moved or changed."),
         ("People", "Name the people", "Faces are grouped by person. Type a name once and FileID finds that person everywhere."),
         ("Describe Files", "Describe files (optional)", "A local AI writes a sentence about each file and suggests a clearer name. You approve every rename."),
-        ("Search & Moments · Chat", "Search and ask", "Find a photo, video or document by what's in it, or ask a question in Chat."),
+        ("Search & Moments · Chat", "Search and ask", "Find a photo, video or document by what’s in it, or ask a question in Chat."),
         ("Duplicates · Organize Folders", "Tidy up", "Move extra copies to Trash and preview a tidier folder layout before anything moves.")
     ]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel("FileID / Get started")
-                    Text("FileID").font(Theme.Font.display(56)).foregroundStyle(Theme.text1)
-                    Text("Organizes your photos, videos and documents. Everything runs on this Mac, and your files never leave it.")
-                        .font(Theme.Font.body(15)).foregroundStyle(Theme.text2)
-                }
-                .padding(.bottom, 26)
+        GeometryReader { geometry in
+            ScrollView {
+                content
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(.horizontal, Theme.Metrics.pageInsetX)
+                    .padding(.vertical, 40)
+                    .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+            }
+        }
+    }
 
-                Panel {
-                    PanelHeader("How it works")
-                    ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                        HStack(alignment: .firstTextBaseline, spacing: 14) {
-                            Text(String(index + 1)).font(Theme.ChromeFont.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
-                                .frame(width: 16, height: 16).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 1))
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 8) {
-                                    Text(step.1).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
-                                    MetaText(step.0.uppercased(), size: 10.5)
-                                }
-                                Text(step.2).font(Theme.Font.body(13)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel("FileID / Get started")
+                Text("FileID").font(Theme.Font.display(56)).foregroundStyle(Theme.text1)
+                Text("Organizes your photos, videos and documents. Everything runs on this Mac, and your files never leave it.")
+                    .font(Theme.Font.body(15)).foregroundStyle(Theme.text2)
+            }
+            .padding(.bottom, 26)
+
+            Panel {
+                PanelHeader("How it works")
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    HStack(alignment: .firstTextBaseline, spacing: 14) {
+                        Text(String(index + 1)).font(Theme.ChromeFont.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
+                            .frame(width: 16, height: 16).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 1))
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(step.1).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                                MetaText(step.0.uppercased(), size: 10.5)
                             }
-                            Spacer(minLength: 0)
+                            Text(step.2).font(Theme.Font.body(13)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                        Spacer(minLength: 0)
                     }
-                }
-                .padding(.bottom, 20)
-
-                HStack(spacing: 12) {
-                    Button { onPickFolder() } label: { Label("Choose a folder to scan", systemImage: "folder.badge.plus") }
-                        .buttonStyle(.dsPrimary)
-                    MetaText("Or drag a folder onto this window (⌘O).")
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
-            .padding(.horizontal, 40)
-            .padding(.vertical, 48)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 20)
+
+            HStack(spacing: 12) {
+                Button { onPickFolder() } label: { Label("Choose a folder to scan", systemImage: "folder.badge.plus") }
+                    .buttonStyle(.dsPrimary)
+                MetaText("Or drag a folder here, or press ⌘O.")
+            }
         }
     }
 }

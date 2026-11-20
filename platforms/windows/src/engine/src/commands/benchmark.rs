@@ -1,6 +1,3 @@
-//! `benchmarkModel` / `cancelBenchmark`: run the on-device benchmark for one
-//! installed model and report progress and the result over IPC.
-
 use crate::ipc::sink::Sink;
 use crate::ipc::{BenchmarkModelPayload, BenchmarkProgress, BenchmarkResult, EventPayload, IpcEvent, Wrap};
 use parking_lot::Mutex;
@@ -18,7 +15,6 @@ async fn finish(sink: &Sink, payload: &BenchmarkModelPayload, status: &str, mess
 }
 
 pub async fn handle(sink: Sink, payload: BenchmarkModelPayload) {
-    // The Mac app's engine benchmarks only the kinds `AIModelKind(rawValue:)` knows, as Swift.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     let known = crate::models::mlx::repo(&payload.model_kind).is_some();
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]

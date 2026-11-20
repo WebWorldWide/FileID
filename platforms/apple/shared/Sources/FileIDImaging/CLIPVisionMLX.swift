@@ -2,11 +2,8 @@ import Foundation
 import Darwin
 import MLX
 
-/// OpenAI CLIP ViT-B/32 image tower on the GPU through MLX, loaded from the
-/// same pinned ONNX file the ONNX Runtime path uses, so embeddings stay in the
-/// existing CLIP space. The ONNX graph is built from dynamic-shape primitives
-/// the CoreML provider cannot compile, which left CLIP on the CPU at ~190 ms
-/// per image under scan load.
+/// OpenAI CLIP ViT-B/32 image tower on the GPU through MLX, loaded from the same pinned ONNX file so embeddings stay in the existing CLIP space.
+/// The ONNX graph's dynamic shapes kept CLIP on the CPU (~190 ms per image under scan load).
 package final class CLIPVisionMLX: @unchecked Sendable {
     package static let inputSize = 224
     private static let patch = 32
@@ -236,15 +233,8 @@ package final class CLIPGPUBatcher: @unchecked Sendable {
     package func embed(_ tensor: [Float]) -> [Float]? { batcher.submit(tensor) }
 }
 
-/// Runs each model's batches on its own thread and MLX stream, so a long
-/// RAM++ batch does not hold CLIP requests behind it.
-///
-/// The thread is dedicated, not a dispatch queue, on purpose: MLX keeps its
-/// compile cache per thread, and a compiled function's cache entry (which holds
-/// the model weights it captured) can only be erased from the thread that
-/// compiled it. A queue hops between pool threads, so releasing a compiled
-/// model left its weights live. Here the worker owns `run` and drops it, and
-/// with it the model, on its own thread before `deinit` returns.
+/// Runs each model's batches on a dedicated thread with its own MLX stream, so a long RAM++ batch doesn't hold CLIP requests behind it.
+/// The worker thread must own and drop the compiled model: MLX's compile cache is per thread, so a queue hop would leave the captured weights live after release.
 package final class GPURequestBatcher: @unchecked Sendable {
     package typealias Run = @Sendable (_ pixels: [Float], _ count: Int) -> [[Float]]
     private final class Slot: @unchecked Sendable {
@@ -286,9 +276,7 @@ package final class GPURequestBatcher: @unchecked Sendable {
         state.finished.wait()
     }
 
-    /// Varying batch sizes leave freed buffers MLX cannot reuse; uncapped, a
-    /// 300-file scan with RAM++ reached a 12.8 GB footprint on a 16 GB Mac.
-    /// Only lowers the limit, so a tighter Deep Analyze cap stays in place.
+    /// Varying batch sizes leave MLX buffers it cannot reuse: uncapped, a 300-file RAM++ scan reached 12.8 GB on a 16 GB Mac. Only lowers the limit.
     package static func capCache(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let mb = environment["FILEID_MLX_CACHE_MB"].flatMap { Int($0) }.map { max(0, $0) } ?? 256
         if Memory.cacheLimit > mb * 1_048_576 { Memory.cacheLimit = mb * 1_048_576 }

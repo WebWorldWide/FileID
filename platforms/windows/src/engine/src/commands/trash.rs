@@ -9,18 +9,13 @@ use crate::ipc::{self, sink::Sink, BulkActionItem, BulkActionResult};
 use super::bulk::emit_bulk_result;
 use super::trash_log;
 
-/// Per-target restore decision, made BEFORE touching the Recycle Bin.
-/// Keeps the conflict rule and the SEC-7 containment rule in one
-/// pure, unit-testable place.
+/// Per-target restore decision made BEFORE touching the Recycle Bin, keeping the conflict rule and the SEC-7 containment rule in one pure, testable place.
 #[derive(Debug, PartialEq, Eq)]
 enum RestoreDisposition {
-    /// Inside an authorized root and the destination is free — attempt restore.
     Restore,
     /// Outside every authorized library root (SEC-7).
     Refused,
-    /// Destination already occupied by another file — restoring would
-    /// clobber it / the bin's Undelete is a no-op, so report a conflict rather
-    /// than a false success.
+    /// Destination already occupied: restoring would clobber it or the bin's Undelete would no-op, so report a conflict rather than a false success.
     Conflict,
 }
 
@@ -37,6 +32,10 @@ fn restore_disposition(allowed: bool, occupied: bool) -> RestoreDisposition {
 #[derive(Debug)]
 enum RestoreOutcome {
     Restored(crate::platform::FileIdentity, Option<std::path::PathBuf>),
+    /// An earlier put back already finished: the file is back and the catalog row exists again.
+    AlreadyPutBack,
+    /// The journal never recorded this file as trashed (a killed Trash batch stopped before reaching it) and it still sits at its original path with its row.
+    NeverMoved,
     Conflict,
     Refused(String),
     Failed(String),
@@ -392,7 +391,44 @@ fn already_restored_outcome(
     })
 }
 
+/// A put back that crashed after moving the file leaves no catalog row, so a retry still finishes it. With the row
+/// already back the batch was put back before, and a second request must say so instead of succeeding again.
+fn catalog_holds(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)",
+        rusqlite::params![item.file_id, item.original_path],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+fn occupied_outcome(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem, original: &std::path::Path) -> RestoreOutcome {
+    match already_restored_outcome(item, original) {
+        Some(_) if catalog_holds(conn, item) && item.trashed_path.is_none() => RestoreOutcome::NeverMoved,
+        Some(_) if catalog_holds(conn, item) => RestoreOutcome::AlreadyPutBack,
+        Some(restored) => restored,
+        None => RestoreOutcome::Conflict,
+    }
+}
+
+/// One item's catalog changes are all-or-nothing, so a bad snapshot row can't leave a
+/// half-restored file behind while the rest of the batch commits.
 fn reconcile_restored_catalog(
+    tx: &rusqlite::Transaction<'_>,
+    item: &trash_log::TrashLogItem,
+    identity: crate::platform::FileIdentity,
+) -> anyhow::Result<()> {
+    tx.execute_batch("SAVEPOINT restore_item")?;
+    match reconcile_restored_catalog_rows(tx, item, identity) {
+        Ok(()) => Ok(tx.execute_batch("RELEASE restore_item")?),
+        Err(error) => {
+            tx.execute_batch("ROLLBACK TO restore_item; RELEASE restore_item")?;
+            Err(error)
+        }
+    }
+}
+
+fn reconcile_restored_catalog_rows(
     tx: &rusqlite::Transaction<'_>,
     item: &trash_log::TrashLogItem,
     identity: crate::platform::FileIdentity,
@@ -508,24 +544,49 @@ fn persist_windows_restore_receipts(
     Ok(())
 }
 
+pub(crate) fn library_roots(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<std::path::PathBuf>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.filter_map(|root| root.ok()).filter_map(|root| std::fs::canonicalize(root).ok()).collect())
+}
+
+pub(crate) fn containing_root(roots: &[std::path::PathBuf], path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidate = crate::util::path_safety::canonicalize_for_containment(path);
+    roots.iter().filter(|root| candidate.starts_with(root)).max_by_key(|root| root.components().count()).cloned()
+}
+
+/// What a put back may anchor in: the catalog's roots, plus the root the signed Trash journal
+/// recorded for this item. The recorded root only authorizes paths inside it, so a wiped catalog
+/// still lets FileID put back what it trashed but nothing outside the folder it was trashed from.
+fn restore_roots(library_roots: &[std::path::PathBuf], item: &trash_log::TrashLogItem) -> Vec<std::path::PathBuf> {
+    let mut roots = library_roots.to_vec();
+    if let Some(recorded) = item.library_root.as_deref().and_then(|root| std::fs::canonicalize(root).ok())
+        && !roots.contains(&recorded)
+    {
+        roots.push(recorded);
+    }
+    roots
+}
+
 pub(crate) async fn handle_restore_from_trash(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::RestoreFromTrashPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
-        let mut entry = trash_log::read_batch(&payload.batch_id)?
-            .ok_or_else(|| anyhow::anyhow!("trash log batch {} not found", payload.batch_id))?;
-        let allowed_canonical: Vec<std::path::PathBuf> = {
-            let conn = db.lock();
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL",
-            )?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            rows.filter_map(|root| root.ok())
-                .filter_map(|root| std::fs::canonicalize(root).ok())
-                .collect()
-        };
+    let result = tokio::task::spawn_blocking(move || restore_batch(&db, &payload.batch_id)).await;
+
+    emit_bulk_result(&sink, "restoreFromTrash", result).await;
+}
+
+/// Puts back every item of one journalled Trash batch. Items the journal never saw trashed and that are still in place count as fine, so a batch cut short by a crash restores without reporting its untouched files as failures.
+pub(crate) fn restore_batch(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    batch_id: &str,
+) -> anyhow::Result<BulkActionResult> {
+    {
+        let mut entry = trash_log::read_batch(batch_id)?
+            .ok_or_else(|| anyhow::anyhow!("trash log batch {batch_id} not found"))?;
+        let library_roots = library_roots(&db.lock())?;
 
         let mut outcomes: Vec<Option<RestoreOutcome>> =
             std::iter::repeat_with(|| None).take(entry.items.len()).collect();
@@ -533,11 +594,11 @@ pub(crate) async fn handle_restore_from_trash(
         for (index, item) in entry.items.iter().enumerate() {
             let original = std::path::Path::new(&item.original_path);
             let candidate = crate::util::path_safety::canonicalize_for_containment(original);
+            let allowed_canonical = restore_roots(&library_roots, item);
             let allowed = allowed_canonical
                 .iter()
                 .any(|root| candidate.starts_with(root));
             let occupied = original.symlink_metadata().is_ok();
-            let already_restored = already_restored_outcome(item, original);
             match restore_disposition(allowed, occupied) {
                 RestoreDisposition::Refused => {
                     outcomes[index] = Some(RestoreOutcome::Refused(
@@ -545,7 +606,7 @@ pub(crate) async fn handle_restore_from_trash(
                     ));
                 }
                 RestoreDisposition::Conflict => {
-                    outcomes[index] = Some(already_restored.unwrap_or(RestoreOutcome::Conflict));
+                    outcomes[index] = Some(occupied_outcome(&db.lock(), item, original));
                 }
                 RestoreDisposition::Restore => {
                     #[cfg(windows)]
@@ -658,6 +719,26 @@ pub(crate) async fn handle_restore_from_trash(
                         operation_id: None,
                     });
                 }
+                RestoreOutcome::AlreadyPutBack => {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: false,
+                        message: Some(format!("{} is already back in its folder.", item.original_path)),
+                        reason: None,
+                        operation_id: None,
+                    });
+                }
+                RestoreOutcome::NeverMoved => {
+                    succeeded += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: true,
+                        message: Some(format!("{} is already back in its folder.", item.original_path)),
+                        reason: None,
+                        operation_id: None,
+                    });
+                }
                 RestoreOutcome::Conflict => {
                     failed += 1;
                     messages.push(BulkActionItem {
@@ -700,43 +781,20 @@ pub(crate) async fn handle_restore_from_trash(
             failed,
             messages,
         })
-    })
-    .await;
-
-    emit_bulk_result(&sink, "restoreFromTrash", result).await;
+    }
 }
 
-/// Separator for the `FILEID_RB_PATHS` env transport (engine -> PowerShell).
-/// MUST be NUL-free: `std::process::Command` runs `ensure_no_nuls` on every env
-/// value, so an interior NUL makes `.status()` return `Err` WITHOUT ever
-/// spawning powershell.exe — which silently restored NOTHING for every
-/// multi-file batch (`wanted_paths.len() >= 2`). U+001F (Unit Separator) is
-/// NUL-free yet still forbidden in Windows file names (0x01-0x1F), so it can't
-/// appear in any `original_path` or inject a spurious entry; the script splits
-/// on the same byte (`-split [char]0x1f`). (C1-018)
+/// Separator for the `FILEID_RB_PATHS` env transport (engine -> PowerShell). MUST be NUL-free: `Command` runs `ensure_no_nuls` on env values, so an interior NUL makes `.status()` fail WITHOUT spawning powershell.exe, silently restoring nothing for every multi-file batch. U+001F is NUL-free yet forbidden in Windows file names, so it can't appear in an `original_path` or inject an entry; the script splits on the same byte (`-split [char]0x1f`).
 #[cfg(any(windows, test))]
 const RB_PATH_SEP: &str = "\u{1f}";
 
-/// PowerShell batch-restore script. The wanted set uses an ordinal-IGNORE-CASE
-/// comparer so the bin's reconstructed path matches the DB-stored
-/// `original_path` even when their casing diverges (drive-letter / Shell path
-/// normalization). The default parameterless HashSet[string] ctor is ordinal
-/// case-SENSITIVE, which regressed the case-insensitive `-eq` match the
-/// per-item helper used and silently failed recoverable restores. (R-02)
+/// PowerShell batch-restore script.
 ///
-/// The match key is reconstructed from `DeletedFrom + name`, but `$i.Name`
-/// follows Explorer's "Hide extensions for known file types" setting and can
-/// return the display name WITHOUT the extension ("document" for
-/// "document.txt") — so `DeletedFrom\document` never matched the DB's
-/// `...\document.txt` and the whole batch silently restored nothing on any box
-/// with the default shell setting. The physical recycled file (`$i.Path` →
-/// `...\$R######.txt`) always keeps the original extension, so we test BOTH the
-/// display-name path AND the display-name-plus-physical-extension path against
-/// the wanted set. Checking two candidates (rather than grafting only when the
-/// name looks extensionless) also covers multi-dot names like `archive.tar.gz`,
-/// where hiding the final ".gz" still leaves an apparent ".tar" extension.
-/// NOTE: this is concatenated into a SINGLE line — no `#` comments (they would
-/// swallow the rest of the script) and statements are `;`-separated. (audit 2026-07-08)
+/// The wanted set uses an ordinal-IGNORE-CASE comparer so the bin's reconstructed path matches the stored `original_path` despite casing drift (drive letter / Shell normalization); the default HashSet[string] ctor is case-sensitive and silently failed recoverable restores.
+///
+/// The match key is `DeletedFrom + name`, but `$i.Name` follows Explorer's "Hide extensions for known file types" and can omit the extension, which made the whole batch restore nothing on default shell settings. The recycled file (`$i.Path` → `...\$R######.txt`) keeps its extension, so BOTH the display-name path and display-name-plus-physical-extension are tested; two candidates also cover `archive.tar.gz`, where hiding ".gz" leaves an apparent ".tar".
+///
+/// NOTE: concatenated into a SINGLE line, so no `#` comments (they would swallow the rest) and statements are `;`-separated.
 #[cfg(any(windows, test))]
 const RESTORE_BATCH_SCRIPT: &str = "\
 $shell = New-Object -ComObject Shell.Application; \
@@ -823,8 +881,6 @@ fn invoke_windows_restore_chunk(
     if wanted_paths.is_empty() {
         return std::collections::HashMap::new();
     }
-    // Match the full deleted-from path and emit only the first physical item
-    // for each claim, preserving deterministic behavior for duplicate bin rows.
     let joined = wanted_paths.join(RB_PATH_SEP);
     let script = RESTORE_BATCH_SCRIPT;
     let Some(powershell) = system_powershell_path() else {
@@ -1179,13 +1235,7 @@ fn apply_revert_merge(
     }
     affected_people.sort_unstable();
     affected_people.dedup();
-    for pid in affected_people {
-        tx.execute(
-            "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
-             FROM face_prints WHERE person_id = ?1 AND COALESCE(excluded,0)=0) WHERE id = ?1",
-            [pid],
-        )?;
-    }
+    crate::db::person_counts::reconcile(&tx, &affected_people)?;
     tx.commit()?;
     Ok(RevertMergeOutcome {
         person_id: new_pid,
@@ -1250,6 +1300,7 @@ mod tests {
             "CREATE TABLE persons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_count INTEGER NOT NULL DEFAULT 0,
+                representative_face_id INTEGER,
                 created_at DOUBLE NOT NULL
              );
              CREATE TABLE face_prints (
@@ -1365,6 +1416,32 @@ mod tests {
         assert_eq!(face_owner(&conn, 102), Some(10));
         assert_eq!(merge_verification_count(&conn, 10, 20), 0);
         assert_eq!(merge_verification_count(&conn, 10, 30), 1);
+    }
+
+    fn representative(conn: &rusqlite::Connection, person_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT representative_face_id FROM persons WHERE id = ?1",
+            [person_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn revert_merge_leaves_each_person_a_representative_it_owns() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 20);
+        add_face(&conn, 101, 1, 20);
+        add_face(&conn, 102, 2, 20);
+        add_face(&conn, 103, 3, 20);
+        conn.execute("UPDATE persons SET representative_face_id = 101 WHERE id = 20", [])
+            .unwrap();
+
+        apply_revert_merge(&conn, &revert_payload(vec![101, 102]), 2.0).unwrap();
+
+        assert_eq!(face_owner(&conn, 101), Some(10));
+        assert_eq!(representative(&conn, 10), Some(101));
+        assert_eq!(representative(&conn, 20), Some(103));
     }
 
     #[test]
@@ -1606,16 +1683,106 @@ mod tests {
         std::fs::remove_dir_all(base).ok();
     }
 
-    // C1-003: an occupied destination must be a Conflict (not a Restore that
-    // later reads the occupant via Path::exists() and falsely reports success).
+    #[test]
+    fn a_second_put_back_of_a_finished_batch_is_refused_but_an_unfinished_one_completes() {
+        let base = std::env::temp_dir().join(format!("fileid-restore-twice-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("back.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        let identity = crate::platform::file_identity(&path).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let item = trash_log::TrashLogItem {
+            file_id: 9,
+            original_path: path.to_string_lossy().into_owned(),
+            source_identity: Some(identity),
+            ..Default::default()
+        };
+        assert!(
+            matches!(occupied_outcome(&conn, &item, &path), RestoreOutcome::Restored(recovered, _) if recovered == identity),
+            "the file is back but the catalog never got its row: the retry finishes the put back"
+        );
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, has_faces, has_text, failed) \
+             VALUES (9, ?1, 'h', ?1, 7, 1, 'other', 'bin', 0, 0, 0)",
+            [&item.original_path],
+        )
+        .unwrap();
+        assert!(
+            matches!(occupied_outcome(&conn, &item, &path), RestoreOutcome::NeverMoved),
+            "a journal that never saw the file trashed (a killed batch) counts it as fine, not as a failure"
+        );
+        let trashed = trash_log::TrashLogItem { trashed_path: Some("/Trash/back.bin".into()), ..item.clone() };
+        assert!(matches!(occupied_outcome(&conn, &trashed, &path), RestoreOutcome::AlreadyPutBack));
+        let stranger = trash_log::TrashLogItem { source_identity: None, ..item };
+        assert!(matches!(occupied_outcome(&conn, &stranger, &path), RestoreOutcome::Conflict));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_corrupt_snapshot_row_rolls_back_only_its_own_item() {
+        use trash_log::{SnapshotRow, SnapshotValue};
+        let base = std::env::temp_dir().join(format!(
+            "fileid-restore-savepoint-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
+        let snapshot = |path: &std::path::Path, id: i64, corrupt: bool| {
+            crate::db::test_support::insert_file(&conn, id, &path.to_string_lossy(), "image");
+            let mut rows = trash_log::snapshot_rows(&conn, id).unwrap();
+            conn.execute("DELETE FROM files WHERE id = ?1", [id]).unwrap();
+            if corrupt {
+                let mut columns = std::collections::BTreeMap::new();
+                columns.insert("file_id".to_string(), SnapshotValue { int: Some(id), ..Default::default() });
+                columns.insert("print_data".to_string(), SnapshotValue { blob: Some("not base64!".into()), ..Default::default() });
+                columns.insert("bbox".to_string(), SnapshotValue { text: Some("[0,0,1,1]".into()), ..Default::default() });
+                rows.push(SnapshotRow { table: "face_prints".into(), columns });
+            }
+            rows
+        };
+        let bad_path = base.join("bad.jpg");
+        let good_path = base.join("good.jpg");
+        std::fs::write(&bad_path, b"bad").unwrap();
+        std::fs::write(&good_path, b"good").unwrap();
+        let bad = trash_log::TrashLogItem {
+            file_id: 1,
+            original_path: bad_path.to_string_lossy().into_owned(),
+            rows: snapshot(&bad_path, 1, true),
+            ..Default::default()
+        };
+        let good = trash_log::TrashLogItem {
+            file_id: 2,
+            original_path: good_path.to_string_lossy().into_owned(),
+            rows: snapshot(&good_path, 2, false),
+            ..Default::default()
+        };
+
+        let tx = conn.transaction().unwrap();
+        let bad_identity = crate::platform::file_identity(&bad_path).unwrap();
+        let good_identity = crate::platform::file_identity(&good_path).unwrap();
+        assert!(reconcile_restored_catalog(&tx, &bad, bad_identity).is_err());
+        reconcile_restored_catalog(&tx, &good, good_identity).unwrap();
+        tx.commit().unwrap();
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(ids, vec![2]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    // An occupied destination must be a Conflict, not a Restore that later reads the occupant via Path::exists() and falsely reports success.
     #[test]
     fn occupied_destination_is_a_conflict_not_success() {
-        // Inside an authorized root but the path is already occupied.
         assert_eq!(
             restore_disposition(true, true),
             RestoreDisposition::Conflict
         );
-        // The happy path: allowed + free.
         assert_eq!(
             restore_disposition(true, false),
             RestoreDisposition::Restore
@@ -1635,11 +1802,60 @@ mod tests {
         );
     }
 
-    // Deterministic multi-entry: when two log items share one original
-    // path, both classify identically (the batch enumeration restores the
-    // first matching bin entry per path and removes it from the wanted set, so
-    // the pick is deterministic rather than arbitrary). Here we assert the
-    // pre-classification is stable and does not depend on item order.
+    fn journal_item(original: &std::path::Path, library_root: Option<&std::path::Path>) -> trash_log::TrashLogItem {
+        trash_log::TrashLogItem {
+            file_id: 1,
+            original_path: original.to_string_lossy().into_owned(),
+            library_root: library_root.map(|root| root.to_string_lossy().into_owned()),
+            ..Default::default()
+        }
+    }
+
+    fn contains(roots: &[std::path::PathBuf], path: &std::path::Path) -> bool {
+        let candidate = crate::util::path_safety::canonicalize_for_containment(path);
+        roots.iter().any(|root| candidate.starts_with(root))
+    }
+
+    #[test]
+    fn a_wiped_catalog_still_authorizes_the_root_the_journal_recorded() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("fileid-wipe-restore-{}", uuid::Uuid::new_v4()));
+        let library = base.join("library");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(library.join("sub")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        assert!(library_roots(&conn).unwrap().is_empty(), "the wipe left no scan sessions");
+
+        let recorded = journal_item(&library.join("sub/a.jpg"), Some(&library));
+        let roots = restore_roots(&[], &recorded);
+        assert!(contains(&roots, &library.join("sub/a.jpg")), "the put back anchors in the recorded root");
+        assert!(!contains(&roots, &elsewhere.join("a.jpg")), "and nowhere else");
+
+        let legacy = journal_item(&library.join("sub/a.jpg"), None);
+        assert!(!contains(&restore_roots(&[], &legacy), &library.join("sub/a.jpg")), "an entry with no recorded root is still refused");
+
+        let gone = journal_item(&library.join("a.jpg"), Some(&base.join("missing-root")));
+        assert!(restore_roots(&[], &gone).is_empty(), "a recorded root that no longer exists authorizes nothing");
+
+        let forged = journal_item(&elsewhere.join("a.jpg"), Some(&library));
+        assert!(!contains(&restore_roots(&[], &forged), &elsewhere.join("a.jpg")), "a path outside the recorded root is refused");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn trashing_records_the_innermost_root_that_contains_the_file() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("fileid-root-of-{}", uuid::Uuid::new_v4()));
+        let outer = base.join("photos");
+        let inner = outer.join("trips");
+        std::fs::create_dir_all(&inner).unwrap();
+        let roots = vec![outer.clone(), inner.clone()];
+        assert_eq!(containing_root(&roots, &inner.join("a.jpg")), Some(inner));
+        assert_eq!(containing_root(&roots, &outer.join("b.jpg")), Some(outer));
+        assert_eq!(containing_root(&roots, &base.join("c.jpg")), None);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    // Items sharing one original path classify identically regardless of order (batch enumeration restores the first matching bin entry per path).
     #[test]
     fn same_path_items_classify_identically() {
         let occupied = true;
@@ -1650,11 +1866,7 @@ mod tests {
         assert_eq!(a, RestoreDisposition::Conflict);
     }
 
-    // The batch-restore wanted set must match paths case-INSENSITIVELY,
-    // restoring the case-insensitive `-eq` semantics the per-item helper had.
-    // A parameterless HashSet[string] is ordinal case-SENSITIVE, which fails to
-    // match (and so fails to restore) a recoverable file whenever the bin's
-    // reconstructed path casing diverges from the stored original_path.
+    // The batch-restore wanted set must match paths case-INSENSITIVELY; a parameterless HashSet[string] is case-sensitive and fails to restore when the bin's casing diverges from the stored original_path.
     #[test]
     fn restore_batch_script_matches_paths_case_insensitively() {
         assert!(
@@ -1668,12 +1880,7 @@ mod tests {
         );
     }
 
-    // audit 2026-07-08: $i.Name follows the "hide extensions for known file
-    // types" shell setting and can drop the extension, so the reconstructed
-    // match key must also try the physical extension from $i.Path — otherwise
-    // the whole batch silently restores nothing on any box with the default
-    // shell setting. Also guard the single-line invariant: a `#` comment or an
-    // unescaped newline would break the concatenated script.
+    // $i.Name follows the "hide extensions for known file types" setting and can drop the extension, so the match key must also try the physical extension from $i.Path. Also guards the single-line invariant: a `#` comment or newline would break the concatenated script.
     #[test]
     fn restore_batch_script_grafts_physical_extension() {
         assert!(
@@ -1698,13 +1905,7 @@ mod tests {
         );
     }
 
-    // C1-018: a multi-file batch crosses to PowerShell as the FILEID_RB_PATHS
-    // env var. std::process::Command runs `ensure_no_nuls` on every env value,
-    // so the previous `"\0"` separator made `.status()` return Err WITHOUT ever
-    // spawning powershell.exe for any batch of len >= 2 — restoring nothing even
-    // though the bytes still sat in the Recycle Bin. Lock the separator NUL-free
-    // and keep the Rust join + PowerShell split byte-identical so the script
-    // rebuilds exactly the wanted set the engine sent.
+    // A multi-file batch crosses to PowerShell as the FILEID_RB_PATHS env var, and `Command` rejects NUL in env values, so a `"\0"` separator restored nothing for batches of 2+. Lock the separator NUL-free and keep the Rust join and PowerShell split byte-identical.
     #[test]
     fn recycle_lookup_chunks_fit_the_environment_bound() {
         let paths = ["aa", "bbb", "123456"];
@@ -1722,7 +1923,6 @@ mod tests {
 
     #[test]
     fn batch_restore_env_separator_is_nul_free_and_round_trips() {
-        // The exact guard Command::env enforces: an interior NUL aborts the spawn.
         assert!(
             !RB_PATH_SEP.contains('\0'),
             "FILEID_RB_PATHS separator must be NUL-free or Command::env aborts the spawn"
@@ -1733,18 +1933,15 @@ mod tests {
             RB_PATH_SEP.chars().all(|c| u32::from(c) < 0x20),
             "separator must be a control char forbidden in Windows file names"
         );
-        // The regressed case: 2+ paths must join to a value Command::env accepts.
         let paths = ["C:\\Users\\a\\one.txt", "C:\\Users\\a\\two.txt", "D:\\x\\3"];
         let joined = paths.join(RB_PATH_SEP);
         assert!(!joined.contains('\0'), "multi-path env value must be NUL-free");
-        // Rust join and PowerShell split MUST agree on the separator.
         let round_trip: Vec<&str> = joined.split(RB_PATH_SEP).collect();
         assert_eq!(round_trip, paths.to_vec());
         assert!(
             RESTORE_BATCH_SCRIPT.contains("-split [char]0x1f"),
             "script must split FILEID_RB_PATHS on the same U+001F separator"
         );
-        // Guard against a silent revert to the NUL separator that aborts the spawn.
         assert!(
             !RESTORE_BATCH_SCRIPT.contains("-split [char]0)"),
             "must not split on NUL: Command::env rejects the value and never spawns"

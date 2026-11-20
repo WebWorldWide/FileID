@@ -33,7 +33,6 @@ $RealModels = Join-Path $RealRoot "Models"
 if (-not (Test-Path $EnginePath)) { Write-Host "engine not built: $EnginePath" -ForegroundColor Red; exit 2 }
 if (-not (Test-Path $Corpus))     { Write-Host "corpus not found: $Corpus" -ForegroundColor Red; exit 2 }
 
-# --- isolated state dir (preserves the user's real library) -----------
 $Temp  = Join-Path $env:TEMP "fileid_perf_state"
 $State = Join-Path $Temp "FileID"
 if (Test-Path $Temp) {
@@ -46,7 +45,6 @@ New-Item -ItemType Junction -Path (Join-Path $State "Models") -Target $RealModel
 $appSettings = Join-Path $RealRoot "app-settings.json"
 if (Test-Path $appSettings) { Copy-Item $appSettings (Join-Path $State "app-settings.json") -Force }
 
-# --- colocate ORT + DirectML beside the engine -----------------------
 $fetch = Join-Path $BuildDir "fetch-runtime-deps.ps1"
 $outDir = Split-Path -Parent $EnginePath
 if (Test-Path $fetch) {
@@ -62,14 +60,12 @@ $eventLog = Join-Path $Temp "events.jsonl"
 "" | Set-Content $eventLog
 $gpuCsv = Join-Path $Temp "gpu.csv"
 
-# --- GPU sampler ------------------------------------------------------
 $smi = $null
 if (-not $NoGpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
     $smiArgs = "--query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits -lms 250 -f `"$gpuCsv`""
     $smi = Start-Process -FilePath "nvidia-smi" -ArgumentList $smiArgs -PassThru -WindowStyle Hidden
 }
 
-# --- spawn engine -----------------------------------------------------
 Step "Bench '$Label': scanning <= $Cap files of $Corpus"
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $EnginePath
@@ -82,7 +78,6 @@ $psi.Environment["LOCALAPPDATA"]        = $Temp
 $psi.Environment["FILEID_LOG"]          = "info"
 $psi.Environment["FILEID_PERF_TRACE"]   = "1"
 $psi.Environment["FILEID_TEST_FILE_CAP"]= "$Cap"
-$psi.Environment["ORT_DYLIB_PATH"]      = Join-Path $outDir "onnxruntime.dll"
 if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }
 if ($env:FILEID_CLIP_USE_BATCH)     { $psi.Environment["FILEID_CLIP_USE_BATCH"]     = $env:FILEID_CLIP_USE_BATCH }
 
@@ -103,7 +98,6 @@ function Send-Cmd($cmd) {
     $proc.StandardInput.WriteLine($json); $proc.StandardInput.Flush()
 }
 
-# wait ready
 $deadline = (Get-Date).AddSeconds(60); $ready = $false
 while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
     Start-Sleep -Milliseconds 400
@@ -115,7 +109,6 @@ $ep = if ($readyLine -match '"executionProvider"\s*:\s*"([^"]+)"') { $Matches[1]
 $gpuName = if ($readyLine -match '"gpuName"\s*:\s*"([^"]+)"') { $Matches[1] } else { "?" }
 Info "EP=$ep  GPU=$gpuName"
 
-# scan
 $scanStart = Get-Date
 Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null; rescan = $true } } }
 $done = $false; $peakMB = 0; $processed = 0; $fps = 0.0
@@ -138,13 +131,11 @@ if ($smi) { Start-Sleep -Milliseconds 400; Stop-Process -Id $smi.Id -Force -Erro
 
 $tput = if ($scanSec -gt 0 -and $processed -gt 0) { [math]::Round($processed / $scanSec, 2) } else { 0 }
 
-# --- last [STATS] line ------------------------------------------------
 $statsLine = (Get-Content $eventLog | Where-Object { $_ -match '\[STATS\]' } | Select-Object -Last 1)
 function StatOf($name) { if ($statsLine -match "$name\s*[=:]\s*(\d+)") { return [int]$Matches[1] } else { return 0 } }
 $ramUs = StatOf 'ramplus_us'; $visUs = StatOf 'vision_us'; $clipUs = StatOf 'clip_us'
 $ocrUs = StatOf 'ocr_us'; $totUs = StatOf 'total_us'; $vwaitUs = StatOf 'vision_wait_us'
 
-# --- GPU summary ------------------------------------------------------
 $gMean=0; $gP50=0; $gP90=0; $vramMax=0
 if ((-not $NoGpu) -and (Test-Path $gpuCsv)) {
     $rows = @(Get-Content $gpuCsv | Where-Object { $_ -match ',' } | ForEach-Object {
@@ -161,7 +152,6 @@ if ((-not $NoGpu) -and (Test-Path $gpuCsv)) {
 
 $errs = @(Get-Content $eventLog | Where-Object { $_ -match 'panicked' -or $_ -match '"kind"\s*:\s*"(panic|fatal|crash)"' }).Count
 
-# cleanup
 $j = Join-Path $State "Models"; if (Test-Path $j) { cmd /c rmdir "$j" 2>$null }
 Remove-Item -Recurse -Force $Temp -ErrorAction SilentlyContinue
 

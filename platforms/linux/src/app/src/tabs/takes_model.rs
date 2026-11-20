@@ -1,7 +1,5 @@
-// Best Takes review rules, kept free of GTK so they can be tested: what the
-// buttons and toasts say, which tries are kept by default, which files a
-// "keep" set sends to Trash, which group opens next and where Zoom lands.
-// Mirrors the macOS TakeReview / TakeWorkbench (DESIGN_V3_PORT "Best Takes").
+// Best Takes review rules, free of GTK so they can be tested: button labels, default keeps,
+// which files a keep set trashes, the next group to open, and where Zoom lands.
 
 use std::collections::BTreeSet;
 

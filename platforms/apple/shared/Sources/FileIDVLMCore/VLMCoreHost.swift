@@ -75,11 +75,11 @@ private enum StderrLog {
         encoder.dateEncodingStrategy = .iso8601
         guard var line = try? encoder.encode(Entry(t: Date(), lvl: level, ev: event, path: path, error: error, extra: extra)) else { return }
         line.append(0x0A)
-        lock.withLock { FileHandle.standardError.write(line) }
+        let stderr = FileHandle.standardError
+        lock.withLock { try? stderr.write(contentsOf: line) }
     }
 }
 
-/// The engine log as the moved code calls it.
 final class JSONLog: Sendable {
     static let shared = JSONLog()
     func info(ev: String, sess: String? = nil, path: String? = nil, extra: [String: AnyCodable]? = nil) {
@@ -94,8 +94,7 @@ final class JSONLog: Sendable {
     func flush() {}
 }
 
-/// The engine scheduler as the moved code calls it; the host's `Scheduler`
-/// decides.
+/// The engine scheduler the shared MLX code calls; the host's `Scheduler` decides.
 actor ResourceScheduler {
     static let shared = ResourceScheduler()
 
@@ -168,8 +167,7 @@ enum VLMDownloaderError: LocalizedError {
     }
 }
 
-/// The engine downloader as the moved code calls it; the host's `FetchRepo`
-/// decides.
+/// The engine downloader the shared MLX code calls; the host's `FetchRepo` decides.
 final class VLMDownloader: Sendable {
     static let shared = VLMDownloader()
     func fetchRepo(repo: String, documentsHF: URL, progress: @escaping @Sendable (Double, Int64, Int64) -> Void) async throws {
@@ -184,9 +182,7 @@ enum EngineStateRoot {
     static var directory: URL { VLMCoreHost.stateDirectory }
 }
 
-/// The engine's file-kind namespace as the moved code names it. Public
-/// because `DeepAnalyze.analyze` is; inside the Swift engine its own
-/// `DiscoveredFile` shadows this one and `Kind` is the same `FileKind`.
+/// The file-kind namespace the shared MLX code names. Public because `DeepAnalyze.analyze` is.
 public enum DiscoveredFile {
     public typealias Kind = FileKind
 }

@@ -39,8 +39,6 @@ final class CLIPModelInstaller: ModelInstalling {
 
     // MARK: - Required files
 
-    /// Files the installer must produce on disk for both the image
-    /// embedder and the text encoder (both run in the engine) to be usable.
     static var requiredFiles: [URL] {
         let models = modelsRoot
         return [
@@ -65,7 +63,7 @@ final class CLIPModelInstaller: ModelInstalling {
             .reduce(0) { $0 + $1.approxBytes }
     }()
 
-    private static var fetchPlan: [(remote: URL, dest: URL, sha256: String?)] {
+    private static var fetchPlan: [(dest: URL, sha256: String?)] {
         let m = modelsRoot
         let txtDir = m.appendingPathComponent("clip_text")
         let plan: [(String, URL)] = [
@@ -75,8 +73,8 @@ final class CLIPModelInstaller: ModelInstalling {
             ("clip_bpe_merges", txtDir.appendingPathComponent("merges.txt")),
         ]
         return plan.compactMap { id, dest in
-            guard let artifact = ModelManifest.artifact(id: id), let remote = URL(string: artifact.url) else { return nil }
-            return (remote: remote, dest: dest, sha256: artifact.sha256)
+            guard let artifact = ModelManifest.artifact(id: id) else { return nil }
+            return (dest: dest, sha256: artifact.sha256)
         }
     }
 
@@ -99,6 +97,9 @@ final class CLIPModelInstaller: ModelInstalling {
             status = .missing(reason: ModelInstaller.notDownloaded)
         } else {
             for dir in Self.modelDirectories { totalSize += ModelInstaller.diskSize(of: dir) }
+            for file in Self.requiredFiles where !FileManager.default.fileExists(atPath: file.path) {
+                if let other = ModelFileLayout.installedFile(file, in: Self.modelsRoot) { totalSize += ModelInstaller.diskSize(of: other) }
+            }
             status = .installed(sizeBytes: totalSize)
         }
     }
@@ -110,7 +111,7 @@ final class CLIPModelInstaller: ModelInstalling {
     /// call this instead to keep the per-file Settings rows accurate. (R7 delta)
     private func recomputePresentFiles() {
         var present: Set<String> = []
-        for f in Self.requiredFiles where FileManager.default.fileExists(atPath: f.path) {
+        for f in Self.requiredFiles where ModelFileLayout.installedFile(f, in: Self.modelsRoot) != nil {
             present.insert(f.path)
         }
         presentFilePaths = present
@@ -122,11 +123,7 @@ final class CLIPModelInstaller: ModelInstalling {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self] in
             await AppSleepActivity.run(reason: "Install CLIP models") {
-                if EngineModelInstall.active {
-                    await self?.runEngineInstall()
-                } else {
-                    await self?.runHubFetch()
-                }
+                await self?.runEngineInstall()
             }
             self?.task = nil
         }
@@ -160,6 +157,9 @@ final class CLIPModelInstaller: ModelInstalling {
         for d in Self.modelDirectories {
             try? FileManager.default.removeItem(at: d)
         }
+        for f in Self.requiredFiles {
+            if let other = ModelFileLayout.alternate(of: f, in: Self.modelsRoot) { try? FileManager.default.removeItem(at: other) }
+        }
         // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
         // and falls back to keyword-only search. (Install→Remove leaked it true.)
         textEncoderReady = false
@@ -169,78 +169,11 @@ final class CLIPModelInstaller: ModelInstalling {
 
     // MARK: - Implementation
 
-    /// Concurrent per-file fetch from HF (3 streams). Each file's
-    /// tick lands in the shared tracker; the global Status.downloading
-    /// reads sum-of-writtens / sum-of-totals + summed bandwidth.
-    /// Files stage into a sibling dir and atomic-promote on full
-    /// success — a partial install never poisons the production tree.
-    private func runHubFetch() async {
-        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
-        installing = true
-        defer { installing = false }
-        Self.sweepOrphanedStagingRoots()
-        let approxBytes = Self.approxDownloadBytes
-        try? FileManager.default.createDirectory(at: Self.modelsRoot, withIntermediateDirectories: true)
-        if let free = ModelInstaller.freeDiskBytes(at: Self.modelsRoot), free < approxBytes * 2 {
-            status = .installFailed(ModelInstaller.notEnoughSpace(needed: approxBytes * 2, available: free))
-            return
-        }
-
-        let modelsRoot = Self.modelsRoot
-        let stagingRoot = modelsRoot
-            .appendingPathComponent(".clip-staging-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: stagingRoot) }
-
-        let plan = Self.fetchPlan
-        let stagedPlan: [(remote: URL, staged: URL, finalDest: URL, sha256: String?)] = plan.map { item in
-            let rel = item.dest.path.dropFirst(modelsRoot.path.count + 1)
-            let staged = stagingRoot.appendingPathComponent(String(rel))
-            return (item.remote, staged, item.dest, item.sha256)
-        }
-
-        status = .downloading(fraction: 0, message: "Connecting…",
-                              bytesPerSecond: 0, etaSeconds: 0)
-        let tracker = ProgressTracker(fileCount: plan.count)
-
-        do {
-            try await runParallelDownloads(
-                plan: stagedPlan.map { (remote: $0.remote, dest: $0.staged, sha256: $0.sha256) },
-                // Each file uses up to 8-way ranged GETs internally,
-                // so 2 concurrent files = ~16 TCP connections to HF.
-                // More than that and Cloudflare starts rate-limiting.
-                tracker: tracker, maxConcurrency: 2
-            )
-        } catch {
-            status = ModelInstaller.failureStatus(error)
-            return
-        }
-
-        status = .extracting
-        do {
-            try promoteStaged(stagedPlan.map { (staged: $0.staged, finalDest: $0.finalDest) })
-        } catch {
-            status = .installFailed("FileID couldn't save the downloaded files. Try again.")
-            recomputePresentFiles()
-            return
-        }
-
-        for f in Self.requiredFiles {
-            if !FileManager.default.fileExists(atPath: f.path) {
-                status = .installFailed("The download didn't finish. Try again.")
-                recomputePresentFiles()
-                return
-            }
-        }
-
-        // The engine embeds search text; marking ready lets search use it now.
-        markTextEncoderReady()
-        refreshStatus()
-    }
-
-    /// Under the Rust engine the engine downloads the same four files to the
-    /// same places (`prewarmModel` for the image and text encoders).
     private func runEngineInstall() async {
+        guard EngineModelInstall.active else {
+            status = .installFailed(EngineModelInstall.notResponding)
+            return
+        }
         installing = true
         defer { installing = false }
         status = .downloading(fraction: 0, message: "Connecting…", bytesPerSecond: 0, etaSeconds: 0)
@@ -275,146 +208,12 @@ final class CLIPModelInstaller: ModelInstalling {
         }
     }
 
-    /// Body lives outside the TaskGroup closure so the Swift 6 region
-    /// isolation checker sees Sendable parameters instead of capture
-    /// inference on the closure's implicit set.
-    private func runParallelDownloads(
-        plan: [(remote: URL, dest: URL, sha256: String?)],
-        tracker: ProgressTracker,
-        maxConcurrency: Int
-    ) async throws {
-        let count = plan.count
-        let remotes: [URL] = plan.map(\.remote)
-        let dests:   [URL] = plan.map(\.dest)
-        let hashes:  [String?] = plan.map(\.sha256)
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            var inFlight = 0
-            var i = 0
-            while i < count {
-                if inFlight >= maxConcurrency {
-                    try await group.next()
-                    inFlight -= 1
-                }
-                let idx = i
-                let remote = remotes[idx]
-                let dest = dests[idx]
-                let sha256 = hashes[idx]
-                group.addTask {
-                    try await Self.runOneFile(index: idx, remote: remote,
-                                              dest: dest, sha256: sha256,
-                                              tracker: tracker)
-                }
-                inFlight += 1
-                i += 1
-            }
-            try await group.waitForAll()
-        }
-    }
-
-    private static func runOneFile(
-        index: Int, remote: URL, dest: URL, sha256: String?, tracker: ProgressTracker
-    ) async throws {
-        try Task.checkCancellation()
-        try FileManager.default.createDirectory(
-            at: dest.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        // parallelStreamingDownload HEADs first, decides parts based
-        // on Content-Length, and falls back to single-stream when the
-        // host doesn't expose ranges or the file is small. weight.bin
-        // (~80 MB) gets 8-way; Manifest.json (~few KB) stays single.
-        try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12,
-                                            expectedSHA256: sha256) { tick in
-            tracker.update(index: index, tick: tick)
-            Task { @MainActor in
-                Self.shared.publishFromTracker(tracker)
-            }
-        }
-        tracker.markComplete(index: index)
-        await MainActor.run { Self.shared.publishFromTracker(tracker) }
-    }
-
-    @MainActor
-    private func publishFromTracker(_ tracker: ProgressTracker) {
-        guard installing else { return }
-        let snap = tracker.snapshot()
-        let total = snap.totalBytes
-        let written = snap.writtenBytes
-        let frac = total > 0 ? min(1.0, Double(written) / Double(total)) : 0
-        let activeCount = snap.activeFiles
-        let msg = ModelInstaller.progressMessage(
-            written: written, total: total,
-            suffix: activeCount > 1 ? " (\(activeCount) files in parallel)" : "")
-        status = .downloading(
-            fraction: frac, message: msg,
-            bytesPerSecond: snap.combinedBytesPerSec,
-            etaSeconds: snap.combinedETASec
-        )
-    }
-
-    /// Lock-protected aggregator. NSLock + `@unchecked Sendable` rather
-    /// than `@MainActor` because Swift 6's region isolation checker
-    /// can't see through the `addTask { @MainActor in … }` closure.
-    private final class ProgressTracker: @unchecked Sendable {
-        struct FileState { var written: Int64; var total: Int64; var bps: Double; var done: Bool }
-        struct Snapshot {
-            let writtenBytes: Int64
-            let totalBytes: Int64
-            let combinedBytesPerSec: Double
-            let combinedETASec: Double
-            let activeFiles: Int
-        }
-        private let lock = NSLock()
-        private var states: [FileState]
-
-        init(fileCount: Int) {
-            self.states = Array(repeating: FileState(written: 0, total: 0, bps: 0, done: false),
-                                count: fileCount)
-        }
-
-        func update(index: Int, tick: DownloadTick) {
-            lock.lock(); defer { lock.unlock() }
-            guard states.indices.contains(index) else { return }
-            states[index].written = tick.written
-            if tick.total > 0 { states[index].total = tick.total }
-            states[index].bps = tick.bytesPerSecond
-        }
-
-        func markComplete(index: Int) {
-            lock.lock(); defer { lock.unlock() }
-            guard states.indices.contains(index) else { return }
-            states[index].done = true
-            if states[index].total > 0 {
-                states[index].written = states[index].total
-            }
-            states[index].bps = 0
-        }
-
-        func snapshot() -> Snapshot {
-            lock.lock(); defer { lock.unlock() }
-            var written: Int64 = 0
-            var total: Int64 = 0
-            var bps: Double = 0
-            var active = 0
-            for s in states {
-                written += s.written
-                total += s.total
-                if !s.done && s.bps > 0 { bps += s.bps; active += 1 }
-                if !s.done && s.bps == 0 && s.written > 0 { active += 1 }
-            }
-            let remaining = max(0, total - written)
-            let eta = bps > 0 ? Double(remaining) / bps : 0
-            return Snapshot(writtenBytes: written, totalBytes: total,
-                            combinedBytesPerSec: bps, combinedETASec: eta,
-                            activeFiles: active)
-        }
-    }
-
     private func runExtract(zipAt zipURL: URL, deleteZipAfter: Bool) async {
         guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed(ModelInstaller.protectedMessage); return }
         status = .extracting
         let modelsRoot = Self.modelsRoot
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
+        Self.sweepOrphanedStagingRoots()
 
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: zipURL.path, isDirectory: &isDir),
@@ -423,12 +222,12 @@ final class CLIPModelInstaller: ModelInstalling {
             return
         }
         guard zipURL.pathExtension.lowercased() == "zip" else {
-            status = .installFailed("Selected file isn't a .zip — choose a clip-models.zip archive.")
+            status = .installFailed("That isn’t a .zip file. Choose the model archive you downloaded.")
             return
         }
         if let attrs = try? FileManager.default.attributesOfItem(atPath: zipURL.path),
            let type = attrs[.type] as? FileAttributeType, type != .typeRegular {
-            status = .installFailed("Zip path isn't a regular file (symlink or special file).")
+            status = .installFailed("That file can’t be used. Choose the model archive itself, not a link to it.")
             return
         }
 
@@ -436,7 +235,7 @@ final class CLIPModelInstaller: ModelInstalling {
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
            let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
            free < minFreeBytes {
-            status = .installFailed("Need at least 1 GB free to extract; only \(free / 1_048_576) MB available.")
+            status = .installFailed("Not enough free space to unpack the model archive: it needs about 1 GB and only \(ModelSize.label(free)) is free.")
             return
         }
 
@@ -446,7 +245,7 @@ final class CLIPModelInstaller: ModelInstalling {
             try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stagingRoot.path)
         } catch {
-            status = .installFailed("Couldn't create a private extraction area: \(error.localizedDescription)")
+            status = .installFailed("Couldn’t prepare space to unpack the model archive. Check that there’s free disk space, then try again.")
             return
         }
         defer { try? FileManager.default.removeItem(at: stagingRoot) }
@@ -458,8 +257,9 @@ final class CLIPModelInstaller: ModelInstalling {
             if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
                let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.uint64Value,
                free < requiredFree {
-                throw LocalArchiveError(
-                    "archive needs at least \(requiredFree / 1_048_576) MB free for extraction and rollback")
+                status = .installFailed("Not enough free space to unpack the model archive: it needs about \(ModelSize.label(Int64(clamping: requiredFree))).")
+                recomputePresentFiles()
+                return
             }
             let result = try await runUnzip(
                 ["-q", zipURL.path, "-d", stagingRoot.path],
@@ -488,7 +288,7 @@ final class CLIPModelInstaller: ModelInstalling {
                     .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
                 ])
                 guard values.isRegularFile == true, values.isSymbolicLink != true else {
-                    throw LocalArchiveError("\(item.staged.lastPathComponent) isn't a regular file")
+                    throw LocalArchiveError("\(item.staged.lastPathComponent) isn’t a regular file")
                 }
                 guard let expected = item.sha256 else {
                     throw LocalArchiveError("\(item.staged.lastPathComponent) has no canonical SHA-256 pin")
@@ -507,7 +307,8 @@ final class CLIPModelInstaller: ModelInstalling {
             recomputePresentFiles()
             return
         } catch {
-            status = .installFailed("Local model archive rejected: \(error.localizedDescription)")
+            NSLog("FileID model archive rejected: \(error.localizedDescription)")
+            status = .installFailed("That model archive isn’t valid, so nothing was installed. Download it again, then choose it again.")
             recomputePresentFiles()
             return
         }
@@ -524,7 +325,7 @@ final class CLIPModelInstaller: ModelInstalling {
             ["-Z1", zipURL.path], workRoot: workRoot,
             timeoutSeconds: 30, label: "names")
         guard namesResult.status == 0 else {
-            throw LocalArchiveError("couldn't list archive entries: \(namesResult.error)")
+            throw LocalArchiveError("couldn’t list archive entries: \(namesResult.error)")
         }
         let names = namesResult.output.split(whereSeparator: \.isNewline).map(String.init)
         guard names.count <= 10_000 else {
@@ -538,7 +339,7 @@ final class CLIPModelInstaller: ModelInstalling {
             ["-Z", "-v", zipURL.path], workRoot: workRoot,
             timeoutSeconds: 30, label: "metadata")
         guard verbose.status == 0 else {
-            throw LocalArchiveError("couldn't inspect archive metadata: \(verbose.error)")
+            throw LocalArchiveError("couldn’t inspect archive metadata: \(verbose.error)")
         }
         var total: UInt64 = 0
         for rawLine in verbose.output.split(whereSeparator: \.isNewline) {
@@ -556,7 +357,7 @@ final class CLIPModelInstaller: ModelInstalling {
             if line.hasPrefix("file security status:"),
                let value = line.split(separator: ":", maxSplits: 1).last,
                !LocalArchiveSafety.fileSecurityStatusIsUnencrypted(String(value)) {
-                throw LocalArchiveError("encrypted archives aren't supported")
+                throw LocalArchiveError("encrypted archives aren’t supported")
             }
             if line.hasPrefix("Unix file attributes"),
                let permissions = line.split(separator: ":", maxSplits: 1).last?
@@ -649,7 +450,7 @@ final class CLIPModelInstaller: ModelInstalling {
         let data = try handle.read(upToCount: cap + 1) ?? Data()
         guard data.count <= cap else { throw LocalArchiveError("archive listing was too large") }
         guard let text = String(data: data, encoding: .utf8) else {
-            throw LocalArchiveError("archive listing wasn't UTF-8")
+            throw LocalArchiveError("archive listing wasn’t UTF-8")
         }
         return text
     }
@@ -669,7 +470,7 @@ final class CLIPModelInstaller: ModelInstalling {
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
             options: []) else {
-            throw LocalArchiveError("couldn't inspect extracted files")
+            throw LocalArchiveError("couldn’t inspect extracted files")
         }
         var count = 0
         for case let url as URL in enumerator {

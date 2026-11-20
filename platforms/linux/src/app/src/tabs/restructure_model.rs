@@ -101,10 +101,7 @@ pub fn plural(n: usize, noun: &str) -> String {
 pub fn zero_move_status(anchors: u32) -> String {
     match anchors {
         0 => "No moves were proposed for this folder.".to_owned(),
-        n => format!(
-            "Everything here is already organized. {n} folder{} kept.",
-            if n == 1 { "" } else { "s" }
-        ),
+        _ => "Your folders here are already well organized. FileID doesn’t rename the folder you chose.".to_owned(),
     }
 }
 
@@ -247,7 +244,7 @@ mod tests {
         );
         assert_eq!(
             zero_move_status(4),
-            "Everything here is already organized. 4 folders kept."
+            "Your folders here are already well organized. FileID doesn’t rename the folder you chose."
         );
         assert_eq!(plural(1200, "file"), "1,200 files");
     }

@@ -1,10 +1,7 @@
-//! Opt-in model license terms: which kinds need acceptance, and the on-device
-//! record of what the user accepted. Policy URLs and review dates come from
-//! `shared/models/manifest.json` (`licensePolicies`). Acceptances live in
-//! `<state root>/model-licenses.json` as a sorted JSON array of
-//! `ModelLicenseAccepted:<policy>:<reviewedAt>` keys — the format WinUI writes,
-//! so every front end shares one record. A re-review bumps `reviewedAt` and
-//! therefore asks again.
+//! Opt-in model license terms and the on-device record of acceptance: `<state root>/model-licenses.json`, a sorted JSON
+//! array of `ModelLicenseAccepted:<policy>:<reviewedAt>` keys (the format WinUI writes, so every front end shares it).
+//! A re-review bumps `reviewedAt` and so asks again. Policy URLs and dates come from `shared/models/manifest.json`
+//! (`licensePolicies`).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,10 +24,8 @@ impl LicensePolicy {
 
 fn policy_key(model_kind: &str) -> Option<&'static str> {
     match model_kind {
-        "cudnn_runtime_x64" => Some("NVIDIA-cuDNN"),
-        // The ORT CUDA pack and CUDA llama runtime carry CUDA Toolkit
-        // redistributables, so the CUDA EULA governs them.
-        "ort_cuda_x64" | "llama_runtime_cuda_x64" => Some("NVIDIA-CUDA"),
+        // The CUDA llama runtime carries CUDA Toolkit redistributables, so the CUDA EULA governs it.
+        "llama_runtime_cuda_x64" => Some("NVIDIA-CUDA"),
         _ => super::manifest::terms_policy_for_kind(model_kind).or_else(|| {
             super::catalog::find(model_kind).filter(|entry| entry.terms_required).map(|entry| entry.license.as_str())
         }),
@@ -40,14 +35,11 @@ fn policy_key(model_kind: &str) -> Option<&'static str> {
 fn display_name(key: &str) -> &'static str {
     match key {
         "Gemma" => "Google Gemma Terms of Use",
-        "NVIDIA-cuDNN" => "NVIDIA cuDNN Software License Agreement",
         "NVIDIA-CUDA" => "NVIDIA CUDA Toolkit End User License Agreement",
         _ => "model license terms",
     }
 }
 
-/// The terms a model kind needs accepted before download; `None` when its
-/// license is permissive.
 pub fn policy_for(model_kind: &str) -> Option<LicensePolicy> {
     let (key, policy) = super::manifest::manifest().license_policies.get_key_value(policy_key(model_kind)?)?;
     policy.terms_required.then(|| LicensePolicy {
@@ -73,13 +65,11 @@ fn load(state_root: &Path) -> Result<BTreeSet<String>> {
     }
 }
 
-/// True when this exact policy revision was accepted on this device. An
-/// unreadable record counts as not accepted.
+/// An unreadable record counts as not accepted.
 pub fn is_accepted(state_root: &Path, policy: &LicensePolicy) -> bool {
     load(state_root).is_ok_and(|accepted| accepted.contains(&policy.acceptance_key()))
 }
 
-/// Persist acceptance of `policy`, keeping every other recorded key.
 pub fn record(state_root: &Path, policy: &LicensePolicy) -> Result<()> {
     let mut accepted = load(state_root)?;
     if !accepted.insert(policy.acceptance_key()) {
@@ -109,8 +99,7 @@ mod tests {
         assert_eq!(gemma.reviewed_at, "2026-07-16");
         assert_eq!(gemma.acceptance_key(), "ModelLicenseAccepted:Gemma:2026-07-16");
         assert_eq!(policy_for("paligemma_3b"), Some(gemma));
-        assert_eq!(policy_for("ort_cuda_x64").unwrap().key, "NVIDIA-CUDA");
-        assert_eq!(policy_for("cudnn_runtime_x64").unwrap().key, "NVIDIA-cuDNN");
+        assert_eq!(policy_for("llama_runtime_cuda_x64").unwrap().key, "NVIDIA-CUDA");
         for open in ["qwen2_5_vl_7b", "arcface", "mobileclip_s2", ""] {
             assert!(policy_for(open).is_none(), "{open}");
         }
@@ -136,7 +125,7 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         let gemma = policy_for("gemma_3_4b").unwrap();
-        let cuda = policy_for("ort_cuda_x64").unwrap();
+        let cuda = policy_for("llama_runtime_cuda_x64").unwrap();
         assert!(!is_accepted(&root, &gemma));
         record(&root, &gemma).unwrap();
         record(&root, &cuda).unwrap();

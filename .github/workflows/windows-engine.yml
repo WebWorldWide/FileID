@@ -128,7 +128,7 @@ jobs:
         if: matrix.label == 'x64'
         shell: pwsh
         # Supply-chain gate: a downloadable model/runtime with `sha256: None`
-        # would load (into ONNX Runtime / llama.cpp) UNVERIFIED — a compromised
+        # would load (into tract / llama.cpp) UNVERIFIED — a compromised
         # mirror could serve a malicious artifact (RCE during inference). Every
         # FileEntry in registry.rs MUST pin a SHA256; the downloader verifies it.
         run: |
@@ -293,11 +293,9 @@ jobs:
 
       # Per-vendor EP smoke: launch the engine, let it emit `ready` on stdout
       # (carrying HardwareInfo + the chosen executionProvider), then send EOF
-      # via empty stdin so the engine exits cleanly. On CI hosts we expect
-      # CPU fallback (no GPU), so this proves the EP probe + dispatch + JSON
-      # serialization are alive on each target arch. On real-hardware
-      # verification runs the same step surfaces CUDA / DirectML / QNN.
-      - name: Smoke — engine startup + EP probe
+      # via empty stdin so the engine exits cleanly. This proves the hardware
+      # probe + dispatch + JSON serialization are alive on each target arch.
+      - name: Smoke — engine startup + hardware probe
         if: matrix.cross == false
         shell: pwsh
         env:

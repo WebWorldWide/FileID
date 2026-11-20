@@ -6,10 +6,10 @@ namespace FileID.App.Tests;
 public sealed class SearchStrengthPolicyTests
 {
     [Theory]
-    [InlineData("1 good match.")]
-    [InlineData("3 good matches.")]
-    [InlineData("1 good match, 2 weaker.")]
-    [InlineData("4 good matches, 1 weaker.")]
+    [InlineData("1 match (1 strong visual).")]
+    [InlineData("3 matches (3 strong visual).")]
+    [InlineData("1 match (1 strong visual), 2 weaker.")]
+    [InlineData("4 matches (4 strong visual), 1 weaker.")]
     [InlineData("No good matches, 5 weaker.")]
     [InlineData("No matches.")]
     public void ShowsTheHelpersSentence(string message)
@@ -20,7 +20,7 @@ public sealed class SearchStrengthPolicyTests
     [Fact]
     public void TrimsTheMessage()
     {
-        Assert.Equal("3 good matches.", SearchStrengthPolicy.Label("  dog  ", " 3 good matches.\n"));
+        Assert.Equal("3 matches (3 strong visual).", SearchStrengthPolicy.Label("  dog  ", " 3 matches (3 strong visual).\n"));
     }
 
     [Theory]
@@ -30,13 +30,13 @@ public sealed class SearchStrengthPolicyTests
     [InlineData(null)]
     public void ShortSearchesKeepTheCount(string? query)
     {
-        Assert.Null(SearchStrengthPolicy.Label(query, "3 good matches."));
+        Assert.Null(SearchStrengthPolicy.Label(query, "3 matches (3 strong visual)."));
     }
 
     [Fact]
     public void ThreeCharactersIsEnough()
     {
-        Assert.NotNull(SearchStrengthPolicy.Label(" dog ", "3 good matches."));
+        Assert.NotNull(SearchStrengthPolicy.Label(" dog ", "3 matches (3 strong visual)."));
     }
 
     [Theory]
@@ -46,9 +46,9 @@ public sealed class SearchStrengthPolicyTests
     [InlineData("Visual similarity results.")]
     [InlineData("Matches by name, text and what's in the picture.")]
     [InlineData("Keyword results only. Preparing the local visual search index.")]
-    [InlineData("3 good matches")]
-    [InlineData("3 good matches, 1 weaker. Extra")]
-    [InlineData("-1 good matches.")]
+    [InlineData("3 matches (3 strong visual)")]
+    [InlineData("3 matches (3 strong visual), 1 weaker. Extra")]
+    [InlineData("-1 matches (-1 strong visual).")]
     public void NoMessageOrAnotherNoteKeepsTheCount(string? message)
     {
         Assert.Null(SearchStrengthPolicy.Label("sunset", message));
@@ -58,20 +58,20 @@ public sealed class SearchStrengthPolicyTests
     public void SummaryReplacesTheCountOnlyWhenPresent()
     {
         Assert.Equal("12 results", SearchStrengthPolicy.CountText("12 results", null));
-        Assert.Equal("3 good matches.", SearchStrengthPolicy.CountText("12 results", "3 good matches."));
+        Assert.Equal("3 matches (3 strong visual).", SearchStrengthPolicy.CountText("12 results", "3 matches (3 strong visual)."));
     }
 
     [Fact]
     public void ScreenReaderNameIncludesTheSummary()
     {
-        Assert.Equal("Search results. 3 good matches, 1 weaker.", SearchStrengthPolicy.AccessibleName("3 good matches, 1 weaker.", "3 good matches, 1 weaker."));
+        Assert.Equal("Search results. 3 matches (3 strong visual), 1 weaker.", SearchStrengthPolicy.AccessibleName("3 matches (3 strong visual), 1 weaker.", "3 matches (3 strong visual), 1 weaker."));
         Assert.Equal("12 results", SearchStrengthPolicy.AccessibleName("12 results", null));
         Assert.Equal(string.Empty, SearchStrengthPolicy.AccessibleName(string.Empty, null));
     }
 
     [Theory]
-    [InlineData("3 good matches, 1 weaker.", 3, 1)]
-    [InlineData("1 good match.", 1, 0)]
+    [InlineData("3 matches (3 strong visual), 1 weaker.", 3, 1)]
+    [InlineData("1 match (1 strong visual).", 1, 0)]
     [InlineData("No good matches, 60 weaker.", 0, 60)]
     [InlineData("No matches.", 0, 0)]
     public void CountsReadTheHelpersSentences(string message, int good, int weaker)
@@ -83,7 +83,7 @@ public sealed class SearchStrengthPolicyTests
     [InlineData(null)]
     [InlineData("Matches by name, text and what's in the picture.")]
     [InlineData("Visual similarity results.")]
-    [InlineData("3 good matches")]
+    [InlineData("3 matches (3 strong visual)")]
     public void CountsIgnoreAnyOtherNote(string? message)
     {
         Assert.Null(SearchStrengthPolicy.Counts(message));
@@ -92,9 +92,9 @@ public sealed class SearchStrengthPolicyTests
     [Fact]
     public void GoodMatchesShowTheHelpersListAndSummary()
     {
-        var d = SearchStrengthPolicy.Decide("sunset", "4 good matches, 20 weaker.", 2, showWeaker: false);
+        var d = SearchStrengthPolicy.Decide("sunset", "4 matches (4 strong visual), 20 weaker.", 2, showWeaker: false);
         Assert.False(d.KeywordOnly);
-        Assert.Equal("4 good matches, 20 weaker.", d.Label);
+        Assert.Equal("4 matches (4 strong visual), 20 weaker.", d.Label);
         Assert.Equal(0, d.HiddenWeaker);
     }
 
@@ -171,7 +171,7 @@ public sealed class SearchStrengthPolicyTests
     }
 
     [Theory]
-    [InlineData("4 good matches, 20 weaker.", 2, false, true)]
+    [InlineData("4 matches (4 strong visual), 20 weaker.", 2, false, true)]
     [InlineData("No good matches, 60 weaker.", 0, true, true)]
     [InlineData("Matches by name, text and what's in the picture.", 0, false, true)]
     [InlineData(null, 0, false, true)]

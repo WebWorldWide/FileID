@@ -1,6 +1,4 @@
-﻿// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses
-// for free. The Apply path emits engine `applyTags` IPC and surfaces the
-// engine's BulkActionResult via a status line.
+﻿// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses for free.
 
 using System;
 using System.Collections.Generic;
@@ -18,10 +16,7 @@ namespace FileID.Views.Library;
 public sealed partial class BulkTagSheet : UserControl
 {
     private IReadOnlyList<long> _fileIds = Array.Empty<long>();
-    // "Replace existing" wipes every user tag before writing the new set. A
-    // nested ContentDialog can't open while this sheet's host dialog is
-    // mid-deferral (WinUI allows only one open at a time), so the confirmation
-    // is an explicit second Apply click gated by this flag instead.
+    // A nested ContentDialog can't open while this sheet's host dialog is mid-deferral (WinUI allows only one open at a time), so the confirmation is an explicit second Apply click gated by this flag instead.
     private bool _replaceConfirmed;
 
     public BulkTagSheet()
@@ -54,10 +49,6 @@ public sealed partial class BulkTagSheet : UserControl
         }
     }
 
-    /// <summary>
-    /// Validates + commits via engine IPC. Returns false if validation
-    /// fails (caller can keep the dialog open).
-    /// </summary>
     public async Task<bool> CommitAsync()
     {
         var tags = Tags;
@@ -73,7 +64,6 @@ public sealed partial class BulkTagSheet : UserControl
         }
 
         var mode = Mode;
-        // Confirm the destructive "Replace existing" before it wipes user tags.
         if (mode == "replace")
         {
             if (!_replaceConfirmed)
@@ -87,7 +77,6 @@ public sealed partial class BulkTagSheet : UserControl
         }
         else
         {
-            // User switched off Replace — re-arm the confirm for next time.
             _replaceConfirmed = false;
         }
 
@@ -114,8 +103,7 @@ public sealed partial class BulkTagSheet : UserControl
             if (result.Failed > 0 || result.Action != "applyTags"
                 || !Services.BulkActionResultTruth.ConfirmsExactSuccess(result, _fileIds))
             {
-                // Surface per-file engine failures. Keep the dialog open so the
-                // user can adjust + retry; do NOT report success.
+                // Keep the dialog open so the user can adjust + retry; do NOT report success.
                 var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message
                             ?? "see logs for details";
                 var body = result.Failed == 0
@@ -152,8 +140,7 @@ public sealed partial class BulkTagSheet : UserControl
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // ContentDialog.ShowAsync can throw on a broken XamlRoot (mid-shutdown,
-        // tab re-host). Catch + log so a failed alert never escalates.
+        // Catch + log so a failed alert never escalates.
         try
         {
             if (XamlRoot is null) return;
@@ -169,7 +156,6 @@ public sealed partial class BulkTagSheet : UserControl
         }
         catch
         {
-            // Best-effort surfacing; the in-sheet StatusText still carries the message.
         }
     }
 
@@ -180,9 +166,6 @@ public sealed partial class BulkTagSheet : UserControl
                 .GetKeyStateForCurrentThread(VirtualKey.Control)
                 .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
         {
-            // Ctrl+Enter — caller listens via ContentDialog primary button;
-            // this just signals via FocusManager. The dialog wires its own
-            // primary-button handler that calls CommitAsync.
             e.Handled = true;
             var root = XamlRoot;
             if (root?.Content is FrameworkElement fe)

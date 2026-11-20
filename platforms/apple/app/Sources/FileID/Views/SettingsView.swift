@@ -1,4 +1,3 @@
-// Settings tab. (Review tab folded into Settings → Advanced.)
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -12,7 +11,6 @@ struct SettingsTab: View {
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
     @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @AppStorage(AppSettings.fastTextReadingKey) private var fastTextReading: Bool = AppSettings.fastTextReadingDefault
-    @AppStorage(EngineBackendPolicy.defaultsKey) private var engineBackendSetting: String = ""
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
     @State private var confirmFactoryReset = false
@@ -24,8 +22,6 @@ struct SettingsTab: View {
                 PrivacyCard()
 
                 LocationsCard(engine: engine)
-
-                // ─── User-facing settings (always visible) ───────────────
 
                 Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 10) {
@@ -40,7 +36,7 @@ struct SettingsTab: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Scanning").font(Theme.Font.body(14, .semibold))
                         SettingToggleRow("Faster text reading (Latin scripts only)",
-                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after FileID's helper restarts.",
+                                         subtitle: "Reads text in photos and screenshots as English and other Latin-alphabet languages (Cyrillic too), which makes scans of screenshots and signs about a third faster. Chinese, Japanese, Korean, Arabic and other scripts are not read. Takes effect after FileID’s helper restarts.",
                                          isOn: $fastTextReading)
                         restartHelperRow
                     }
@@ -52,17 +48,14 @@ struct SettingsTab: View {
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID's helper restarts.")
-                            .font(Theme.Font.body(11))
-                            .foregroundStyle(Theme.text3)
+                        MetaText("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after FileID’s helper restarts.")
+                            .fixedSize(horizontal: false, vertical: true)
                         restartHelperRow
                     }
                 }
 
                 DeepAnalyzeExclusionsCard()
 
-                // AI Models — visible because users genuinely care about
-                // which models are installed and download status.
                 EssentialModelsCard()
                 ModelInstallCard.clip
                 ModelInstallCard.ramPlus
@@ -72,57 +65,36 @@ struct SettingsTab: View {
                 ModelInstallCard.face
                 ModelInstallCard.faceMesh
 
-                // ─── Advanced (collapsed by default) ─────────────────────
-                // Engine PIDs, DB paths, log files. Power-user info that
-                // doesn't help a casual user choose anything; hiding it
-                // declutters the page.
-
                 Panel(padding: 16) {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
-                            // Engine
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("FileID's helper").font(Theme.Font.body(12.5, .semibold))
-                                if engine.rustEngineBundled && !EngineBackendPolicy.isAppStoreBuild {
-                                    LabeledSegment("Engine") {
-                                        SegmentedBar(selection: engineChoice, options: [(EngineBackend.rust, "Shared"), (EngineBackend.swift, "Swift")])
-                                    }
-                                    Text("FileID now runs its shared engine, the one the Windows and Linux apps use. Choose Swift to go back to the previous Mac engine for this release. Switching restarts the engine and stops any scan in progress.")
-                                        .font(Theme.Font.body(11))
-                                        .foregroundStyle(Theme.text3)
-                                }
-                                if let note = engine.fallback.note {
-                                    Text(note)
-                                        .font(Theme.Font.body(11))
-                                        .foregroundStyle(Theme.text2)
-                                }
+                                Text("FileID’s helper").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Status", connectionLabel)
                                 if case .ready(let info) = engine.state {
-                                    infoRow("Running", info.engine == "rust" ? "Shared engine" : "Swift engine")
                                     infoRow("Version", info.version)
                                     infoRow("Process number", "\(info.pid)")
                                     infoRow("Files worked on at once", "\(info.workerCap)")
-                                    infoRow("This Mac's memory",  "\(Int(info.physicalMemoryGB)) GB")
+                                    infoRow("This Mac’s memory",  "\(Int(info.physicalMemoryGB)) GB")
                                 }
                                 HStack(spacing: 8) {
-                                    Button("Restart helper") { engine.start() }
+                                    Button("Restart helper") { engine.restart() }
                                         .buttonStyle(.dsSecondary)
-                                        .help("Restart FileID's background helper. Stops any scan in progress.")
+                                        .help("Restart FileID’s background helper. Stops any scan in progress.")
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
-                            // Storage
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
-                                infoRow("Total files",   "\(store.totalFiles)")
-                                infoRow("Photos tagged", "\(store.totalImages)")
-                                infoRow("Sets of duplicates", "\(store.totalDuplicateGroups)")
-                                infoRow("Space duplicates use", String(format: "%.1f MB", store.totalReclaimableMB))
-                                infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path))
+                                infoRow("Total files",   store.totalFiles.formatted())
+                                infoRow("Photos tagged", store.totalImages.formatted())
+                                infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
+                                infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableBytes: store.totalReclaimableBytes))
+                                infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
                                     .help(ReadStore.defaultDBURL.path)
                                 Button("Show library file in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
@@ -130,9 +102,8 @@ struct SettingsTab: View {
                                 .buttonStyle(.dsSecondary)
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
-                            // Recent scans (folded in from former Review tab)
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Recent scans").font(Theme.Font.body(12.5, .semibold))
                                 if sessions.isEmpty {
@@ -145,12 +116,34 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
-                            // Logs
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Acknowledgements").font(Theme.Font.body(12.5, .semibold))
+                                Text("FileID is open source under the Apache License 2.0. These are the licenses of the open-source software and models it uses.")
+                                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
+                                HStack(spacing: 8) {
+                                    Button("Open-source acknowledgements") {
+                                        if let url = LicenseNotices.noticesURL() { NSWorkspace.shared.open(url) }
+                                    }
+                                    .buttonStyle(.dsSecondary)
+                                    .disabled(LicenseNotices.noticesURL() == nil)
+                                    .help(LicenseNotices.noticesURL() == nil
+                                          ? "The acknowledgements file is only in the packaged app."
+                                          : "Opens the list of open-source licenses.")
+                                    Button("FileID license") {
+                                        if let url = LicenseNotices.licenseURL() { NSWorkspace.shared.open(url) }
+                                    }
+                                    .buttonStyle(.dsSecondary)
+                                    .disabled(LicenseNotices.licenseURL() == nil)
+                                }
+                            }
+
+                            Hairline(color: Theme.hairlineSoft)
+
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Logs").font(Theme.Font.body(12.5, .semibold))
-                                Text("Detailed scan + app logs for troubleshooting.")
+                                Text("Detailed scan and app logs for troubleshooting.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 HStack(spacing: 8) {
                                     Button("Show scan log in Finder") {
@@ -164,31 +157,29 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
-                            // Danger Zone
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Danger Zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
-                                Text("Permanently erase FileID's library, local models, settings, and caches.")
+                                Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
+                                Text("Permanently erase FileID’s library, settings, caches and small helper models. The large description models are kept.")
                                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 Button(role: .destructive) {
                                     confirmFactoryReset = true
                                 } label: {
-                                    Text("Factory Reset & Quit")
+                                    Text("Factory reset and quit")
                                 }
-                                .buttonStyle(.dsPrimary)
-                                .tint(Theme.danger)
+                                .buttonStyle(.dsDanger)
                                 .confirmationDialog(
                                     "Are you sure you want to completely erase FileID?",
                                     isPresented: $confirmFactoryReset,
                                     titleVisibility: .visible
                                 ) {
-                                    Button("Erase Everything and Quit", role: .destructive) {
+                                    Button("Erase everything and quit", role: .destructive) {
                                         engine.factoryResetAndQuit()
                                     }
                                     Button("Cancel", role: .cancel) { }
                                 } message: {
-                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, downloaded models and caches. The large description models are kept. Your own files are not touched. This can't be undone.")
+                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, caches and the small downloaded helper models. The large description models are kept; remove them under Settings ▸ AI models. Your own files are not touched. This can’t be undone.")
                                 }
                             }
                         }
@@ -198,15 +189,18 @@ struct SettingsTab: View {
                             Image(systemName: "wrench.and.screwdriver")
                                 .foregroundStyle(Theme.text3)
                             Text("Advanced").font(Theme.Font.body(14, .semibold))
-                            Text("(troubleshooting: background helper, storage, scan history, logs)")
+                            Text("Background helper, storage, scan history, acknowledgements and logs.")
                                 .font(Theme.Font.body(12))
                                 .foregroundStyle(Theme.text3)
                         }
                     }
                 }
             }
-            .padding(24)
+            .frame(maxWidth: 1100, alignment: .leading)
+            .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .environment(\.helperDown, HelperGate.isDown(engine))
         .onAppear {
             Task { sessions = store.recentSessions() }
             #if DEBUG
@@ -230,23 +224,14 @@ struct SettingsTab: View {
                 Text(PathText.abbreviated(s.rootPath)).font(Theme.Font.mono(11.5)).lineLimit(1).truncationMode(.middle).help(s.rootPath)
                 HStack(spacing: 12) {
                     Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    Text(s.status)
-                    if let n = s.lastFileIndex { Text("\(n) files") }
+                    Text(s.status.capitalized)
+                    if let n = s.lastFileIndex { Text(n == 1 ? "1 file" : "\(n.formatted()) files") }
                 }
-                .font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
+                .font(Theme.Font.body(12)).monospacedDigit().foregroundStyle(Theme.text3)
             }
             Spacer()
         }
         .padding(.vertical, 1)
-    }
-
-    private var engineChoice: Binding<EngineBackend> {
-        Binding(get: { _ = engineBackendSetting; return engine.preferredBackend },
-                set: { choice in
-                    guard choice != engine.preferredBackend else { return }
-                    engine.switchBackend(to: choice)
-                    engineBackendSetting = choice.rawValue
-                })
     }
 
     private var connectionLabel: String {
@@ -259,23 +244,26 @@ struct SettingsTab: View {
 
     private var restartHelperRow: some View {
         HStack(spacing: 8) {
-            Button("Restart helper now") { engine.start() }
-                .buttonStyle(DSSecondaryButtonStyle(height: 24))
-            MetaText("Applies the change right away. Stops a scan that is running.", size: 11)
+            Button("Restart helper now") { engine.restart() }
+                .buttonStyle(.dsSecondary)
+            MetaText("Applies the change right away. Stops a scan that is running.")
         }
     }
 
     @ViewBuilder
-    private func infoRow(_ k: String, _ v: String) -> some View {
+    private func infoRow(_ k: String, _ v: String, isPath: Bool = false) -> some View {
         HStack(alignment: .top) {
-            Text(k).foregroundStyle(Theme.text3).frame(width: 130, alignment: .leading)
-            Text(v).font(Theme.Font.mono(12.5)).textSelection(.enabled)
+            Text(k).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(160), alignment: .leading)
+            Text(v).font(isPath ? Theme.Font.mono(12.5) : Theme.Font.body(13.5)).monospacedDigit().textSelection(.enabled)
             Spacer()
         }
         .font(Theme.Font.body(13.5))
     }
 
-    static var modelsFolderURL: URL { AppSupportPath.models }
+    static func duplicateSpaceLabel(reclaimableBytes bytes: Int64) -> String {
+        bytes <= 0 ? "None" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
     static var scanLogURL: URL { EngineLogFiles.revealTarget(state: AppSupportPath.fileID) }
     static var appLogURL: URL {
         AppSupportPath.fileID.appendingPathComponent("logs/app.log")
@@ -284,12 +272,7 @@ struct SettingsTab: View {
 
 // MARK: - Deep Analyze exclusions card
 
-/// Folders to skip during a whole-library Deep Analyze pass — separate from
-/// the (currently unsurfaced) scan-exclusion list: a folder can be fine to
-/// catalog/tag/search but too slow or private to run the VLM over. Nothing
-/// is removed from the library, so unlike the model-install cards above
-/// there's no purge-in-flight state to track — just persist the list; it
-/// takes effect starting with the next whole-library Deep Analyze run.
+/// Folders skipped by a whole-library Deep Analyze pass. Nothing is removed from the library, so there is no purge state to track.
 struct DeepAnalyzeExclusionsCard: View {
     @State private var settings = DeepAnalyzeSettings.shared
     @State private var message: (text: String, isError: Bool)?
@@ -302,7 +285,7 @@ struct DeepAnalyzeExclusionsCard: View {
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
 
                 if let message {
                     HStack(alignment: .top, spacing: 6) {
@@ -310,7 +293,7 @@ struct DeepAnalyzeExclusionsCard: View {
                             .foregroundStyle(message.isError ? Theme.danger : Theme.delight)
                         Text(message.text)
                             .font(Theme.Font.body(12))
-                            .foregroundStyle(message.isError ? Theme.danger : .secondary)
+                            .foregroundStyle(message.isError ? Theme.danger : Theme.text3)
                         Spacer()
                     }
                 }
@@ -327,7 +310,7 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            DSIconButton("Describe \(folder) again", systemImage: "xmark", tint: Theme.text3) {
+                            DSIconButton("Stop skipping \(URL(fileURLWithPath: folder).lastPathComponent)", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
                             }
                         }
@@ -354,7 +337,7 @@ struct DeepAnalyzeExclusionsCard: View {
         case .alreadyExcluded:
             message = ("That folder is already skipped.", false)
         case .invalid:
-            message = ("Couldn't skip that folder. Choose a folder on this Mac.", true)
+            message = ("Couldn’t skip that folder. Choose a folder on this Mac.", true)
         }
     }
 }
@@ -378,8 +361,9 @@ struct ModelInstallCard: View {
     let fallback: String
     var onRemoved: () -> Void = {}
     @State private var confirmRemove = false
+    @Environment(\.helperDown) private var helperDown
 
-    private var sizeLabel: String { ByteCountFormatter.string(fromByteCount: approxBytes, countStyle: .file) }
+    private var sizeLabel: String { ModelSize.label(approxBytes) }
 
     var body: some View {
         Panel(padding: 16) {
@@ -388,9 +372,9 @@ struct ModelInstallCard: View {
                 Text(blurb)
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 ForEach(rows, id: \.path) { rowView($0) }
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 footer
             }
         }
@@ -411,6 +395,7 @@ struct ModelInstallCard: View {
     private func rowView(_ row: Row) -> some View {
         HStack(alignment: .top, spacing: 8) {
             rowIcon(present: installer.presentFilePaths.contains(row.path.path)).padding(.top, 2)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.name).font(Theme.Font.body(13.5, .semibold))
                 if let detail = row.detail {
@@ -438,12 +423,15 @@ struct ModelInstallCard: View {
         case .unknown:
             ProgressView().controlSize(.small)
         case .missing(let reason):
-            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11)
+            MetaText("\(reason) About \(sizeLabel), downloaded once from the internet (huggingface.co).", size: 11.5)
             HStack(spacing: 8) {
                 Button { installer.install() } label: {
                     Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
+                .disabled(helperDown)
+                .help(helperDown ? HelperGate.downloadsUnavailableNote : "")
+                .accessibilityLabel("Download \(title), about \(sizeLabel)")
                 Spacer()
             }
         case .downloading(let fraction, let message, _, _):
@@ -459,6 +447,7 @@ struct ModelInstallCard: View {
                     Spacer()
                     Button("Cancel") { installer.cancel() }
                         .buttonStyle(.borderless).controlSize(.small)
+                        .accessibilityLabel("Cancel downloading \(title)")
                 }
             }
         case .extracting:
@@ -469,11 +458,12 @@ struct ModelInstallCard: View {
             }
         case .installed(let bytes):
             HStack(spacing: 8) {
-                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11)
+                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on this Mac", size: 11.5)
                 Spacer()
                 Button("Remove") { confirmRemove = true }
                     .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                     .padding(.trailing, -6)
+                    .accessibilityLabel("Remove \(title)")
             }
         case .installFailed(let why):
             VStack(alignment: .leading, spacing: 6) {
@@ -481,6 +471,9 @@ struct ModelInstallCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Try again") { installer.install() }.buttonStyle(.dsSecondary)
+                        .disabled(helperDown)
+                        .help(helperDown ? HelperGate.downloadsUnavailableNote : "")
+                        .accessibilityLabel("Try again to download \(title)")
                     Spacer()
                 }
             }
@@ -495,6 +488,7 @@ struct EssentialModelsCard: View {
     @State private var ramPlus = ModelInstaller.ramPlus
     @State private var bge = ModelInstaller.bge
     @State private var face = ModelInstaller.face
+    @Environment(\.helperDown) private var helperDown
 
     private var items: [(installer: any ModelInstalling, bytes: Int64)] {
         [(clip, CLIPModelInstaller.approxDownloadBytes), (ramPlus, ramPlus.spec.approxBytes),
@@ -515,6 +509,9 @@ struct EssentialModelsCard: View {
                     MetaText(missing.isEmpty
                              ? "Search, tags, faces and documents are all downloaded."
                              : "Search, tags, faces and documents each need a small model. Without them, FileID still finds files by name and by text inside them.")
+                    if helperDown && !missing.isEmpty {
+                        MetaText(HelperGate.downloadsUnavailableNote)
+                    }
                 }
                 Spacer()
                 if !missing.isEmpty {
@@ -525,8 +522,8 @@ struct EssentialModelsCard: View {
                               systemImage: "arrow.down.circle.fill")
                     }
                     .buttonStyle(.dsPrimary)
-                    .disabled(idle.isEmpty)
-                    .help(busy ? "Each model's progress is shown in its card below" : "Downloads every missing model below, once, from the internet (huggingface.co)")
+                    .disabled(idle.isEmpty || helperDown)
+                    .help(busy ? "Each model’s progress is shown in its card below" : "Downloads every missing model below, once, from the internet (huggingface.co)")
                 }
             }
         }
@@ -540,11 +537,11 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Search by description",
-            blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Runs on this Mac.",
+            blurb: "Lets you search photos by what’s in them, like “sunset at the beach”. Runs on this Mac.",
             rows: [
                 Row(name: "Understands photos", detail: "Looks at each photo during a scan.", technical: "OpenCLIP ViT-B/32 image model (MIT)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
-                Row(name: "Understands your search words", detail: "Matches what you type to what photos show.", technical: "OpenCLIP ViT-B/32 text model (MIT)", path: CLIPTextEncoder.defaultModelURL),
-                Row(name: "Word list", detail: "The words the search model knows.", technical: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPTextEncoder.defaultDirectory.appendingPathComponent("vocab.json")),
+                Row(name: "Understands your search words", detail: "Matches what you type to what photos show.", technical: "OpenCLIP ViT-B/32 text model (MIT)", path: CLIPEmbeddingSpace.textModelURL),
+                Row(name: "Word list", detail: "The words the search model knows.", technical: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPEmbeddingSpace.textModelDirectory.appendingPathComponent("vocab.json")),
             ],
             approxBytes: CLIPModelInstaller.approxDownloadBytes,
             removeTitle: "Remove the Search by description model?",
@@ -556,7 +553,7 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Photo tags",
-            blurb: "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Without it, FileID uses a simpler built-in tagger.",
+            blurb: "Labels what’s in each photo (thousands of everyday things) so you can search and sort by it. Without it, FileID uses a simpler built-in tagger.",
             rows: [Row(name: "Photo tagger", detail: "Knows about 4,500 everyday things, in English.", technical: "RAM++ (Recognize Anything Plus), Swin-Large @384, Apache-2.0", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Photo tags model?",
@@ -569,7 +566,7 @@ extension ModelInstallCard {
             installer: installer,
             title: "Documents",
             blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Without it, documents are grouped by file name.",
-            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the Neural Engine", path: installer.spec.primaryFile)],
+            rows: [Row(name: "Document reader", detail: "Works out what a document is about from its text.", technical: "BGE-small-en-v1.5 (MIT), 384-d text embedder, runs on the CPU", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the Documents model?",
             fallback: "Organize Folders groups documents by file name instead.")
@@ -593,11 +590,11 @@ extension ModelInstallCard {
         return ModelInstallCard(
             installer: installer,
             title: "Closed eyes in Best Takes",
-            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Runs on this Mac. Without it, FileID uses Apple's built-in eye check.",
+            blurb: "Spots closed eyes more reliably when Best Takes picks the best photo of a moment. Runs on this Mac. Without it, FileID uses Apple’s built-in eye check.",
             rows: [Row(name: "Eye checker", detail: "Measures how open each eye is.", technical: "MediaPipe Face Mesh V2 (Apache-2.0), 478 face landmarks", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove the closed-eyes model?",
-            fallback: "Best Takes goes back to Apple's built-in eye check.")
+            fallback: "Best Takes goes back to Apple’s built-in eye check.")
     }
 }
 
@@ -615,7 +612,7 @@ struct PrivacyCard: View {
                         MetaText("File names, tags and descriptions FileID wrote become searchable with ⌘Space by anyone using this Mac. Turning this off removes them from Spotlight.")
                     }
                     Spacer()
-                    Toggle("", isOn: $spotlight).labelsHidden().toggleStyle(.switch)
+                    Toggle("", isOn: $spotlight).labelsHidden().toggleStyle(DSToggleStyle())
                         .accessibilityLabel("Show results in Spotlight")
                 }
                 MetaText("Nothing is sent anywhere. The only network use is a model download you start yourself.")
@@ -624,7 +621,7 @@ struct PrivacyCard: View {
     }
 }
 
-/// Prototype v3 appearance: lava lamp Full / Calm / Off, and the page text size.
+/// Appearance: lava lamp Full / Calm / Off, and the page text size.
 struct AppearanceCard: View {
     @AppStorage("lavaMode") private var lavaMode: String = LavaMode.full.rawValue
     @AppStorage(TextSize.storageKey) private var textSize: String = TextSize.standard.rawValue
@@ -639,10 +636,11 @@ struct AppearanceCard: View {
                     }
                     .accessibilityHidden(true)
                     Spacer()
-                    SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) }, height: 26)
+                    SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) })
                         .accessibilityLabel("Lava lamp")
                         .accessibilityHint("Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it.")
                 }
+                Hairline(color: Theme.hairlineSoft).padding(.vertical, 4)
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Text size").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
@@ -650,7 +648,7 @@ struct AppearanceCard: View {
                     }
                     .accessibilityHidden(true)
                     Spacer()
-                    SegmentedBar(selection: $textSize, options: TextSize.allCases.map { ($0.rawValue, $0.title) }, height: 26)
+                    SegmentedBar(selection: $textSize, options: TextSize.allCases.map { ($0.rawValue, $0.title) })
                         .accessibilityLabel("Text size")
                         .accessibilityHint("Changes the size of text on every page. The title bar and sidebar stay the same size.")
                 }

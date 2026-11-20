@@ -1,5 +1,4 @@
-// Plain titles and sentences for the helper's error kinds, mirroring the Mac
-// app's `Sidebar.errorTitle` / `errorText`. Codes, model ids and raw messages
+// User-facing titles and sentences for engine error kinds. Codes, model ids and raw messages
 // belong in a tooltip (`detail`), never in primary text.
 
 pub fn title(kind: &str) -> &'static str {
@@ -8,6 +7,7 @@ pub fn title(kind: &str) -> &'static str {
         "empty_folder" => "No files to scan",
         "scan_failed" => "The scan stopped",
         "db_unavailable" | "db_failed" => "The library couldn't be opened",
+        "db_disk_full" | "scan_disk_full" => "Your disk is full",
         "db_newer_than_engine" => "This library needs a newer FileID",
         "folder_access_denied" | "bookmark_unavailable" => "FileID can't reach that folder",
         "command_decode_failed" => "FileID couldn't do that",
@@ -22,6 +22,7 @@ pub fn title(kind: &str) -> &'static str {
         "model_download_failed" | "download_tls_pin_failed" => "The download didn't finish",
         "model_download_disk_full" => "Not enough disk space",
         "scan_already_running" => "A scan is already running",
+        "scan_slower_path" => "This scan will take longer",
         _ => "Something went wrong",
     }
 }
@@ -30,6 +31,8 @@ pub fn text(kind: &str, message: &str) -> String {
     let fixed = match kind {
         "scan_failed" => "Press Scan again. Files already read are skipped.",
         "db_unavailable" | "db_failed" => "Quit and reopen FileID. If it keeps happening, use Start over in the folder menu.",
+        "db_disk_full" => "Free some space on this computer (about 1 GB is plenty), then quit and reopen FileID.",
+        "scan_disk_full" => "Free some space on this computer, then scan again. What FileID already saved is kept.",
         "db_newer_than_engine" => "This library was made by a newer FileID. Update FileID.",
         "folder_access_denied" | "bookmark_unavailable" => "Choose the folder again so FileID can open it.",
         "command_decode_failed" => "Try again. If it keeps happening, quit and reopen FileID.",
@@ -51,14 +54,12 @@ pub fn text(kind: &str, message: &str) -> String {
     fixed.to_owned()
 }
 
-/// Title and sentence on one line, for places with a single label.
 pub fn sentence(kind: &str, message: &str) -> String {
     let title = title(kind);
     let text = text(kind, message);
     if text.is_empty() { title.to_owned() } else { format!("{title}. {text}") }
 }
 
-/// What a tooltip may carry: the code, the model id and the raw message.
 pub fn detail(kind: &str, message: &str, model_kind: Option<&str>) -> String {
     let mut detail = kind.to_owned();
     if let Some(model) = model_kind.filter(|model| !model.is_empty()) {
@@ -96,7 +97,17 @@ mod tests {
         assert_eq!(title("db_failed"), title("db_unavailable"));
         assert_eq!(title("restructure_busy"), "A folder move is already running");
         assert_eq!(text("model_load_failed", "x"), "Open Settings and install the model again.");
+        assert_eq!(title("db_disk_full"), "Your disk is full");
+        assert_eq!(title("scan_disk_full"), title("db_disk_full"));
         assert_eq!(title("no_such_kind"), "Something went wrong");
+    }
+
+    #[test]
+    fn a_slower_scan_notice_is_not_called_a_failure() {
+        assert_eq!(
+            sentence("scan_slower_path", "Picture search can't use this computer's graphics chip."),
+            "This scan will take longer. Picture search can't use this computer's graphics chip."
+        );
     }
 
     #[test]

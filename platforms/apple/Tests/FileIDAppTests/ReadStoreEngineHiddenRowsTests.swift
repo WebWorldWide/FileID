@@ -55,6 +55,58 @@ struct ReadStoreEngineHiddenRowsTests {
         #expect(store.files(search: "empty").isEmpty)
     }
 
+    @Test("an Organize Folders plan counts only the files under its own folder")
+    func filesUnderAPlanRoot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-under-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try seed(root)
+        try DatabaseQueue(path: url.path).write { db in
+            try db.execute(sql: """
+                INSERT INTO files(id,path_text,kind) VALUES
+                    (10,'/lib/2021/a.pdf','pdf'), (11,'/lib/2021/x/b.pdf','pdf'), (12,'/lib/2021-old/c.pdf','pdf'),
+                    (13,'/lib/20210/d.pdf','pdf'), (14,'/other/e.jpg','image')
+                """)
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        #expect(store.countFiles(under: "/lib/2021") == 2)
+        #expect(store.countFiles(under: "/lib/2021/") == 2)
+        #expect(store.countFiles(under: "/lib") == 7)
+        #expect(store.countFiles(under: "/nowhere") == 0)
+        #expect(store.countFiles(under: "/") == 8)
+    }
+
+    @Test("the file count is unknown until the counters load, a real zero for a missing database, and unknown again when the reader fails")
+    func catalogedFileCountKnownness() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-known-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let seeded = try seed(root)
+        let store = ReadStore(dbURL: seeded)
+        #expect(store.catalogedFileCount == nil)
+        store.openIfPossible()
+        defer { store.close() }
+        for _ in 0..<200 where store.catalogedFileCount == nil { try await Task.sleep(nanoseconds: 25_000_000) }
+        #expect(store.catalogedFileCount == 3)
+
+        let missing = ReadStore(dbURL: root.appending(component: "none.sqlite"))
+        missing.openIfPossible()
+        #expect(missing.catalogedFileCount == 0)
+
+        let broken = root.appending(component: "broken.sqlite")
+        try Data("this is not a database".utf8).write(to: broken)
+        let unreadable = ReadStore(dbURL: broken)
+        unreadable.openIfPossible()
+        defer { unreadable.close() }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(unreadable.catalogedFileCount == nil)
+    }
+
     @Test("the hidden messages match what the engine writes")
     nonisolated func messages() {
         #expect(ReadStore.engineHiddenMessages.count == 2)

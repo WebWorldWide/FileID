@@ -14,7 +14,8 @@ struct WelcomeSheet: View {
     @State private var bge = ModelInstaller.bge
 
     private let recommendedFace: FaceEmbedderKind
-    private let hardwareRecommendedVLM: AIModelKind
+    @State private var hardwareRecommendedVLM: AIModelKind
+    @State private var adoptingAdvice = false
     private let availableDiskBytes: Int64?
     @State private var selectedVLM: AIModelKind
 
@@ -40,11 +41,33 @@ struct WelcomeSheet: View {
         self.availableDiskBytes = freeDisk
         let recommended = AIModelKind.safeDefaultFor(ramGB: ram,
                                                       freeDiskBytes: freeDisk)
-        self.hardwareRecommendedVLM = recommended
+        self._hardwareRecommendedVLM = State(initialValue: recommended)
         self._selectedVLM = State(initialValue: AIModelKind.onboardingSelection(
             persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
             ramGB: ram,
             freeDiskBytes: freeDisk))
+        #if DEBUG
+        if SelfShot.welcomeDemoDownload {
+            self._vlmRequested = State(initialValue: true)
+            self._vlmSmoothedBytesPerSec = State(initialValue: 29_900_000)
+            self._vlmLockedTotalBytes = State(initialValue: 5_800_000_000)
+        }
+        #endif
+    }
+
+    /// The engine knows how much memory is free right now; until the user picks a model, the recommendation follows it.
+    private func adoptVLMAdvice(_ advice: VLMAdvice?) {
+        guard let advice, selectedVLM == hardwareRecommendedVLM, !ModelInstallStatus.isInstalled(kind: selectedVLM),
+              UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")?.isEmpty != false else { return }
+        let recommended = AIModelKind.recommended(ramGB: systemRAMGB, advice: advice, freeDiskBytes: availableDiskBytes)
+        guard recommended != hardwareRecommendedVLM else { return }
+        hardwareRecommendedVLM = recommended
+        adoptingAdvice = true
+        selectedVLM = recommended
+    }
+
+    private var recommendation: VLMRecommendation {
+        VLMRecommendation(ramGB: systemRAMGB, advice: engine.vlmAdvice, freeDiskBytes: availableDiskBytes)
     }
 
     private var systemRAMGB: Double {
@@ -62,18 +85,18 @@ struct WelcomeSheet: View {
                 VStack(alignment: .leading, spacing: 0) {
             modelRow(
                 title: "Search by description",
-                detail: "Find photos by typing what's in them",
+                detail: "Find photos by typing what’s in them",
                 technical: "CLIP ViT-B/32",
-                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
+                size: "~\(ModelSize.label(Int64(CLIPModelInstaller.approxDownloadBytes)))",
                 status: clip.status,
                 action: { clip.install() },
                 cancel: { clip.cancel() }
             )
             modelRow(
                 title: "Photo tags",
-                detail: "Labels what's in each photo",
+                detail: "Labels what’s in each photo",
                 technical: "RAM++",
-                size: "~\(ByteCountFormatter.string(fromByteCount: ramplus.spec.approxBytes, countStyle: .file))",
+                size: "~\(ModelSize.label(ramplus.spec.approxBytes))",
                 status: ramplus.status,
                 action: { ramplus.install() },
                 cancel: { ramplus.cancel() }
@@ -82,7 +105,7 @@ struct WelcomeSheet: View {
                 title: "Faces",
                 detail: "Groups photos by person",
                 technical: recommendedFace.displayName,
-                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
+                size: "~\(ModelSize.label(Int64(recommendedFace.approxBytes)))",
                 status: arcface.status,
                 action: { arcface.install() },
                 cancel: { arcface.cancel() }
@@ -91,45 +114,47 @@ struct WelcomeSheet: View {
                 title: "Documents",
                 detail: "Understands what documents are about",
                 technical: "BGE-small",
-                size: "~\(ByteCountFormatter.string(fromByteCount: bge.spec.approxBytes, countStyle: .file))",
+                size: "~\(ModelSize.label(bge.spec.approxBytes))",
                 status: bge.status,
                 action: { bge.install() },
                 cancel: { bge.cancel() }
             )
-            Menu {
-                ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
-                    Button {
-                        selectedVLM = kind
-                    } label: {
-                        HStack {
-                            Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
-                            if kind == selectedVLM {
-                                Image(systemName: "checkmark").accessibilityHidden(true)
+            HStack(spacing: 10) {
+                Text("Description model").font(Theme.Font.body(13.5))
+                Spacer(minLength: 8)
+                Menu {
+                    ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
+                        Button {
+                            selectedVLM = kind
+                        } label: {
+                            HStack {
+                                Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
+                                if kind == selectedVLM {
+                                    Image(systemName: "checkmark").accessibilityHidden(true)
+                                }
                             }
                         }
+                        .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
+                        .disabled(!vlmChoiceAvailable(kind))
+                        .help("\(kind.displayName) · \(kind.licenseName)")
                     }
-                    .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
-                    .disabled(!vlmChoiceAvailable(kind))
-                    .help("\(kind.displayName) · \(kind.licenseName)")
+                } label: {
+                    DSMenuLabel(title: Self.shortName(selectedVLM))
                 }
-            } label: {
-                HStack {
-                    Text("Description model")
-                    Spacer()
-                    Text(Self.shortName(selectedVLM))
-                    Image(systemName: "chevron.up.chevron.down")
-                }
+                .menuStyle(.button)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .disabled(vlmInProgress)
+                .help("\(selectedVLM.displayName) · \(selectedVLM.licenseName)")
+                .accessibilityLabel("Description model")
+                .accessibilityValue(Self.shortName(selectedVLM))
             }
-            .disabled(vlmInProgress)
-            .menuStyle(.borderlessButton)
-            .font(Theme.Font.body(13.5))
             .padding(.horizontal, 22).padding(.top, 12)
-            .help("\(selectedVLM.displayName) · \(selectedVLM.licenseName)")
-            .accessibilityLabel("Description model")
-            .accessibilityValue(Self.shortName(selectedVLM))
-            Text(selectedVLM == hardwareRecommendedVLM
-                 ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
-                 : "Your choice. FileID uses it to describe files and answer Chat.")
+            Text([selectedVLM == recommendation.kind
+                  ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
+                  : "Your choice. FileID uses it to describe files and answer Chat.",
+                  recommendation.reason].compactMap { $0 }.joined(separator: " "))
                 .font(Theme.Font.meta)
                 .foregroundStyle(Theme.text3)
                 .padding(.horizontal, 22).padding(.bottom, 4)
@@ -160,7 +185,7 @@ struct WelcomeSheet: View {
             )
             .disabled(!vlmInstalled && !vlmInProgress && !selectedVLMCanInstall)
             if let selectedVLMInstallBlocker {
-                MetaText(selectedVLMInstallBlocker, color: Theme.danger, size: 11).padding(.horizontal, 22).padding(.vertical, 6)
+                MetaText(selectedVLMInstallBlocker, color: Theme.danger).padding(.horizontal, 22).padding(.vertical, 6)
             }
                 }
             }
@@ -169,7 +194,7 @@ struct WelcomeSheet: View {
             footer
         }
         .frame(width: 600)
-        .background(Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94), ignoresSafeAreaEdges: [])
+        .background(Theme.sheetFill, ignoresSafeAreaEdges: [])
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         .preferredColorScheme(.dark)
         .onAppear {
@@ -177,7 +202,10 @@ struct WelcomeSheet: View {
             ramplus.refreshStatus()
             arcface.refreshStatus()
             bge.refreshStatus()
+            engine.refreshVLMAdvice()
+            adoptVLMAdvice(engine.vlmAdvice)
         }
+        .onChange(of: engine.vlmAdvice) { _, advice in adoptVLMAdvice(advice) }
         .onDisappear { installAllRequested = false }
         .onChange(of: essentialsInProgress) { _, inProgress in
             // Once everything the essentials button kicked off has settled
@@ -187,6 +215,7 @@ struct WelcomeSheet: View {
             if !inProgress && !essentialsInstalled { installAllRequested = false }
         }
         .onChange(of: selectedVLM) { _, kind in
+            if adoptingAdvice { adoptingAdvice = false; return }
             DeepAnalyzeSettings.shared.activeKind = kind
         }
         .onChange(of: vlmInstalled) { _, nowInstalled in
@@ -223,10 +252,7 @@ struct WelcomeSheet: View {
             // first VLM use, where the banner has actual context.
             if ModelInstallStatus.isInstalled(kind: selectedVLM) { return }
             if let kind = err.modelKind, kind != selectedVLM.rawValue { return }
-            // `unknown_model` is the canonical unrecognized-model-kind error
-            // (renamed from the macOS-only `prewarm_invalid_kind` for cross-
-            // platform parity,); route it like the prewarm_*
-            // family so the row flips to Failed instead of spinning.
+            // `unknown_model` is an unrecognized model kind; route it like the prewarm_* family so the row flips to Failed.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
                 || ModelFailureText.isModelFailure(err)
                 || err.modelKind == selectedVLM.rawValue
@@ -253,18 +279,43 @@ struct WelcomeSheet: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
-                if let free = availableDiskBytes {
-                    MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac", size: 11)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    footerNote(stacked: false)
+                    Spacer(minLength: 8)
+                    footerButtons
+                }
+                VStack(alignment: .trailing, spacing: 10) {
+                    footerNote(stacked: true).frame(maxWidth: .infinity, alignment: .leading)
+                    footerButtons
                 }
             }
-            Spacer()
-            if essentialsInstalled {
-                Button("Continue") { dismiss() }
-                    .buttonStyle(DSPrimaryButtonStyle(height: 32))
-                    .keyboardShortcut(.defaultAction)
-            } else {
+        }
+        .padding(.horizontal, 22).padding(.vertical, 16)
+        .overlay(alignment: .top) { Hairline() }
+    }
+
+    private func footerNote(stacked: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            MetaText(essentialsInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
+            if helperDown && !essentialsInstalled {
+                MetaText(HelperGate.downloadsUnavailableNote, color: Theme.warning)
+            }
+            if let free = availableDiskBytes {
+                MetaText("\(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free on this Mac")
+            }
+        }
+        .fixedSize(horizontal: !stacked, vertical: true)
+    }
+
+    @ViewBuilder
+    private var footerButtons: some View {
+        if essentialsInstalled {
+            Button("Continue") { dismiss() }
+                .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                .keyboardShortcut(.defaultAction)
+        } else {
+            HStack(spacing: 8) {
                 Button("Later") { dismiss() }
                     .buttonStyle(DSSecondaryButtonStyle(height: 32))
                     .keyboardShortcut(.cancelAction)
@@ -276,12 +327,12 @@ struct WelcomeSheet: View {
                     if !bgeInstalled, !bgeInProgress { bge.install() }
                 }
                 .buttonStyle(DSPrimaryButtonStyle(height: 32))
-                .disabled(installAllRequested)
-                .help("Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
+                .fixedSize()
+                .disabled(HelperGate.downloadDisabled(inProgress: installAllRequested, helperDown: helperDown))
+                .help(helperDown ? HelperGate.downloadsUnavailableNote : "Downloads search, tags, faces and documents. The description model is optional and has its own Download button.")
             }
+            .fixedSize()
         }
-        .padding(.horizontal, 22).padding(.vertical, 16)
-        .overlay(alignment: .top) { Hairline() }
     }
 
     private func modelRow(title: String, detail: String, technical: String, size: String,
@@ -303,35 +354,47 @@ struct WelcomeSheet: View {
                           cancel: @escaping () -> Void) -> some View {
         let frac = installed ? 1.0 : (progressFrac ?? 0)
         let failed = !inProgress && !installed && progressLabel != nil
-        VStack(alignment: .leading, spacing: 6) {
+        let progressLine = [progressLabel, rateETA].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(title).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
                     .help(technical)
-                Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 8)
                 if installed {
-                    MetaText("Ready", color: Theme.delight, size: 11)
+                    MetaText("Ready", color: Theme.delight)
                 } else if inProgress {
-                    MetaText(progressLabel ?? "\(Int(frac * 100))%", color: Theme.gold, size: 11).lineLimit(1)
+                    MetaText("\(Int(frac * 100))%", color: Theme.gold).monospacedDigit()
                     Button("Cancel", action: cancel).buttonStyle(.dsGhost)
                 } else {
-                    MetaText(size, size: 11)
-                    Button("Download", action: action).buttonStyle(DSSecondaryButtonStyle(height: 24))
-                        .help("Download \(technical) (\(size))")
+                    MetaText(size)
+                    Button("Download", action: action).buttonStyle(.dsSecondary)
+                        .disabled(helperDown)
+                        .help(helperDown ? HelperGate.downloadsUnavailableNote : "Download \(technical) (\(size))")
                 }
             }
-            GrainProgressBar(progress: inProgress && frac == 0 ? 0.03 : frac, tone: installed ? .done : .gold)
-            if inProgress, let rateETA, !rateETA.isEmpty { MetaText(rateETA, size: 11) }
-            if failed, let progressLabel { MetaText(progressLabel, color: Theme.danger, size: 11) }
+            // The hidden description sizes the line, so a download's progress text or a failure message takes its place without moving the rows below.
+            ZStack(alignment: .topLeading) {
+                Text(detail).font(Theme.Font.body(13)).opacity(0).accessibilityHidden(true)
+                if failed, let progressLabel {
+                    Text(progressLabel).font(Theme.Font.body(13)).foregroundStyle(Theme.danger)
+                } else if inProgress, !progressLine.isEmpty {
+                    Text(progressLine).font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                } else {
+                    Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            GrainProgressBar(progress: inProgress && frac == 0 ? 0.03 : frac, tone: installed ? .done : .gold).padding(.top, 3)
         }
-        .padding(.horizontal, 22).padding(.vertical, 10)
+        .padding(.horizontal, 22).padding(.vertical, 8)
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 
     private func triggerVLMInstall() {
         guard !vlmInProgress else { return }
         guard selectedVLMCanInstall else {
-            vlmLastError = selectedVLMInstallBlocker ?? "This description model can't be used on this Mac. Choose another one."
+            vlmLastError = selectedVLMInstallBlocker ?? "This description model can’t be used on this Mac. Choose another one."
             return
         }
         guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
@@ -359,7 +422,7 @@ struct WelcomeSheet: View {
             guard vlmRequested,
                   vlmRequestedAt == started,
                   engine.modelDownloadProgress?.modelKind != kind.rawValue else { return }
-            stopVLMRequest(kind, error: "The download didn't start. Try again.")
+            stopVLMRequest(kind, error: "The download didn’t start. Try again.")
         }
         // started-then-stalled watchdog. A download that emits ≥1 progress
         // event then goes silent (server hang / dropped link without RST) defeats
@@ -395,7 +458,7 @@ struct WelcomeSheet: View {
     }
 
     static func shortName(_ kind: AIModelKind) -> String {
-        kind.displayName.replacingOccurrences(of: #"\s*\([^)]*bit\)$"#, with: "", options: .regularExpression)
+        kind.shortName
     }
 
     private func vlmChoiceBlocker(_ kind: AIModelKind) -> String? {
@@ -476,8 +539,7 @@ struct WelcomeSheet: View {
     }
 
     private var vlmSizeLabel: String {
-        let gb = Double(resolvedVLMTotalBytes) / 1_073_741_824.0
-        return String(format: "~%.1f GB", gb)
+        "~\(ModelSize.label(resolvedVLMTotalBytes))"
     }
 
     private var vlmRateETA: String? {
@@ -540,6 +602,8 @@ struct WelcomeSheet: View {
         vlmLastProgressAt = nil
         vlmLastError = nil
     }
+
+    private var helperDown: Bool { HelperGate.isDown(engine) }
 
     private var essentialsDownloadLabel: String {
         var bytes: Int64 = 0

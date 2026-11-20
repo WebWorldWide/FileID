@@ -1,15 +1,7 @@
-// LavaLampBackground — port of the macOS/Windows signature background
-// (`platforms/apple/.../Theme/LavaLampBackground.swift`,
-// `platforms/windows/.../Motion/LavaLampBackground.cs`): a near-black #141414
-// base and three slowly drifting glows in the canonical recipe — warm GOLD,
-// ORANGE #FF6600 and a large DARK one that mottles the centre.
-//
-// The glows are GSK radial-gradient nodes, so the renderer draws them on the
-// GPU; nothing is rasterised on the CPU per frame. The lamp advances at most
-// 20 times a second (the Mac cap), and its frame-clock callback exists only
-// while it can be seen moving: the window is on screen, active and not
-// suspended, the lamp is on, and neither Reduce Motion nor high contrast is
-// set. Otherwise it holds its last frame and costs nothing.
+// LavaLampBackground: the signature background, ported 1:1 from macOS and Windows
+// (near-black base, three drifting glows). Glows are GSK radial gradients drawn on the GPU.
+// Frames are capped at 20/s (the Mac cap); the frame callback runs only while the lamp can be
+// seen moving, otherwise it holds its last frame and costs nothing.
 
 use gtk::glib;
 use gtk::prelude::*;
@@ -47,7 +39,6 @@ struct Blob {
     alpha: f64,
 }
 
-/// Speeds, drifts and alphas match the macOS + Windows recipe 1:1.
 const BLOBS: [Blob; 3] = [
     Blob { colour: crate::theme::rgb::GOLD, speed: (0.20, 0.23), drift: (0.30, 0.30), radius: 0.46, alpha: 0.44 },
     Blob { colour: crate::theme::rgb::ORANGE, speed: (0.15, 0.18), drift: (0.40, 0.40), radius: 0.38, alpha: 0.34 },
@@ -76,7 +67,6 @@ struct Conditions {
     suspended: bool,
 }
 
-/// Whether the lamp should be moving right now.
 fn should_animate(c: Conditions) -> bool {
     c.enabled && c.animations && !c.high_contrast && c.mapped && c.active && !c.suspended
 }
@@ -179,7 +169,6 @@ impl LavaLamp {
         }
     }
 
-    /// Starts or stops the frame callback to match what can be seen.
     fn sync(&self) {
         if should_animate(self.conditions()) {
             self.start();

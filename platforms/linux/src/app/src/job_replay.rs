@@ -1,10 +1,5 @@
-// What a page built after startup has missed. Pages learn about running work
-// (a scan, Describe Files, a model download, a speed test) only from engine
-// events, so a page first opened in the middle of a job would look idle. This
-// keeps the newest event of each job that is still running, and a page built
-// late gets them first, followed by a `Ready` when the engine is already up
-// (pages load their data on `Ready`). Replies to a page's own requests are
-// never kept: those belong to the page that asked.
+// Pages built after startup miss engine events for running jobs, so the newest event of each
+// running job is replayed to them. Replies to a page's own requests are never replayed.
 
 use std::rc::Rc;
 

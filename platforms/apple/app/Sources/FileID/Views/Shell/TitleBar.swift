@@ -39,7 +39,7 @@ struct TitleBar: View {
         .background(Theme.bg1.opacity(0.62), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .overlay(alignment: .bottom) { Hairline() }
-        .confirmationDialog("Erase FileID's library and scan this folder again?", isPresented: $confirmWipe, titleVisibility: .visible) {
+        .confirmationDialog("Erase FileID’s library and scan this folder again?", isPresented: $confirmWipe, titleVisibility: .visible) {
             Button("Erase and scan again", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -52,7 +52,7 @@ struct TitleBar: View {
     private var leading: some View {
         HStack(spacing: 10) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) { sidebarVisible.toggle() }
+                withAnimation(Theme.springStandard) { sidebarVisible.toggle() }
             } label: {
                 Image(systemName: "sidebar.left").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget).contentShape(Rectangle())
@@ -72,15 +72,15 @@ struct TitleBar: View {
                         .frame(maxWidth: 180, alignment: .leading)
                         .contentTransition(.opacity)
                         .animation(Theme.spring, value: switcherTitle)
-                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
+                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).accessibilityHidden(true)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
                 .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(folderOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(folderOpen ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Choose which location to show, or add, rescan or close a folder")
             .accessibilityLabel("Location: \(switcherTitle)")
             .accessibilityHint("Chooses which location Library, Search & Moments and Chat show")
@@ -96,7 +96,7 @@ struct TitleBar: View {
         let resolved = url.resolvingSymlinksInPath().path
         guard let root = engine.libraryRoots.first(where: { [path, resolved].contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path) || $0.path == path }),
               root.fileCount > 0 else { return "Not scanned" }
-        return "\(root.fileCount.formatted()) files"
+        return Plural.noun(root.fileCount, "file", "files")
     }
 
     private var switcherTitle: String {
@@ -130,7 +130,7 @@ struct TitleBar: View {
                         scopeCheck(current == root.id)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(root.display).font(Theme.ChromeFont.body(13.5, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
-                            Text(root.path).font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+                            PathLabel(path: root.path, font: Theme.ChromeFont.mono(11), color: Theme.text3)
                         }
                         Spacer(minLength: 8)
                         if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
@@ -158,7 +158,7 @@ struct TitleBar: View {
                 .overlay(alignment: .top) { if !engine.libraryRoots.isEmpty { Hairline(color: Theme.hairlineStrong) } }
             if let url = pickedURL {
                 HStack(alignment: .top, spacing: 10) {
-                    Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14)
+                    Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(url.lastPathComponent).font(Theme.ChromeFont.body(14, .semibold)).foregroundStyle(Theme.text1)
                         Text(url.path).font(Theme.ChromeFont.meta).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
@@ -175,7 +175,7 @@ struct TitleBar: View {
                 Button(pickedURL == nil ? "Choose folder…" : "Choose another folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
-                        .buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("r", modifiers: .command)
+                        .buttonStyle(DSSecondaryButtonStyle(height: 28))
                         .disabled(engine.lastProgress.map { $0.phase == .discovering || $0.phase == .tagging || $0.phase == .postScan } ?? false)
                 }
             }
@@ -196,7 +196,7 @@ struct TitleBar: View {
             }
         }
         .frame(width: 360)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 
@@ -210,27 +210,25 @@ struct TitleBar: View {
                     .foregroundStyle(chatPresented ? Theme.gold : Theme.text2)
                     .frame(width: 30, height: 30)
                     .background(chatPresented ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(chatPresented ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(chatPresented ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                     .contentShape(Rectangle())
             }
             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help(chatPresented ? "Close chat (⌘⇧K)" : "Open chat beside this page (⌘⇧K)")
             .accessibilityLabel(chatPresented ? "Close chat" : "Open chat beside this page")
             .accessibilityAddTraits(chatPresented ? .isSelected : [])
-            .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(activeTab == .chat)
             Button { activeTab = .settings } label: {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: 30, height: 30)
                     .background(activeTab == .settings ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activeTab == .settings ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activeTab == .settings ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                     .contentShape(Rectangle())
             }
             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Settings (⌘,)")
             .accessibilityLabel("Settings")
             .accessibilityAddTraits(activeTab == .settings ? .isSelected : [])
-            .keyboardShortcut(",", modifiers: .command)
         }
     }
 
@@ -251,14 +249,14 @@ struct TitleBar: View {
                 .onExitCommand { searchFocused = false; searchText = "" }
             Text("⌘K").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
                 .padding(.horizontal, 5).padding(.vertical, 2)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.white.opacity(0.16), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         }
         .padding(.leading, 10).padding(.trailing, 6)
         .frame(height: Theme.Metrics.controlLarge)
         .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
-        .background {
-            Button("") { userOpened = true; searchFocused = true; searchOpen = true }.keyboardShortcut("k", modifiers: .command).opacity(0).frame(width: 0, height: 0)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFocusSearch)) { _ in
+            userOpened = true; searchFocused = true; searchOpen = true
         }
         .popover(isPresented: $searchOpen, arrowEdge: .bottom) { searchPopover.chromeTextSize() }
     }
@@ -316,13 +314,13 @@ struct TitleBar: View {
                         .background(groupIndex == 0 && itemIndex == 0 ? Theme.gold.opacity(0.08) : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 }
             }
         }
         .padding(.bottom, 6)
         .frame(width: 400)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 
@@ -344,7 +342,7 @@ struct TitleBar: View {
             let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : (p.phase == .completed ? 1 : 0)
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",
-                                   sub: running ? "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" : "\(p.processed.formatted()) files",
+                                   sub: running ? "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))" : "\(Plural.noun(p.processed, "file", "files"))",
                                    state: p.phase == .completed ? "Done" : running ? Self.scanStateLabel(p.phase, paused: engine.isPaused, fraction: frac) : Self.phaseLabel(p.phase),
                                    color: p.phase == .completed ? Theme.delight : engine.isPaused ? Theme.text3 : Theme.gold,
                                    progress: running && !engine.isPaused && p.phase != .tagging ? nil : frac,
@@ -354,15 +352,15 @@ struct TitleBar: View {
         }
         if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight {
             let frac = d.total > 0 ? Double(d.processed) / Double(d.total) : 0
-            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(d.processed.formatted()) of \(d.total.formatted()) files",
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(d.processed.formatted()) of \(Plural.noun(d.total, "file", "files"))",
                                    state: "\(Int(frac * 100))%", color: Theme.ai, progress: frac, tone: .ai,
                                    button: ("Cancel", { engine.deepAnalyzeCancel() }), open: .deep))
         } else if let done = engine.deepAnalyzeComplete, done.processed > 0 {
-            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(done.processed.formatted()) files", state: "Done", color: Theme.delight,
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(Plural.noun(done.processed, "file", "files"))", state: "Done", color: Theme.delight,
                                    progress: 1, tone: .done, button: nil, open: .deep))
         }
         if engine.faceClusteringInFlight {
-            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: "Finding the same person across photos", state: "Working", color: Theme.ai, progress: nil, tone: .ai, button: nil, open: .people))
+            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: engine.faceStageProgress ?? "Finding the same person across photos", state: "Working", color: Theme.ai, progress: nil, tone: .ai, button: nil, open: .people))
         }
         if let download = engine.modelDownloadProgress {
             let name = AIModelKind.migrated(rawValue: download.modelKind).displayName
@@ -387,7 +385,7 @@ struct TitleBar: View {
     private static func phaseLabel(_ phase: ScanPhase) -> String {
         switch phase {
         case .cancelled: return "Stopped"
-        case .failed: return "Didn't finish"
+        case .failed: return "Didn’t finish"
         default: return ""
         }
     }
@@ -408,11 +406,12 @@ struct TitleBar: View {
         case "running": return "Working \(Int(progress * 100))%"
         case "paused": return "Paused"
         case "cancelled", "canceled": return "Stopped"
-        default: return "Didn't finish"
+        default: return "Didn’t finish"
         }
     }
 
     private var currentActivity: (label: String, color: Color, progress: Double?, tone: ProgressTone, idle: Bool) {
+        if let stopped = HelperGate.pillLabel(for: engine.state) { return (stopped, Theme.danger, nil, .paused, true) }
         if scanRunning, let p = engine.lastProgress {
             let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
             return ("Scanning", Theme.gold, p.phase == .tagging ? frac : nil, .gold, false)
@@ -442,10 +441,10 @@ struct TitleBar: View {
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.controlLarge)
             .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activityOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activityOpen ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .help("What FileID is working on right now")
         .popover(isPresented: $activityOpen, arrowEdge: .bottom) { activityPopover.chromeTextSize() }
     }
@@ -474,8 +473,8 @@ struct TitleBar: View {
                         IndeterminateBar()
                     }
                     HStack(spacing: 6) {
-                        if let button = row.button { Button(button.label) { button.run() }.buttonStyle(DSSecondaryButtonStyle(height: 24)) }
-                        Button("Open \(row.open.title)") { activityOpen = false; activeTab = row.open }.buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        if let button = row.button { Button(button.label) { button.run() }.buttonStyle(.dsSecondary) }
+                        Button("Open \(row.open.title)") { activityOpen = false; activeTab = row.open }.buttonStyle(.dsSecondary)
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 12)
@@ -483,7 +482,7 @@ struct TitleBar: View {
             }
         }
         .frame(width: 400)
-        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
+        .background(Theme.chromeFill, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 }

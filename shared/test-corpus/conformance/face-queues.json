@@ -759,178 +759,18 @@
   ]
  },
  {
-  "name": "cross-face-queues-merge-split-and-undo",
-  "description": "Swift merges a suggested pair and Rust undoes it; Rust splits a person and Swift undoes it; Rust accepts all of a person's suggestions and Swift undoes them, so both engines read each other's queue journals.",
-  "requires": [
-   "swift",
-   "rust"
-  ],
-  "engines": [
-   "swift"
-  ],
-  "start": "swift",
-  "sql": [
-   "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg'),(4,'{root}/4.jpg',4,1,0,'image','jpg'),(5,'{root}/5.jpg',5,1,0,'image','jpg'),(6,'{root}/6.jpg',6,1,0,'image','jpg'),(7,'{root}/7.jpg',7,1,0,'image','jpg'),(8,'{root}/8.jpg',8,1,0,'image','jpg'),(9,'{root}/9.jpg',9,1,0,'image','jpg'),(10,'{root}/10.jpg',10,1,0,'image','jpg'),(11,'{root}/11.jpg',11,1,0,'image','jpg'),(12,'{root}/12.jpg',12,1,0,'image','jpg')",
-   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(1,NULL,0,1,1),(2,'Alex',0,2,2)",
-   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(1,1,1,X'00','b1','m','p',0.8),(2,2,2,X'00','b2','m','p',0.9),(3,3,2,X'00','b3','m','p',0.7)",
-   "INSERT INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES(2,1,0.7123,'m|p',100)",
-   "INSERT INTO persons(id,name,created_at,representative_face_id,file_count) VALUES(5,'Kim',0,11,6)",
-   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(11,1,5,X'00','b11','m','p',0.9),(12,2,5,X'00','b12','m','p',0.8),(13,3,5,X'00','b13','m','p',0.7),(14,4,5,X'00','b14','m','p',0.6),(15,5,5,X'00','b15','m','p',0.5),(16,6,5,X'00','b16','m','p',0.4)",
-   "INSERT INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(5,0.2134,'[11,12,13]','[14,15,16]','m|p',200)",
-   "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,embedding_model,processing_version,face_quality) VALUES(30,12,NULL,X'00','b30','m','p',0.5)",
-   "INSERT INTO face_assignment_assessed(face_id,namespace,outcome,assessed_at) VALUES(30,'m|p','suggested',100)",
-   "INSERT INTO face_review_candidates(face_id,person_id,score,reason,namespace,created_at) VALUES(30,2,0.9,'suggested','m|p',100)"
-  ],
+  "name": "swift-written-face-queues",
+  "description": "A suggested pair the Swift engine merged is undone by this engine from the queue journal it wrote; this engine then splits a person and accepts all of another's suggestions, and each is undone.",
+  "fixture": "swift-written-face-queues",
+  "os": ["darwin"],
   "steps": [
-   {
-    "label": "swift merges",
-    "command": {
-     "resolveFaceReview": {
-      "requestID": "x-1",
-      "personID": 2,
-      "resolution": "merge",
-      "otherPersonID": 1
-     }
-    },
-    "await": "faceReview",
-    "filter": {
-     "requestID": "x-1"
-    },
-    "expect": {
-     "status": "ok",
-     "otherPersonID": 1
-    },
-    "save": {
-     "name": "op",
-     "path": "operationID"
-    }
-   },
-   {
-    "restart": "rust"
-   },
-   {
-    "label": "rust undoes the merge",
-    "command": {
-     "undoFaceReview": {
-      "requestID": "x-2",
-      "operationID": {
-       "$var": "op"
-      }
-     }
-    },
-    "await": "faceReview",
-    "filter": {
-     "requestID": "x-2"
-    },
-    "expect": {
-     "status": "ok",
-     "personID": 2,
-     "otherPersonID": 1,
-     "total": 1
-    }
-   },
-   {
-    "label": "rust splits",
-    "command": {
-     "resolveFaceReview": {
-      "requestID": "x-3",
-      "personID": 5,
-      "resolution": "split"
-     }
-    },
-    "await": "faceReview",
-    "filter": {
-     "requestID": "x-3"
-    },
-    "expect": {
-     "status": "ok"
-    },
-    "save": {
-     "name": "op2",
-     "path": "operationID"
-    }
-   },
-   {
-    "label": "rust accepts all",
-    "command": {
-     "resolveFaceReview": {
-      "requestID": "x-4",
-      "personID": 2,
-      "resolution": "acceptAll"
-     }
-    },
-    "await": "faceReview",
-    "filter": {
-     "requestID": "x-4"
-    },
-    "expect": {
-     "status": "ok",
-     "acceptedFaceIDs": [
-      30
-     ]
-    },
-    "save": {
-     "name": "op3",
-     "path": "operationID"
-    }
-   },
-   {
-    "restart": "swift"
-   },
-   {
-    "label": "swift undoes the split",
-    "command": {
-     "undoFaceReview": {
-      "requestID": "x-5",
-      "operationID": {
-       "$var": "op2"
-      }
-     }
-    },
-    "await": "faceReview",
-    "filter": {
-     "requestID": "x-5"
-    },
-    "expect": {
-     "status": "ok",
-     "personID": 5,
-     "total": 1
-    }
-   },
-   {
-    "label": "swift undoes accept all",
-    "command": {
-     "undoFaceReview": {
-      "requestID": "x-6",
-      "operationID": {
-       "$var": "op3"
-      }
-     }
-    },
-    "await": "faceReview",
-    "filter": {
-     "requestID": "x-6"
-    },
-    "expect": {
-     "status": "ok",
-     "acceptedFaceIDs": [
-      30
-     ]
-    }
-   },
-   {
-    "label": "back to start",
-    "db": "SELECT (SELECT person_id FROM face_prints WHERE id=1), (SELECT COUNT(*) FROM face_prints WHERE person_id=5), (SELECT person_id FROM face_prints WHERE id=30), (SELECT COUNT(*) FROM face_verifications), (SELECT COUNT(*) FROM catalog_operations WHERE state='undone')",
-    "expect": [
-     [
-      1,
-      6,
-      null,
-      0,
-      3
-     ]
-    ]
-   }
+    {"label": "rust undoes the merge", "command": {"undoFaceReview": {"requestID": "x-2", "operationID": {"$var": "op"}}}, "await": "faceReview", "filter": {"requestID": "x-2"}, "expect": {"status": "ok", "personID": 2, "otherPersonID": 1, "total": 1}},
+    {"label": "rust splits", "command": {"resolveFaceReview": {"requestID": "x-3", "personID": 5, "resolution": "split"}}, "await": "faceReview", "filter": {"requestID": "x-3"}, "expect": {"status": "ok"}, "save": {"name": "op2", "path": "operationID"}},
+    {"label": "rust accepts all", "command": {"resolveFaceReview": {"requestID": "x-4", "personID": 2, "resolution": "acceptAll"}}, "await": "faceReview", "filter": {"requestID": "x-4"}, "expect": {"status": "ok", "acceptedFaceIDs": [30]}, "save": {"name": "op3", "path": "operationID"}},
+    {"restart": true},
+    {"label": "rust undoes the split", "command": {"undoFaceReview": {"requestID": "x-5", "operationID": {"$var": "op2"}}}, "await": "faceReview", "filter": {"requestID": "x-5"}, "expect": {"status": "ok", "personID": 5, "total": 1}},
+    {"label": "rust undoes accept all", "command": {"undoFaceReview": {"requestID": "x-6", "operationID": {"$var": "op3"}}}, "await": "faceReview", "filter": {"requestID": "x-6"}, "expect": {"status": "ok", "acceptedFaceIDs": [30]}},
+    {"label": "back to start", "db": "SELECT (SELECT person_id FROM face_prints WHERE id=1), (SELECT COUNT(*) FROM face_prints WHERE person_id=5), (SELECT person_id FROM face_prints WHERE id=30), (SELECT COUNT(*) FROM face_verifications), (SELECT COUNT(*) FROM catalog_operations WHERE state='undone')", "expect": [[1, 6, null, 0, 3]]}
   ]
  }
 ]

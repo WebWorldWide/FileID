@@ -22,8 +22,6 @@ public class PathRedactorTests
     [Fact]
     public void Redact_MacUsersPrefix_ReplacedWithTilde()
     {
-        // Cross-platform DB rows: macOS-shaped paths in the engine's
-        // tables get redacted in C# logs too.
         Assert.Equal("~/photos/trip.jpg", PathRedactor.Redact("/Users/adam/photos/trip.jpg"));
     }
 
@@ -46,8 +44,7 @@ public class PathRedactorTests
     [Fact]
     public void Redact_CaseInsensitiveWindowsMatch()
     {
-        // NTFS is case-insensitive; the redactor must match the user
-        // profile regardless of the casing of the input path.
+        // NTFS is case-insensitive; the redactor must match the user profile regardless of the casing of the input path.
         var home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
         var upper = home.ToUpperInvariant();
         var input = System.IO.Path.Combine(upper, "Pictures", "x.png");

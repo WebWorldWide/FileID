@@ -12,18 +12,8 @@ namespace FileID;
 
 public partial class App : Application
 {
-    /// <summary>
-    /// The single host Window. Code that needs an HWND (folder picker,
-    /// dialogs, drag-region anchors) reaches in here.
-    /// </summary>
     public static Window? HostWindow { get; private set; }
 
-    /// <summary>
-    /// Awaitable handle on the engine-spawn task. The Welcome sheet's
-    /// Install handlers no longer need this directly (they go through
-    /// EngineClient.WaitForReadyAsync), but exposing it lets any other
-    /// startup-sensitive code observe whether the spawn faulted.
-    /// </summary>
     public static Task EngineStartedTask { get; private set; } = Task.CompletedTask;
 
     public App()
@@ -203,23 +193,6 @@ public partial class App : Application
             Trace("ScanCompleteToast.Start");
             try { ScanCompleteToast.Start(); }
             catch (System.Exception ex) { Trace($"ScanCompleteToast.Start failed (non-fatal): {ex.Message}"); }
-
-            // SmolVLM removed: scan-time scene tags come from CLIP
-            // zero-shot. The optional higher-quality VLM (Qwen / Gemma) is
-            // installed manually from the Deep Analyze tab — no silent
-            // multi-GB background fetch at engine-ready.
-
-            // ClassifierAutoInstaller removed: scan-time scene tags now come
-            // from CLIP zero-shot (reusing the already-required MobileCLIP
-            // models), so the separate MobileNetV3 ImageNet classifier — and
-            // its silent ~22 MB "downloading for identifying" fetch — is gone.
-
-            // CudnnAutoInstaller silent fetch removed. The ~430 MB
-            // background download surprised users and added startup-time
-            // GPU pressure during what was already a hang-prone period.
-            // DirectML at 38 fps is sufficient on the RTX 2060 / 6 GB
-            // target. Power users can opt in via Settings → Performance
-            // → "NVIDIA acceleration (cuDNN)". See DECISIONS.md 2026-05-15.
 
             Trace("WorkflowAutoTabRouter.Hook");
             try { WorkflowAutoTabRouter.Hook(); }

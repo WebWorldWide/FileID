@@ -3,7 +3,6 @@ use gtk::prelude::*;
 use super::Page;
 use crate::v3::{hbox, label, section as section_label, spacer, vbox};
 
-/// Crumb (AREA / PAGE), serif 34 title and trailing page meta over a hairline.
 #[derive(Clone)]
 pub struct PageHeader {
     pub root: gtk::Box,
@@ -41,7 +40,6 @@ impl PageHeader {
     }
 }
 
-/// The page under its header, on the frosted page fill.
 pub fn wrap(page: &Page, content: &gtk::Widget) -> (gtk::Box, PageHeader) {
     let header = PageHeader::new(page);
     let column = vbox(0);

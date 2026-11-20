@@ -1,11 +1,5 @@
 #![allow(deprecated)]
 
-// FileID Linux — gtk4 + libadwaita entrypoint.
-//
-// Mirror of macOS FileIDApp.swift / Windows App.xaml.cs. Boots an
-// adw::Application, installs the shared design system (palette, glass
-// surfaces, force-dark), and presents the main window over the LavaLamp
-// background. The window spawns the engine subprocess.
 
 #![allow(clippy::type_complexity)]
 
@@ -35,11 +29,8 @@ const APP_ID: &str = "io.github.fileid.FileID";
 
 fn main() -> glib::ExitCode {
     window::note_launch();
-    // Chat retrieval runs the CLIP/BGE text encoders in this process.
-    fileid_engine::ort_runtime::disable_telemetry_before_load();
 
-    // Local-only structured logging. Same envelope shape as the engine so the
-    // two log streams interleave cleanly. NEVER transmits.
+    // Local-only structured logging; NEVER transmits.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

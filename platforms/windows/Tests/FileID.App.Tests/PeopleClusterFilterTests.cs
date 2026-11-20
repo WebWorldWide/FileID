@@ -5,8 +5,6 @@ using Xunit;
 
 namespace FileID.App.Tests;
 
-/// Pins the People-grid presentation contract: every active face cluster is
-/// visible regardless of size, while the explicit Unknown filter still applies.
 public class PeopleClusterFilterTests
 {
     private const string Schema = """

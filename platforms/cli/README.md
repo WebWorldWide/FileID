@@ -21,7 +21,7 @@ fileid --help
 
 The script builds `FileIDEngine`, `fileid`, and `fileid-tui` in release mode and
 installs them in `~/.cargo/bin`. On Windows, the PowerShell installer also
-stages ONNX Runtime and DirectML:
+stages PDFium:
 
 ```powershell
 .\scripts\build-tools.ps1
@@ -85,8 +85,6 @@ success, so `fileid people` is immediately current.
 | `fileid restructure --apply [ROOT]` | collision-safe moves with stale-plan/path guards and undo journal |
 | `fileid models list` | install state, size, license, and pinned repository for each model |
 | `fileid models download <NAME…>` | SHA-256-verified, user-initiated model install |
-| `fileid runtime status` | report ONNX Runtime availability |
-| `fileid runtime install` | one-time macOS ONNX Runtime setup when needed |
 
 A bare `fileid` prints a guided tour. Every command has focused examples under
 `fileid <command> --help`.
@@ -134,13 +132,6 @@ events. It requires the engine binary plus these minimum models:
 The engine is resolved from `$FILEID_ENGINE_BIN`, beside `fileid`, repository
 engine build directories, and then `PATH`. Models install under the engine's
 writable model directory and are separate from the macOS app's Core ML bundle.
-
-On macOS, check the dynamically loaded inference runtime once:
-
-```bash
-fileid runtime status
-fileid runtime install
-```
 
 Use `fileid models list` for optional tagging, text-search, speech, and Deep
 Analyze models. `--all --dry-run` reports the full size and license set without
