@@ -190,7 +190,7 @@ struct SankeyFlowView: View {
                     )
                     // Replay entrance animation when data changes.
                     entranceProgress = 0
-                    withAnimation(.easeOut(duration: 0.55)) {
+                    withAnimation(Theme.springStandard) {
                         entranceProgress = 1
                     }
                 }
@@ -200,7 +200,7 @@ struct SankeyFlowView: View {
             .clipped()
             .onAppear {
                 if entranceProgress < 1 {
-                    withAnimation(.easeOut(duration: 0.55)) {
+                    withAnimation(Theme.springStandard) {
                         entranceProgress = 1
                     }
                 }
@@ -237,7 +237,7 @@ struct SankeyFlowView: View {
         }
         // Performant ribbon animation: only opacity transitions, no
         // per-ribbon view diff. Canvas redraws once per state change.
-        .animation(.easeOut(duration: 0.18), value: hoveredFlowID)
+        .animation(Theme.quick, value: hoveredFlowID)
     }
 
     private enum RibbonState { case resting, dimmed, highlighted }
@@ -260,8 +260,8 @@ struct SankeyFlowView: View {
         )
         let opacity: CGFloat
         switch state {
-        case .resting:     opacity = 0.18
-        case .dimmed:      opacity = 0.04
+        case .resting:     opacity = 0.42
+        case .dimmed:      opacity = 0.08
         case .highlighted: opacity = 0.95
         }
         let thickness = ribbonThickness(for: flow.count)
@@ -335,7 +335,7 @@ struct SankeyFlowView: View {
         .frame(height: slot.height)
         .contentShape(Rectangle())
         .help("\(node.label) · \(node.count) file\(node.count == 1 ? "" : "s") · click to see them")
-        .animation(.easeOut(duration: 0.18), value: isFocused)
+        .animation(Theme.quick, value: isFocused)
     }
 
     // MARK: - Hover handling
@@ -793,13 +793,15 @@ struct SankeyFlowView: View {
 
     /// Proportional slot Y positions for a column: small nodes flex up to `preferredMin`, the rest scale to fit. The 14pt gaps keep node shadows apart, and the buffer leaves room for the focused halo.
     private static let columnVerticalBuffer: CGFloat = 14
+    private static let nodeSlotHeight: CGFloat = 44
+    private static let nodeGap: CGFloat = 14
 
-    private static func layoutSlots(nodes: [Node], totalHeight: CGFloat) -> [String: Slot] {
+    static func layoutSlots(nodes: [Node], totalHeight: CGFloat) -> [String: Slot] {
         guard !nodes.isEmpty, totalHeight > 0 else { return [:] }
-        let gap: CGFloat = 14
+        let gap = nodeGap
         let totalCount = nodes.reduce(0) { $0 + $1.count }
-        let preferredMin: CGFloat = 28
-        let absoluteMin: CGFloat = 18
+        let preferredMin = nodeSlotHeight
+        let absoluteMin: CGFloat = 40
         let buffer = columnVerticalBuffer
         let layoutHeight = max(0, totalHeight - buffer * 2)
         let availableHeight = max(0, layoutHeight - CGFloat(nodes.count - 1) * gap)
@@ -860,10 +862,13 @@ struct SankeyFlowView: View {
         return result
     }
 
-    private var sankeyHeight: CGFloat {
-        let maxNodes = max(layout.sources.count, layout.destinations.count, 1)
-        if maxNodes < 4 { return 160 + CGFloat(maxNodes) * 40 }
-        return min(580, max(320, CGFloat(maxNodes) * 56))
+    private var sankeyHeight: CGFloat { Self.mapHeight(nodeCount: max(layout.sources.count, layout.destinations.count, 1)) }
+
+    /// Tall enough that every node slot keeps its two label lines and the gap between nodes.
+    static func mapHeight(nodeCount maxNodes: Int) -> CGFloat {
+        let fitsNodes = CGFloat(maxNodes) * (Self.nodeSlotHeight + Self.nodeGap) + 2 * Self.columnVerticalBuffer
+        if maxNodes < 4 { return max(160 + CGFloat(maxNodes) * 40, fitsNodes) }
+        return max(320, fitsNodes)
     }
 
 }

@@ -75,6 +75,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastScrollToTopToken = 0
         private var atTop = true
         private var lastClickRowID: Int64?
+        private var showsChipRow = true
 
         @objc func scrolled(_ note: Notification) {
             guard let clip = note.object as? NSClipView else { return }
@@ -94,8 +95,12 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             let stateChanged = grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
                 || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize || grid.offline != lastOffline
             if !grid.selectMode { cursorID = nil }
-            if let layout = collection.collectionViewLayout as? AdaptiveGridLayout, layout.textSize != grid.textSize {
-                layout.textSize = grid.textSize
+            if contentChanged {
+                showsChipRow = grid.rows.contains { !LibraryTileItem.displayTags(grid.tagsByFile[$0.id] ?? [], kind: $0.kind).isEmpty }
+            }
+            if let layout = collection.collectionViewLayout as? AdaptiveGridLayout {
+                if layout.textSize != grid.textSize { layout.textSize = grid.textSize }
+                if layout.showsChipRow != showsChipRow { layout.showsChipRow = showsChipRow }
             }
             if force || newIDs != ids {
                 let appended = !ids.isEmpty && newIDs.count > ids.count && Array(newIDs.prefix(ids.count)) == ids
@@ -204,6 +209,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 checked: model.checkedIDs.contains(row.id),
                 offline: model.offline.isOffline(row.pathText),
                 textSize: model.textSize,
+                reservesChipRow: showsChipRow,
                 reloadImage: reloadImage)
             tile.onClick = { [weak self] count in
                 guard let self, let model = self.model else { return }
@@ -229,6 +235,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
 final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
     private(set) var columnCount = 1
     var textSize: TextSize = .standard { didSet { if textSize != oldValue { invalidateLayout() } } }
+    var showsChipRow = true { didSet { if showsChipRow != oldValue { invalidateLayout() } } }
     override init() {
         super.init()
         minimumInteritemSpacing = 12
@@ -243,7 +250,7 @@ final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
             let columns = max(1, Int((usable + minimumInteritemSpacing) / (160 + minimumInteritemSpacing)))
             columnCount = columns
             let itemWidth = floor((usable - CGFloat(columns - 1) * minimumInteritemSpacing) / CGFloat(columns))
-            itemSize = NSSize(width: itemWidth, height: (itemWidth * 3 / 4).rounded() + TileTextMetrics(textSize).captionHeight)
+            itemSize = NSSize(width: itemWidth, height: (itemWidth * 3 / 4).rounded() + TileTextMetrics(textSize).captionHeight(includingChips: showsChipRow))
         }
         super.prepare()
     }
@@ -383,7 +390,12 @@ struct TileTextMetrics: Equatable {
         meta = line(15)
     }
 
-    var captionHeight: CGFloat { Self.gap + name + Self.lineGap + chip + Self.lineGap + meta + Self.bottom }
+    var captionHeight: CGFloat { captionHeight(includingChips: true) }
+
+    /// Without a chip row (no file in the listing has tags) the size and date sit directly under the name.
+    func captionHeight(includingChips: Bool) -> CGFloat {
+        Self.gap + name + Self.lineGap + (includingChips ? chip + Self.lineGap : 0) + meta + Self.bottom
+    }
 }
 
 /// One reusable tile: layer-backed thumbnail, kind badge, name, two tag chips,
@@ -410,6 +422,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let unreadableGlyph = NSImageView()
     private let kindGlyph = NSImageView()
     private var findsSimilar = false
+    private var reservesChipRow = true
     private var topLeftText = false
     private var rowID: Int64?
     private var thumbTask: Task<Void, Never>?
@@ -486,7 +499,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         kindGlyph.frame = CGRect(x: thumbFrame.midX - 24, y: thumbFrame.midY - 24, width: 48, height: 48)
         var y = b.height - thumbHeight - TileTextMetrics.gap - metrics.name
         name.frame = CGRect(x: 0, y: y, width: b.width, height: metrics.name)
-        y -= TileTextMetrics.lineGap + metrics.chip
+        if reservesChipRow { y -= TileTextMetrics.lineGap + metrics.chip }
         var x: CGFloat = 0
         var showsSecond = !chips[1].isHidden
         let first = chips[0].textWidth + 14, second = chips[1].textWidth + 14
@@ -510,7 +523,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.commit()
     }
 
-    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, offline: Bool, textSize: TextSize, reloadImage: Bool) {
+    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, offline: Bool, textSize: TextSize, reservesChipRow: Bool = true, reloadImage: Bool) {
         let changedFile = rowID != row.id
         if textSize != self.textSize {
             self.textSize = textSize
@@ -519,6 +532,7 @@ final class LibraryTileItem: NSCollectionViewItem {
             CATransaction.commit()
         }
         rowID = row.id
+        self.reservesChipRow = reservesChipRow
         self.isChosen = selected
         self.checked = checked
         badge.text = row.failed ? "Unreadable" : FileKindLabel.title(row.kind)
