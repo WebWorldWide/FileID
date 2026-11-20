@@ -83,7 +83,7 @@ struct LibraryListTable: NSViewRepresentable {
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
-        scroll.automaticallyAdjustsContentInsets = false
+        scroll.automaticallyAdjustsContentInsets = true
         scroll.contentView.drawsBackground = false
         scroll.contentView.postsBoundsChangedNotifications = true
         scroll.postsFrameChangedNotifications = true
@@ -346,6 +346,8 @@ final class ListHeaderView: NSTableHeaderView {
     override func draw(_ dirtyRect: NSRect) {
         guard let table = tableView else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSColor(hex: 0x0F0F11).setFill()
+            bounds.fill()
             Theme.nsHairline.setFill()
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
             let current = table.sortDescriptors.first

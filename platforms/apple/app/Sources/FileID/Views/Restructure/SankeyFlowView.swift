@@ -829,6 +829,13 @@ struct SankeyFlowView: View {
             }
         }
         let flexAvailable = max(0, availableHeight - fixedTotal)
+        let floorTotal = preferredMin * CGFloat(nodes.count)
+        if availableHeight >= floorTotal, flexCountSum > 0 {
+            let extra = availableHeight - floorTotal
+            for (i, n) in nodes.enumerated() where heights[i] == 0 {
+                heights[i] = preferredMin + extra * CGFloat(n.count) / CGFloat(flexCountSum)
+            }
+        }
         for (i, n) in nodes.enumerated() {
             if heights[i] == 0 {
                 let h = flexCountSum > 0

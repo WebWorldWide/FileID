@@ -11,7 +11,7 @@ struct SankeyFolderCountTests {
     }
 }
 
-@Suite("Folder map slots")
+@MainActor @Suite("Folder map slots")
 struct SankeySlotTests {
     private func nodes(_ counts: [Int]) -> [SankeyFlowView.Node] {
         counts.enumerated().map { index, count in
