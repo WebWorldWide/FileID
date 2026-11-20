@@ -7,7 +7,7 @@ struct EngineNoticeKindsTests {
     @Test("notices from either engine raise no error card")
     func quietKinds() {
         for kind in ["rescan_no_changes", "scan_already_running", "scan_already_queued", "prewarm_cancelled",
-                     "model_license_not_accepted"] {
+                     "model_license_not_accepted", "scan_slower_path"] {
             #expect(EngineClient.isQuietNotice(kind), "\(kind)")
         }
         for kind in ["scan_failed", "empty_folder", "db_unavailable", "something_new"] {

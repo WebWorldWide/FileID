@@ -75,6 +75,11 @@ struct CleanupView: View {
         let visible = visibleGroups
         VStack(spacing: 0) {
             header(visible: visible, totals: selectionTotals(in: visible))
+            if let note = Self.unreadableNote(store.unreadableFiles, timedOut: store.unreadableTimedOutFiles) {
+                MetaText(note, color: Theme.text2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.bottom, 10)
+            }
             Divider().opacity(0.4)
             if visible.isEmpty {
                 empty
@@ -141,10 +146,8 @@ struct CleanupView: View {
     @ViewBuilder
     private func header(visible: [DuplicateGroup], totals: SelectionTotals) -> some View {
         let totalSelected = totals.count
-        HStack(alignment: .center, spacing: 12) {
-            MetaText(headerSubtitle(visible: visible), color: Theme.text2)
-                .lineLimit(2)
-                .layoutPriority(-1)
+        let subtitle = MetaText(headerSubtitle(visible: visible), color: Theme.text2)
+        let controls = Group {
             SegmentedBar(selection: $mode, options: [("exact", "Exact copies"), ("similar", "Look-alikes")])
             .help("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
             Spacer()
@@ -200,6 +203,13 @@ struct CleanupView: View {
                 }
             }
         }
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) { subtitle.fixedSize(); controls }
+            VStack(alignment: .leading, spacing: 8) {
+                subtitle.fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .center, spacing: 12) { controls }
+            }
+        }
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
     }
 
@@ -209,12 +219,15 @@ struct CleanupView: View {
         return "\(extraCopies.formatted()) extra cop\(extraCopies == 1 ? "y" : "ies") in \(groups.formatted()) group\(groups == 1 ? "" : "s") · \(freed) can be freed"
     }
 
-    /// Files that failed to read are in no group; Library's Unreadable chip counts the same rows.
-    static func unreadableNote(_ count: Int) -> String? {
+    /// Files that failed to read are in no group; Library's Unreadable chip counts the same rows. "Yet" only for the ones a later scan can still read.
+    static func unreadableNote(_ count: Int, timedOut: Int = 0) -> String? {
         guard count > 0 else { return nil }
-        return count == 1
-            ? "1 file couldn't be read yet — it's not in these results"
-            : "\(count.formatted()) files couldn't be read yet — they're not in these results"
+        let noun = count == 1 ? "1 file" : "\(count.formatted()) files"
+        let them = count == 1 ? "it's" : "they're"
+        let timedOut = min(max(timedOut, 0), count)
+        if timedOut == 0 { return "\(noun) couldn't be read, so \(them) not in these results" }
+        if timedOut == count { return "\(noun) couldn't be read yet, so \(them) not in these results" }
+        return "\(noun) couldn't be read, so \(them) not in these results. \(timedOut.formatted()) of them ran out of time and may read next time"
     }
 
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
@@ -232,7 +245,6 @@ struct CleanupView: View {
             base = Self.exactSummary(groups: g, extraCopies: extraCopies, bytes: bytes)
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
-        if let note = Self.unreadableNote(store.unreadableFiles) { result += " · \(note)" }
         if !isSimilar && exactPreviewPartial {
             if exactCapped { result += " · more may exist" }
             if exactSkipped > 0 { result += " · \(exactSkipped) couldn't be checked" }

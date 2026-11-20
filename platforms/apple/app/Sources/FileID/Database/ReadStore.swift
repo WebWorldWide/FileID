@@ -47,6 +47,8 @@ public final class ReadStore: @unchecked Sendable {
     /// Files the scan could not decode or read; the Library hides them unless
     /// the Unreadable filter is chosen.
     public private(set) var unreadableFiles: Int = 0
+    /// The part of `unreadableFiles` that failed only because the machine was too busy; a later scan can still read them.
+    public private(set) var unreadableTimedOutFiles: Int = 0
     /// Files cataloged by name, size and dates only (archives, installers, unknown types).
     public private(set) var otherFiles: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
@@ -112,6 +114,7 @@ public final class ReadStore: @unchecked Sendable {
             self.totalFiles = 0
             self.totalImages = 0
             self.unreadableFiles = 0
+            self.unreadableTimedOutFiles = 0
             self.otherFiles = 0
             self.totalDuplicateGroups = 0
             self.totalReclaimableBytes = 0
@@ -179,6 +182,7 @@ public final class ReadStore: @unchecked Sendable {
         let totalFiles: Int
         let totalImages: Int
         let unreadableFiles: Int
+        let unreadableTimedOutFiles: Int
         let otherFiles: Int
         let scopedTotalFiles: Int
         let scopedUnreadableFiles: Int
@@ -258,6 +262,7 @@ public final class ReadStore: @unchecked Sendable {
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL)") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
+                let unreadableTimedOutFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(Self.timedOutSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
                 var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
                 if let scope {
@@ -308,6 +313,7 @@ public final class ReadStore: @unchecked Sendable {
                     totalFiles: totalFiles,
                     totalImages: totalImages,
                     unreadableFiles: unreadableFiles,
+                    unreadableTimedOutFiles: unreadableTimedOutFiles,
                     otherFiles: otherFiles,
                     scopedTotalFiles: scoped.total,
                     scopedUnreadableFiles: scoped.unreadable,
@@ -332,6 +338,7 @@ public final class ReadStore: @unchecked Sendable {
         if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
         if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
         if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }
+        if self.unreadableTimedOutFiles != snapshot.unreadableTimedOutFiles { self.unreadableTimedOutFiles = snapshot.unreadableTimedOutFiles }
         if self.otherFiles != snapshot.otherFiles { self.otherFiles = snapshot.otherFiles }
         if self.scopedTotalFiles != snapshot.scopedTotalFiles { self.scopedTotalFiles = snapshot.scopedTotalFiles }
         if self.scopedUnreadableFiles != snapshot.scopedUnreadableFiles { self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles }
@@ -349,6 +356,14 @@ public final class ReadStore: @unchecked Sendable {
     public static let unreadableFilter = "unreadable"
     /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
     static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%' AND \(notEngineHiddenSQL)"
+    /// Stored `error_message` of a row that failed because the machine was too busy (`tagging.rs` `TIMEOUT_MESSAGES`, and the "ran out of time" wording that replaces them).
+    nonisolated static let timedOutMessages = ["per-file timeout after 60s", "Vision pass timed out"]
+    nonisolated static let timedOutSQL =
+        "(COALESCE(error_message, '') IN (\(timedOutMessages.map { "'" + $0 + "'" }.joined(separator: ", "))) OR COALESCE(error_message, '') LIKE '%ran out of time%')"
+    nonisolated static func isTimedOut(errorMessage: String?) -> Bool {
+        guard let errorMessage else { return false }
+        return timedOutMessages.contains(errorMessage) || errorMessage.contains("ran out of time")
+    }
     /// The two `failed = 1` reasons the Rust engine writes for a row that is not a broken file: one removed from
     /// its folder (kept 30 days so a returning file re-binds) and an empty one. Same exact strings as
     /// `scan_session.rs` `HIDDEN_ROW_MESSAGE` and `db/zero_byte.rs` `ZERO_BYTE_REASON`.
@@ -1219,18 +1234,16 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Deep Analyze queries
 
-    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int) {
-        guard let q = queue else { return (0, 0) }
+    /// `pending`: files the chosen model has not described (a run with "only files not described yet" does these). `undescribed`: files no model has described.
+    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int, undescribed: Int) {
+        guard let q = queue else { return (0, 0, 0) }
         return (try? q.read { db in
-            let total = try Int.fetchOne(db, sql:
-                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0") ?? 0
-            let pending = try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM files
-                WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
-                  AND (vlm_full_model IS NULL OR vlm_full_model != ?)
-                """, arguments: [modelKey]) ?? 0
-            return (total, pending)
-        }) ?? (0, 0)
+            let describable = "kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0"
+            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable)") ?? 0
+            let pending = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND (vlm_full_model IS NULL OR vlm_full_model != ?)", arguments: [modelKey]) ?? 0
+            let undescribed = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND vlm_full_model IS NULL") ?? 0
+            return (total, pending, undescribed)
+        }) ?? (0, 0, 0)
     }
 
     /// All non-failed image files that have a non-empty

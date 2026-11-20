@@ -151,6 +151,8 @@ public final class EngineClient {
     /// False when the engine reports mlx.metallib missing (Deep Analyze would crash on first VLM call); the UI disables and explains.
     public private(set) var deepAnalyzeAvailable: Bool = true
     public private(set) var deepAnalyzeUnavailableReason: String?
+    /// The scan fell back to the CPU for picture search and will take longer than usual; cleared when the next scan starts.
+    public private(set) var scanRunsOnCPU = false
 
     /// Bumped on every engine exit. A dead engine can't emit the terminal events that clear a view's own in-flight UI (e.g. Deep Analyze's StreamCard + Cancel), so views reset that state via `.onChange`. The client's own flags are reset in `handleEngineExit`.
     public private(set) var engineResetSignal: Int = 0
@@ -485,11 +487,11 @@ public final class EngineClient {
         return nil
     }
 
-    /// Error kinds that are a notice, not a failure: the user's own Cancel, a repeated Scan click (Swift sends `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
+    /// Error kinds that are a notice, not a failure: the user's own Cancel, a scan that fell back to the CPU, a repeated Scan click (Swift sends `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
     nonisolated static func isQuietNotice(_ kind: String) -> Bool {
         switch kind {
         case "prewarm_cancelled", "scan_already_queued", "scan_already_running", "rescan_no_changes",
-             "model_license_not_accepted": return true
+             "model_license_not_accepted", "scan_slower_path": return true
         default: return false
         }
     }
@@ -627,7 +629,8 @@ public final class EngineClient {
             }
             // The user's own Cancel, a repeated click and a declined license aren't failures; the request already told them.
             if Self.isQuietNotice(e.kind) {
-                Self.debug("engine notice (user-initiated): \(e.kind)")
+                Self.debug("engine notice: \(e.kind)")
+                if e.kind == "scan_slower_path" { scanRunsOnCPU = true }
                 return
             }
             lastError = e
@@ -932,6 +935,7 @@ public final class EngineClient {
 
     public func startScan(rootURL: URL) {
         isPaused = false
+        scanRunsOnCPU = false
         let displayPath = rootURL.path
         // The persisted app-scoped bookmark stays in the app; the engine gets a separate implicit-scope bookmark that can cross the process boundary.
         let client = self

@@ -604,8 +604,17 @@ struct LibraryView: View {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 10) {
                     filterControls
+                    summaryControls(wrapped: false)
                     Spacer(minLength: 8)
                     modeControls
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterControls
+                        Spacer(minLength: 8)
+                        modeControls
+                    }
+                    HStack(alignment: .center, spacing: 10) { summaryControls(wrapped: true) }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .center, spacing: 10) {
@@ -619,6 +628,7 @@ struct LibraryView: View {
                             modeControls
                         }
                     }
+                    HStack(alignment: .center, spacing: 10) { summaryControls(wrapped: true) }
                 }
             }
         }
@@ -661,15 +671,16 @@ struct LibraryView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
         kindPicker
+    }
 
+    @ViewBuilder
+    private func summaryControls(wrapped: Bool) -> some View {
         if !(rows.isEmpty && shownTotal == 0) {
-            ViewThatFits(in: .horizontal) {
-                if let visualSummary { MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize() }
-                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
-                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
-                Color.clear.frame(width: 0, height: 0)
+            if let visualSummary {
+                MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize(horizontal: !wrapped, vertical: true)
+            } else {
+                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize(horizontal: !wrapped, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
 
         if hiddenWeaker > 0, !rows.isEmpty {
@@ -811,6 +822,21 @@ struct LibraryView: View {
         return short ? "\(rows.formatted())/\(total.formatted())" : "\(rows.formatted()) of \(total.formatted()) shown"
     }
 
+    /// "3 of 472" once the listing's size is known; "3 of 300+" while more pages remain unloaded and the size isn't.
+    static func previewPosition(index: Int, loaded: Int, moreToLoad: Bool, knownTotal: Int?) -> String {
+        let position = (index + 1).formatted()
+        guard moreToLoad else { return "\(position) of \(loaded.formatted())" }
+        if let knownTotal { return "\(position) of \(max(knownTotal, loaded).formatted())" }
+        return "\(position) of \(loaded.formatted())+"
+    }
+
+    /// The whole listing's size when it is the plain kind listing: a search, similarity seed or narrowed kind has no cheap total.
+    private var listingTotal: Int? {
+        guard similarSeed == nil, searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              kindFilter == nil || kindFilter == ReadStore.unreadableFilter else { return nil }
+        return shownTotal
+    }
+
     /// Files the current listing draws from: unreadable files appear only under their own filter.
     private var shownTotal: Int {
         kindFilter == ReadStore.unreadableFilter ? store.scopedUnreadableFiles : max(0, store.scopedTotalFiles - store.scopedUnreadableFiles)
@@ -920,6 +946,7 @@ struct LibraryView: View {
             FilePreviewSheet(siblings: previewSiblings,
                               indexByID: previewIndex,
                               selectedID: $previewSelectedID,
+                              moreToLoad: canLoadMore, knownTotal: listingTotal,
                               store: store, engine: engine,
                               onEdit: { editEpoch += 1; refreshBulkState() },
                               onNearEnd: { loadMore() })
@@ -1132,6 +1159,10 @@ private struct FilePreviewSheet: View {
     /// Position of each sibling, built once when the list changes.
     let indexByID: [Int64: Int]
     @Binding var selectedID: Int64?
+    /// True while the grid has more pages than the siblings loaded so far.
+    let moreToLoad: Bool
+    /// The listing's real size when the library already knows it.
+    let knownTotal: Int?
     let store: ReadStore
     let engine: EngineClient
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
@@ -1319,7 +1350,7 @@ private struct FilePreviewSheet: View {
             if siblings.count > 1, let index = siblingIndex {
                 HStack(spacing: 2) {
                     iconButton("chevron.left", "Previous file (←)") { step(-1) }.disabled(index <= 0)
-                    Text("\(index + 1) of \(siblings.count)")
+                    Text(LibraryView.previewPosition(index: index, loaded: siblings.count, moreToLoad: moreToLoad, knownTotal: knownTotal))
                         .font(Theme.Font.body(12.5)).monospacedDigit().foregroundStyle(Theme.text2)
                         .frame(minWidth: 70)
                     iconButton("chevron.right", "Next file (→)") { step(1) }.disabled(index >= siblings.count - 1)
@@ -1487,7 +1518,11 @@ private struct FileDetailRows: View {
     let people: [String]
     var body: some View {
         DetailRow("Kind", FileKindLabel.detail(kind: file.kind, fileExtension: file.extension))
-        if file.failed { DetailRow("Status", "Couldn't be read, so it has no tags, faces or text. It may be damaged.") }
+        if file.failed {
+                    DetailRow("Status", ReadStore.isTimedOut(errorMessage: file.errorMessage)
+                        ? "FileID ran out of time reading this file, so it has no tags, faces or text yet. It isn't damaged."
+                        : "Couldn't be read, so it has no tags, faces or text. It may be damaged.")
+                }
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
         if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }

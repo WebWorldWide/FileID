@@ -49,7 +49,7 @@ struct Detail: View {
 
     private var pageMeta: String {
         switch activeTab {
-        case .library: return store.scopedTotalFiles > 0 ? "\(store.scopedTotalFiles.formatted()) files" + (store.scope.map { " in \($0.root.display)" } ?? "") : ""
+        case .library: return Self.libraryMeta(total: store.scopedTotalFiles, unreadable: store.scopedUnreadableFiles, location: store.scope?.root.display)
         case .deep:
             if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) of \(d.total.formatted()) files" }
             return ""
@@ -57,6 +57,16 @@ struct Detail: View {
         case .restructure: return pickedURL?.lastPathComponent ?? ""
         default: return ""
         }
+    }
+
+    /// The grid lists only readable files, so the header counts those and names the rest.
+    static func libraryMeta(total: Int, unreadable: Int, location: String?) -> String {
+        guard total > 0 else { return "" }
+        let readable = max(0, total - unreadable)
+        var text = "\(readable.formatted()) file\(readable == 1 ? "" : "s")"
+        if let location { text += " in \(location)" }
+        if unreadable > 0 { text += " · \(unreadable.formatted()) couldn't be read" }
+        return text
     }
 
     private var pageHeader: some View {

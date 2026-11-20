@@ -26,6 +26,9 @@ struct DeepAnalyzeModelPickerCard: View {
     private var top3: [AIModelKind] {
         AIModelKind.recommendedFor(ramGB: ramGB)
     }
+    private var recommendation: VLMRecommendation {
+        VLMRecommendation(ramGB: ramGB, advice: engine.vlmAdvice, freeDiskBytes: DescriptionModelStore.freeDiskBytes())
+    }
 
     var body: some View {
         Panel(padding: 16) {
@@ -33,11 +36,14 @@ struct DeepAnalyzeModelPickerCard: View {
                 HStack {
                     Text("Descriptions and Chat").font(Theme.Font.body(14, .semibold))
                     Spacer()
-                    Text("Suggested for this Mac (\(Int(ramGB)) GB memory)")
+                    Text("This Mac has \(Int(ramGB)) GB memory")
                         .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                 }
                 Text("The AI that writes descriptions and suggested names, and answers Chat. Bigger models write better but need more memory.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
+                if let reason = recommendation.reason {
+                    Text(reason).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                }
                 Divider().opacity(0.3)
                 if !AIModelKind.favorites.contains(settings.activeKind) {
                     Text("Selected model").font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.ai)
@@ -78,6 +84,7 @@ struct DeepAnalyzeModelPickerCard: View {
             onDiskBytes = await Task.detached(priority: .utility) { DescriptionModelStore.sizeOnDisk(kind) }.value
         }
         .onChange(of: settings.activeKind.rawValue) { _, _ in failure = nil }
+        .onAppear { engine.refreshVLMAdvice() }
         .onChange(of: engine.lastErrorSignal) { _, _ in
             guard requested != nil, let error = engine.lastError else { return }
             if error.kind == "prewarm_cancelled" { requested = nil; return }
@@ -192,6 +199,7 @@ struct DeepAnalyzeModelPickerCard: View {
             isActive: settings.activeKind == kind,
             installed: ModelInstallStatus.isInstalled(kind: kind),
             fits: kind.fits(ramGB: ramGB),
+            recommended: recommendation.kind == kind,
             ramGB: ramGB,
             onPick: { settings.activeKind = kind }
         )
@@ -205,6 +213,7 @@ private struct ModelOptionRow: View {
     let isActive: Bool
     let installed: Bool
     let fits: Bool
+    let recommended: Bool
     let ramGB: Double
     let onPick: () -> Void
 
@@ -259,6 +268,7 @@ private struct ModelOptionRow: View {
         HStack(spacing: 6) {
             Text(kind.displayName)
                 .font(Theme.Font.body(13.5, .semibold))
+            if recommended { BadgePill(label: "Recommended", color: Theme.gold) }
             badgeView
         }
     }
@@ -346,7 +356,7 @@ struct DeepAnalyzeView: View {
     // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
     // pass (multi-hour overnight runs). Refreshed on the same coarse triggers as
     // pendingRenameCount, plus active-model changes (pending is keyed by model).
-    @State private var pendingTotals: (total: Int, pending: Int) = (0, 0)
+    @State private var pendingTotals: (total: Int, pending: Int, undescribed: Int) = (0, 0, 0)
 
     /// True when at least one person cluster has been given a name.
     /// Hard requirement before Deep Analyze can run — the VLM uses the
@@ -781,7 +791,21 @@ struct DeepAnalyzeView: View {
                     }
                     GridRow {
                         Text("Not described yet").foregroundStyle(Theme.text3)
-                        Text("\(totals.pending.formatted()) files").font(Theme.Font.body(13, .medium)).monospacedDigit()
+                        Text("\(totals.undescribed.formatted()) files").font(Theme.Font.body(13, .medium)).monospacedDigit()
+                    }
+                    if totals.pending > totals.undescribed {
+                        GridRow {
+                            Text("Described by another model").foregroundStyle(Theme.text3)
+                            Text("\((totals.pending - totals.undescribed).formatted()) files · \(settings.activeKind.displayName) describes them again")
+                                .font(Theme.Font.body(13, .medium)).monospacedDigit()
+                        }
+                    }
+                    if let done = engine.deepAnalyzeComplete, done.processed > 0, !engine.deepAnalyzeInFlight {
+                        GridRow {
+                            Text("Last run").foregroundStyle(Theme.text3)
+                            Text("\(done.processed.formatted()) file\(done.processed == 1 ? "" : "s") described \(DescribeRunSummary.modelNote(ran: done.modelKind, chosen: settings.activeKind))")
+                                .font(Theme.Font.body(13, .medium)).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     if totals.pending > 0 {
                         GridRow {
