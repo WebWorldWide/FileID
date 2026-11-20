@@ -109,6 +109,13 @@ extension View {
     func dsFocusRing(radius: CGFloat = Theme.Radius.s) -> some View { modifier(DSFocusRing(radius: radius)) }
 }
 
+/// ⌘F reaches a page's search field only from the page on screen, and never while a sheet covers it.
+enum FindRouting {
+    @MainActor static func accepts(pageActive: Bool) -> Bool {
+        pageActive && NSApp?.keyWindow?.attachedSheet == nil
+    }
+}
+
 /// Esc closes a sheet whose visible primary button already owns Return.
 private struct DSEscapeCancels: ViewModifier {
     let action: () -> Void
@@ -710,7 +717,7 @@ struct DSTextField: View {
         .onTapGesture { focused = true }
         .animation(Theme.quick, value: focused)
         .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
-            if respondsToFind && pageActive && NSApp.keyWindow?.attachedSheet == nil { focused = true }
+            if respondsToFind && FindRouting.accepts(pageActive: pageActive) { focused = true }
         }
     }
 }
@@ -769,8 +776,10 @@ final class ToastCenter {
         current = Toast(text: text, actionLabel: actionLabel, action: action)
         shownDuration = duration
         scheduleDismiss(after: duration)
-        NSAccessibility.post(element: NSApp.mainWindow as Any, notification: .announcementRequested,
-                             userInfo: [.announcement: text])
+        if let app = NSApp {
+            NSAccessibility.post(element: app.mainWindow as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: text])
+        }
     }
     func dismiss() { dismissTask?.cancel(); current = nil }
 

@@ -310,7 +310,7 @@ struct LibraryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
-            if pageActive && NSApp.keyWindow?.attachedSheet == nil { searchFocused = true }
+            if FindRouting.accepts(pageActive: pageActive) { searchFocused = true }
         }
     }
 
