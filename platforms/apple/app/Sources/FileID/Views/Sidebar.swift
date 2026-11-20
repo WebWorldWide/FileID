@@ -98,7 +98,7 @@ struct Sidebar: View {
                         }
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .help("\(area.rawValue): \(area.tabs.map(\.title).joined(separator: ", ")) (\(area.shortcutHint))")
                 .accessibilityLabel("\(area.rawValue) pages")
                 .accessibilityAddTraits(on ? [.isSelected, .isButton] : [.isButton])

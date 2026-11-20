@@ -114,6 +114,31 @@ extension View {
     func dsFocusRing(radius: CGFloat = Theme.Radius.s) -> some View { modifier(DSFocusRing(radius: radius)) }
 }
 
+/// ⌘F reaches a page's search field only from the page on screen, and never while a sheet covers it.
+enum FindRouting {
+    @MainActor static func accepts(pageActive: Bool) -> Bool {
+        pageActive && NSApp?.keyWindow?.attachedSheet == nil
+    }
+}
+
+/// Esc closes a sheet whose visible primary button already owns Return.
+private struct DSEscapeCancels: ViewModifier {
+    let action: () -> Void
+    func body(content: Content) -> some View {
+        content.background {
+            Button("", action: action)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+extension View {
+    func dsEscapeCancels(_ action: @escaping () -> Void) -> some View { modifier(DSEscapeCancels(action: action)) }
+}
+
 /// Whether the control itself holds keyboard focus. `\.isFocused` is also true
 /// for everything inside a focused container (the preview sheet takes focus for
 /// its arrow keys), which ringed every button in it at once.
@@ -350,7 +375,7 @@ struct DSDangerButtonStyle: PrimitiveButtonStyle {
 }
 
 /// Face of a pop-up menu button, drawn like a secondary button: use inside a `Menu` label with
-/// `.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)`.
+/// `.menuStyle(.button).buttonStyle(DSBareButtonStyle()).menuIndicator(.hidden)`.
 struct DSMenuLabel: View {
     let title: String
     var systemImage: String? = nil
@@ -451,7 +476,7 @@ struct DSToggleStyle: ToggleStyle {
         Button { configuration.isOn.toggle() } label: {
             HStack(spacing: 10) {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                    Capsule().fill(configuration.isOn ? Theme.gold : Color.white.opacity(0.14))
+                    Capsule().fill(configuration.isOn ? Theme.gold : Theme.hairlineStrong)
                     Circle().fill(configuration.isOn ? Theme.onGold : Theme.text2).frame(width: 12, height: 12).padding(2)
                 }
                 .frame(width: 30, height: 16)
@@ -525,6 +550,7 @@ struct GrainProgressBar: View {
     var progress: Double
     var tone: ProgressTone = .gold
     var height: CGFloat = 6
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var colors: [Color] {
         switch tone {
         case .gold: return [Color(hex: 0xFF8A1A), Color(hex: 0xFFB000), Theme.gold, Color(hex: 0xFFE9A3)]
@@ -547,7 +573,7 @@ struct GrainProgressBar: View {
             }
         }
         .frame(height: height)
-        .animation(Theme.springStandard, value: progress)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: progress)
         .accessibilityElement()
         .accessibilityValue(Text("\(Int((progress.isFinite ? progress : 0) * 100)) percent"))
     }
@@ -669,9 +695,11 @@ struct DSTextField: View {
     var icon: String? = nil
     var height: CGFloat = Theme.Metrics.controlLarge
     var mono = false
+    var respondsToFind = false
     var onSubmit: () -> Void = {}
     @FocusState private var focused: Bool
     @Environment(\.fixedTextSize) private var fixed
+    @Environment(\.pageActive) private var pageActive
     var body: some View {
         HStack(spacing: 8) {
             if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3).accessibilityHidden(true) }
@@ -693,6 +721,9 @@ struct DSTextField: View {
         .contentShape(rounded(Theme.Radius.s))
         .onTapGesture { focused = true }
         .animation(Theme.quick, value: focused)
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
+            if respondsToFind && FindRouting.accepts(pageActive: pageActive) { focused = true }
+        }
     }
 }
 
@@ -731,7 +762,7 @@ struct DashedNotice: View {
         }
         .frame(maxWidth: .infinity)
         .padding(40)
-        .overlay(rounded(Theme.Radius.l).stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4])).foregroundStyle(Color.white.opacity(0.16)))
+        .overlay(rounded(Theme.Radius.l).stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4])).foregroundStyle(Theme.hairlineStrong))
     }
 }
 
@@ -744,16 +775,34 @@ final class ToastCenter {
     private(set) var current: Toast?
     private var dismissTask: Task<Void, Never>?
 
+    private var shownDuration = 5.0
+
     func show(_ text: String, actionLabel: String? = nil, duration: Double = 5, action: (() -> Void)? = nil) {
-        dismissTask?.cancel()
         current = Toast(text: text, actionLabel: actionLabel, action: action)
+        shownDuration = duration
+        scheduleDismiss(after: duration)
+        if let app = NSApp {
+            NSAccessibility.post(element: app.mainWindow as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: text])
+        }
+    }
+    func dismiss() { dismissTask?.cancel(); current = nil }
+
+    /// A toast with an action stays while the pointer is on it, then gets a fresh short window.
+    func hold() { dismissTask?.cancel() }
+    func release() {
+        guard current != nil else { return }
+        scheduleDismiss(after: min(shownDuration, 4))
+    }
+
+    private func scheduleDismiss(after seconds: Double) {
+        dismissTask?.cancel()
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(duration))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.current = nil
         }
     }
-    func dismiss() { dismissTask?.cancel(); current = nil }
 }
 
 struct ToastView: View {
@@ -770,7 +819,8 @@ struct ToastView: View {
         .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 8)
         .background(.ultraThinMaterial, in: rounded(Theme.Radius.l))
         .background(Theme.popoverFill, in: rounded(Theme.Radius.l))
-        .overlay(rounded(Theme.Radius.l).stroke(Color.white.opacity(0.14), lineWidth: 1))
+        .overlay(rounded(Theme.Radius.l).stroke(Theme.hairlineStrong, lineWidth: 1))
+        .onHover { $0 ? ToastCenter.shared.hold() : ToastCenter.shared.release() }
         .shadow(color: .black.opacity(0.45), radius: 20, y: 12)
     }
 }

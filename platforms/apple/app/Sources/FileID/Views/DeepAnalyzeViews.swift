@@ -243,7 +243,7 @@ private struct ModelOptionRow: View {
             .overlay(rowBorder)
             .opacity(fits ? 1.0 : 0.55)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .disabled(!fits)
         .help(fits ? "License: \(kind.licenseName)" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB of free memory. Choose a smaller model for this \(Int(ramGB)) GB Mac. FileID checks free memory again before it starts.")
     }
@@ -1142,7 +1142,7 @@ struct DeepAnalyzeButton: View {
             ))
             .foregroundStyle(alreadyDone ? Theme.gold : .black)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .disabled(engine.deepAnalyzeInFlight || !fits)
         .confirmationDialog("This downloads about \(DescriptionModelStore.downloadSizeText(settings.activeKind)) once. Continue?",
                             isPresented: $confirmDownload, titleVisibility: .visible) {

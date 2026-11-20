@@ -142,7 +142,7 @@ struct WelcomeSheet: View {
                     DSMenuLabel(title: Self.shortName(selectedVLM))
                 }
                 .menuStyle(.button)
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .disabled(vlmInProgress)

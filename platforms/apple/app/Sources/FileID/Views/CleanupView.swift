@@ -699,7 +699,7 @@ private struct GroupCard: View {
                         DSMenuLabel(title: "Choose…", systemImage: "checkmark.circle", height: Theme.Metrics.hitTarget)
                     }
                     .menuStyle(.button)
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     .menuIndicator(.hidden)
                     .fixedSize()
 
@@ -779,6 +779,7 @@ private struct CopyTile: View {
     let isSimilar: Bool
     let isSelected: Bool
     let hovering: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var fullFolder: String {
         (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
@@ -800,13 +801,14 @@ private struct CopyTile: View {
         VStack(alignment: .leading, spacing: 4) {
             Color.white.opacity(0.04)
                 .frame(width: CopyStrip.tile, height: CopyStrip.tile)
-                .overlay(thumbContent)
+                .overlay(thumbContent.accessibilityHidden(true))
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .stroke(borderColor, lineWidth: borderWidth)
                 )
                 .overlay(badgeOverlay)
+                .scaleEffect(hovering && !reduceMotion ? 1.02 : 1.0)
                 .animation(Theme.quick, value: hovering)
                 .contentShape(Rectangle())
                 .onTapGesture { onToggle() }
@@ -848,6 +850,7 @@ private struct CopyTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
+        .accessibilityAction(.default, onToggle)
         .accessibilityHint(isSelected
             ? "Chosen. It goes to Trash when you press Move to Trash. Click to unchoose."
             : isKeeper
@@ -881,8 +884,10 @@ private struct CopyTile: View {
                     .foregroundStyle(isSelected ? Theme.danger : Color.white.opacity(0.85))
                     .background(Circle().fill(.black.opacity(0.5)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: 11))
             .help(isSelected ? "Don't move this copy to Trash" : "Choose this copy for Trash")
+            .accessibilityLabel(isSelected ? "Chosen for Trash" : "Choose for Trash")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }

@@ -18,6 +18,7 @@ struct SankeyFlowView: View {
     @State private var cursorPos: CGPoint = .zero
     @State private var cursorActive = false
     @State private var entranceProgress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let topN = 8
     private static let otherSourceID = "src:__other__"
@@ -190,7 +191,7 @@ struct SankeyFlowView: View {
                     )
                     // Replay entrance animation when data changes.
                     entranceProgress = 0
-                    withAnimation(Theme.springStandard) {
+                    withAnimation(reduceMotion ? nil : Theme.springStandard) {
                         entranceProgress = 1
                     }
                 }
@@ -200,7 +201,7 @@ struct SankeyFlowView: View {
             .clipped()
             .onAppear {
                 if entranceProgress < 1 {
-                    withAnimation(Theme.springStandard) {
+                    withAnimation(reduceMotion ? nil : Theme.springStandard) {
                         entranceProgress = 1
                     }
                 }
@@ -448,8 +449,7 @@ struct SankeyFlowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text("\(count)")
-                        .font(.system(size: 14, weight: .bold,
-                                       design: .rounded).monospacedDigit())
+                        .font(Theme.Font.body(14, .bold).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                     Text("file\(count == 1 ? "" : "s") moving")
                         .font(Theme.Font.body(12, .semibold))

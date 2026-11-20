@@ -72,15 +72,15 @@ struct TitleBar: View {
                         .frame(maxWidth: 180, alignment: .leading)
                         .contentTransition(.opacity)
                         .animation(Theme.spring, value: switcherTitle)
-                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
+                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).accessibilityHidden(true)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
                 .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(folderOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(folderOpen ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Choose which location to show, or add, rescan or close a folder")
             .accessibilityLabel("Location: \(switcherTitle)")
             .accessibilityHint("Chooses which location Library, Search & Moments and Chat show")
@@ -158,7 +158,7 @@ struct TitleBar: View {
                 .overlay(alignment: .top) { if !engine.libraryRoots.isEmpty { Hairline(color: Theme.hairlineStrong) } }
             if let url = pickedURL {
                 HStack(alignment: .top, spacing: 10) {
-                    Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14)
+                    Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(url.lastPathComponent).font(Theme.ChromeFont.body(14, .semibold)).foregroundStyle(Theme.text1)
                         Text(url.path).font(Theme.ChromeFont.meta).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
@@ -175,7 +175,7 @@ struct TitleBar: View {
                 Button(pickedURL == nil ? "Choose folder…" : "Choose another folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
-                        .buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("r", modifiers: .command)
+                        .buttonStyle(DSSecondaryButtonStyle(height: 28))
                         .disabled(engine.lastProgress.map { $0.phase == .discovering || $0.phase == .tagging || $0.phase == .postScan } ?? false)
                 }
             }
@@ -210,7 +210,7 @@ struct TitleBar: View {
                     .foregroundStyle(chatPresented ? Theme.gold : Theme.text2)
                     .frame(width: 30, height: 30)
                     .background(chatPresented ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(chatPresented ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(chatPresented ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                     .contentShape(Rectangle())
             }
             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
@@ -222,7 +222,7 @@ struct TitleBar: View {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: 30, height: 30)
                     .background(activeTab == .settings ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activeTab == .settings ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activeTab == .settings ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                     .contentShape(Rectangle())
             }
             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
@@ -249,12 +249,12 @@ struct TitleBar: View {
                 .onExitCommand { searchFocused = false; searchText = "" }
             Text("⌘K").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
                 .padding(.horizontal, 5).padding(.vertical, 2)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.white.opacity(0.16), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         }
         .padding(.leading, 10).padding(.trailing, 6)
         .frame(height: Theme.Metrics.controlLarge)
         .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
         .onReceive(NotificationCenter.default.publisher(for: .fileIDFocusSearch)) { _ in
             userOpened = true; searchFocused = true; searchOpen = true
         }
@@ -314,7 +314,7 @@ struct TitleBar: View {
                         .background(groupIndex == 0 && itemIndex == 0 ? Theme.gold.opacity(0.08) : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 }
             }
         }
@@ -441,10 +441,10 @@ struct TitleBar: View {
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.controlLarge)
             .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activityOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activityOpen ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .help("What FileID is working on right now")
         .popover(isPresented: $activityOpen, arrowEdge: .bottom) { activityPopover.chromeTextSize() }
     }

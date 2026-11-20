@@ -1307,7 +1307,7 @@ struct RestructureView: View {
         }
         .frame(minWidth: 600, minHeight: 480)
         .sheetSurface()
-        .preferredColorScheme(.dark)
+        .dsEscapeCancels { drillDown = nil }
     }
 
     /// Recompute the filtered + bucketed proposals for a drill-down scope.

@@ -95,6 +95,10 @@ struct FileIDApp: App {
                 Button("Pause or Resume Background Motion") { NotificationCenter.default.post(name: .fileIDToggleMotion, object: nil) }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
+            CommandGroup(after: .textEditing) {
+                Button("Find") { NotificationCenter.default.post(name: .fileIDFindInPage, object: nil) }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
             CommandMenu("Go") {
                 Button("Search or Ask…") { NotificationCenter.default.post(name: .fileIDFocusSearch, object: nil) }
                     .keyboardShortcut("k", modifiers: .command)
@@ -178,4 +182,6 @@ extension Notification.Name {
     static let fileIDToggleChat = Notification.Name("FileID.toggleChat")
     static let fileIDToggleMotion = Notification.Name("FileID.toggleMotion")
     static let fileIDFocusSearch = Notification.Name("FileID.focusSearch")
+    /// Edit ▸ Find (⌘F): the visible page focuses its own search field.
+    static let fileIDFindInPage = Notification.Name("FileID.findInPage")
 }

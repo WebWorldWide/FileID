@@ -319,13 +319,9 @@ struct LibraryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Standard idiom: a hidden ⌘F button, since keyboardShortcut doesn't attach to TextField focus.
-        .background(
-            Button("") { searchFocused = true }
-                .keyboardShortcut(pageActive ? KeyboardShortcut("f", modifiers: .command) : nil)
-                .opacity(0)
-                .frame(width: 0, height: 0)
-        )
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
+            if FindRouting.accepts(pageActive: pageActive) { searchFocused = true }
+        }
     }
 
     /// Inline post-scan banner used for "Grouping faces…" and
@@ -677,7 +673,7 @@ struct LibraryView: View {
                 .focused($searchFocused)
             if !searchText.isEmpty {
                 Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     .help("Clear search")
                     .accessibilityLabel("Clear search")
             }
@@ -773,7 +769,7 @@ struct LibraryView: View {
 
         if hiddenWeaker > 0, !rows.isEmpty {
             Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .font(Theme.Font.body(11.5, .semibold))
                 .foregroundStyle(Theme.gold)
                 .fixedSize()
@@ -974,7 +970,7 @@ struct LibraryView: View {
                         .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
@@ -1781,7 +1777,7 @@ private struct FinderTagsEditor: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text3)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Remove this tag")
             .accessibilityLabel("Remove this tag")
         }
@@ -1988,7 +1984,7 @@ private struct LibrarySelectedPane: View {
                     Spacer()
                     Button(action: onClose) {
                         Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
-                            .frame(width: 22, height: 22)
+                            .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget)
                     }
                     .buttonStyle(.dsRow)
                     .keyboardShortcut(pageActive ? .cancelAction : nil)

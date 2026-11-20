@@ -225,6 +225,7 @@ struct FaceReviewSheet: View {
         }
         .frame(minWidth: 760, minHeight: 520)
         .sheetSurface()
+        .dsEscapeCancels(onDone)
         .task { await loadAll() }
     }
 

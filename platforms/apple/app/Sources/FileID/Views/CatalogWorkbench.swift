@@ -143,7 +143,7 @@ struct CatalogWorkbench: View {
     private var resultsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
+                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", respondsToFind: true, onSubmit: search)
                 CaptureDateFilter(window: $captureWindow)
                     .onChange(of: captureWindow) { _, _ in search() }
                     .onChangeWhileActive(of: store?.scopeEpoch ?? 0) { search() }
