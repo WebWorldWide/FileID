@@ -800,7 +800,7 @@ private struct CopyTile: View {
         VStack(alignment: .leading, spacing: 4) {
             Color.white.opacity(0.04)
                 .frame(width: CopyStrip.tile, height: CopyStrip.tile)
-                .overlay(thumbContent)
+                .overlay(thumbContent.accessibilityHidden(true))
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
@@ -849,6 +849,7 @@ private struct CopyTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
+        .accessibilityAction(.default, onToggle)
         .accessibilityHint(isSelected
             ? "Chosen. It goes to Trash when you press Move to Trash. Click to unchoose."
             : isKeeper
@@ -882,8 +883,10 @@ private struct CopyTile: View {
                     .foregroundStyle(isSelected ? Theme.danger : Color.white.opacity(0.85))
                     .background(Circle().fill(.black.opacity(0.5)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: 11))
             .help(isSelected ? "Don't move this copy to Trash" : "Choose this copy for Trash")
+            .accessibilityLabel(isSelected ? "Chosen for Trash" : "Choose for Trash")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
