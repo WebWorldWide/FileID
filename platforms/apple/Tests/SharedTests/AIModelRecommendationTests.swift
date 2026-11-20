@@ -19,6 +19,33 @@ struct AIModelRecommendationTests {
         #expect(AIModelKind.safeDefaultFor(ramGB: 30.9) == .mistralSmall32)
     }
 
+    @Test func theHundredBillionModelTopsTheLadderOnlyWhereItFits() {
+        #expect(AIModelKind.safeDefaultFor(ramGB: 64) == .mistralSmall32)
+        #expect(AIModelKind.safeDefaultFor(ramGB: 96) == .qwen35_122B)
+        #expect(AIModelKind.safeDefaultFor(ramGB: 128) == .qwen35_122B)
+        #expect(AIModelKind.safeDefaultFor(ramGB: 192) == .qwen35_122B)
+        #expect(!AIModelKind.qwen35_122B.fits(ramGB: 64))
+        #expect(AIModelKind.qwen35_122B.fits(ramGB: 96))
+        #expect(AIModelKind.recommendedFor(ramGB: 64).first == .mistralSmall32)
+        #expect(AIModelKind.recommendedFor(ramGB: 96).first == .qwen35_122B)
+    }
+
+    @Test func aBusyBigMacFallsBackToTheModelThatLoadsNow() {
+        #expect(AIModelKind.safeDefaultFor(ramGB: 128, availableMB: 100_000) == .qwen35_122B)
+        #expect(AIModelKind.safeDefaultFor(ramGB: 128, availableMB: 40_000) == .mistralSmall32)
+        #expect(AIModelKind.safeDefaultFor(ramGB: 96, availableMB: 50_000) == .mistralSmall32)
+        #expect(AIModelKind.safeDefaultFor(ramGB: 96, availableMB: 15_000) == .qwen3VL8B)
+    }
+
+    @Test func theBigModelIsATrackedFavouriteOfTheCatalog() throws {
+        let entry = try #require(AIModelKind.qwen35_122B.catalogEntry)
+        #expect(entry.role == .vision && entry.architecture == "qwen3_5_moe" && entry.license == "apache-2.0")
+        #expect(entry.bases.first?.repo == "Qwen/Qwen3.5-122B-A10B")
+        #expect(AIModelKind.qwen35_122B.sourceRepo == entry.repo)
+        #expect(AIModelKind.qwen35_122B.licensePolicyKey == "Apache-2.0")
+        #expect(AIModelKind.qwen35_122B.licenseTermsURL == nil)
+    }
+
     @Test func diskPressureDowngradesBeforeDownloading() {
         let qwenOnly = AIModelKind.qwen2VL7B.requiredFreeBytes + 1
         #expect(qwenOnly < AIModelKind.mistralSmall32.requiredFreeBytes)

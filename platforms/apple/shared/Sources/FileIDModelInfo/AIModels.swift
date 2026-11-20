@@ -18,7 +18,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
-    // Commercial-clean lineup: Apache-2.0 models plus Gemma/PaliGemma (Gemma Terms permit commercial use). Mistral-Small-3.2 is the max-quality pick.
+    // Commercial-clean lineup: Apache-2.0 models plus Gemma/PaliGemma (Gemma Terms permit commercial use). Qwen3.5 122B-A10B tops the ladder on Macs with 96 GB or more; Mistral-Small-3.2 is the pick below that.
     // Mirrors the Windows VLM ladder.
     public static let qwen2VL7B = Self(registeredValue: "qwen2_5_vl_7b")
     public static let qwen3VL2B = Self(registeredValue: "qwen3_vl_2b")
@@ -28,10 +28,11 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public static let gemma3_4B = Self(registeredValue: "gemma_3_4b")
     public static let gemma3_12B = Self(registeredValue: "gemma_3_12b")
     public static let mistralSmall32 = Self(registeredValue: "mistral_small_3_2")
+    public static let qwen35_122B = Self(registeredValue: "qwen3_5_122b")
     public static let paligemma3B = Self(registeredValue: "paligemma_3b")
 
 
-    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .paligemma3B]
+    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .qwen35_122B, .paligemma3B]
     public static var allCases: [Self] { favorites + MLXModelCatalog.entries.filter { entry in !favorites.contains { $0.sourceRepo == entry.repo } }.map { Self(registeredValue: $0.id) } }
     public var catalogEntry: CatalogModel? { MLXModelCatalog.entry(forRepo: sourceRepo) }
     public var supportsVision: Bool { MLXModelCatalog.entry(forID: rawValue)?.role != .text }
@@ -46,6 +47,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_4B:     return "Gemma 3 4B (QAT 4-bit)"
         case .gemma3_12B:    return "Gemma 3 12B (QAT 4-bit)"
         case .mistralSmall32: return "Mistral Small 3.2 24B (4-bit)"
+        case .qwen35_122B:   return "Qwen3.5 122B-A10B (4-bit)"
         case .paligemma3B:   return "PaliGemma 3B (8-bit)"
         default: return MLXModelCatalog.entry(forID: rawValue)?.displayName ?? rawValue
         }
@@ -61,6 +63,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_4B:     return "Made by Google. Good at answering questions about a picture. Fast, and works on Macs with 8 GB of memory."
         case .gemma3_12B:    return "Very detailed descriptions. About three times slower, and needs a Mac with 16 GB of memory or more."
         case .mistralSmall32: return "The most detailed descriptions. The slowest choice. Works best on a Mac with 32 GB of memory."
+        case .qwen35_122B:   return "The largest model, for Macs with 96 GB of memory or more. A 70 GB download."
         case .paligemma3B:   return "Good at finding things in a picture and reading text. Fast, and works on Macs with 8 GB of memory."
         default: return MLXModelCatalog.entry(forID: rawValue)?.summary ?? "Extra model"
         }
@@ -82,6 +85,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_4B:     return 4.5
         case .gemma3_12B:    return 9.0
         case .mistralSmall32: return 16.0
+        case .qwen35_122B:   return 72.0
         case .paligemma3B:   return 4.0
         default: return Double(approxBytes) / 1_073_741_824 * 1.5 + 2
         }
@@ -123,7 +127,8 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     /// Picks for a given RAM tier, ranked best-first; the smaller Qwen3-VL models close each list so a busy Mac always has one that loads.
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
-        if ramGB >= 30       { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B, .qwen3VL2B] }
+        if ramGB >= 80       { return [.qwen35_122B, .mistralSmall32, .qwen3VL8B, .qwen3VL4B, .qwen3VL2B] }
+        else if ramGB >= 30  { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B, .qwen3VL2B] }
         else if ramGB >= 16  { return [.qwen3VL8B, .qwen3VL4B, .qwen2VL7B, .qwen3VL2B] }
         else                 { return [.qwen3VL4B, .qwen3VL2B, .gemma3_4B, .paligemma3B] }
     }

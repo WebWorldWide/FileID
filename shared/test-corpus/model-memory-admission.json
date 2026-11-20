@@ -9,5 +9,14 @@
   {"totalMB":16384,"availableMB":0,"requestedMB":5120,"accepted":false},
   {"totalMB":0,"availableMB":8192,"requestedMB":5120,"accepted":false},
   {"totalMB":16384,"availableMB":8192,"requestedMB":0,"accepted":false},
-  {"totalMB":16384,"availableMB":18446744073709551615,"requestedMB":18446744073709551615,"accepted":false}
+  {"totalMB":16384,"availableMB":18446744073709551615,"requestedMB":18446744073709551615,"accepted":false},
+  {"totalMB":65536,"availableMB":50000,"requestedMB":73728,"accepted":false},
+  {"totalMB":98304,"availableMB":90000,"requestedMB":73728,"accepted":true},
+  {"totalMB":98304,"availableMB":60000,"requestedMB":73728,"accepted":false},
+  {"totalMB":131072,"availableMB":100000,"requestedMB":86132,"accepted":true},
+  {"totalMB":98304,"availableMB":85000,"requestedMB":86132,"accepted":false},
+  {"totalMB":65536,"availableMB":65536,"requestedMB":86132,"accepted":false},
+  {"totalMB":196608,"availableMB":150000,"requestedMB":135168,"accepted":true},
+  {"totalMB":8192,"availableMB":3686,"requestedMB":2876,"accepted":true},
+  {"totalMB":8192,"availableMB":3686,"requestedMB":3742,"accepted":false}
 ]
