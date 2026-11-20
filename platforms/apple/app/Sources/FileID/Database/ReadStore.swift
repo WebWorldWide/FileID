@@ -377,12 +377,13 @@ public final class ReadStore: @unchecked Sendable {
 
     public func files(offset: Int = 0, limit: Int = 200,
                       search: String = "",
-                      kindFilter: String? = nil) -> [FileRow] {
+                      kindFilter: String? = nil,
+                      sort: LibrarySort = .standard) -> [FileRow] {
         guard let q = queue else { return [] }
         let scope = self.scope
         do {
             return try q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
             }
         } catch {
             reportError("Library query failed: \(error)")
@@ -391,7 +392,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     private static func fetchFiles(_ db: Database, offset: Int, limit: Int, search: String,
-                                   kindFilter: String?, scope: LibraryScope?) throws -> [FileRow] {
+                                   kindFilter: String?, scope: LibraryScope?, sort: LibrarySort) throws -> [FileRow] {
         let unreadable = kindFilter == Self.unreadableFilter
         var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
         var args: StatementArguments = []
@@ -442,7 +443,7 @@ public final class ReadStore: @unchecked Sendable {
             sql += " AND " + LibraryScope.sql("path_text")
             args += [scope.param]
         }
-        sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
+        sql += " ORDER BY \(sort.orderSQL) LIMIT ? OFFSET ?"
         args += [limit, offset]
         let rows = try Row.fetchAll(db, sql: sql, arguments: args)
         return rows.map { Self.toFileRow($0) }
@@ -451,14 +452,15 @@ public final class ReadStore: @unchecked Sendable {
     /// Off-main twin of `files(...)`: the keyword search is a multi-table FTS + LIKE + face-join query that would stutter the UI on every throttled scan batch.
     public func filesAsync(offset: Int = 0, limit: Int = 200,
                            search: String = "",
-                           kindFilter: String? = nil) async -> [FileRow] {
+                           kindFilter: String? = nil,
+                           sort: LibrarySort = .standard) async -> [FileRow] {
         guard let q = queue else { return [] }
         let scope = self.scope
         do {
             // GRDB's async read interrupts the query when the calling task is
             // cancelled, so a superseded search stops instead of running out.
             return try await q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
             }
         } catch {
             if !(error is CancellationError), !Task.isCancelled { reportError("Library query failed: \(error)") }
@@ -1437,6 +1439,7 @@ public final class ReadStore: @unchecked Sendable {
         config.maximumReaderCount = 6
         config.busyMode = .timeout(2)
         config.prepareDatabase { db in
+            db.add(collation: DatabaseCollation(LibrarySort.nameCollation) { $0.localizedStandardCompare($1) })
             try db.execute(sql: "PRAGMA cache_size = -32768")
             try db.execute(sql: "PRAGMA mmap_size = 268435456")
             try db.execute(sql: "PRAGMA temp_store = MEMORY")
