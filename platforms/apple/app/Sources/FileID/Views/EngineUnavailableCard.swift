@@ -13,7 +13,7 @@ struct EngineUnavailableCard: View {
         Panel(padding: 28) {
             VStack(spacing: 14) {
                 Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 44, weight: .light))
+                    .font(.system(size: 56, weight: .light))
                     .foregroundStyle(Theme.gold)
                     .accessibilityHidden(true)
                 Text(Self.title)
@@ -76,7 +76,7 @@ struct EngineUnavailableOverlay: ViewModifier {
         content.overlay {
             if let failure = engine.startFailure, activeTab != .settings {
                 ZStack {
-                    Rectangle().fill(Theme.surfaceBase)
+                    Rectangle().fill(Theme.pageSurface)
                     EngineUnavailableCard(failure: failure, onTryAgain: { engine.restart() })
                         .padding(24)
                 }

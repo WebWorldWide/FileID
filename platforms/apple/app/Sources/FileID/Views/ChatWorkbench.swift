@@ -271,6 +271,7 @@ struct ChatWorkbench: View {
                     .accessibilityHint("Puts this question in the message field")
                 }
             }
+            .frame(maxWidth: 460, alignment: .leading)
         }
         .padding(.vertical, 8)
     }

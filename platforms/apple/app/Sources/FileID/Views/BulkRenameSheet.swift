@@ -31,12 +31,12 @@ struct BulkRenameSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Hairline()
             if nameable.isEmpty {
                 emptyState
             } else {
                 actionsBar
-                Divider()
+                Hairline()
                 renameList
             }
         }

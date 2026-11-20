@@ -44,18 +44,18 @@ struct DeepAnalyzeModelPickerCard: View {
                 if let reason = recommendation.reason {
                     Text(reason).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                 }
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 if !AIModelKind.favorites.contains(settings.activeKind) {
                     Text("Selected model").font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.ai)
                     modelOptionRow(settings.activeKind)
-                    Divider().opacity(0.3)
+                    Hairline(color: Theme.hairlineSoft)
                 }
                 ForEach(top3, id: \.rawValue) { kind in
                     modelOptionRow(kind)
                 }
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 selectedModelActions
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 Button { catalogPresented = true } label: {
                     Label("Browse \(MLXModelCatalog.entries.count) more models", systemImage: "magnifyingglass")
                 }.buttonStyle(.dsSecondary)
@@ -729,7 +729,7 @@ struct DeepAnalyzeView: View {
                           ? "Name the files that have suggestions in the style below"
                           : "Name the files chosen in Library in the style below")
                 }
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 NameStyleControls(engine: engine)
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
@@ -821,7 +821,7 @@ struct DeepAnalyzeView: View {
                             MetaText(modelInstalled ? "Downloaded" : "Not downloaded yet · about \(DescriptionModelStore.downloadSizeText(settings.activeKind))",
                                      color: modelInstalled ? Theme.delight : Theme.text2, size: 11.5)
                             Button("Change…") { onSwitchTab(.settings) }
-                                .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                                .buttonStyle(DSSecondaryButtonStyle())
                                 .help("Choose a different description model in Settings")
                         }
                     }

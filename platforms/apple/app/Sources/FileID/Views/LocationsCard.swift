@@ -26,7 +26,7 @@ struct LocationsCard: View {
                 } else {
                     ForEach(roots, id: \.id) { root in
                         LocationRow(root: root, engine: engine)
-                        if root.id != roots.last?.id { Divider().opacity(0.3) }
+                        if root.id != roots.last?.id { Hairline(color: Theme.hairlineSoft) }
                     }
                     MetaText("Offline locations keep their tags, faces and descriptions. They come back when the drive does.")
                 }
@@ -80,7 +80,7 @@ struct LocationRow: View {
                     if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
                 }
                 MetaText(LocationText.summary(root))
-                MetaText(PathText.abbreviated(root.path)).lineLimit(1).truncationMode(.middle).help(root.path)
+                Text(PathText.abbreviated(root.path)).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head).help(root.path)
             }
             Spacer()
             Button("Rescan") { engine.startScan(rootURL: URL(fileURLWithPath: root.path)) }

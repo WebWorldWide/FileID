@@ -39,7 +39,7 @@ struct EmptyStateView: View {
             }
             if let action = primaryAction {
                 Button(action.label, action: action.run)
-                    .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                    .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .padding(.top, 6)
             }
         }

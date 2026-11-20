@@ -37,7 +37,7 @@ struct ModelCatalogBrowser: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("More AI models").font(Theme.Font.body(20, .semibold))
+                    Text("More AI models").font(Theme.Font.display(28))
                     Text("For the curious: try a different AI for descriptions and Chat. The models suggested in Settings suit most people.")
                         .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -52,7 +52,7 @@ struct ModelCatalogBrowser: View {
             DSTextField(placeholder: "Search model, publisher or license", text: $query, icon: "magnifyingglass")
             HStack {
                 if !visionOnly {
-                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")], height: 26)
+                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")])
                 }
                 Spacer()
                 Toggle("Fits this Mac", isOn: $fitsOnly)
@@ -179,6 +179,7 @@ struct ModelCatalogBrowser: View {
                 }
             }
         }.padding(24).frame(minWidth: 640, idealWidth: 780, minHeight: 680, idealHeight: 760)
+            .sheetSurface()
             .onAppear { selection = initialSelection?.rawValue; engine.refreshModelCatalog() }
             .onChange(of: engine.lastErrorSignal) { _, _ in
                 guard let error = engine.lastError, selected != nil, error.kind != "prewarm_cancelled",
@@ -243,7 +244,7 @@ struct ModelBenchmarkPanel: View {
                     Button { engine.benchmarkModel(kind) } label: {
                         Label(engine.benchmarkResults[kind.rawValue] == nil ? "Measure speed" : "Measure again", systemImage: "speedometer")
                     }
-                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .disabled(!installed || engine.benchmarkModelKind != nil || engine.modelDownloadProgress != nil)
                     .help(installed ? "Runs a short test twice on this Mac. Nothing is downloaded." : "Download the model first. Measuring never downloads anything.")
                 }

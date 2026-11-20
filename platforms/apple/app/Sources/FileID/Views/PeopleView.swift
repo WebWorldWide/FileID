@@ -78,7 +78,7 @@ struct PeopleView: View {
         VStack(spacing: 0) {
             if showsHeader {
                 headerBlock
-                Divider().opacity(0.15)
+                Hairline(color: Theme.hairlineSoft)
             }
             if mergeProgress != nil || mergeStatus != nil { statusRow }
             content
@@ -310,7 +310,7 @@ struct PeopleView: View {
                     .font(Theme.Font.body(12))
                     .foregroundStyle(Theme.text2)
                 Button(mergeStopRequested ? "Stopping…" : "Stop") { mergeStopRequested = true }
-                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .disabled(mergeStopRequested)
                     .help("Finish the merge that is running, then stop. Merges already done stay.")
             } else if let status = mergeStatus {
@@ -322,7 +322,7 @@ struct PeopleView: View {
                         showHiddenUnknowns = true
                         reload()
                     }
-                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .help("Show the people you marked as unknown. To bring one back, open the card and untick \"I don't know who this is\".")
                 }
             }
@@ -417,7 +417,7 @@ struct PeopleView: View {
                         .font(Theme.Font.body(13.5))
                         .foregroundStyle(Theme.text3)
                     Button("Group faces") { engine.runFaceClustering() }
-                        .buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        .buttonStyle(DSSecondaryButtonStyle())
                         .disabled(engine.faceClusteringInFlight)
                         .help("Sort the waiting faces into people. Names you gave are kept.")
                 }
@@ -1077,7 +1077,7 @@ private struct PersonDetailSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(headerTitle)
-                        .font(Theme.Font.body(20, .semibold))
+                        .font(Theme.Font.display(28))
                     Spacer()
                     MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
                     Button("Done") { dismiss() }
@@ -1118,7 +1118,7 @@ private struct PersonDetailSheet: View {
             }
             .padding(16)
             FaceReviewSection(engine: engine, person: person, onChange: loadFiles)
-            Divider()
+            Hairline()
             // Photo grid + multi-select toolbar. Toolbar only shows when
             // we have ≥ 2 photos and ≥ 2 named persons in total — moving
             // makes no sense otherwise.
@@ -1179,6 +1179,7 @@ private struct PersonDetailSheet: View {
             Text(pendingTagMessage)
         }
         .frame(minWidth: 720, minHeight: 520)
+        .sheetSurface()
         .onAppear {
             loadFiles()
             title = person.title ?? ""
@@ -1241,12 +1242,12 @@ private struct PersonDetailSheet: View {
                 } label: {
                     Label(tagBatchInFlight
                           ? "Tagging…"
-                          : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with \"\(tagName)\"",
+                          : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with “\(tagName)”",
                           systemImage: "tag.fill")
                 }
                 .buttonStyle(.dsSecondary)
                 .disabled(tagBatchInFlight || tagName.isEmpty || files.isEmpty)
-                .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
+                .help("Adds the Finder tag “\(tagName)” to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
 
                 // re-tag affordance. Shows only when this person
                 // was previously tagged with a DIFFERENT name (e.g. user
@@ -1255,7 +1256,7 @@ private struct PersonDetailSheet: View {
                     Button {
                         pendingTag = PendingTag(adding: tagName, removing: oldTag)
                     } label: {
-                        Label("Replace \"\(oldTag)\" with \"\(tagName)\"",
+                        Label("Replace \"\(oldTag)\" with “\(tagName)”",
                               systemImage: "arrow.triangle.2.circlepath")
                     }
                     .buttonStyle(.dsSecondary)
@@ -1475,7 +1476,7 @@ private struct MovePhotosTargetPicker: View {
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
-            Divider()
+            Hairline()
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)],
                           spacing: 12) {
@@ -1490,6 +1491,7 @@ private struct MovePhotosTargetPicker: View {
             }
         }
         .frame(minWidth: 640, minHeight: 480)
+        .sheetSurface()
         .confirmationDialog(
             "Move \(fileIDs.count) photo\(fileIDs.count == 1 ? "" : "s") from \(sourcePerson.displayName) to \(pendingTarget?.displayName ?? "")?",
             isPresented: Binding(get: { pendingTarget != nil }, set: { if !$0 { pendingTarget = nil } }),
@@ -1548,7 +1550,7 @@ private struct SuggestedMergesSheet: View {
                 ProgressView().controlSize(.small)
                 Text(progress).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
                 Button(stopRequested ? "Stopping…" : "Stop", action: onStop)
-                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .disabled(stopRequested)
                     .help("Finish the merge that is running, then stop. Merges already done stay.")
                 Spacer(minLength: 0)
@@ -1566,7 +1568,7 @@ private struct SuggestedMergesSheet: View {
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Suggested merges")
-                        .font(Theme.Font.body(14, .semibold))
+                        .font(Theme.Font.display(28))
                     Text("\(candidates.count) pairs of cards might be the same person.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.text3)
@@ -1607,11 +1609,11 @@ private struct SuggestedMergesSheet: View {
                 Spacer()
             }
             outcomeRow
-            Divider().opacity(0.3)
+            Hairline(color: Theme.hairlineSoft)
             if candidates.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 48))
+                        .font(.system(size: 56, weight: .light))
                         .foregroundStyle(Theme.delight)
                     Text("No likely matches found.")
                         .font(Theme.Font.body(13.5, .semibold))
@@ -1637,7 +1639,7 @@ private struct SuggestedMergesSheet: View {
         }
         .padding(20)
         .frame(minWidth: 560, minHeight: 420)
-        .background(LavaLampBackground())
+        .sheetSurface()
         .preferredColorScheme(.dark)
         .confirmationDialog(
             pending?.title ?? "",
@@ -1758,7 +1760,7 @@ private struct MergeTargetPickerSheet: View {
                 .font(Theme.Font.body(13.5))
                 .foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
-            Divider().opacity(0.3)
+            Hairline(color: Theme.hairlineSoft)
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(sortedCandidates) { person in
@@ -1798,7 +1800,7 @@ private struct MergeTargetPickerSheet: View {
         }
         .padding(20)
         .frame(minWidth: 460, minHeight: 320)
-        .background(LavaLampBackground())
+        .sheetSurface()
         .preferredColorScheme(.dark)
         .confirmationDialog(
             "Combine \(checked.count) cards into \"\(pendingTarget?.displayName ?? "")\"?",

@@ -68,7 +68,7 @@ struct SettingsTab: View {
                 Panel(padding: 16) {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("FileID's helper").font(Theme.Font.body(12.5, .semibold))
@@ -86,7 +86,7 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
@@ -102,7 +102,7 @@ struct SettingsTab: View {
                                 .buttonStyle(.dsSecondary)
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Recent scans").font(Theme.Font.body(12.5, .semibold))
@@ -116,7 +116,7 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Acknowledgements").font(Theme.Font.body(12.5, .semibold))
@@ -139,7 +139,7 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Logs").font(Theme.Font.body(12.5, .semibold))
@@ -157,7 +157,7 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
+                            Hairline(color: Theme.hairlineSoft)
 
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Danger zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
@@ -196,8 +196,8 @@ struct SettingsTab: View {
                     }
                 }
             }
-            .frame(maxWidth: 960, alignment: .leading)
-            .padding(24)
+            .frame(maxWidth: 1100, alignment: .leading)
+            .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .environment(\.helperDown, HelperGate.isDown(engine))
@@ -285,7 +285,7 @@ struct DeepAnalyzeExclusionsCard: View {
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
 
                 if let message {
                     HStack(alignment: .top, spacing: 6) {
@@ -372,9 +372,9 @@ struct ModelInstallCard: View {
                 Text(blurb)
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 ForEach(rows, id: \.path) { rowView($0) }
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 footer
             }
         }
@@ -636,10 +636,11 @@ struct AppearanceCard: View {
                     }
                     .accessibilityHidden(true)
                     Spacer()
-                    SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) }, height: 26)
+                    SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) })
                         .accessibilityLabel("Lava lamp")
                         .accessibilityHint("Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it.")
                 }
+                Hairline(color: Theme.hairlineSoft).padding(.vertical, 4)
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Text size").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
@@ -647,7 +648,7 @@ struct AppearanceCard: View {
                     }
                     .accessibilityHidden(true)
                     Spacer()
-                    SegmentedBar(selection: $textSize, options: TextSize.allCases.map { ($0.rawValue, $0.title) }, height: 26)
+                    SegmentedBar(selection: $textSize, options: TextSize.allCases.map { ($0.rawValue, $0.title) })
                         .accessibilityLabel("Text size")
                         .accessibilityHint("Changes the size of text on every page. The title bar and sidebar stay the same size.")
                 }

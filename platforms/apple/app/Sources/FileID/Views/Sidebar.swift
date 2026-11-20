@@ -28,7 +28,7 @@ struct Sidebar: View {
 
             if shouldShowEngineSection {
                 VStack(alignment: .leading, spacing: 8) {
-                    EngineStatusRow(state: engine.state, onRestart: { engine.restart() })
+                    if engine.startFailure == nil { EngineStatusRow(state: engine.state, onRestart: { engine.restart() }) }
                     if let err = engine.lastError, Self.showsErrorCard(err.kind) { engineErrorRow(err) }
                 }
                 .padding(.horizontal, 12).padding(.bottom, 10)

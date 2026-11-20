@@ -78,6 +78,11 @@ struct PanelFooter<Content: View>: View {
     }
 }
 
+extension View {
+    /// The one sheet background: the grey every sheet sits on, so none carries its own lava or flat black.
+    func sheetSurface() -> some View { background(Theme.sheetFill, ignoresSafeAreaEdges: []) }
+}
+
 struct Hairline: View {
     var color: Color = Theme.hairline
     var body: some View { Rectangle().fill(color).frame(height: 1) }

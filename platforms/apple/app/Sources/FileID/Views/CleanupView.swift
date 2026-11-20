@@ -80,7 +80,7 @@ struct CleanupView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.bottom, 10)
             }
-            Divider().opacity(0.4)
+            Hairline()
             if visible.isEmpty {
                 empty
             } else {
@@ -696,7 +696,7 @@ private struct GroupCard: View {
                         Button("None") { onSelectNone() }
                         Button("Invert") { onInvert() }
                     } label: {
-                        DSMenuLabel(title: "Choose…", systemImage: "checkmark.circle", height: 26)
+                        DSMenuLabel(title: "Choose…", systemImage: "checkmark.circle", height: Theme.Metrics.hitTarget)
                     }
                     .menuStyle(.button)
                     .buttonStyle(.plain)
@@ -704,12 +704,12 @@ private struct GroupCard: View {
                     .fixedSize()
 
                     Button { onDeleteGroup() } label: { Label(selectedInGroup == 0 ? "Move to Trash" : "Move \(selectedInGroup) to Trash", systemImage: "trash") }
-                    .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle(height: 26)))
+                    .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle()))
                     .disabled(selectedInGroup == 0)
                     .help(selectedInGroup == 0 ? "Click the copies you want to remove first" : "Move the chosen copies in this group to Trash")
 
                     Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
-                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .help("Hide this group if these aren't really copies. Nothing is deleted.")
 
                     Spacer()

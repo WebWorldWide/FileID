@@ -67,7 +67,7 @@ private struct LearnedStyleRow: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Button("Reset") { Task { await load(reset: true); onReset() } }
-                .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                .buttonStyle(DSSecondaryButtonStyle())
                 .disabled(busy || learned.samples == 0)
                 .help("Forget the style FileID learned from your renames")
                 .accessibilityLabel("Reset learned name style")
@@ -193,7 +193,7 @@ struct SmartNamePreviewSheet: View {
         }
         .padding(20)
         .frame(minWidth: 680, minHeight: 520)
-        .background(LavaLampBackground())
+        .sheetSurface()
         .preferredColorScheme(.dark)
         .task { await preview() }
         .onChange(of: naming) { _, _ in schedulePreview() }

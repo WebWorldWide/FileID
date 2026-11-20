@@ -81,7 +81,8 @@ private struct FaceReviewRow: View {
             FaceReviewCrop(path: candidate?.representativePath, bbox: candidate?.representativeBBox,
                            revision: candidate?.representativeCacheRevision, label: FaceReviewText.name(item.personName))
             details
-            Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
             actions
         }
         .padding(10)
@@ -103,7 +104,8 @@ private struct FaceReviewRow: View {
                 .foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .help(FaceReviewText.scoreHelp(item.score))
-            MetaText(item.lowQuality == true ? "\(FaceReviewText.fileName(item)) · \(FaceReviewText.lowQuality)" : FaceReviewText.fileName(item), size: 11)
+            MetaText(FaceReviewText.fileName(item), size: 12).lineLimit(1).truncationMode(.middle)
+            if item.lowQuality == true { MetaText(FaceReviewText.lowQuality, size: 12) }
         }
     }
 
@@ -210,7 +212,7 @@ struct FaceReviewSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text(FaceReviewText.title).font(Theme.Font.body(20, .semibold))
+                Text(FaceReviewText.title).font(Theme.Font.display(28))
                     .accessibilityLabel(FaceReviewText.header(waiting))
                 MetaText("\(waiting) waiting")
                 Spacer()
@@ -218,10 +220,11 @@ struct FaceReviewSheet: View {
             }
             .padding(16)
             picker.padding(.horizontal, 16).padding(.bottom, 12)
-            Divider()
+            Hairline()
             ScrollView { content.padding(16) }
         }
         .frame(minWidth: 760, minHeight: 520)
+        .sheetSurface()
         .task { await loadAll() }
     }
 

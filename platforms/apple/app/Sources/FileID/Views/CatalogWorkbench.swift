@@ -470,16 +470,18 @@ struct CatalogWorkbench: View {
 
     // MARK: - Analysis queue
 
+    private var timelineJobs: [CatalogJob] { engine.catalogJobs.filter { $0.kind == "timelineSample" } }
+
     private var queuePanel: some View {
         Panel {
             PanelHeader("Video analysis") {
-                MetaText(engine.catalogJobs.isEmpty ? "Nothing running" : "\(engine.catalogJobs.count) task\(engine.catalogJobs.count == 1 ? "" : "s")", size: 12)
+                MetaText(timelineJobs.isEmpty ? "Nothing running" : "\(timelineJobs.count) task\(timelineJobs.count == 1 ? "" : "s")", size: 12)
             }
-            if engine.catalogJobs.isEmpty {
+            if timelineJobs.isEmpty {
                 MetaText("Nothing waiting. Pick a video and press Find moments.")
                     .padding(.horizontal, 14).padding(.vertical, 12)
             }
-            ForEach(engine.catalogJobs, id: \.id) { job in
+            ForEach(timelineJobs, id: \.id) { job in
                 CatalogJobRow(job: job) { action in
                     switch action {
                     case "retryTimeline": send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: job.fileIDs))

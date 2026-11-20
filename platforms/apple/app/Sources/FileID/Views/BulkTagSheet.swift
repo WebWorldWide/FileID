@@ -20,7 +20,7 @@ struct BulkTagSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Apply tags to \(files.count) file\(files.count == 1 ? "" : "s")")
-                        .font(Theme.Font.body(20, .semibold))
+                        .font(Theme.Font.display(28))
                     Text("Comma-separated. Existing tags on each file are preserved — only new tags get added.")
                         .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
@@ -52,6 +52,7 @@ struct BulkTagSheet: View {
         }
         .padding(20)
         .frame(width: 520)
+        .sheetSurface()
     }
 
     private var parsedTags: [String] {

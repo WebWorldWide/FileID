@@ -1306,7 +1306,7 @@ struct RestructureView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 480)
-        .background(LavaLampBackground())
+        .sheetSurface()
         .preferredColorScheme(.dark)
     }
 
