@@ -449,8 +449,7 @@ struct SankeyFlowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text("\(count)")
-                        .font(.system(size: 14, weight: .bold,
-                                       design: .rounded).monospacedDigit())
+                        .font(Theme.Font.body(14, .bold).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                     Text("file\(count == 1 ? "" : "s") moving")
                         .font(Theme.Font.body(12, .semibold))
