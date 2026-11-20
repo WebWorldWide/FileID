@@ -7,6 +7,7 @@ struct ModelCatalogBrowser: View {
     var initialSelection: AIModelKind?
     let onSelect: (AIModelKind) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var query = ""
     @State private var role = "all"
     @State private var fitsOnly = true
@@ -114,7 +115,7 @@ struct ModelCatalogBrowser: View {
             .frame(minHeight: 220)
             .onChange(of: selection) { _, id in
                 guard let id else { return }
-                withAnimation(Theme.quick) { proxy.scrollTo(id) }
+                withAnimation(reduceMotion ? nil : Theme.quick) { proxy.scrollTo(id) }
             }
             .onChange(of: engine.benchmarkModelKind) { _, _ in
                 if let selection { proxy.scrollTo(selection) }

@@ -18,6 +18,7 @@ struct SankeyFlowView: View {
     @State private var cursorPos: CGPoint = .zero
     @State private var cursorActive = false
     @State private var entranceProgress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let topN = 8
     private static let otherSourceID = "src:__other__"
@@ -190,7 +191,7 @@ struct SankeyFlowView: View {
                     )
                     // Replay entrance animation when data changes.
                     entranceProgress = 0
-                    withAnimation(.easeOut(duration: 0.55)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.55)) {
                         entranceProgress = 1
                     }
                 }
@@ -200,7 +201,7 @@ struct SankeyFlowView: View {
             .clipped()
             .onAppear {
                 if entranceProgress < 1 {
-                    withAnimation(.easeOut(duration: 0.55)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.55)) {
                         entranceProgress = 1
                     }
                 }

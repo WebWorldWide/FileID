@@ -538,6 +538,7 @@ struct GrainProgressBar: View {
     var progress: Double
     var tone: ProgressTone = .gold
     var height: CGFloat = 6
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var colors: [Color] {
         switch tone {
         case .gold: return [Color(hex: 0xFF8A1A), Color(hex: 0xFFB000), Theme.gold, Color(hex: 0xFFE9A3)]
@@ -560,7 +561,7 @@ struct GrainProgressBar: View {
             }
         }
         .frame(height: height)
-        .animation(.easeOut(duration: 0.3), value: progress)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: progress)
         .accessibilityElement()
         .accessibilityValue(Text("\(Int((progress.isFinite ? progress : 0) * 100)) percent"))
     }

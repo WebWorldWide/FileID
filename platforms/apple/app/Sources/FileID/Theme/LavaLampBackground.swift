@@ -85,7 +85,7 @@ struct LavaLampBackground: View {
                     .mask(Self.glowTopFade)
                     .position(x: w / 2, y: h * 1.0)
                     .opacity(aiActive && mode != .off ? 1 : 0)
-                    .animation(.easeInOut(duration: 2.4), value: aiActive)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 2.4), value: aiActive)
 
                     if mode != .off {
                         AtmosphereTimeline(paused: paused || reduceMotion) { time in
