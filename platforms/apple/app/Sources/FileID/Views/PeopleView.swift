@@ -1159,10 +1159,12 @@ private struct PersonDetailSheet: View {
                 engine: engine,
                 store: store,
                 fileIDs: Array(checked),
-                onMoved: { count, targetName in
-                    moveStatus = "Moved \(count) photo\(count == 1 ? "" : "s") to \(targetName)."
-                    selectMode = false
-                    checked.removeAll()
+                onMoved: { outcome, targetName in
+                    moveStatus = outcome.status(target: targetName)
+                    if outcome.photosMoved > 0 {
+                        selectMode = false
+                        checked.removeAll()
+                    }
                     loadFiles()
                 }
             )
@@ -1448,7 +1450,7 @@ private struct MovePhotosTargetPicker: View {
     let engine: EngineClient
     let store: ReadStore
     let fileIDs: [Int64]
-    let onMoved: @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
+    let onMoved: @Sendable @MainActor (_ outcome: CatalogWrites.FaceMoveOutcome, _ targetName: String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var candidates: [ReadStore.PersonRow] = []
     @State private var pendingTarget: ReadStore.PersonRow?
@@ -1461,8 +1463,8 @@ private struct MovePhotosTargetPicker: View {
         let completion = onMoved
         dismiss()
         Task { [engine, store] in
-            let moved = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
-            completion(moved, targetName)
+            let outcome = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
+            completion(outcome, targetName)
         }
     }
 

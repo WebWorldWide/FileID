@@ -36,3 +36,21 @@ struct PersonCountsTests {
         #expect(try #require(people.first { $0.id == 2 }).fileCount == 1)
     }
 }
+
+@Suite struct MovePhotosOutcomeTests {
+    private typealias Outcome = CatalogWrites.FaceMoveOutcome
+
+    @Test func aPhotoCountsOnceEvenWithTwoFacesAndOnlyWhenEveryFaceMoved() {
+        let faces: [(face: Int64, file: Int64)] = [(1, 10), (2, 10), (3, 11), (4, 12)]
+        #expect(Outcome.settle(faceFiles: faces, movedFaces: [1, 2, 3, 4], photosAsked: 3).photosMoved == 3)
+        #expect(Outcome.settle(faceFiles: faces, movedFaces: [1, 3], photosAsked: 3).photosMoved == 1)
+        #expect(Outcome.settle(faceFiles: faces, movedFaces: [], photosAsked: 3).photosMoved == 0)
+    }
+
+    @Test func nothingMovedSaysSoAndPartialSaysHowMany() {
+        #expect(Outcome(photosMoved: 0, photosAsked: 3).status(target: "Alex") == "The photos didn’t move. Try again in a moment.")
+        #expect(Outcome(photosMoved: 3, photosAsked: 3).status(target: "Alex") == "Moved 3 photos to Alex.")
+        #expect(Outcome(photosMoved: 1, photosAsked: 1).status(target: "Alex") == "Moved 1 photo to Alex.")
+        #expect(Outcome(photosMoved: 2, photosAsked: 5).status(target: "Alex") == "Moved 2 photos of 5 to Alex. The rest stayed where they were.")
+    }
+}

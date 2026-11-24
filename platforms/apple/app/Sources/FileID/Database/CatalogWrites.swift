@@ -109,19 +109,41 @@ enum CatalogWrites {
         return merged
     }
 
-    /// Moves every face of `source` on `fileIDs` to `target`. Returns how many faces moved.
-    static func moveFaces(_ engine: EngineClient, store: ReadStore, from source: Int64, to target: Int64, fileIDs: [Int64]) async -> Int {
-        guard source != target, !fileIDs.isEmpty else { return 0 }
-        let faces = await Task.detached(priority: .userInitiated) { store.faceIDs(personID: source, fileIDs: fileIDs) }.value
-        var moved = 0
-        for face in faces {
-            let result = await request(engine, .reassignFace(faceID: face, destinationPersonID: target, createNewPerson: false),
-                                       action: "reassignFace", id: face, timeout: 30)
-            if result.succeeded == 1 { moved += 1 }
+    /// How a Move photos request ended: whole photos that moved out of the chosen ones.
+    struct FaceMoveOutcome: Equatable {
+        let photosMoved: Int
+        let photosAsked: Int
+
+        static func settle(faceFiles: [(face: Int64, file: Int64)], movedFaces: Set<Int64>, photosAsked: Int) -> FaceMoveOutcome {
+            var left = Set<Int64>(), all = Set<Int64>()
+            for pair in faceFiles {
+                all.insert(pair.file)
+                if !movedFaces.contains(pair.face) { left.insert(pair.file) }
+            }
+            return FaceMoveOutcome(photosMoved: all.subtracting(left).count, photosAsked: photosAsked)
+        }
+
+        func status(target: String) -> String {
+            if photosMoved == 0 { return "The photos didn’t move. Try again in a moment." }
+            let moved = Plural.noun(photosMoved, "photo", "photos")
+            if photosMoved < photosAsked { return "Moved \(moved) of \(photosAsked.formatted()) to \(target). The rest stayed where they were." }
+            return "Moved \(moved) to \(target)."
+        }
+    }
+
+    /// Moves every face of `source` on `fileIDs` to `target`. A photo counts as moved only when all of its faces did.
+    static func moveFaces(_ engine: EngineClient, store: ReadStore, from source: Int64, to target: Int64, fileIDs: [Int64]) async -> FaceMoveOutcome {
+        guard source != target, !fileIDs.isEmpty else { return FaceMoveOutcome(photosMoved: 0, photosAsked: fileIDs.count) }
+        let faceFiles = await Task.detached(priority: .userInitiated) { store.faceFiles(personID: source, fileIDs: fileIDs) }.value
+        var movedFaces = Set<Int64>()
+        for pair in faceFiles {
+            let result = await request(engine, .reassignFace(faceID: pair.face, destinationPersonID: target, createNewPerson: false),
+                                       action: "reassignFace", id: pair.face, timeout: 30)
+            if result.succeeded == 1 { movedFaces.insert(pair.face) }
             if !answered(result) { break }
         }
         store.notifyChanged()
-        return moved
+        return FaceMoveOutcome.settle(faceFiles: faceFiles, movedFaces: movedFaces, photosAsked: fileIDs.count)
     }
 
     // MARK: - Suggested-name renames

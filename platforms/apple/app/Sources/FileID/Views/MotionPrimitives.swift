@@ -33,7 +33,7 @@ struct ShimmerView: View {
                         .offset(x: w * phase)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
