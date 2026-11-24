@@ -510,6 +510,31 @@ fn apply_part_progress(running: u64, msg: PartProgress) -> u64 {
     }
 }
 
+/// A retry after a partial install must not fetch again what already verified on disk.
+async fn destination_matches_pin(request: &DownloadRequest) -> bool {
+    let Some(expected) = request.expected_sha256.clone() else {
+        return false;
+    };
+    let path = request.destination.clone();
+    tokio::task::spawn_blocking(move || {
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            return false;
+        };
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            match std::io::Read::read(&mut file, &mut buffer) {
+                Ok(0) => break,
+                Ok(count) => hasher.update(&buffer[..count]),
+                Err(_) => return false,
+            }
+        }
+        hex::encode(hasher.finalize()).eq_ignore_ascii_case(&expected)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Downloads one file using up to PARALLEL_PARTS concurrent range-GETs, falling back to `download_simple` when the server lacks `Accept-Ranges: bytes`, the file is under MIN_BYTES_FOR_PARALLEL (5 MB), or the HEAD probe fails.
 ///
 /// Sharing the `reqwest::Client` is critical: HTTP/2 multiplexing + keep-alive let 12 parallel GETs hit one HuggingFace edge without re-handshaking TLS. Each range-GET retries on 429/503, transport and stream errors under the progress-aware `RetryBudget` (backoff 1s/4s/16s, Retry-After honored).
@@ -530,6 +555,15 @@ where
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_else(|| "<unparseable>".to_string());
         anyhow::bail!("refusing to download: host '{host}' is not on the https egress allowlist");
+    }
+    if destination_matches_pin(&request).await {
+        progress(DownloadProgress {
+            url: request.url.clone(),
+            bytes_done: tokio::fs::metadata(&request.destination).await.map_or(0, |m| m.len()),
+            bytes_total: None,
+            bytes_per_second: 0.0,
+        });
+        return Ok(());
     }
     if let Some(parent) = request.destination.parent() {
         tokio::fs::create_dir_all(parent).await
@@ -1378,5 +1412,32 @@ mod tests {
 
         // Floor guard: if a Rewound were applied before the matching Advanced, saturating keeps bytes_done >= 0 rather than wrapping to ~1.8e19.
         assert_eq!(apply_part_progress(0, PartProgress::Rewound(50)), 0);
+    }
+
+    #[tokio::test]
+    async fn a_file_already_on_disk_with_the_pinned_hash_is_not_fetched_again() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("fileid-pin-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("weights.bin");
+        std::fs::write(&dest, b"already here").unwrap();
+        let client = std::sync::Arc::new(
+            reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+                .build()
+                .unwrap(),
+        );
+        let request = super::DownloadRequest {
+            url: "https://huggingface.co/x/y/resolve/main/weights.bin".into(),
+            destination: dest.clone(),
+            expected_sha256: Some(hex::encode(Sha256::digest(b"already here"))),
+            expected_bytes: Some(12),
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        super::download_parallel(client, request, cancel, |_| {})
+            .await
+            .expect("a verified file on disk needs no network");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"already here");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
