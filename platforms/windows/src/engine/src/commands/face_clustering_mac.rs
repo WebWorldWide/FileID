@@ -106,12 +106,44 @@ pub(crate) fn catalog_mtime(metadata: &std::fs::Metadata) -> Option<f64> {
 }
 
 fn current_source_revision(path: &str) -> Option<String> {
+    #[cfg(test)]
+    tests::note_stat();
     let metadata = std::fs::metadata(Path::new(path)).ok()?;
     if !metadata.is_file() {
         return None;
     }
     let size = i64::try_from(metadata.len()).ok()?;
     Some(source_revision(size, catalog_mtime(&metadata)?))
+}
+
+/// What each face-bearing photo's file looks like on disk right now. Built once per pass before the catalog lock is taken, so a slow or sleeping drive never holds the writer.
+#[derive(Default)]
+pub(crate) struct Presence(HashMap<String, Option<String>>);
+
+impl Presence {
+    #[cfg(test)]
+    pub(crate) fn of(conn: &Connection) -> rusqlite::Result<Self> {
+        let paths = Self::paths(conn)?;
+        Ok(Self(paths.into_iter().map(|path| (path.clone(), current_source_revision(&path))).collect()))
+    }
+
+    pub(crate) fn build(database: &Mutex<Connection>) -> Result<Self> {
+        let paths = match crate::db::reader_for(database)? {
+            Some(reader) => Self::paths(&reader)?,
+            None => Self::paths(&database.lock())?,
+        };
+        Ok(Self(paths.into_iter().map(|path| (path.clone(), current_source_revision(&path))).collect()))
+    }
+
+    fn paths(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+        conn.prepare("SELECT DISTINCT f.path_text FROM face_prints fp JOIN files f ON f.id=fp.file_id WHERE f.path_text IS NOT NULL AND f.path_text<>''")?
+            .query_map([], |row| row.get(0))?
+            .collect()
+    }
+
+    fn revision(&self, path: &str) -> Option<&str> {
+        self.0.get(path)?.as_deref()
+    }
 }
 
 fn normalized_embedding(blob: &[u8]) -> bool {
@@ -176,7 +208,7 @@ struct Partition {
     overflowed: bool,
 }
 
-fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_quality: f64, limit: usize) -> rusqlite::Result<Partition> {
+fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_quality: f64, limit: usize, presence: &Presence) -> rusqlite::Result<Partition> {
     let mut statement = conn.prepare(
         "SELECT fp.id,fp.file_id,fp.person_id,fp.bbox,fp.face_quality,fp.excluded, \
                 CASE WHEN LENGTH(fp.arcface_embedding)=512 THEN fp.arcface_embedding END, \
@@ -188,7 +220,6 @@ fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_qua
     )?;
     let mut cursor = statement.query([])?;
     let mut partition = Partition { rows: Vec::new(), snapshots: Vec::new(), deferred: 0, overflowed: false };
-    let mut revisions: HashMap<String, Option<String>> = HashMap::new();
     while let Some(row) = cursor.next()? {
         let id: i64 = row.get(0)?;
         if skip.contains(&id) {
@@ -219,8 +250,7 @@ fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_qua
             partition.deferred += 1;
             continue;
         };
-        let actual = revisions.entry(path.clone()).or_insert_with(|| current_source_revision(&path));
-        if !actual.as_deref().is_some_and(|actual| crate::util::same_source_revision(actual, &revision)) {
+        if !presence.revision(&path).is_some_and(|actual| crate::util::same_source_revision(actual, &revision)) {
             partition.deferred += 1;
             continue;
         }
@@ -273,8 +303,8 @@ fn is_current(
         && embedding.is_some_and(normalized_embedding)
 }
 
-fn require_unchanged(conn: &Connection, original: &Partition, space: &Space, skip: &HashSet<i64>, min_quality: f64) -> Result<u64> {
-    let current = load_partition(conn, space, skip, min_quality, MAX_FACES_PER_RUN)?;
+fn require_unchanged(conn: &Connection, original: &Partition, space: &Space, skip: &HashSet<i64>, min_quality: f64, presence: &Presence) -> Result<u64> {
+    let current = load_partition(conn, space, skip, min_quality, MAX_FACES_PER_RUN, presence)?;
     ensure!(
         !current.overflowed && current.rows == original.rows && current.snapshots == original.snapshots,
         "the face evidence changed during clustering"
@@ -935,8 +965,9 @@ fn persist(
     min_quality: f64,
     min_size: usize,
     solo_floor: f64,
+    presence: &Presence,
 ) -> Result<Stats> {
-    let deferred = require_unchanged(tx, partition, space, skip, min_quality)?;
+    let deferred = require_unchanged(tx, partition, space, skip, min_quality, presence)?;
     let face_ids: Vec<i64> = partition.rows.iter().map(|row| row.id).collect();
     let vectors: Vec<Vec<f32>> = partition.rows.iter().map(|row| decode(&row.blob)).collect();
     let held: Vec<bool> = partition.rows.iter().map(|row| row.held).collect();
@@ -1244,8 +1275,8 @@ impl Join<'_> {
     }
 }
 
-fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
-    let partition = load_partition(conn, space, &HashSet::new(), 0.0, MAX_FACES_PER_RUN)?;
+fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Result<usize> {
+    let partition = load_partition(conn, space, &HashSet::new(), 0.0, MAX_FACES_PER_RUN, presence)?;
     ensure!(!partition.overflowed, "face cache overflow");
     let priors = priors(conn)?;
     let participants: HashSet<i64> = partition.rows.iter().map(|row| row.id).collect();
@@ -1408,7 +1439,7 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
         return Ok(0);
     }
     let tx = conn.transaction()?;
-    require_unchanged(&tx, &partition, space, &HashSet::new(), 0.0)?;
+    require_unchanged(&tx, &partition, space, &HashSet::new(), 0.0, presence)?;
     ensure!(priors == self::priors(&tx)? && verdicts == self::verdicts(&tx, Some(&participants))?, "face evidence changed");
     let fresh: HashMap<i64, Prior> = priors.into_iter().map(|p| (p.id, p)).collect();
     let mut absorbed = 0;
@@ -1747,13 +1778,21 @@ fn result(person_count: u32, face_count: usize, unmatched: usize, started: Insta
 pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let started = Instant::now();
     let min_quality = env_double("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0..=1.0);
+    let presence = match Presence::build(database) {
+        Ok(presence) => presence,
+        Err(error) => {
+            tracing::warn!(?error, "face clustering query failed");
+            let count = person_count(&database.lock());
+            return Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) };
+        }
+    };
     let loaded = {
         let conn = database.lock();
         (|| -> Result<(HashSet<i64>, HashSet<i64>, Partition)> {
             let unknown: HashSet<i64> = priors(&conn)?.into_iter().filter(|p| p.unknown).flat_map(|p| p.faces).collect();
             let held = holdout(&conn, space, min_quality)?;
             let skip: HashSet<i64> = unknown.union(&held).copied().collect();
-            let partition = load_partition(&conn, space, &skip, min_quality, MAX_FACES_PER_RUN)?;
+            let partition = load_partition(&conn, space, &skip, min_quality, MAX_FACES_PER_RUN, &presence)?;
             Ok((held, skip, partition))
         })()
     };
@@ -1799,7 +1838,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let mut conn = database.lock();
     let stats = (|| -> Result<Stats> {
         let tx = conn.transaction()?;
-        let stats = persist(&tx, &partition, space, &raw, &skip, min_quality, min_size, solo_floor)?;
+        let stats = persist(&tx, &partition, space, &raw, &skip, min_quality, min_size, solo_floor, &presence)?;
         tx.commit()?;
         Ok(stats)
     })();
@@ -1812,7 +1851,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
             return Outcome { result: summary, error: Some(("face_cluster_persist_failed", PERSIST_ERROR)) };
         }
     };
-    let merged = auto_merge(&mut conn, space).unwrap_or_else(|error| {
+    let merged = auto_merge(&mut conn, space, &presence).unwrap_or_else(|error| {
         tracing::warn!(?error, "face auto-merge skipped");
         0
     });

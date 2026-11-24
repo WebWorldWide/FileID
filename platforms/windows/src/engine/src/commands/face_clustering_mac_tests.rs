@@ -30,6 +30,44 @@ fn vector(identity: usize, face: usize, jitter: f32) -> Vec<u8> {
     encode(&values.iter().map(|v| v / norm).collect::<Vec<_>>())
 }
 
+thread_local! {
+    static PROBE: std::cell::RefCell<Option<Arc<Mutex<Connection>>>> = const { std::cell::RefCell::new(None) };
+    static STATS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+pub(super) fn note_stat() {
+    let held = PROBE.with(|probe| probe.borrow().as_ref().is_some_and(|database| database.try_lock().is_none()));
+    STATS.with(|stats| {
+        let (all, under_lock) = stats.get();
+        stats.set((all + 1, under_lock + usize::from(held)));
+    });
+}
+
+#[test]
+fn a_clustering_pass_stats_each_photo_once_and_never_under_the_catalog_lock() {
+    let catalog = Catalog::new();
+    for face in 1..=6 {
+        catalog.face(face, (face % 2) as usize, 0.6, None);
+    }
+    let Catalog { conn, dir: _dir } = catalog;
+    let database = Arc::new(Mutex::new(conn));
+    PROBE.with(|probe| *probe.borrow_mut() = Some(database.clone()));
+    STATS.with(|stats| stats.set((0, 0)));
+    let outcome = super::run(&database, &space());
+    PROBE.with(|probe| *probe.borrow_mut() = None);
+    assert!(outcome.error.is_none());
+    assert_eq!(STATS.with(std::cell::Cell::get), (6, 0), "(stats, stats made while the writer lock was held)");
+}
+
+fn presence(conn: &Connection) -> Presence {
+    Presence::of(conn).unwrap()
+}
+
+fn merge(conn: &mut Connection) -> Result<usize> {
+    let presence = presence(conn);
+    auto_merge(conn, &space(), &presence)
+}
+
 struct Catalog {
     conn: Connection,
     dir: TempDir,
@@ -241,7 +279,7 @@ fn twin_people(first: (Option<&str>, bool), second: (Option<&str>, bool), verdic
             .unwrap();
     }
     let mut conn = catalog.conn;
-    let absorbed = auto_merge(&mut conn, &space()).unwrap();
+    let absorbed = merge(&mut conn).unwrap();
     (Catalog { conn, dir: catalog.dir }, absorbed)
 }
 
@@ -306,7 +344,7 @@ fn auto_merge_does_not_join_people_who_share_a_photo() {
         .execute("UPDATE face_prints SET file_id=1, source_revision=(SELECT revision FROM catalog_revisions WHERE file_id=1) WHERE id=5", [])
         .unwrap();
     let mut conn = catalog.conn;
-    let absorbed = auto_merge(&mut conn, &space()).unwrap();
+    let absorbed = merge(&mut conn).unwrap();
     assert_eq!(absorbed, 0);
     let people: Vec<Option<i64>> = Catalog { conn, dir: catalog.dir }.assignments().into_iter().map(|(_, person)| person).collect();
     assert_eq!(people, vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
@@ -366,10 +404,10 @@ fn mixed_legacy_stale_and_malformed_face_caches_are_deferred_and_keep_every_iden
         } else {
             catalog.conn.execute(fault_sql, []).unwrap();
         }
-        let partition = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN).unwrap();
+        let partition = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN, &presence(&catalog.conn)).unwrap();
         assert_eq!((partition.rows.len(), partition.deferred), (1, 1), "{fault}");
         let mut conn = catalog.conn;
-        assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 0, "{fault}");
+        assert_eq!(merge(&mut conn).unwrap(), 0, "{fault}");
         let catalog = Catalog { conn, dir: catalog.dir };
         assert_eq!(catalog.assignments(), vec![(1, Some(10)), (2, Some(20))], "{fault}");
         let (catalog, outcome) = catalog.run();
@@ -392,7 +430,7 @@ fn a_bridge_face_cannot_chain_two_named_people_together() {
     catalog.face(2, 0, 0.6, Some(20));
     catalog.face(3, 0, 0.6, Some(5));
     let mut conn = catalog.conn;
-    let absorbed = auto_merge(&mut conn, &space()).unwrap();
+    let absorbed = merge(&mut conn).unwrap();
     let catalog = Catalog { conn, dir: catalog.dir };
     assert_eq!(absorbed, 1, "only the unnamed bridge is absorbed");
     let assignments = catalog.assignments();
@@ -414,7 +452,7 @@ fn people_named_only_by_a_title_middle_name_or_suffix_are_never_auto_merged() {
         catalog.face(face, 0, 0.6, Some(20));
     }
     let mut conn = catalog.conn;
-    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 0);
+    assert_eq!(merge(&mut conn).unwrap(), 0);
     let catalog = Catalog { conn, dir: catalog.dir };
     assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(20), Some(20), Some(20)]);
 }
@@ -437,7 +475,7 @@ fn a_merge_search_over_its_edge_budget_merges_no_one() {
     let catalog = crowd(1415);
     let before = catalog.assignments();
     let mut conn = catalog.conn;
-    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 0);
+    assert_eq!(merge(&mut conn).unwrap(), 0);
     let catalog = Catalog { conn, dir: catalog.dir };
     assert_eq!(catalog.assignments(), before, "a search that ran out of budget changes nothing");
     let file_counts: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons WHERE file_count=0", [], |row| row.get(0)).unwrap();
@@ -445,7 +483,7 @@ fn a_merge_search_over_its_edge_budget_merges_no_one() {
 
     let catalog = crowd(1414);
     let mut conn = catalog.conn;
-    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 1413, "inside the budget the same crowd is one person");
+    assert_eq!(merge(&mut conn).unwrap(), 1413, "inside the budget the same crowd is one person");
 }
 
 #[test]
@@ -521,12 +559,14 @@ fn a_photo_changed_after_the_partition_was_read_refuses_the_commit() {
     let catalog = Catalog::new();
     catalog.person(10, Some("Maya"), false);
     catalog.face(1, 0, 0.6, Some(10));
-    let selected = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN).unwrap();
+    let seen = presence(&catalog.conn);
+    let selected = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN, &seen).unwrap();
     assert_eq!(selected.rows.len(), 1);
-    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0).is_ok());
+    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0, &seen).is_ok());
+    catalog.conn.execute("UPDATE files SET size_bytes = size_bytes + 1 WHERE id = 1", []).unwrap();
+    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0, &seen).is_err());
     std::fs::write(catalog.dir.0.join("1.jpg"), [1u8, 2]).unwrap();
-    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0).is_err());
-    let current = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN).unwrap();
+    let current = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN, &presence(&catalog.conn)).unwrap();
     assert_eq!((current.rows.len(), current.deferred), (0, 1));
     assert_eq!(person_ids(&catalog), vec![10]);
 }
@@ -539,7 +579,7 @@ fn faces_of_people_marked_unknown_do_not_use_up_the_face_window() {
     catalog.face(1, 0, 0.6, Some(10));
     catalog.face(2, 1, 0.6, Some(20));
     catalog.conn.execute("UPDATE persons SET is_unknown=0", []).unwrap();
-    let loaded = load_partition(&catalog.conn, &space(), &HashSet::from([1]), 0.0, 1).unwrap();
+    let loaded = load_partition(&catalog.conn, &space(), &HashSet::from([1]), 0.0, 1, &presence(&catalog.conn)).unwrap();
     assert_eq!(loaded.rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![2]);
     assert!(!loaded.overflowed);
 }
@@ -565,7 +605,7 @@ fn oversized_evidence_is_deferred_while_other_people_still_merge() {
     let oversized = encode(&[1.0f32; 4097]);
     catalog.conn.execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=3", [&oversized]).unwrap();
     let mut conn = catalog.conn;
-    assert_eq!(auto_merge(&mut conn, &space()).unwrap(), 1);
+    assert_eq!(merge(&mut conn).unwrap(), 1);
     let catalog = Catalog { conn, dir: catalog.dir };
     let assignments = catalog.assignments();
     assert_eq!(assignments[0].1, assignments[1].1);
