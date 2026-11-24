@@ -1635,6 +1635,39 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
     Err(last_err.unwrap_or_else(|| std::io::Error::other("open failed")))
 }
 
+/// Largest file `read_image_bytes` will buffer; RAW and TIFF files above it are refused as an ordinary per-file error.
+const MAX_IMAGE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Reads an image file into memory. A mapped file raises SIGBUS (killing the engine) when the drive is pulled or the file is truncated mid-decode; a read turns the same event into an `Err` for that one file.
+pub(crate) fn read_image_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let file = open_image_file(path)?;
+    read_capped(file, MAX_IMAGE_FILE_BYTES)
+}
+
+fn read_capped(mut file: impl std::io::Read + Len, cap: u64) -> std::io::Result<Vec<u8>> {
+    let len = file.len()?;
+    if len > cap {
+        return Err(std::io::Error::other(format!("image file is {len} bytes, over the {cap}-byte read cap")));
+    }
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len as usize).map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, cap + 1), &mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(std::io::Error::other("image file grew past the read cap while reading"));
+    }
+    Ok(buf)
+}
+
+trait Len {
+    fn len(&self) -> std::io::Result<u64>;
+}
+
+impl Len for std::fs::File {
+    fn len(&self) -> std::io::Result<u64> {
+        self.metadata().map(|m| m.len())
+    }
+}
+
 /// Decodes an image to RGB8 on the calling thread, rejecting images over `MAX_DECODED_PIXELS` before commit; `catch_unwind` turns a panicking codec into Err.
 /// On Windows it falls back to the WinRT BitmapDecoder (HEIF, camera RAW, system codecs) when image-rs fails; a missing codec only marks that file undecodable.
 pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
@@ -1697,13 +1730,12 @@ pub(crate) fn decode_raw_preview_at_least(
     scale_floor: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mmap;
+        let owned;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
             pre_read
         } else {
-            let file = open_image_file(path).ok()?;
-            mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
-            &mmap
+            owned = read_image_bytes(path).ok()?;
+            &owned
         };
         let jpeg = super::raw_preview::largest_embedded_jpeg(bytes)?;
         let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg)
@@ -1774,10 +1806,8 @@ fn scaled_jpeg_reservation_for(path: &std::path::Path, bytes: Option<&[u8]>) -> 
     if !jpeg_scaled_decode_enabled() {
         return None;
     }
-    let file = open_image_file(path).ok()?;
-    // SAFETY: read-only map of a file opened for reading, dropped before returning.
-    let map = unsafe { memmap2::Mmap::map(&file).ok()? };
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&map))).ok().flatten()
+    let bytes = read_image_bytes(path).ok()?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&bytes))).ok().flatten()
 }
 
 fn jpeg_scaled_decode_enabled() -> bool {
@@ -1905,17 +1935,12 @@ fn decode_image_sync_imagecrate(
 ) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
-        let mmap;
+        let owned;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
             pre_read
         } else {
-            let file = open_image_file(path)
-                .map_err(|e| anyhow::anyhow!("open: {e}"))?;
-            mmap = unsafe {
-                memmap2::Mmap::map(&file)
-                    .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
-            };
-            &mmap
+            owned = read_image_bytes(path).map_err(|e| anyhow::anyhow!("read: {e}"))?;
+            &owned
         };
 
         let peek = image::ImageReader::new(Cursor::new(bytes))
@@ -3153,6 +3178,30 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_files_are_read_into_memory_never_mapped() {
+        for (name, source) in [
+            ("tagging.rs", include_str!("tagging.rs")),
+            ("shell/mod.rs", include_str!("../shell/mod.rs")),
+        ] {
+            let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+            assert!(!production.contains("Mmap::map"), "{name} maps a file; a pulled drive would SIGBUS the engine");
+        }
+    }
+
+    #[test]
+    fn reading_an_image_refuses_a_file_over_the_cap_and_a_missing_file_as_plain_errors() {
+        let dir = std::env::temp_dir().join(format!("fileid-read-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.tif");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        assert_eq!(read_capped(std::fs::File::open(&path).unwrap(), 8192).unwrap().len(), 4096);
+        assert!(read_capped(std::fs::File::open(&path).unwrap(), 1024).is_err());
+        assert!(read_image_bytes(&dir.join("gone.jpg")).is_err());
+        assert!(decode_image_sync(&dir.join("gone.jpg"), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_usb_or_network_volume_narrows_the_decode_pool_to_four() {
         use crate::platform::StorageType::{Hdd, Network, Nvme, Removable, Unknown};

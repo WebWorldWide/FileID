@@ -650,10 +650,7 @@ pub mod thumbnail {
     fn decode_upright(path: &Path, dim: u32) -> Result<image::DynamicImage> {
         use crate::pipeline::{raw_preview, tagging};
         let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-        let file = tagging::open_image_file(path).context("opening thumbnail source")?;
-        // SAFETY: read-only map of a file we only read; a concurrent truncation
-        // can fault, the same trade-off the scan decoder makes.
-        let bytes = unsafe { memmap2::Mmap::map(&file) }.context("mapping thumbnail source")?;
+        let bytes = tagging::read_image_bytes(path).context("reading thumbnail source")?;
         if raw_preview::is_raw_extension(&ext)
             && let Some((rgb, w, h)) = tagging::decode_raw_preview_at_least(path, Some(&bytes), 1, dim) {
                 return rgb_image(rgb, w, h);
