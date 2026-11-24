@@ -107,7 +107,7 @@ fn export_failure_message(error: &anyhow::Error, folder: Option<&str>, exported:
     match io_cause(error) {
         Some(IoCause::DiskFull) => format!("There isn’t enough free space in {folder}. Free up space or choose another folder.{progress}"),
         Some(IoCause::ReadOnly) => format!("{folder} is on a read-only disk, so FileID can’t save there. Choose another folder.{progress}"),
-        Some(IoCause::NameTooLong) => format!("A name in this export is too long (the limit is 255 characters). Rename the files and try again.{progress}"),
+        Some(IoCause::NameTooLong) => format!("A name in this export is too long (the limit is 255 bytes, about 85 characters of Japanese, Chinese or Korean text). Rename the files and try again.{progress}"),
         None if error.chain().any(|layer| layer.is::<std::io::Error>()) => {
             "Export didn’t finish. Some files may already be saved; press Show last export to check.".to_string()
         }

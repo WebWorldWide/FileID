@@ -14,7 +14,7 @@ impl IoCause {
         match self {
             Self::DiskFull => "There isn’t enough free space on this disk. Free some space, then try again.",
             Self::ReadOnly => "This folder is on a read-only disk, so FileID can’t change it.",
-            Self::NameTooLong => "That name is too long (the limit is 255 characters).",
+            Self::NameTooLong => "That name is too long. The limit is 255 bytes: about 255 letters, but only about 85 characters of Japanese, Chinese or Korean text.",
         }
     }
 }

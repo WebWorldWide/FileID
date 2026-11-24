@@ -509,6 +509,12 @@ fn plan_rename(
             row.ok().map(|(path, _, _)| path),
         ));
     }
+    if !cfg!(windows) && entry.new_name.len() > 255 {
+        return Err((
+            crate::util::user_message::IoCause::NameTooLong.sentence().into(),
+            row.ok().map(|(path, _, _)| path),
+        ));
+    }
     let (path, file_ref, proposed) = row.map_err(|err| (format!("not found: {err}"), None))?;
     let refuse = |message: &str| Err((message.to_string(), Some(path.clone())));
     let Some(dir) = path.parent().map(std::path::Path::to_path_buf) else {
@@ -4041,12 +4047,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
+    fn a_name_over_255_bytes_is_refused_before_the_move_with_the_byte_limit() {
+        let entry = ipc::RenameEntry { file_id: 1, new_name: format!("{}.jpg", "あ".repeat(90)) };
+        let Err((message, _)) = plan_rename(0, &entry, Err(rusqlite::Error::QueryReturnedNoRows)) else { panic!("a 274-byte name was planned") };
+        assert!(message.contains("255 bytes"), "{message}");
+        assert!(!message.contains("255 characters"));
+    }
+
+    #[test]
     fn failures_from_the_operating_system_never_show_an_os_string() {
         let dest = std::path::Path::new("/tmp/IMG_2.JPG");
         let read_only = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
         assert_eq!(rename_failure_text(&read_only, dest), "This folder is on a read-only disk, so FileID can’t change it.");
         let too_long = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::InvalidFilename));
-        assert_eq!(rename_failure_text(&too_long, dest), "That name is too long (the limit is 255 characters).");
+        assert_eq!(rename_failure_text(&too_long, dest), crate::util::user_message::IoCause::NameTooLong.sentence());
         let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
         assert!(rename_failure_text(&full, dest).starts_with("There isn’t enough free space"));
         let busy = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ResourceBusy));
