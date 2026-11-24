@@ -652,6 +652,10 @@ fn twin_reuse_enabled() -> bool {
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 /// What a row says when a read timed out: the file is fine, the machine was too busy, and the engine reads it again.
 pub(crate) const TIMED_OUT_MESSAGE: &str = "FileID ran out of time reading this file; it will try again";
+/// What a row says when the scheduler refused the file for lack of time or memory; the row is transient, so the next scan reads it again.
+pub(crate) const BUSY_MESSAGE: &str = "FileID was too busy or low on memory to read this file; it will try again";
+/// What a row says when a decoder rejected the image; the codec's own text goes to the log only.
+pub(crate) const UNDECODABLE_IMAGE_MESSAGE: &str = "FileID couldn't read this image; the file may be damaged or in a format it doesn't support";
 /// The wording earlier builds stored for the same failure; catalogs written by them still hold it.
 const LEGACY_TIMEOUT_MESSAGES: [&str; 2] = ["per-file timeout after 60s", "Vision pass timed out"];
 /// Stored `error_message` of a row that failed only because the machine was too busy, so a retry may succeed.
@@ -962,7 +966,10 @@ impl Tagger {
                     let (_lease, refused) = match admission {
                         Ok(lease) => (Some(lease), None),
                         Err(_) if coord.is_cancelled() => break,
-                        Err(error) => (None, Some(error.to_string())),
+                        Err(error) => {
+                            tracing::warn!(%error, "scan admission refused a file");
+                            (None, Some(BUSY_MESSAGE.to_string()))
+                        }
                     };
                     // Bounds async inference after decoding (platform decoders enforce their own limits). A panic on one file becomes that file's failure so the worker keeps draining.
                     let transient = refused.is_some();
@@ -2130,7 +2137,7 @@ async fn process_file_predecoded(
         Some(Err(err)) => {
             tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
             tagged.failed = true;
-            tagged.error_message = Some(format!("image decode: {err:#}"));
+            tagged.error_message = Some(UNDECODABLE_IMAGE_MESSAGE.to_string());
             None
         }
         None => None,
@@ -3178,6 +3185,16 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_failure_messages_never_carry_scheduler_or_codec_wording() {
+        let production = include_str!("tagging.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(!production.contains("Some(error.to_string())"), "a scheduler refusal is stored verbatim");
+        assert!(!production.contains("format!(\"image decode: {err"), "a codec error is stored verbatim");
+        for message in [BUSY_MESSAGE, UNDECODABLE_IMAGE_MESSAGE] {
+            assert!(!message.contains("Resource") && !message.contains("decode:"));
+        }
+    }
+
     #[test]
     fn image_files_are_read_into_memory_never_mapped() {
         for (name, source) in [
