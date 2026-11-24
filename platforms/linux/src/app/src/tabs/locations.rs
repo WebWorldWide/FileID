@@ -256,6 +256,7 @@ mod tests {
             total_bytes: bytes,
             last_scan_at,
             last_status: None,
+            read_only: None,
         }
     }
 

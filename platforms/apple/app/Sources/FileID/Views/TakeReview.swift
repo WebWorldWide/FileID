@@ -42,6 +42,7 @@ struct TakeReview: View {
         return qualities.first { $0.recommended }?.primaryFileID
     }
 
+    private var readOnlyReason: String? { engine.readOnlyGate.reasonIfAll(victims.map(\.path)) }
     private var victims: [CatalogTakeQuality] { qualities.filter { !keep.contains($0.primaryFileID) } }
 
     var body: some View {
@@ -92,17 +93,18 @@ struct TakeReview: View {
             HStack(spacing: 8) {
                 Button(primaryTitle) { confirmTrash = true }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
-                    .disabled(primaryDisabled)
+                    .disabled(primaryDisabled || readOnlyReason != nil)
                     .keyboardShortcut(pageActive ? .defaultAction : nil)
                     .background {
                         Button("") { confirmTrash = true }
                             .keyboardShortcut(pageActive ? KeyboardShortcut(.delete, modifiers: .command) : nil)
-                            .disabled(primaryDisabled)
+                            .disabled(primaryDisabled || readOnlyReason != nil)
                             .opacity(0)
                             .frame(width: 0, height: 0)
                             .accessibilityHidden(true)
                     }
-                    .help(primaryHelp)
+                    .help(readOnlyReason ?? primaryHelp)
+                    .accessibilityHint(readOnlyReason ?? "")
                 Button("Keep all") { Task { await decide("keepAll") } }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.control))
                     .disabled(loading || trashing)
@@ -485,6 +487,12 @@ struct TakeReview: View {
         let commandID = engine.lastSentCommandID
         guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles", commandID: commandID, timeout: 120) else {
             trashProblem = "Moving to Trash took too long, so FileID can’t tell how many moved. Check the Trash before trying again."
+            return
+        }
+        // A batch that moved nothing is not a decision: leave the group open and say why.
+        if result.succeeded == 0 {
+            trashProblem = result.messages.first(where: { !$0.ok })?.message.flatMap { Sidebar.looksTechnical($0) ? nil : $0 }
+                ?? "Nothing was moved to the Trash. Your files are untouched."
             return
         }
         let keptIDs = keptShots.flatMap(\.fileIDs)

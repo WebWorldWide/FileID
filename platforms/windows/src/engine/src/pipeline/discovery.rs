@@ -784,6 +784,12 @@ fn is_noise_directory(name: &str) -> bool {
             | ".cache"
             | ".gradle"
             | ".idea"
+        | ".spotlight-v100"
+        | ".trashes"
+        | ".temporaryitems"
+        | ".fseventsd"
+        | ".documentrevisions-v100"
+        | ".pkinstallsandboxmanager"
     )
 }
 
@@ -1052,6 +1058,7 @@ mod tests {
         assert!(is_noise_directory("__pycache__"));
         assert!(is_noise_directory("$RECYCLE.BIN"));
         assert!(is_noise_directory("System Volume Information"));
+        assert!(is_noise_directory(".Trashes") && is_noise_directory(".Spotlight-V100") && is_noise_directory(".TemporaryItems"));
         assert!(!is_noise_directory("Pictures"));
         assert!(!is_noise_directory("Desktop"));
     }
@@ -1109,6 +1116,28 @@ mod tests {
             }
             (got, errors.load(Ordering::Relaxed))
         })
+    }
+
+    /// macOS keeps volume metadata folders it forbids reading (`.Trashes` is mode 0 to everyone): walking them counts a
+    /// discovery error every scan and stops missing-file reconciliation for the whole library.
+    #[test]
+    #[cfg(unix)]
+    fn macos_volume_metadata_folders_are_not_walked_so_a_clean_drive_scans_clean() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        std::fs::write(root.join("a.jpg"), b"jpeg").unwrap();
+        let locked = root.join(".Trashes");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&locked).is_ok();
+        let (files, errors) = walk(root);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return;
+        }
+        assert_eq!(files.len(), 1);
+        assert_eq!(errors, 0, "an unreadable metadata folder must be skipped, not counted");
     }
 
     /// Symlink loops, unreadable directories, hard links and sparse files must neither hang, panic nor vanish silently from the walk.

@@ -1262,6 +1262,60 @@ pub fn suppress_hard_error_dialogs() {
 #[cfg(not(windows))]
 pub fn suppress_hard_error_dialogs() {}
 
+/// The volume holding `path` as (volume id, display name, mounted read-only), for the read-only write guard.
+#[cfg(unix)]
+pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    let device = metadata.dev();
+    let mut mount = path.to_path_buf();
+    while let Some(parent) = mount.parent() {
+        if std::fs::metadata(parent).map(|m| m.dev()).ok() != Some(device) {
+            break;
+        }
+        mount = parent.to_path_buf();
+    }
+    let name = mount.file_name().map_or_else(|| "this drive".to_owned(), |n| n.to_string_lossy().into_owned());
+    let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+    let read_only = {
+        let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(raw.as_ptr(), &raw mut stats) } != 0 {
+            return None;
+        }
+        (stats.f_flags as u64 & libc::MNT_RDONLY as u64) != 0
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+    let read_only = {
+        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(raw.as_ptr(), &raw mut stats) } != 0 {
+            return None;
+        }
+        (stats.f_flag as u64 & libc::ST_RDONLY as u64) != 0
+    };
+    Some((device.to_string(), name, read_only))
+}
+
+#[cfg(windows)]
+pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{FILE_READ_ONLY_VOLUME, GetVolumeInformationW, GetVolumePathNameW};
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut root = [0u16; 261];
+    unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root).ok()? };
+    let mut label = [0u16; 261];
+    let mut flags = 0u32;
+    unsafe { GetVolumeInformationW(PCWSTR(root.as_ptr()), Some(&mut label), None, None, Some(&mut flags), None).ok()? };
+    let end = |buffer: &[u16]| buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    let root_text = String::from_utf16_lossy(&root[..end(&root)]);
+    let label_text = String::from_utf16_lossy(&label[..end(&label)]);
+    let name = if label_text.is_empty() { root_text.clone() } else { label_text };
+    Some((root_text, name, flags & FILE_READ_ONLY_VOLUME.0 != 0))
+}
+
+
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;
@@ -1407,5 +1461,30 @@ mod adaptive_tests {
     fn available_disk_space_resolves_a_missing_child_to_its_volume() {
         let child = std::env::temp_dir().join("fileid-space-probe").join("not-created");
         assert!(available_disk_bytes(&child).is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
+    #[ignore = "needs FILEID_RO_DMG_TESTS=1 and macOS hdiutil"]
+    #[cfg(target_os = "macos")]
+    fn a_real_read_only_disk_image_is_detected_and_a_writable_one_is_not() {
+        if std::env::var("FILEID_RO_DMG_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fileid-ro-dmg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("test.dmg");
+        let run = |args: &[&str]| std::process::Command::new("hdiutil").args(args).output().unwrap();
+        assert!(run(&["create", "-size", "2m", "-fs", "HFS+", "-volname", "FileIDRO", image.to_str().unwrap()]).status.success());
+        let mount = dir.join("mnt");
+        std::fs::create_dir_all(&mount).unwrap();
+        let attach = run(&["attach", "-readonly", "-nobrowse", "-mountpoint", mount.to_str().unwrap(), image.to_str().unwrap()]);
+        assert!(attach.status.success(), "{}", String::from_utf8_lossy(&attach.stderr));
+        crate::util::read_only::refresh();
+        let seen = crate::util::read_only::read_only_location(&mount.join("new/file.jpg"));
+        let _ = run(&["detach", mount.to_str().unwrap(), "-force"]);
+        assert!(seen.is_some(), "read-only attach not detected");
+        crate::util::read_only::refresh();
+        assert!(crate::util::read_only::read_only_location(&dir.join("file.jpg")).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

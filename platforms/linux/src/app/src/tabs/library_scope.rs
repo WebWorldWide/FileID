@@ -197,6 +197,7 @@ mod tests {
             total_bytes: 1,
             last_scan_at: None,
             last_status: None,
+            read_only: None,
         }
     }
 

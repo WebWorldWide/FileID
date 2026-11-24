@@ -144,6 +144,8 @@ public final class EngineClient {
     public private(set) var modelDownloadProgress: ModelDownloadProgress?
     public private(set) var benchmarkProgress: BenchmarkProgress?
     public private(set) var libraryRoots: [LibraryRoot] = []
+    /// Which paths sit on read-only locations, from the engine's root list plus the Adlon name guard.
+    var readOnlyGate: ReadOnlyGate { ReadOnlyGate(libraryRoots) }
     public private(set) var benchmarkResults: [String: ModelBenchmark] = [:]
     /// The engine's own verdict on each vision model for this Mac and the memory free now, from the last `listModels` for the vision role.
     public private(set) var vlmAdvice: VLMAdvice?

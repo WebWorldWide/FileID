@@ -54,7 +54,8 @@ public enum TagWriter {
     /// Adds the supplied tags to the existing ones, preserving tags from other tools or the user (never blow away a user's "Important" tag).
     @discardableResult
     public static func addTags(_ tags: [String], at url: URL) throws -> [String] {
-        let existing = readTags(at: url)
+        try ReadOnlyLocations.requireSourceMutation(url)
+        let existing = try readTagsThrowing(at: url)
         let merged = mergeTags(existing: existing, adding: tags)
         if merged != existing {
             try setTags(merged, at: url)
@@ -66,7 +67,8 @@ public enum TagWriter {
     /// present are silently ignored. Returns the resulting tag list.
     @discardableResult
     public static func removeTags(_ tags: [String], at url: URL) throws -> [String] {
-        let existing = readTags(at: url)
+        try ReadOnlyLocations.requireSourceMutation(url)
+        let existing = try readTagsThrowing(at: url)
         let toRemove = Set(tags.map { $0.lowercased() })
         let kept = existing.filter { !toRemove.contains($0.lowercased()) }
         if kept.count != existing.count {

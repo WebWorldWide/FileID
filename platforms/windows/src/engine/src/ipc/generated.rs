@@ -1209,6 +1209,12 @@ pub struct LibraryRoot {
     pub last_scan_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<String>,
+    /// True when the volume holding this location is mounted read-only (or is the owner's protected
+    /// drive). FileID shows and searches such files but refuses every command that would change
+    /// them. Re-read at scan start and on every listRoots; omitted by engines that do not detect it
+    /// (read as false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 /// recommendedID is the engine's pick among the vision models: the best one that loads with the
@@ -1370,17 +1376,19 @@ pub struct ScanComplete {
 pub struct EngineError {
     /// Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the
     /// same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact
-    /// strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed |
-    /// model_download_failed | download_tls_pin_failed | pack_not_available |
-    /// face_clustering_failed | unknown_model | unknown | … . `face_clustering_failed` (Windows
-    /// form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy
-    /// `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't
-    /// recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was
-    /// renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial)
-    /// are emitted by the Windows engine; the macOS engine emits rescan_no_changes too and surfaces
-    /// the other conditions through its scan-completion flow rather than as distinct error kinds.
-    /// `ocr_accurate_disabled` (Swift engine, macOS only) reports that accurate text recognition
-    /// failed repeatedly and the engine fell back to fast recognition.
+    /// strings. Canonical kinds: location_read_only (a command was refused because its targets sit
+    /// on a read-only volume; the message is the plain sentence to show) | discovery_failed |
+    /// vision_failed | db_failed | model_load_failed | model_download_failed |
+    /// download_tls_pin_failed | pack_not_available | face_clustering_failed | unknown_model |
+    /// unknown | … . `face_clustering_failed` (Windows form) is the canonical face-clustering
+    /// failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it.
+    /// `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH
+    /// engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices
+    /// (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine;
+    /// the macOS engine emits rescan_no_changes too and surfaces the other conditions through its
+    /// scan-completion flow rather than as distinct error kinds. `ocr_accurate_disabled` (Swift
+    /// engine, macOS only) reports that accurate text recognition failed repeatedly and the engine
+    /// fell back to fast recognition.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

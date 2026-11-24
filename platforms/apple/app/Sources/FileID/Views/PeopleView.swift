@@ -3,6 +3,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 struct PeopleView: View {
     let engine: EngineClient
@@ -1237,6 +1238,8 @@ private struct PersonDetailSheet: View {
         return "FileID writes the Finder tag “\(tag.adding)” onto \(these). It shows in Finder and Spotlight. Other tags are kept, and you can remove it later in Finder."
     }
 
+    private var allPhotosReadOnlyReason: String? { engine.readOnlyGate.reasonIfAll(files.map(\.url)) }
+
     @ViewBuilder
     private var tagAllPhotosButton: some View {
         let tagName = primaryTagName
@@ -1253,6 +1256,7 @@ private struct PersonDetailSheet: View {
                 .buttonStyle(.dsSecondary)
                 .disabled(tagBatchInFlight || tagName.isEmpty || files.isEmpty)
                 .help("Adds the Finder tag “\(tagName)” to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
+                .readOnlyGated(allPhotosReadOnlyReason)
 
                 // re-tag affordance. Shows only when this person
                 // was previously tagged with a DIFFERENT name (e.g. user
@@ -1267,6 +1271,7 @@ private struct PersonDetailSheet: View {
                     .buttonStyle(.dsSecondary)
                     .disabled(tagBatchInFlight || files.isEmpty)
                     .help("Photos were tagged “\(oldTag)” earlier. Removes the old tag and adds the new one.")
+                    .readOnlyGated(allPhotosReadOnlyReason)
                 }
             }
             if let s = tagBatchStatus {
@@ -1327,6 +1332,10 @@ private struct PersonDetailSheet: View {
 
     private func applyTagToAllPhotos(_ tag: String) {
         guard !tag.isEmpty else { return }
+        if let refusal = ReadOnlyLocations.batchRefusal(files.map(\.url)) {
+            tagBatchStatus = refusal.errorDescription
+            return
+        }
         tagBatchInFlight = true
         tagBatchStatus = nil
         let urls = files.map(\.url)

@@ -95,6 +95,7 @@ fn convert_item(item: SwiftItem) -> TrashLogItem {
         source_identity: None,
         trashed_path: (!item.trashed_path.is_empty()).then_some(item.trashed_path),
         rows: item.rows,
+        settled: false,
     };
     // The Swift journal keeps only the inode; bind the volume too while the item is where the journal says.
     if let Some(inode) = converted.expected_inode() {

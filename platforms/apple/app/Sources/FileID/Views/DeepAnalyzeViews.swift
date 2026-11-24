@@ -4,6 +4,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 // MARK: - Settings card
 
@@ -545,8 +546,9 @@ struct DeepAnalyzeView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(DSSecondaryButtonStyle(height: 30))
-                .help(pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names in your Name style. You see the counts and confirm first." : "Adds tags and people’s names to the files. You confirm first.")
-                .disabled(applyInFlight)
+                .help(libraryReadOnlyReason ?? (pendingRenameCount > 0 ? "Adds tags and people, and renames files to their suggested names in your Name style. You see the counts and confirm first." : "Adds tags and people’s names to the files. You confirm first."))
+                .disabled(applyInFlight || libraryReadOnlyReason != nil)
+                .accessibilityHint(libraryReadOnlyReason ?? "")
                 .frame(maxWidth: 760, alignment: .leading)
                 .confirmationDialog(
                     applyConfirm?.title ?? "",
@@ -559,6 +561,9 @@ struct DeepAnalyzeView: View {
                 } message: { confirm in
                     Text(confirm.message)
                 }
+                if let libraryReadOnlyReason {
+                    Text(libraryReadOnlyReason).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
+                }
                 if let applyStatus {
                     Text(applyStatus).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
@@ -567,13 +572,17 @@ struct DeepAnalyzeView: View {
         }
     }
 
+    private var libraryReadOnlyReason: String? { engine.libraryReadOnlyReason }
+
     private func secondaryApplyButton(_ title: String, systemImage: String,
                                       disabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage).frame(maxWidth: .infinity)
         }
         .buttonStyle(DSSecondaryButtonStyle(height: 30))
-        .disabled(disabled)
+        .disabled(disabled || libraryReadOnlyReason != nil)
+        .help(libraryReadOnlyReason ?? "")
+        .accessibilityHint(libraryReadOnlyReason ?? "")
     }
 
     enum ApplyScope { case tags, people, all }
@@ -584,6 +593,8 @@ struct DeepAnalyzeView: View {
         var renames: [CatalogWrites.NamedRename] = []
         var tagged = 0
         var people = 0
+        var readOnlyDrive: String?
+        var readOnlySkipped = 0
 
 
         var title: String {
@@ -609,6 +620,9 @@ struct DeepAnalyzeView: View {
             }
             if tagged > 0 { parts.append("\(Plural.noun(tagged, "file", "files")) get FileID’s tags as Finder tags.") }
             if people > 0 { parts.append("\(Plural.noun(people, "file", "files")) get the names of the people in them as Finder tags.") }
+            if readOnlySkipped > 0, let drive = readOnlyDrive {
+                parts.append("\(Plural.noun(readOnlySkipped, "file", "files")) on “\(drive)” can’t be changed, because it’s a read-only drive, so FileID leaves \(readOnlySkipped == 1 ? "it" : "them") alone.")
+            }
             parts.append("Your own Finder tags are kept. To take a tag off later, remove it in Finder.")
             return parts.joined(separator: " ")
         }
@@ -621,18 +635,29 @@ struct DeepAnalyzeView: View {
         applyInFlight = true
         applyStatus = "Counting files…"
         let store = self.store
+        let gate = engine.readOnlyGate
         Task { @MainActor in
             var confirm = ApplyConfirm(scope: scope)
+            var skipped = 0
             if scope != .people {
-                confirm.tagged = await Task.detached(priority: .userInitiated) {
-                    store.filesWithKeywordTags().filter { !$0.tags.isEmpty }.count
+                let counts = await Task.detached(priority: .userInitiated) {
+                    let rows = store.filesWithKeywordTags().filter { !$0.tags.isEmpty }
+                    return (rows.filter { gate.drive(for: $0.url) == nil }.count, rows.filter { gate.drive(for: $0.url) != nil }.map(\.url))
                 }.value
+                confirm.tagged = counts.0
+                skipped = max(skipped, counts.1.count)
+                confirm.readOnlyDrive = counts.1.first.flatMap { gate.drive(for: $0) }
             }
             if scope != .tags {
-                confirm.people = await Task.detached(priority: .userInitiated) {
-                    store.filesWithPersonTags().filter { !$0.names.isEmpty }.count
+                let counts = await Task.detached(priority: .userInitiated) {
+                    let rows = store.filesWithPersonTags().filter { !$0.names.isEmpty }
+                    return (rows.filter { gate.drive(for: $0.url) == nil }.count, rows.filter { gate.drive(for: $0.url) != nil }.map(\.url))
                 }.value
+                confirm.people = counts.0
+                skipped = max(skipped, counts.1.count)
+                confirm.readOnlyDrive = confirm.readOnlyDrive ?? counts.1.first.flatMap { gate.drive(for: $0) }
             }
+            confirm.readOnlySkipped = skipped
             if scope == .all {
                 let ids = await Task.detached(priority: .userInitiated) {
                     store.filesWithProposedNames(limit: NameStyle.maxFiles).map(\.id)
@@ -648,7 +673,9 @@ struct DeepAnalyzeView: View {
             }
             applyInFlight = false
             guard confirm.renames.count + confirm.tagged + confirm.people > 0 else {
-                applyStatus = "Nothing to add yet."
+                applyStatus = confirm.readOnlySkipped > 0 && confirm.readOnlyDrive != nil
+                    ? ReadOnlyLocations.sentence(forDrive: confirm.readOnlyDrive ?? "this drive")
+                    : "Nothing to add yet."
                 return
             }
             applyStatus = nil
@@ -665,6 +692,7 @@ struct DeepAnalyzeView: View {
         applyStatus = "Working…"
         let store = self.store
         let scope = confirm.scope
+        let gate = engine.readOnlyGate
         Task { @MainActor in
             var summary: [String] = []
             if !confirm.renames.isEmpty {
@@ -673,22 +701,33 @@ struct DeepAnalyzeView: View {
                 if !result.renamed.isEmpty { summary.append("\(result.renamed.count) renamed") }
                 if result.failed > 0 { summary.append("\(result.failed.formatted()) couldn’t be renamed") }
             }
+            var firstError: String?
             if scope == .tags || scope == .all {
-                let n = await Task.detached(priority: .userInitiated) {
-                    Self.writeTags(store.filesWithKeywordTags())
+                let tally = await Task.detached(priority: .userInitiated) {
+                    Self.writeTags(store.filesWithKeywordTags(), gate: gate)
                 }.value
-                if n > 0 { summary.append("\(n) tagged") }
+                if tally.added > 0 { summary.append("\(tally.added) tagged") }
+                if tally.unchanged > 0 { summary.append("\(tally.unchanged) already had them") }
+                if tally.failed > 0 { summary.append("\(tally.failed.formatted()) couldn’t be changed") }
+                firstError = firstError ?? tally.firstError
             }
             if scope == .people || scope == .all {
-                let n = await Task.detached(priority: .userInitiated) {
-                    Self.writeTags(store.filesWithPersonTags().map { (url: $0.url, tags: $0.names) })
+                let tally = await Task.detached(priority: .userInitiated) {
+                    Self.writeTags(store.filesWithPersonTags().map { (url: $0.url, tags: $0.names) }, gate: gate)
                 }.value
-                if n > 0 { summary.append("\(n) tagged with names") }
+                if tally.added > 0 { summary.append("\(tally.added) tagged with names") }
+                if tally.unchanged > 0 { summary.append("\(tally.unchanged) already had the names") }
+                if tally.failed > 0 { summary.append("\(tally.failed.formatted()) couldn’t be changed") }
+                firstError = firstError ?? tally.firstError
             }
             applyInFlight = false
-            applyStatus = summary.isEmpty
-                ? "Nothing to add yet."
-                : "Done: " + summary.joined(separator: ", ") + "."
+            if let firstError, !summary.isEmpty, summary.allSatisfy({ $0.hasSuffix("couldn’t be changed") }) {
+                applyStatus = firstError
+            } else {
+                applyStatus = summary.isEmpty
+                    ? "Nothing to add yet."
+                    : "Done: " + summary.joined(separator: ", ") + "."
+            }
             refreshPendingRenameCount()
             refreshStatusCounts()
         }
@@ -696,12 +735,25 @@ struct DeepAnalyzeView: View {
 
     /// Additively write each file's tags as Finder tags. Returns the number of
     /// files that ended up modified. Runs on a detached task (FS writes).
-    nonisolated private static func writeTags(_ items: [(url: URL, tags: [String])]) -> Int {
-        var changed = 0
+    struct TagTally: Sendable {
+        var added = 0
+        var unchanged = 0
+        var failed = 0
+        var firstError: String?
+    }
+
+    nonisolated private static func writeTags(_ items: [(url: URL, tags: [String])], gate: ReadOnlyGate) -> TagTally {
+        var tally = TagTally()
         for item in items where !item.tags.isEmpty {
-            if (try? TagWriter.addTags(item.tags, at: item.url)) != nil { changed += 1 }
+            // Files on a read-only drive are left alone and said so in the confirmation, never counted as failures.
+            if gate.drive(for: item.url) != nil { continue }
+            let result = TagWriter.addTagsBulk(item.tags, to: [item.url])
+            tally.added += result.added
+            tally.unchanged += result.unchanged
+            tally.failed += result.failed
+            tally.firstError = tally.firstError ?? result.firstError
         }
-        return changed
+        return tally
     }
 
     private var smartNamesCard: some View {
@@ -720,7 +772,9 @@ struct DeepAnalyzeView: View {
                         Label("Review suggested names…", systemImage: "wand.and.rays")
                     }
                     .buttonStyle(DSPrimaryButtonStyle(height: 30))
-                    .disabled(pendingRenameCount == 0)
+                    .disabled(pendingRenameCount == 0 || libraryReadOnlyReason != nil)
+                    .help(libraryReadOnlyReason ?? "")
+                    .accessibilityHint(libraryReadOnlyReason ?? "")
                     Button {
                         openNamePreview()
                     } label: {

@@ -790,6 +790,7 @@ struct LibraryView: View {
             .fixedSize()
             .disabled(checkedFiles.isEmpty)
             .help(checkedFiles.isEmpty ? "Click files to choose them first" : "Add tags to the chosen files")
+            .readOnlyGated(engine.readOnlyGate.reasonIfAll(checkedFiles.values.map(\.url)))
             Button("Done") {
                 selectMode = false
                 checkedFiles.removeAll()
@@ -1561,6 +1562,7 @@ private struct FilePreviewSheet: View {
                                 .buttonStyle(.dsSecondary)
                                 .disabled(renaming)
                                 .help("Renames the file using your Name style, after you confirm. Undo last rename at the top of Library puts the old name back.")
+                                .readOnlyGated(engine.readOnlyGate.reasonIfAll([file.url]))
                             }
                             .padding(10)
                             .background(Theme.gold.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
@@ -1578,7 +1580,7 @@ private struct FilePreviewSheet: View {
                         }
                     }
                 }
-                FinderTagsEditor(file: file, store: store, isFocused: $tagFieldFocused, onEdit: onEdit)
+                FinderTagsEditor(file: file, store: store, readOnlyReason: engine.readOnlyGate.reasonIfAll([file.url]), isFocused: $tagFieldFocused, onEdit: onEdit)
                 DisclosureGroup {
                     VStack(spacing: 0) {
                         DetailRow("Path", file.pathText)
@@ -1655,6 +1657,7 @@ private struct FileDetailRows: View {
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
+    var readOnlyReason: String?
     /// Bound to the preview sheet's tag-field focus so it can suppress
     /// arrow-key navigation while the user is typing a tag.
     var isFocused: FocusState<Bool>.Binding
@@ -1700,7 +1703,9 @@ private struct FinderTagsEditor: View {
                         .buttonStyle(DSSecondaryButtonStyle(height: 30))
                         .keyboardShortcut(.defaultAction)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .readOnlyGated(readOnlyReason)
                 }
+                if let readOnlyReason { MetaText(readOnlyReason, size: 11) }
                 if let e = error {
                     Text(e).font(Theme.Font.body(11.5)).foregroundStyle(Theme.warning)
                 }

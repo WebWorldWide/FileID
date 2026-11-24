@@ -556,14 +556,19 @@ fn persist_rule_chunk(
     }
     let mut insert_move = tx.prepare_cached(
         "INSERT INTO raw_moves
-         (seq,file_id,source,source_folder,destination,category,confidence,reason)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+         (seq,file_id,source,source_folder,destination,category,confidence,reason,content_hash,size_bytes,file_ref,modified_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
     )?;
     let mut insert_stat = tx.prepare_cached(
         "INSERT INTO folder_stats(folder,category,count) VALUES (?1,?2,1)
          ON CONFLICT(folder,category) DO UPDATE SET count=count+1",
     )?;
+    let identities: std::collections::HashMap<i64, restructure::PlannedIdentity> = chunk
+        .iter()
+        .filter_map(|file| file.identity.clone().map(|identity| (file.file_id, identity)))
+        .collect();
     for move_ in classify(chunk, library_root) {
+        let identity = identities.get(&move_.file_id);
         let source_folder = move_
             .source
             .parent()
@@ -583,6 +588,10 @@ fn persist_rule_chunk(
             move_.category,
             move_.confidence.as_str(),
             move_.reason,
+            identity.and_then(|identity| identity.content_hash.clone()),
+            identity.map(|identity| identity.size_bytes as i64),
+            identity.and_then(|identity| identity.file_ref).map(|file_ref| file_ref as i64),
+            identity.map(|identity| identity.modified_at),
         ])?;
         *sequence += 1;
     }
@@ -648,7 +657,11 @@ fn plan_large_library_in_with_cancel(
                  destination TEXT NOT NULL,
                  category TEXT NOT NULL,
                  confidence TEXT NOT NULL,
-                 reason TEXT);
+                 reason TEXT,
+                 content_hash TEXT,
+                 size_bytes INTEGER,
+                 file_ref INTEGER,
+                 modified_at REAL);
              CREATE TABLE folder_stats(
                  folder TEXT NOT NULL,
                  category TEXT NOT NULL,
@@ -794,7 +807,7 @@ fn plan_large_library_in_with_cancel(
             );
             let mut stmt = plan_db.prepare(
                 "SELECT r.file_id,r.source,r.destination,r.category,t.tier,
-                        r.confidence,r.reason
+                        r.confidence,r.reason,r.content_hash,r.size_bytes,r.file_ref,r.modified_at
                  FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
                  WHERE t.tier <> 'Anchor'
                  ORDER BY r.seq",
@@ -808,7 +821,10 @@ fn plan_large_library_in_with_cancel(
                     tier: Some(row.get(4)?),
                     confidence: row.get(5)?,
                     reason: row.get(6)?,
-                    ..Default::default()
+                    content_hash: row.get(7)?,
+                    size_bytes: row.get::<_, Option<i64>>(8)?.map(|size| size as u64),
+                    file_ref: row.get::<_, Option<i64>>(9)?.map(|file_ref| file_ref as u64),
+                    modified_at: row.get(10)?,
                 })
             })?;
             write_stored_plan_in_with_cancel(
@@ -1494,6 +1510,9 @@ pub(crate) async fn handle_undo_restructure(
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(r))))
                 .await;
         }
+        Ok(Err(err)) if crate::util::user_message::read_only_sentence(&err).is_some() => {
+            send_read_only_apply_refusal(&sink, &err, 1).await;
+        }
         Ok(Err(err)) => {
             tracing::warn!(?err, "undoRestructure failed");
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
@@ -1538,6 +1557,12 @@ fn unusable_names_notice(unusable: &UnusableNames) -> Option<String> {
     ))
 }
 
+async fn send_read_only_apply_refusal(sink: &Sink, error: &anyhow::Error, requested: usize) {
+    let sentence = crate::util::user_message::read_only_sentence(error).unwrap_or_default();
+    sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+    sink.send(EngineError::event("location_read_only", format!("{sentence} Nothing was moved."))).await;
+}
+
 pub(crate) async fn handle_apply_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1545,6 +1570,10 @@ pub(crate) async fn handle_apply_restructure(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let requested = payload.moves.len();
+    if let Err(error) = crate::util::read_only::require_writable(std::path::Path::new(&payload.library_root)) {
+        send_read_only_apply_refusal(&sink, &anyhow::Error::from(error), requested).await;
+        return;
+    }
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<(ipc::RestructureApplyResult, UnusableNames)> {
             // Inject the operation token the CancelRestructure dispatch arm sets so a long apply is actually stoppable (the flag is reset to false in the ApplyRestructure arm so a stale cancel can't pre-stop a fresh apply).
@@ -1600,6 +1629,9 @@ pub(crate) async fn handle_apply_restructure(
             if let Some(message) = unusable_names_notice(&unusable) {
                 sink.send(EngineError::event("apply_restructure_skipped", message)).await;
             }
+        }
+        Ok(Err(err)) if crate::util::user_message::read_only_sentence(&err).is_some() => {
+            send_read_only_apply_refusal(&sink, &err, requested).await;
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");
@@ -2128,6 +2160,27 @@ mod tests {
                 .all(|entry| !entry.path().to_string_lossy().contains("planning.sqlite")),
             "no planning scratch left behind after planning"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stored-plan apply compares each move with the file the plan was built from, so a streamed plan must carry it.
+    #[test]
+    fn a_streamed_plan_keeps_each_files_identity() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref,content_hash,modified_at)
+             VALUES (7,'/library/downloads/a.jpg',7,1234,1.0,'image','jpg',0,99,x'0a0b0c',555.0)",
+            [],
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let dir = std::env::temp_dir().join(format!("fileid-large-identity-{}", uuid::Uuid::new_v4()));
+        let plan = plan_large_library_in(&db, "/library", &dir).unwrap();
+        let moved = plan.moves.iter().find(|m| m.file_id == 7).expect("the file is planned");
+        assert_eq!(moved.size_bytes, Some(1234));
+        assert_eq!(moved.file_ref, Some(99));
+        assert_eq!(moved.content_hash.as_deref(), Some("0a0b0c"));
+        assert_eq!(moved.modified_at, Some(555.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

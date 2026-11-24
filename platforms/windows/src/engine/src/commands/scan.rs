@@ -213,6 +213,7 @@ pub(crate) async fn handle_start_scan(
     other_heavy_work: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> bool {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
+    crate::util::read_only::refresh();
 
     // A relative or empty path would resolve against the engine's own folder and a NUL would cut it short: either scans
     // a folder the person never chose.

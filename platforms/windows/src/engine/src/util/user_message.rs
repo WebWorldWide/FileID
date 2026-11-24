@@ -51,11 +51,19 @@ pub fn io_cause(error: &anyhow::Error) -> Option<IoCause> {
     })
 }
 
+/// The sentence naming the read-only drive when the error came from the write guard.
+pub fn read_only_sentence(error: &anyhow::Error) -> Option<String> {
+    crate::util::read_only::location_in(error).map(ToString::to_string)
+}
+
 pub const DISK_ALMOST_FULL: &str =
     "Your disk is almost full, so FileID couldn’t save everything it learned. Free some space and scan again.";
 
 /// The text stored on a failed background job: the disk-full sentence, otherwise the error as written.
 pub fn job_failure_text(error: &anyhow::Error) -> String {
+    if let Some(sentence) = read_only_sentence(error) {
+        return sentence;
+    }
     match io_cause(error) {
         Some(IoCause::DiskFull) => DISK_ALMOST_FULL.to_string(),
         _ => format!("{error:#}").chars().take(2_000).collect(),

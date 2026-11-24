@@ -195,3 +195,48 @@ async fn a_partial_restore_keeps_the_whole_batch_journaled_for_a_retry() {
     assert_eq!((retry.succeeded, retry.failed), (2, 0), "a retry finishes the batch from the same journal entry");
     std::fs::remove_dir_all(dir).ok();
 }
+
+fn read_only_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fileid-ro-trash-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::util::read_only::mark_read_only_for_tests(&dir, "Archive");
+    dir
+}
+
+// One target on a read-only drive refuses the whole batch before any hashing, journal entry or move.
+#[tokio::test]
+async fn a_batch_with_one_read_only_file_is_refused_whole_before_any_side_effect() {
+    let ro = read_only_dir("whole");
+    let writable = std::env::temp_dir().join(format!("fileid-rw-trash-{}", std::process::id()));
+    std::fs::create_dir_all(&writable).unwrap();
+    let (locked, free) = (ro.join("a.jpg"), writable.join("b.jpg"));
+    std::fs::write(&locked, b"a").unwrap();
+    std::fs::write(&free, b"b").unwrap();
+    let db = catalog_with(&[(1, &locked), (2, &free)]);
+    let result = trash(&db, vec![1, 2]).await;
+    assert_eq!((result.succeeded, result.failed), (0, 2));
+    assert!(result.messages.iter().all(|item| !item.ok && item.reason.as_deref() == Some("protected")));
+    let text = result.messages[0].message.clone().unwrap();
+    assert!(text.contains("“Archive” is a read-only drive") && text.contains("1 of 2"), "{text}");
+    assert!(locked.exists() && free.exists());
+    let _ = std::fs::remove_dir_all(&writable);
+}
+
+// A batch that moved nothing is closed in the journal, so the next launch's
+// recovery never reads its write-ahead line as an interrupted delete.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_batch_that_moved_nothing_is_closed_in_the_journal() {
+    let _turn = JOURNAL_TURN.lock().await;
+    let dir = std::env::temp_dir().join(format!("fileid-trash-closed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.jpg");
+    std::fs::write(&file, b"first").unwrap();
+    let db = catalog_with(&[(1, &file)]);
+    let result = trash(&db, vec![1]).await;
+    assert_eq!(result.succeeded, 0);
+    let batch_id = result.action.strip_prefix("trashFiles:").unwrap().to_string();
+    let entry = journaled(&batch_id).expect("the batch is journaled");
+    assert!(!entry.items.is_empty() && entry.items.iter().all(|item| item.settled));
+    std::fs::remove_dir_all(dir).ok();
+}

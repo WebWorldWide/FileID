@@ -36,6 +36,10 @@ pub(crate) struct TrashLogItem {
     /// Put back on restore so tags, CLIP vector and take signals return at once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) rows: Vec<SnapshotRow>,
+    /// Set by the closing line of a batch that finished without moving this item, so startup recovery never reads a
+    /// finished batch's write-ahead line as an interrupted one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) settled: bool,
 }
 
 impl TrashLogItem {
@@ -440,6 +444,9 @@ pub(crate) fn put_back_interrupted_batch(
     let Some(newest) = latest_entries(&raw, key).pop() else {
         return 0;
     };
+    if newest.items.iter().any(|item| item.settled) {
+        return 0;
+    }
     if newest.items.iter().any(|item| item.trashed_path.is_some()) {
         return 0;
     }
@@ -708,6 +715,18 @@ mod tests {
 
         assert_eq!(put_back, 2, "the two files already in the Trash came back");
         assert!(originals.iter().all(|original| original.exists()), "the folder is as it was before the delete");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_batch_closed_as_moving_nothing_is_never_put_back_at_the_next_start() {
+        let (dir, trash, originals, mut entry, db) = interrupted_batch_fixture(3, 2);
+        entry.items.iter_mut().for_each(|item| item.settled = true);
+        let (log, key) = (dir.join("trash_log.json"), b"test key".to_vec());
+        append_at(&log, &key, &entry).unwrap();
+
+        assert_eq!(put_back_interrupted_batch(&log, &key, &db, put_everything_back_from(&trash, &originals)), 0);
+        assert!(originals.iter().any(|original| !original.exists()), "a file the user trashed later stays in the Trash");
         std::fs::remove_dir_all(dir).ok();
     }
 
