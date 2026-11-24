@@ -149,6 +149,11 @@ final class ToolsSession {
         selection.formIntersection(chooseableHits.map(\.fileID))
     }
 
+    /// A failed export that wrote nothing is not an export; only a reply that worked, or left a finished file behind, locks Export until the plan changes.
+    nonisolated static func exportCounts(status: String, outputs: [ToolOutput]) -> Bool {
+        status == "ok" || outputs.contains { $0.state == "completed" }
+    }
+
     /// A successful preview says what Export will do in plain words; the engine's sentence ("new files",
     /// "8-bit SDR") stays for everything else. The photo caveat follows the recipe kind that was sent, not the engine's wording.
     nonisolated static func plainMessage(action: String, status: String, outputs: Int, recipeKind: String?, message: String) -> String {
@@ -808,7 +813,7 @@ struct ToolsWorkbench: View {
         }
         if action == "history", response.status == "ok" { session.operationID = response.operationID; session.executed = response.operationID != nil }
         if action == "preview", response.status == "ok" { session.operationID = response.operationID; session.executed = false }
-        if action == "execute" { session.executed = true }
+        if action == "execute" { session.executed = ToolsSession.exportCounts(status: response.status, outputs: response.outputs) }
         if action == "undo", response.status == "ok" { session.operationID = nil; session.executed = false }
         withAnimation(Theme.springStandard) { session.outputs = response.outputs }
     }
