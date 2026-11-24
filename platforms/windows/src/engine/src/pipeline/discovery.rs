@@ -686,11 +686,25 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
 
     let online_only = is_online_only(&metadata);
 
-    let kind = path
+    let mut kind = path
         .extension()
         .and_then(|e| e.to_str())
         .map(FileKind::from_extension)
         .unwrap_or(FileKind::Other);
+    if kind == FileKind::Doc {
+        let extension = path_extension_lower(entry_path);
+        if extension.as_deref() == Some("ts") && file_is_mpeg_transport_stream(entry_path) {
+            kind = FileKind::Video;
+        } else if extension.as_deref() == Some("json")
+            && entry_path.file_name().is_some_and(|n| is_takeout_sidecar(&n.to_string_lossy()))
+        {
+            return ClassifiedEntry {
+                discovered: None,
+                zero_byte: None,
+                seen_path_hash: Some(seen_path_hash),
+            };
+        }
+    }
     if kind == FileKind::Other && !is_cataloged_other(path_extension_lower(entry_path).as_deref()) {
         // Present but never cataloged (unfinished downloads, scratch and SQLite temp files): kept in `seen` so a row whose kind mapping changed across versions isn't soft-hidden while the file exists.
         return ClassifiedEntry {
@@ -748,6 +762,53 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
     }
 }
 
+/// A transport stream is 188-byte packets that each open with 0x47; TypeScript source never repeats that byte at those offsets.
+fn file_is_mpeg_transport_stream(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 188 * 3 + 1];
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return false,
+        }
+    }
+    filled > 188 * 2 && head[0] == 0x47 && head[188] == 0x47 && head[376] == 0x47
+}
+
+/// Google Takeout writes `<photo>.<ext>.json`, `<photo>.<ext>.supplemental-metadata.json` (the suffix is cut to fit the name length limit, so any prefix of it counts) and `<photo>.<ext>(1).json` beside each photo or video. They describe a picture, not a document.
+fn is_takeout_sidecar(name: &str) -> bool {
+    const SUPPLEMENTAL: &str = ".supplemental-metadata";
+    let lower = name.to_ascii_lowercase();
+    let Some(stem) = lower.strip_suffix(".json") else { return false };
+    let strip_counter = |text: &str| -> String {
+        if let Some(open) = text.rfind('(') {
+            let digits = &text[open + 1..];
+            if let Some(number) = digits.strip_suffix(')') {
+                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+                    return text[..open].to_string();
+                }
+            }
+        }
+        text.to_string()
+    };
+    let mut stem = strip_counter(stem);
+    if let Some(dot) = stem.rfind(".s") {
+        let tail = &stem[dot..];
+        if tail.len() >= 2 && SUPPLEMENTAL.starts_with(tail) {
+            stem.truncate(dot);
+        }
+    }
+    let stem = strip_counter(&stem);
+    let Some((_, extension)) = stem.rsplit_once('.') else { return false };
+    matches!(
+        FileKind::from_extension(extension),
+        FileKind::Image | FileKind::Video
+    )
+}
+
 /// Other files (archives, installers, unknown types) are cataloged with name, size, dates and a content hash so they count, search and appear in Duplicates, except these transient ones. Mirrors the Swift `FileTypes.neverCataloged`.
 fn is_cataloged_other(extension: Option<&str>) -> bool {
     !matches!(
@@ -784,7 +845,19 @@ fn is_noise_directory(name: &str) -> bool {
             | ".cache"
             | ".gradle"
             | ".idea"
-    )
+            | ".fseventsd"
+            | ".spotlight-v100"
+            | ".trashes"
+            | ".temporaryitems"
+            | ".documentrevisions-v100"
+    ) || is_chkdsk_recovery_directory(&lower)
+}
+
+/// chkdsk's `FOUND.000`, `FOUND.001`, ... hold recovered `.CHK` fragments, not user files.
+fn is_chkdsk_recovery_directory(lower: &str) -> bool {
+    lower
+        .strip_prefix("found.")
+        .is_some_and(|n| n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Generic names that are build artifacts ONLY inside a dev tree. They double as ordinary folder names (a photographer's "build" set, a "bin" of scans), so the caller prunes them only when a build-system marker sits alongside; otherwise a user's files would vanish from the app.
@@ -1054,6 +1127,74 @@ mod tests {
         assert!(is_noise_directory("System Volume Information"));
         assert!(!is_noise_directory("Pictures"));
         assert!(!is_noise_directory("Desktop"));
+    }
+
+    #[test]
+    fn volume_metadata_directories_are_noise() {
+        for name in [".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems", ".DocumentRevisions-V100", "FOUND.000", "found.012"] {
+            assert!(is_noise_directory(name), "{name}");
+        }
+        assert!(!is_noise_directory("found.photos"));
+        assert!(!is_noise_directory("FOUND.0000"));
+    }
+
+    #[test]
+    fn takeout_sidecars_are_recognised_but_real_json_is_not() {
+        for name in [
+            "IMG_1234.jpg.json",
+            "IMG_1234.JPG.supplemental-metadata.json",
+            "IMG_1234.jpg.supplemental-metad.json",
+            "IMG_1234.jpg.suppl.json",
+            "IMG_1234.jpg.s.json",
+            "IMG_1234.jpg(1).json",
+            "IMG_1234.jpg.supplemental-metadata(2).json",
+            "clip.mp4.json",
+            "DSC0001.ARW.json",
+        ] {
+            assert!(is_takeout_sidecar(name), "{name}");
+        }
+        for name in ["package.json", "notes.txt.json", "data.json", "IMG_1234.jpg", "IMG.jpg.sample.json", "metadata.json"] {
+            assert!(!is_takeout_sidecar(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn mpeg_transport_stream_named_ts_is_video_and_typescript_stays_doc() {
+        let tmp = tempdir_or_skip();
+        let mut ts = vec![0u8; 188 * 4];
+        for packet in 0..4 {
+            ts[packet * 188] = 0x47;
+        }
+        std::fs::write(tmp.path().join("clip.ts"), &ts).unwrap();
+        std::fs::write(tmp.path().join("app.ts"), b"export const answer: number = 42;\n".repeat(40)).unwrap();
+        std::fs::write(tmp.path().join("IMG_1.jpg"), b"jpeg").unwrap();
+        std::fs::write(tmp.path().join("IMG_1.jpg.supplemental-metadata.json"), b"{\"photoTakenTime\":{}}").unwrap();
+        std::fs::write(tmp.path().join("settings.json"), b"{}").unwrap();
+        let (files, errors) = walk(tmp.path());
+        assert_eq!(errors, 0);
+        let kind_of = |name: &str| files.iter().find(|f| f.path.file_name().unwrap() == name).map(|f| f.kind);
+        assert_eq!(kind_of("clip.ts"), Some(FileKind::Video));
+        assert_eq!(kind_of("app.ts"), Some(FileKind::Doc));
+        assert_eq!(kind_of("settings.json"), Some(FileKind::Doc));
+        assert_eq!(kind_of("IMG_1.jpg"), Some(FileKind::Image));
+        assert_eq!(kind_of("IMG_1.jpg.supplemental-metadata.json"), None);
+    }
+
+    #[test]
+    fn volume_metadata_folders_are_not_walked_or_counted() {
+        let tmp = tempdir_or_skip();
+        for dir in [".fseventsd", ".Spotlight-V100", ".Trashes/501", "FOUND.000"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        std::fs::write(tmp.path().join(".fseventsd/fseventsd-uuid"), b"u").unwrap();
+        std::fs::write(tmp.path().join(".fseventsd/000000000d51393f"), b"journal").unwrap();
+        std::fs::write(tmp.path().join(".Trashes/501/gone.jpg"), b"jpeg").unwrap();
+        std::fs::write(tmp.path().join("FOUND.000/FILE0000.CHK"), b"fragment").unwrap();
+        std::fs::write(tmp.path().join("keep.jpg"), b"jpeg").unwrap();
+        let (files, errors) = walk(tmp.path());
+        assert_eq!(errors, 0);
+        let names: Vec<_> = files.iter().map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["keep.jpg".to_string()]);
     }
 
     #[test]
