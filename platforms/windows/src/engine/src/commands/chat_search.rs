@@ -49,6 +49,17 @@ mod tests {
         assert_eq!(timestamp("12:03"), Some(723.0));
     }
     #[test]
+    fn an_and_inside_a_new_search_does_not_inherit_the_previous_search() {
+        let people = vec![(1, vec!["Kyle".into()]), (2, vec!["Maya".into()])];
+        let orchard = SearchPlan::resolve_known("orchard photos", None, &people, &[], false);
+        let fresh = SearchPlan::resolve_known("videos of Kyle and Maya", Some(&orchard), &people, &[], false);
+        assert_eq!((fresh.query.as_str(), fresh.kinds.clone()), ("", vec!["video".to_owned()]));
+        assert!(fresh.person_ids == [1, 2] && fresh.all_people);
+        let more = SearchPlan::resolve_known("and sunsets", Some(&orchard), &people, &[], false);
+        assert_eq!(more.query, "orchard sunsets");
+    }
+
+    #[test]
     fn both_people_excluded_people_and_follow_ups() {
         let people = vec![(1, vec!["Kyle".into()]), (2, vec!["Maya".into()]), (3, vec!["Ann Lee".into()])];
         let plan = SearchPlan::resolve_known("photos of Kyle and Maya at the beach", None, &people, &[], false);
@@ -177,9 +188,10 @@ impl SearchPlan {
             "similar", "closest", "nearest", "lookalike", "lookalikes", "resemble", "resembles", "resembling",
         ];
         let refinement = follow_up
+            || normalized.first().is_some_and(|word| word == "and")
             || normalized.iter().any(|word| {
                 [
-                    "only", "just", "now", "these", "those", "instead", "also", "and", "them", "they", "ones", "he", "she",
+                    "only", "just", "now", "these", "those", "instead", "also", "them", "they", "ones", "he", "she",
                     "him", "her", "his", "their",
                 ]
                 .contains(&word.as_str())

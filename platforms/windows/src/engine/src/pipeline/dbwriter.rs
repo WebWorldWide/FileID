@@ -982,10 +982,39 @@ const HEAL_UPDATE_SQL: &str = r#"
 
 /// Whether a heal candidate genuinely MOVED: heal ONLY when its previous path no longer exists, for BOTH match kinds. A content_hash-only match also fires for a coexisting byte-identical copy, and a `file_ref` (NTFS MFT id) is only volume-local, so files on different volumes or two hardlinks can collide. Healing a coexisting file steals its row and, via `UPDATE OR REPLACE`, FK-cascades its tags/faces away (silent data loss). `symlink_metadata` so a dangling symlink still counts as present.
 fn heal_candidate_moved(old_path: &str) -> bool {
-    std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(
-        std::path::Path::new(old_path),
-    ))
-    .is_err()
+    let path = std::path::Path::new(old_path);
+    let gone = matches!(
+        std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(path)),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+    );
+    gone && removable_volume_root(path).is_none_or(|root| std::fs::read_dir(root).is_ok_and(|mut entries| entries.next().is_some()))
+}
+
+/// The mount point of a drive the path lives on, when that drive can be unplugged. A path under an unmounted volume fails to stat exactly like a deleted file, so an offline library's rows must not look "moved".
+fn removable_volume_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut components = path.components();
+    match components.next()? {
+        Component::Prefix(prefix) => {
+            let mut root = std::path::PathBuf::from(prefix.as_os_str());
+            root.push(std::path::MAIN_SEPARATOR_STR);
+            Some(root)
+        }
+        Component::RootDir => {
+            let names: Vec<&std::ffi::OsStr> = components
+                .filter_map(|c| if let Component::Normal(n) = c { Some(n) } else { None })
+                .take(4)
+                .collect();
+            let depth = match names.first()?.to_str()? {
+                "Volumes" | "mnt" => 2,
+                "media" => 3,
+                "run" if names.get(1).and_then(|n| n.to_str()) == Some("media") => 4,
+                _ => return None,
+            };
+            (names.len() >= depth).then(|| names[..depth].iter().fold(std::path::PathBuf::from("/"), |root, name| root.join(name)))
+        }
+        _ => None,
+    }
 }
 
 const INSERT_CLIP_SQL: &str = r#"
@@ -1743,6 +1772,35 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_under_an_unmounted_volume_is_not_a_moved_file() {
+        for old in [
+            "/Volumes/fileid-test-offline-drive/Photos/a.jpg",
+            "/mnt/fileid-test-offline-drive/Photos/a.jpg",
+            "/media/someone/fileid-test-offline-drive/a.jpg",
+            "/run/media/someone/fileid-test-offline-drive/a.jpg",
+        ] {
+            assert!(!heal_candidate_moved(old), "{old}");
+        }
+        let dir = unique_tmp_dir("heal_moved");
+        let gone = dir.join("deleted.jpg");
+        assert!(heal_candidate_moved(&gone.to_string_lossy()), "a deleted file on a mounted disk is a move");
+        assert!(!heal_candidate_moved(&dir.to_string_lossy()), "a present path is not moved");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removable_volume_roots_are_found_for_mount_conventions_only() {
+        let root = |p: &str| removable_volume_root(std::path::Path::new(p)).map(|r| r.to_string_lossy().into_owned());
+        assert_eq!(root("/Volumes/Adlon/a/b.jpg").as_deref(), Some("/Volumes/Adlon"));
+        assert_eq!(root("/media/u/Disk/x").as_deref(), Some("/media/u/Disk"));
+        assert_eq!(root("/run/media/u/Disk/x").as_deref(), Some("/run/media/u/Disk"));
+        assert_eq!(root("/Users/a/Pictures/x.jpg"), None);
+        assert_eq!(root("/Volumes"), None);
     }
 
     /// `by_ref` is 1 only for a `file_ref` match and 0 (never NULL) for a content_hash-only match, even when the incoming file_ref is NULL but the matched row has one.

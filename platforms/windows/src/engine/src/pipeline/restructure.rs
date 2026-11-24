@@ -61,6 +61,7 @@ pub fn classify_folders(
         by_folder.entry(parent).or_default().push(m);
     }
 
+    let canonical_root = std::fs::canonicalize(library_root).ok();
     let mut out = Vec::with_capacity(by_folder.len());
     for (folder, items) in by_folder {
         let mut hist: HashMap<&str, u32> = HashMap::new();
@@ -80,13 +81,8 @@ pub fn classify_folders(
             || folder
                 .to_string_lossy()
                 .eq_ignore_ascii_case(&library_root.to_string_lossy())
-            || matches!(
-                (
-                    std::fs::canonicalize(&folder),
-                    std::fs::canonicalize(library_root)
-                ),
-                (Ok(folder), Ok(root)) if folder == root
-            );
+            || ((same_final_name(&folder, library_root) || canonical_root.as_deref().is_some_and(|root| same_final_name(&folder, root)))
+                && matches!((std::fs::canonicalize(&folder), &canonical_root), (Ok(folder), Some(root)) if folder == *root));
         let classification = if generic || total <= 2 {
             FolderClassification::Junk
         } else if !is_library_root && homogeneity >= 0.80 {
@@ -101,6 +97,14 @@ pub fn classify_folders(
         });
     }
     out
+}
+
+/// A folder can alias the library root through a symlinked or differently-spelled parent, but its own name still matches, so only those candidates are worth resolving on disk.
+fn same_final_name(folder: &Path, root: &Path) -> bool {
+    match (folder.file_name(), root.file_name()) {
+        (Some(a), Some(b)) => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
+        _ => true,
+    }
 }
 
 /// Drops every move whose source folder classified [`FolderClassification::Anchor`]: the macOS reference emits NO proposals for anchor folders, so their moves must never reach the plan. The anchor COUNT for the "Keep" tile is the caller's job, computed from `classified` BEFORE stripping. Test-only: production calls [`strip_anchor_folder_moves_except`] so the butler's claimed files survive.
@@ -143,7 +147,7 @@ pub fn classify(
 ) -> Vec<ProposedMove> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
-        let ts = f.created_unix.unwrap_or(f.modified_unix);
+        let ts = f.date_unix();
         let date = valid_year_month(ts);
         let ts_valid = date.is_some();
         let (y, m) = date.unwrap_or((1970, 1));
@@ -287,6 +291,13 @@ pub struct FileForClassify {
     pub identity: Option<PlannedIdentity>,
 }
 
+impl FileForClassify {
+    /// The creation time when it is a real date, else the modified time.
+    pub(crate) fn date_unix(&self) -> f64 {
+        self.created_unix.filter(|t| t.is_finite() && *t >= MIN_PLAUSIBLE_UNIX).unwrap_or(self.modified_unix)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PlannedIdentity {
     pub content_hash: Option<String>,
@@ -334,9 +345,12 @@ pub(crate) fn year_month(unix: f64) -> (i32, u32) {
     valid_year_month(unix).unwrap_or((1970, 1))
 }
 
+/// 1990-01-01 UTC. Earlier stamps are placeholders (FAT/exFAT 1980 epoch, zero, corrupt mtimes), never a capture or creation date.
+pub(crate) const MIN_PLAUSIBLE_UNIX: f64 = 631_152_000.0;
+
 fn valid_year_month(unix: f64) -> Option<(i32, u32)> {
     use chrono::{DateTime, Datelike, Utc};
-    if !unix.is_finite() || unix <= 86_400.0 {
+    if !unix.is_finite() || unix < MIN_PLAUSIBLE_UNIX {
         return None;
     }
     let secs = unix as i64;
@@ -611,6 +625,53 @@ mod tests {
         let dest = m[0].destination.to_string_lossy();
         assert!(dest.contains("Audio"), "dest={dest}");
         assert!(dest.contains("2024"), "audio should have year sub-folder: dest={dest}");
+    }
+
+    #[test]
+    fn a_dos_epoch_creation_time_falls_back_to_the_modified_time_and_never_files_into_1980() {
+        let mut f = img(1, "C:/scan/photo.jpg", 1_710_504_000.0);
+        f.created_unix = Some(315_532_800.0);
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("2024") && !dest.contains("1980"), "dest={dest}");
+        let mut both = img(2, "C:/scan/photo2.jpg", 315_532_800.0);
+        both.created_unix = Some(315_532_800.0);
+        let m = classify(&[both], Path::new("D:/Library"));
+        assert_eq!(m[0].confidence, Confidence::Ask);
+        assert!(!m[0].destination.to_string_lossy().contains("1980"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_symlinked_under_another_name_is_still_the_library_root() {
+        let base = std::env::temp_dir().join(format!("fileid_root_rename_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("Pictures")).unwrap();
+        std::os::unix::fs::symlink(base.join("Pictures"), base.join("Photos")).unwrap();
+        let mut moves = Vec::new();
+        for i in 0..4 {
+            moves.append(&mut classify(&[img(i, &format!("{}/Pictures/{i}.jpg", base.display()), 1_710_504_000.0)], &base.join("Photos")));
+        }
+        let classified = classify_folders(&moves, &base.join("Photos"));
+        assert!(classified.iter().all(|c| c.classification != FolderClassification::Anchor), "{classified:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_reached_through_a_symlinked_parent_is_still_the_library_root() {
+        let base = std::env::temp_dir().join(format!("fileid_root_alias_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real/Photos")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("alias")).unwrap();
+        let mut moves = Vec::new();
+        for i in 0..4 {
+            let mut m = classify(&[img(i, &format!("{}/alias/Photos/{i}.jpg", base.display()), 1_710_504_000.0)], &base.join("real/Photos"));
+            moves.append(&mut m);
+        }
+        let classified = classify_folders(&moves, &base.join("real/Photos"));
+        assert!(classified.iter().all(|c| c.classification != FolderClassification::Anchor), "{classified:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

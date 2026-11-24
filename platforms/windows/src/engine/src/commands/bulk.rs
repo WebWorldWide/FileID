@@ -1862,7 +1862,10 @@ pub(crate) fn merge_clusters(conn: &rusqlite::Connection, src: i64, dst: i64) ->
                  (SELECT fp.id FROM face_prints fp
                   WHERE fp.person_id = ?1
                   ORDER BY COALESCE(fp.face_quality, 0) DESC, fp.id LIMIT 1),
-                 representative_face_id)
+                 representative_face_id),
+                 centroid = NULL,
+                 anchor_radius = NULL,
+                 last_clustered_at = NULL
              WHERE id = ?1",
                 rusqlite::params![dst],
             )? == 1,
