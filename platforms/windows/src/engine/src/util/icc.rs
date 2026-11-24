@@ -260,4 +260,26 @@ pub(crate) mod tests {
         let truncated = profile(DISPLAY_P3);
         assert!(Profile::parse(&truncated[..200]).is_none());
     }
+
+    fn system_profile(name: &str) -> Option<Profile> {
+        let bytes = std::fs::read(format!("/System/Library/ColorSync/Profiles/{name}")).ok()?;
+        Some(Profile::parse(&bytes).unwrap_or_else(|| panic!("{name} is an RGB matrix profile and must parse")))
+    }
+
+    #[test]
+    fn the_profiles_macos_ships_convert_the_way_their_primaries_say() {
+        if let Some(srgb) = system_profile("sRGB Profile.icc") {
+            let converter = srgb.converter();
+            let pixel = converter.pixel([12, 200, 99]);
+            assert!(pixel.iter().zip([12, 200, 99]).all(|(a, b)| (i32::from(*a) - b).abs() <= 1), "{pixel:?}");
+        }
+        for name in ["Display P3.icc", "AdobeRGB1998.icc"] {
+            let Some(profile) = system_profile(name) else { continue };
+            let converter = profile.converter();
+            let neutral = converter.pixel([128, 128, 128]);
+            assert!(neutral.iter().all(|c| (i32::from(*c) - 128).abs() <= 2), "{name}: {neutral:?}");
+            let muted = converter.pixel([200, 100, 100]);
+            assert!(muted[0] > 200 && muted[1] <= 100, "{name}: wide-gamut red is more saturated in sRGB: {muted:?}");
+        }
+    }
 }
