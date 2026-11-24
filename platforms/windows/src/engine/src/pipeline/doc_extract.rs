@@ -78,7 +78,11 @@ fn html_to_text(html: &str) -> String {
                 i += rest.find("-->").map_or(rest.len(), |end| end + 3);
                 continue;
             }
-            let skip = ["script", "style", "head"].iter().find(|tag| lower[i..].starts_with(&format!("<{tag}")));
+            let skip = ["script", "style", "head"].iter().find(|tag| {
+                let open = format!("<{tag}");
+                lower[i..].starts_with(&open)
+                    && lower.as_bytes().get(i + open.len()).is_none_or(|b| matches!(b, b'>' | b'/') || b.is_ascii_whitespace())
+            });
             if let Some(tag) = skip {
                 let close = format!("</{tag}");
                 i += lower[i..].find(&close).map_or(rest.len(), |end| end + rest[end..].find('>').map_or(rest.len() - end, |gt| gt + 1));
@@ -425,6 +429,25 @@ fn strip_tags(s: &str) -> String {
     out.trim().to_string()
 }
 
+fn local_name(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+/// A paragraph, heading or shared-string entry ends a word; a run (`w:r`, `a:r`, `text:span`) does not, because Office splits one word across several runs.
+fn is_block_boundary(name: &str) -> bool {
+    matches!(local_name(name), "p" | "h" | "si")
+}
+
+fn is_inline_break(name: &str) -> bool {
+    matches!(local_name(name), "tab" | "br" | "line-break")
+}
+
+fn push_separator(out: &mut String) {
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
+    }
+}
+
 /// Walks `xml` with quick-xml's pull parser, accumulating text from every element whose local name is in `target_elems` (namespace prefix ignored): `["w:t", "t"]` matches `<w:t>`, `<a:t>` and bare `<t>`.
 fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
     use quick_xml::events::Event;
@@ -449,12 +472,23 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 if matches(&name) {
                     depth += 1;
                 }
+                if is_inline_break(&name) {
+                    push_separator(&mut out);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if is_inline_break(&name) {
+                    push_separator(&mut out);
+                }
             }
             Ok(Event::End(e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 if matches(&name) && depth > 0 {
                     depth -= 1;
-                    out.push(' ');
+                }
+                if is_block_boundary(&name) {
+                    push_separator(&mut out);
                 }
             }
             Ok(Event::Text(t)) if depth > 0 => {
@@ -591,6 +625,27 @@ mod tests {
         assert!(out.contains("bb"));
     }
 
+
+    #[test]
+    fn a_word_split_across_office_runs_stays_one_word() {
+        let docx = r#"<w:body><w:p><w:r><w:t>Docu</w:t></w:r><w:r><w:t>ment</w:t></w:r></w:p><w:p><w:r><w:t>next</w:t></w:r></w:p></w:body>"#;
+        assert_eq!(xml_text_runs(docx, &["w:t"]).trim(), "Document next");
+        let odt = r#"<text:p>Docu<text:span>ment</text:span></text:p><text:p>two</text:p>"#;
+        assert_eq!(xml_text_runs(odt, &["p", "h", "span"]).trim(), "Document two");
+        let xlsx = r#"<sst><si><r><t>Docu</t></r><r><t>ment</t></r></si><si><t>cell</t></si></sst>"#;
+        assert_eq!(xml_text_runs(xlsx, &["t"]).trim(), "Document cell");
+        let tabbed = r#"<w:p><w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r></w:p>"#;
+        assert_eq!(xml_text_runs(tabbed, &["w:t"]).trim(), "a b");
+    }
+
+    #[test]
+    fn html_header_and_styles_like_tags_are_not_skipped_as_head_or_style() {
+        let page = "<html><header>Site name</header><body><p>Body text stays</p></body></html>";
+        assert_eq!(html_to_text(page), "Site name Body text stays");
+        assert_eq!(html_to_text("<heading>Open <p>kept</p>"), "Open kept");
+        assert_eq!(html_to_text("<html><head><title>t</title></head><body>shown</body></html>"), "shown");
+        assert_eq!(html_to_text("<style>p{}</style><scripture>verse</scripture>"), "verse");
+    }
     #[test]
     fn xml_text_runs_resolves_entities() {
         // Guards the quick-xml 0.41 migration: text runs must still be entity-decoded (predefined + numeric).
