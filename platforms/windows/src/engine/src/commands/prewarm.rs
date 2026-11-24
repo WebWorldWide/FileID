@@ -486,6 +486,15 @@ async fn install_model(sink: Sink, model_kind: String, http_client: Arc<reqwest:
             }
         }
     }
+    if !cancel.load(Ordering::Relaxed) {
+        errs.retain(|(label, dest, _)| {
+            let keep = !crate::models::registry::is_optional_artifact(dest);
+            if !keep {
+                tracing::warn!(file = %label, "optional model file could not be downloaded; the model works without it");
+            }
+            keep
+        });
+    }
     if !errs.is_empty() {
         // A user-initiated cancel is not a network failure: surface a benign
         // event the app suppresses (ModelInstallerService treats

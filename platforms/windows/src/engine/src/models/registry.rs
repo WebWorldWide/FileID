@@ -17,6 +17,18 @@ pub struct FileEntry {
 
 pub type ModelFile = FileEntry;
 
+impl FileEntry {
+    /// A sidecar the model works without (RAM++ falls back to one global threshold): its absence or a failed download
+    /// never makes an install incomplete.
+    pub fn is_optional(&self) -> bool {
+        is_optional_artifact(&self.dest)
+    }
+}
+
+pub fn is_optional_artifact(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("ram_plus_thresholds.txt")
+}
+
 #[derive(Debug, Clone)]
 pub struct Model {
     pub id: &'static str,
@@ -237,7 +249,7 @@ pub fn installation_complete(model: &Model) -> bool {
 #[cfg(target_os = "macos")]
 fn verified_without_sentinel(model: &Model) -> bool {
     !model.files.is_empty()
-        && model.files.iter().all(|file| {
+        && model.files.iter().filter(|file| !file.is_optional()).all(|file| {
             !is_zip_entry(file)
                 && file
                     .sha256
@@ -280,7 +292,7 @@ fn cached_sha256_matches(path: &Path, expected: &str) -> bool {
 }
 
 pub(crate) fn installation_complete_with_sentinel(model: &Model, sentinel: &Path) -> bool {
-    if !sentinel.is_file() || !model.files.iter().all(installed_artifact_is_plausible) {
+    if !sentinel.is_file() || !model.files.iter().filter(|file| !file.is_optional()).all(installed_artifact_is_plausible) {
         return false;
     }
     if model.files.iter().any(is_zip_entry) {
@@ -510,6 +522,30 @@ mod tests {
         std::fs::write(&path, vec![1u8; 100]).unwrap();
         assert!(!installed_artifact_is_plausible(&file));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_missing_optional_sidecar_does_not_make_an_install_incomplete() {
+        let root = std::env::temp_dir().join(format!("fileid-optional-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = |name: &str, bytes: &[u8]| FileEntry {
+            url: format!("https://huggingface.co/test/{name}"),
+            dest: root.join(name),
+            sha256: Some(hex::encode(sha2::Sha256::digest(bytes))),
+            approx_bytes: bytes.len() as u64,
+        };
+        let model = Model {
+            id: "test_optional",
+            display_name: "Test optional",
+            files: vec![entry("model.onnx", b"weights"), entry("ram_plus_thresholds.txt", b"0.5")],
+        };
+        std::fs::write(root.join("model.onnx"), b"weights").unwrap();
+        let sentinel = root.join("done.installed");
+        std::fs::write(&sentinel, b"").unwrap();
+        assert!(installation_complete_with_sentinel(&model, &sentinel));
+        std::fs::remove_file(root.join("model.onnx")).unwrap();
+        assert!(!installation_complete_with_sentinel(&model, &sentinel), "a required file is still required");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
