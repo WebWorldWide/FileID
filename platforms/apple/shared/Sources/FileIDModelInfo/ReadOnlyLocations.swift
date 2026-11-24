@@ -50,7 +50,9 @@ public enum ReadOnlyLocations {
 
     /// The cached volume lookup: one probe per mount per TTL, so a remount is noticed within seconds.
     public static func volumeName(for url: URL, cache: VolumeCache, now: Date, probe: (URL) -> String?) -> String? {
-        let mount = mountPoint(of: url) ?? ""
+        // A link on a writable volume can point onto a read-only one; the volume flag belongs to where the write lands.
+        let url = resolved(url)
+        guard let mount = mountPoint(of: url) else { return probe(url) }
         cache.lock.lock()
         if let hit = cache.entries[mount], now.timeIntervalSince(hit.at) < volumeTTL {
             cache.lock.unlock()
