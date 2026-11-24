@@ -9,8 +9,8 @@ use rusqlite::{params, Connection};
 use super::restructure::{Confidence, ProposedMove};
 use super::restructure_semantic::filename_tokens;
 
-/// Total summed feedback weight (over a move's filename tokens toward its destination
-/// folder) at/above which the destination is treated as the user's learned habit and
+/// Largest feedback weight of any one of a move's filename tokens toward its destination
+/// folder (each applied file adds one per token, so it counts files) at/above which the destination is treated as the user's learned habit and
 /// the move is upgraded to auto-confidence. Lockstep with the Swift constant.
 pub(crate) const FEEDBACK_AUTO_WEIGHT: i64 = 3;
 
@@ -68,9 +68,7 @@ pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
         };
         let mut score: i64 = 0;
         for token in filename_tokens(&m.source) {
-            score += stmt
-                .query_row(params![folder, &token], |r| r.get::<_, i64>(0))
-                .unwrap_or(0);
+            score = score.max(stmt.query_row(params![folder, &token], |r| r.get::<_, i64>(0)).unwrap_or(0));
         }
         if score >= FEEDBACK_AUTO_WEIGHT {
             m.confidence = Confidence::Auto;
@@ -133,6 +131,15 @@ mod tests {
         boost(&db, &mut moves);
         assert_eq!(moves[0].confidence, Confidence::Auto, "filing history should upgrade the move");
         assert!(moves[0].reason.as_deref().unwrap_or("").contains("filed files like this"));
+    }
+
+    #[test]
+    fn one_earlier_filing_is_not_enough_however_many_tokens_its_name_shares() {
+        let db = db();
+        record(&db, [(Path::new("/in/acme_invoice_march.pdf"), Path::new("/lib/Invoices/acme_invoice_march.pdf"))].into_iter(), 0.0);
+        let mut moves = vec![pm(1, "/in/acme_invoice_march_copy.pdf", "/lib/Invoices/acme_invoice_march_copy.pdf", Confidence::Review)];
+        boost(&db, &mut moves);
+        assert_eq!(moves[0].confidence, Confidence::Review);
     }
 
     #[test]
