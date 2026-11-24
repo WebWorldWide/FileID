@@ -502,6 +502,122 @@ async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
 }
 
 #[tokio::test]
+async fn one_unreadable_video_is_skipped_and_the_rest_are_analysed() {
+    let Some((directory, database)) = media_fixture("color=c=gray:size=64x36:rate=5:duration=12") else {
+        return;
+    };
+    let good = std::fs::read_dir(&directory).unwrap().next().unwrap().unwrap().path();
+    let broken = directory.join("broken.mp4");
+    std::fs::write(&broken, b"this is not a video").unwrap();
+    let second = directory.join("second.mp4");
+    std::fs::copy(&good, &second).unwrap();
+    for (id, path) in [(2, &broken), (3, &second)] {
+        let metadata = std::fs::metadata(path).unwrap();
+        let modified = metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        database
+            .lock()
+            .execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,?3,?4,0,'video','mp4')",
+                params![id, path.to_str().unwrap(), metadata.len() as i64, modified],
+            )
+            .unwrap();
+    }
+    let (id, _) = enqueue(
+        &mut database.lock(),
+        &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1,2,3]})),
+        Some("qwen3_vl_4b"),
+        true,
+    )
+    .unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let model = scripted(vec!["A gray screen", "A gray screen again", "Still gray", "Gray"], None);
+    let skipped = process(&id, &job, &model, &directory.join("frames"), &Arc::new(AtomicBool::new(false)), &sink, &database, 1.0)
+        .await
+        .unwrap();
+    assert_eq!(skipped, 1);
+    assert!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE file_id=1") > 0);
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE file_id=2"), 0);
+    assert!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE file_id=3") > 0);
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_coverage WHERE file_id=2 AND status='sampled'"), 0);
+    let checkpoint: String = database.lock().query_row("SELECT checkpoint_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+    assert_eq!(checkpoint, "3");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn every_video_is_tried_even_when_the_first_cannot_be_read() {
+    let conn = crate::db::test_support::memory_db();
+    for id in 1..=3 {
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,10,1,0,'video','mp4')",
+            params![id, format!("/no/such/volume/clip-{id}.mp4")],
+        )
+        .unwrap();
+    }
+    let database = Arc::new(Mutex::new(conn));
+    let (id, _) = enqueue(
+        &mut database.lock(),
+        &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1,2,3]})),
+        Some("qwen3_vl_4b"),
+        true,
+    )
+    .unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let model = scripted(vec!["unused"], None);
+    let frames = std::env::temp_dir().join(format!("fileid-timeline-skip-{}", uuid::Uuid::new_v4()));
+    let outcome = process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database, 1.0).await;
+    assert!(outcome.is_err(), "when no video could be read the job reports it");
+    let checkpoint: String = database.lock().query_row("SELECT checkpoint_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+    assert_eq!(checkpoint, "3", "an unreadable video moves the checkpoint on instead of stopping the job at it");
+    let _ = std::fs::remove_dir_all(frames);
+}
+
+#[tokio::test]
+async fn dropping_a_prefetched_pool_stops_its_decode() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (started, stopped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (seen_start, seen_stop) = (started.clone(), stopped.clone());
+    let task = spawn_stoppable(&cancel, move |stop| {
+        seen_start.store(true, Ordering::SeqCst);
+        while !stop.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen_stop.store(true, Ordering::SeqCst);
+        bail!("stopped")
+    });
+    while !started.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(task);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !stopped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the decode must stop once its task is dropped");
+}
+
+#[tokio::test]
+async fn a_cancelled_job_stops_a_prefetched_pool_decode() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let seen_stop = stopped.clone();
+    let task = spawn_stoppable(&cancel, move |stop| {
+        while !stop.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen_stop.store(true, Ordering::SeqCst);
+        bail!("stopped")
+    });
+    cancel.store(true, Ordering::Release);
+    assert!(tokio::time::timeout(Duration::from_secs(5), task.finish()).await.expect("cancel must stop the decode").is_err());
+    assert!(stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
     let Some((directory, database)) =
         media_fixture("color=c=black:size=64x36:rate=5:duration=6,geq=lum=if(lt(T\\,3)\\,40+T*60\\,16):cb=128:cr=128")
