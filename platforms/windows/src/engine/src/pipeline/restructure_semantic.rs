@@ -675,6 +675,63 @@ pub(crate) fn existing_group_names(library_root: &Path) -> std::collections::Has
         .collect()
 }
 
+/// Multi-hot vectors up to this many files are searched against every other file; past it, only files that share a token are scored.
+const EXACT_ALL_PAIRS_MAX: usize = 10_000;
+
+#[cfg(test)]
+static BLOCKED_SEARCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Time features closing every fused vector (see `time_features`); the dimensions before them are the token block.
+const TIME_DIMS: usize = 5;
+
+/// Most posting entries one file may walk. Tokens are taken rarest first, so a file's own rare tokens always count and a ubiquitous token cannot turn the pass quadratic.
+const POSTING_BUDGET: usize = 3_000;
+
+/// The `k` nearest files for multi-hot vectors at library scale, from an inverted index of the token dimensions instead of all n^2 pairs. Files with no token in common score only on the time features, so they are left out of the candidates; the similarity of every candidate is the same dense dot product the all-pairs search uses.
+fn sparse_neighbours(fused: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
+    use rayon::prelude::*;
+    let n = fused.len();
+    let tokens = fused.first().map_or(0, |v| v.len().saturating_sub(TIME_DIMS));
+    let mut postings: Vec<Vec<u32>> = vec![Vec::new(); tokens];
+    for (i, v) in fused.iter().enumerate() {
+        for (dim, value) in v[..tokens].iter().enumerate() {
+            if *value != 0.0 {
+                postings[dim].push(i as u32);
+            }
+        }
+    }
+    (0..n)
+        .into_par_iter()
+        .map_init(
+            || (vec![u32::MAX; n], Vec::<usize>::new()),
+            |(stamp, candidates), i| {
+                candidates.clear();
+                let mut own: Vec<&Vec<u32>> =
+                    fused[i][..tokens].iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(dim, _)| &postings[dim]).collect();
+                own.sort_by_key(|list| list.len());
+                let mut walked = 0usize;
+                for list in own {
+                    walked += list.len();
+                    if walked > POSTING_BUDGET && !candidates.is_empty() {
+                        break;
+                    }
+                    for &j in list {
+                        let j = j as usize;
+                        if j != i && stamp[j] != i as u32 {
+                            stamp[j] = i as u32;
+                            candidates.push(j);
+                        }
+                    }
+                }
+                top_k_neighbours(
+                    candidates.iter().map(|&j| Neighbor { idx: j, similarity: dot_lanes(&fused[i], &fused[j]) }).collect(),
+                    k,
+                )
+            },
+        )
+        .collect()
+}
+
 /// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
 /// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
 fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec<usize> {
@@ -694,6 +751,11 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
     // photos). The Swift engine does the same with one Accelerate matrix multiply.
     let exact: Option<Vec<Vec<Neighbor>>> = hnsw.is_none().then(|| {
         use rayon::prelude::*;
+        if exact_only && n > EXACT_ALL_PAIRS_MAX {
+            #[cfg(test)]
+            BLOCKED_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return sparse_neighbours(fused, k);
+        }
         (0..n)
             .into_par_iter()
             .map(|i| {
@@ -884,6 +946,49 @@ mod tests {
         assert!(ids[..40].iter().zip(&ids[3_500..3_540]).all(|(a, b)| a == b), "identical vectors share a cluster");
     }
 
+    fn grouped_bag_of_words(n: usize, group: usize) -> Vec<Vec<f32>> {
+        let groups = n.div_ceil(group);
+        (0..n)
+            .map(|i| {
+                let mut v = vec![0f32; groups * 8 + group + TIME_DIMS];
+                for shared in 0..8 {
+                    v[i / group * 8 + shared] = 1.0;
+                }
+                v[groups * 8 + i % group] = 1.0;
+                unit(v)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn token_blocking_gives_the_same_neighbours_as_all_pairs_when_files_share_tokens() {
+        let fused = grouped_bag_of_words(400, 25);
+        let k = 12;
+        let sparse = sparse_neighbours(&fused, k);
+        for (i, found) in sparse.iter().enumerate() {
+            let all = top_k_neighbours(
+                (0..fused.len()).filter(|&j| j != i).map(|j| Neighbor { idx: j, similarity: dot_lanes(&fused[i], &fused[j]) }).collect(),
+                k,
+            );
+            let key = |list: &[Neighbor]| list.iter().map(|x| (x.idx, x.similarity.to_bits())).collect::<Vec<_>>();
+            assert_eq!(key(found), key(&all), "file {i}");
+        }
+    }
+
+    #[test]
+    fn a_multi_hot_library_past_the_all_pairs_limit_still_groups_by_shared_tokens() {
+        let n = EXACT_ALL_PAIRS_MAX + 400;
+        let fused = grouped_bag_of_words(n, 40);
+        let before = BLOCKED_SEARCHES.load(std::sync::atomic::Ordering::Relaxed);
+        let ids = cluster(&fused, file_hyperparams(), true);
+        assert!(BLOCKED_SEARCHES.load(std::sync::atomic::Ordering::Relaxed) > before, "the search scored only files sharing a token");
+        assert_eq!(ids.len(), n);
+        let grouped = (0..n).filter(|&i| i % 40 != 0 && ids[i] == ids[i - i % 40]).count();
+        let clusters = ids.iter().collect::<std::collections::HashSet<_>>().len();
+        assert!(clusters > n / 80, "{clusters} clusters for {n} files");
+        assert!(grouped * 10 > n * 8, "{grouped} of {n} files joined their group");
+    }
+
     #[test]
     fn a_new_group_never_takes_the_name_of_a_folder_already_in_the_library() {
         let root = std::env::temp_dir().join(format!("fileid-group-names-{}", uuid::Uuid::new_v4()));
@@ -906,7 +1011,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold they must not build a graph at all: counts HNSW distance evaluations (not time, so load can't flip it); building the graph for this shape took about 7 evaluations per pair.
     /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold they must not build a graph at all: counts HNSW distance evaluations (not time, so load can't flip it); building the graph for this shape took about 7 evaluations per pair.
     #[test]
     fn quantized_vectors_past_the_hnsw_threshold_build_no_graph() {
