@@ -247,6 +247,9 @@ struct LibraryListTable: NSViewRepresentable {
 
         private func configure(_ rowView: ListRowView, row: FileRow, reloadImage: Bool) {
             guard let model else { return }
+            let id = row.id
+            rowView.onPress = { [weak self] in self?.activate(id: id, open: false) }
+            rowView.onOpenPreview = { [weak self] in self?.activate(id: id, open: true) }
             rowView.configure(
                 row: row,
                 tags: LibraryTileItem.displayTags(model.tagsByFile[row.id] ?? [], kind: row.kind),
@@ -270,6 +273,12 @@ struct LibraryListTable: NSViewRepresentable {
             else if flags.contains(.command) { model.onCommandCheck(row) }
             else if count >= 2 && sameRow { model.onOpen(row) }
             else { model.onSelect(row) }
+        }
+
+        /// What VoiceOver's press and "Open preview" do: the same select, check and open the mouse and Return key reach.
+        func activate(id: Int64, open: Bool) {
+            guard let model, let index = model.rows.firstIndex(where: { $0.id == id }) else { return }
+            if open { model.onOpen(model.rows[index]) } else { click(row: index, count: 1) }
         }
 
         func menu(for index: Int) -> NSMenu? {
@@ -458,6 +467,18 @@ final class ListRowView: NSTableRowView {
     private var hovering = false { didSet { needsDisplay = true } }
     private var textSize: TextSize = .standard
     private var showsCheck = false
+    var onPress: (() -> Void)?
+    var onOpenPreview: (() -> Void)?
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onPress else { return false }
+        onPress()
+        return true
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        [NSAccessibilityCustomAction(name: "Open preview") { [weak self] in self?.onOpenPreview?(); return self?.onOpenPreview != nil }]
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
