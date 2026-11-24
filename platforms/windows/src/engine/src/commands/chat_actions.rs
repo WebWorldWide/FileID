@@ -187,11 +187,9 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
         .filter(|word| !SCOPE_NOISE.contains(&clean(word).as_str()))
         .collect::<Vec<_>>()
         .join(" ");
-    if !query.is_empty() {
-        let mut ids: Vec<i64> = super::catalog_retrieval::search(conn, &query, &plan.kinds, &plan.person_ids, &[], None, context.root)?
-            .into_iter()
-            .map(|hit| hit.file_id)
-            .collect();
+    if !query.is_empty()
+        && let Some(mut ids) = super::chat_facts::subject_ids(conn, &query)?
+    {
         if let Some(selected) = &filter.ids {
             ids.retain(|id| selected.contains(id));
         }
@@ -730,6 +728,19 @@ mod tests {
 
     fn context<'a>(chat: Option<&'a ChatContext>, people: &'a KnownPeople, events: &'a KnownEvents, text: &'a str) -> Context<'a> {
         Context { request_id: "r", text, chat, root: None, people, events, source: "parser" }
+    }
+
+    #[test]
+    fn a_subject_scope_covers_every_match_not_search_best_hundred() {
+        let conn = crate::db::test_support::memory_db();
+        for id in 1..=150 {
+            crate::db::test_support::insert_file(&conn, id, &format!("/lib/beach_{id:03}.jpg"), "image");
+        }
+        crate::db::test_support::insert_file(&conn, 151, "/lib/forest.jpg", "image");
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let context = context(None, &people, &events, "beach photos");
+        let scope = scope(&conn, Some("beach photos"), &context).unwrap().unwrap();
+        assert_eq!(scope.filter.ids.as_ref().map(Vec::len), Some(150));
     }
 
     #[test]
