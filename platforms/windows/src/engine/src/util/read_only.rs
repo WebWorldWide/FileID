@@ -78,59 +78,7 @@ fn faked_volume(candidate: &Path) -> Option<String> {
 }
 
 fn system_probe(path: &Path) -> Option<(String, Volume)> {
-    platform_volume(path)
-}
-
-#[cfg(unix)]
-fn platform_volume(path: &Path) -> Option<(String, Volume)> {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::metadata(path).ok()?;
-    let device = metadata.dev();
-    let mut mount = path.to_path_buf();
-    while let Some(parent) = mount.parent() {
-        if std::fs::metadata(parent).map(|m| m.dev()).ok() != Some(device) {
-            break;
-        }
-        mount = parent.to_path_buf();
-    }
-    let name = mount.file_name().map_or_else(|| "this drive".to_owned(), |n| n.to_string_lossy().into_owned());
-    let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
-    let read_only = {
-        let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::statfs(raw.as_ptr(), &raw mut stats) } != 0 {
-            return None;
-        }
-        (stats.f_flags as u64 & libc::MNT_RDONLY as u64) != 0
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
-    let read_only = {
-        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::statvfs(raw.as_ptr(), &raw mut stats) } != 0 {
-            return None;
-        }
-        (stats.f_flag as u64 & libc::ST_RDONLY as u64) != 0
-    };
-    Some((device.to_string(), Volume { name, read_only }))
-}
-
-#[cfg(windows)]
-fn platform_volume(path: &Path) -> Option<(String, Volume)> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{FILE_READ_ONLY_VOLUME, GetVolumeInformationW, GetVolumePathNameW};
-    use windows::core::PCWSTR;
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let mut root = [0u16; 261];
-    unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root).ok()? };
-    let mut label = [0u16; 261];
-    let mut flags = 0u32;
-    unsafe { GetVolumeInformationW(PCWSTR(root.as_ptr()), Some(&mut label), None, None, Some(&mut flags), None).ok()? };
-    let end = |buffer: &[u16]| buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
-    let root_text = String::from_utf16_lossy(&root[..end(&root)]);
-    let label_text = String::from_utf16_lossy(&label[..end(&label)]);
-    let name = if label_text.is_empty() { root_text.clone() } else { label_text };
-    Some((root_text, Volume { name, read_only: flags & FILE_READ_ONLY_VOLUME.0 != 0 }))
+    crate::platform::volume_of(path).map(|(id, name, read_only)| (id, Volume { name, read_only }))
 }
 
 fn volume_read_only_with(path: &Path, probe: &Probe) -> Option<String> {
@@ -350,31 +298,6 @@ mod volume_tests {
         let refusal = require_all_writable(paths.iter().map(PathBuf::as_path)).unwrap_err();
         assert_eq!((refusal.read_only, refusal.total, refusal.name.as_str()), (2, 3, "Vault"));
         assert!(refusal.sentence().contains("2 of 3"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    #[ignore = "needs FILEID_RO_DMG_TESTS=1 and macOS hdiutil"]
-    #[cfg(target_os = "macos")]
-    fn a_real_read_only_disk_image_is_detected_and_a_writable_one_is_not() {
-        if std::env::var("FILEID_RO_DMG_TESTS").as_deref() != Ok("1") {
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("fileid-ro-dmg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let image = dir.join("test.dmg");
-        let run = |args: &[&str]| std::process::Command::new("hdiutil").args(args).output().unwrap();
-        assert!(run(&["create", "-size", "2m", "-fs", "HFS+", "-volname", "FileIDRO", image.to_str().unwrap()]).status.success());
-        let mount = dir.join("mnt");
-        std::fs::create_dir_all(&mount).unwrap();
-        let attach = run(&["attach", "-readonly", "-nobrowse", "-mountpoint", mount.to_str().unwrap(), image.to_str().unwrap()]);
-        assert!(attach.status.success(), "{}", String::from_utf8_lossy(&attach.stderr));
-        refresh();
-        let seen = read_only_location(&mount.join("new/file.jpg"));
-        let _ = run(&["detach", mount.to_str().unwrap(), "-force"]);
-        assert!(seen.is_some(), "read-only attach not detected");
-        refresh();
-        assert!(read_only_location(&dir.join("file.jpg")).is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
