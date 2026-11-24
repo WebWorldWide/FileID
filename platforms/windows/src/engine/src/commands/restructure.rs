@@ -1220,8 +1220,7 @@ pub(crate) async fn handle_plan_restructure(
     // Files a semantic pass examined and deliberately left in place (already home, or well-placed per the stay-put guard), claimed like moved files so the rule cascade doesn't re-propose date-tree moves for content the butler judged organized.
     let mut settled: std::collections::HashSet<i64> = std::collections::HashSet::new();
     // One new-folder-name registry shared across the three semantic passes (image, document, non-image); they target the same library_root, so a shared registry stops two passes minting the same folder and merging unrelated content.
-    let mut used_group_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut used_group_names = restructure_semantic::existing_group_names(library_root_path);
 
     if semantic_files.len() >= 2 {
         // Junk-folder filter mirrors the doc/non-image passes: a Downloads/Desktop/temp dump (or all-digit export artifact) is a place to organize photos OUT of, never a learn-your-style routing target.

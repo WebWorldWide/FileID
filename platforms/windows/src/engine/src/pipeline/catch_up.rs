@@ -428,11 +428,15 @@ fn process(file: &Pending, phase: Phase, analyzer: &dyn Analyzer) -> Outcome {
         _ => return Outcome::Leave,
     }
     let context = Context::decode(file.vision.as_deref());
-    match (file.kind.as_str(), phase) {
+    let outcome = match (file.kind.as_str(), phase) {
         ("pdf", Phase::CarefulText) => analyzer.analyse(file, phase, None),
         ("image", _) if context.is_some() => analyzer.analyse(file, phase, context.as_ref()),
         _ => Outcome::Stale,
+    };
+    if matches!(outcome, Outcome::Failed) && !failure_is_about_the_file(&file.path) {
+        return Outcome::Leave;
     }
+    outcome
 }
 
 fn apply(tx: &rusqlite::Connection, file: &Pending, outcome: &Outcome, summary: &mut Summary) -> rusqlite::Result<()> {
@@ -1718,6 +1722,53 @@ mod tests {
         assert_eq!(summary.text_read, 1);
         assert_eq!(reader.lock().failures, 0);
         assert_eq!(reader.lock().deferred_for(std::time::Instant::now()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_read_of_a_file_that_cannot_be_opened_right_now_does_not_use_up_an_attempt() {
+        use std::os::unix::fs::PermissionsExt;
+        struct AlwaysFails;
+        impl Analyzer for AlwaysFails {
+            fn ready(&self, _phase: Phase) -> bool {
+                true
+            }
+            fn parallelism(&self) -> usize {
+                1
+            }
+            fn analyse(&self, _file: &Pending, _phase: Phase, _context: Option<&Context>) -> Outcome {
+                Outcome::Failed
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("fileid-catchup-unopenable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.pdf");
+        std::fs::write(&path, b"%PDF-1.4").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let modified = meta.modified().ok().and_then(crate::util::catalog_unix_seconds);
+        let pending = Pending {
+            file_id: 1,
+            path: path.clone(),
+            kind: "pdf".into(),
+            size_bytes: meta.len() as i64,
+            modified_at: modified,
+            created_at: None,
+            camera_model: None,
+            stages: 0,
+            vision: None,
+            face_count: 0,
+            mark_size: meta.len() as i64,
+            mark_modified: modified,
+        };
+        assert!(matches!(process(&pending, Phase::CarefulText, &AlwaysFails), Outcome::Failed), "a readable file that fails counts");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::File::open(&path).is_err();
+        let outcome = process(&pending, Phase::CarefulText, &AlwaysFails);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        if unreadable {
+            assert!(matches!(outcome, Outcome::Leave), "an unopenable file is left for later, not counted");
+        }
     }
 
     #[test]

@@ -326,6 +326,7 @@ async fn async_main() -> Result<()> {
 
     main_shutdown.await;
     scan_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
+    crate::scan_session::stop_late_careful_reads();
     if let Some(coordinator) = scan_state.lock().as_ref() {
         coordinator.request_cancel();
     }
@@ -1341,6 +1342,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             }
         }
         CommandPayload::CancelScan(_) => {
+            crate::scan_session::stop_late_careful_reads();
             request_scan_cancel(scan_cancel_requested);
             if let Some(coord) = scan_state.lock().as_ref() {
                 coord.request_cancel();
