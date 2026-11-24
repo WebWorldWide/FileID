@@ -17,14 +17,8 @@ pub struct FileEntry {
 
 pub type ModelFile = FileEntry;
 
-impl FileEntry {
-    /// A sidecar the model works without (RAM++ falls back to one global threshold): its absence or a failed download
-    /// never makes an install incomplete.
-    pub fn is_optional(&self) -> bool {
-        is_optional_artifact(&self.dest)
-    }
-}
-
+/// A sidecar the model works without (RAM++ falls back to one global threshold): its absence or a failed download
+/// never makes an install incomplete.
 pub fn is_optional_artifact(path: &Path) -> bool {
     path.file_name().and_then(|name| name.to_str()) == Some("ram_plus_thresholds.txt")
 }
@@ -249,7 +243,7 @@ pub fn installation_complete(model: &Model) -> bool {
 #[cfg(target_os = "macos")]
 fn verified_without_sentinel(model: &Model) -> bool {
     !model.files.is_empty()
-        && model.files.iter().filter(|file| !file.is_optional()).all(|file| {
+        && model.files.iter().filter(|file| !is_optional_artifact(&file.dest)).all(|file| {
             !is_zip_entry(file)
                 && file
                     .sha256
@@ -292,7 +286,7 @@ fn cached_sha256_matches(path: &Path, expected: &str) -> bool {
 }
 
 pub(crate) fn installation_complete_with_sentinel(model: &Model, sentinel: &Path) -> bool {
-    if !sentinel.is_file() || !model.files.iter().filter(|file| !file.is_optional()).all(installed_artifact_is_plausible) {
+    if !sentinel.is_file() || !model.files.iter().filter(|file| !is_optional_artifact(&file.dest)).all(installed_artifact_is_plausible) {
         return false;
     }
     if model.files.iter().any(is_zip_entry) {
