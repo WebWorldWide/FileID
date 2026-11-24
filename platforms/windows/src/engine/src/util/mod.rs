@@ -4,6 +4,7 @@ pub(crate) mod video_creation_date;
 pub mod display;
 pub mod user_message;
 pub(crate) mod hmac;
+pub(crate) mod icc;
 pub(crate) mod hnsw_index;
 pub(crate) mod file_move;
 pub(crate) mod keywords;

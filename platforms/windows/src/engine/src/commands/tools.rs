@@ -115,12 +115,36 @@ fn export_failure_message(error: &anyhow::Error, folder: Option<&str>, exported:
     }
 }
 
+/// What the user sees for a failed request: FileID's own sentences pass through, raw OS and database text never does.
+fn user_message(error: &anyhow::Error) -> String {
+    use crate::util::user_message::io_cause;
+    if io_cause(error).is_some() {
+        return export_failure_message(error, None, 0, 0);
+    }
+    for cause in error.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::NotFound => "FileID can’t find that file. Check that its disk is connected.".into(),
+                std::io::ErrorKind::PermissionDenied => "FileID isn’t allowed to read that file. Check its permissions.".into(),
+                _ => "FileID couldn’t read that file. Check that its disk is connected, then try again.".into(),
+            };
+        }
+        if let Some(database) = cause.downcast_ref::<rusqlite::Error>() {
+            return match database {
+                rusqlite::Error::QueryReturnedNoRows => "That file is no longer in your library.".into(),
+                _ => "FileID couldn’t read its library. Quit and reopen FileID.".into(),
+            };
+        }
+    }
+    error.to_string()
+}
+
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: ToolRequest) {
     let id = request.request_id.clone();
     if request.action == "cancel" {
         let response = match cancel_active(&request) {
             Ok(response) => response,
-            Err(error) => response(&id, "error", &error.to_string()),
+            Err(error) => response(&id, "error", &user_message(&error)),
         };
         sink.send(IpcEvent::now(EventPayload::ToolResponse(Wrap::new(response))))
             .await;
@@ -135,8 +159,14 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     .await;
     let response = match result {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => response(&id, "error", &error.to_string()),
-        Err(error) => response(&id, "error", &error.to_string()),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "tools request failed");
+            response(&id, "error", &user_message(&error))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "tools request did not finish");
+            response(&id, "error", "FileID couldn’t finish that. Try again.")
+        }
     };
     sink.send(IpcEvent::now(EventPayload::ToolResponse(Wrap::new(response))))
         .await;
@@ -318,6 +348,38 @@ fn supports(recipe: &ToolRecipe) -> bool {
                     .contains(&recipe.video_aspect_ratio.as_deref().unwrap_or("source"))
                 && super::video_export::available()))
 }
+const FINGERPRINT_EDGE: u64 = 1024 * 1024;
+
+/// Identifies a source without reading all of it: its size, modified time and first and last megabyte. Any edit
+/// moves the modified time, so a large video is not read three times per export.
+fn fingerprint(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("Choose a regular file, not a link or folder.")
+    }
+    let modified = metadata.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    fingerprint_of(&mut File::open(path)?, metadata.len(), modified)
+}
+
+fn fingerprint_of<R: Read + Seek>(reader: &mut R, len: u64, modified_nanos: u128) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(len.to_le_bytes());
+    digest.update(modified_nanos.to_le_bytes());
+    let mut bytes = vec![0u8; FINGERPRINT_EDGE as usize];
+    let head = len.min(FINGERPRINT_EDGE);
+    reader.seek(SeekFrom::Start(0))?;
+    reader.read_exact(&mut bytes[..head as usize])?;
+    digest.update(&bytes[..head as usize]);
+    let tail_start = len.saturating_sub(FINGERPRINT_EDGE).max(head);
+    let tail = len - tail_start;
+    if tail > 0 {
+        reader.seek(SeekFrom::Start(tail_start))?;
+        reader.read_exact(&mut bytes[..tail as usize])?;
+        digest.update(&bytes[..tail as usize]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
 fn hash(path: &Path) -> Result<String> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -465,7 +527,7 @@ fn run_action(
                 if recipe.kind == "chapters" && chapters.is_empty() {
                     bail!("A selected file has no current chapter markers.")
                 }
-                let source_hash = hash(source_path)?;
+                let source_hash = fingerprint(source_path)?;
                 if recipe.kind == "photo" {
                     validate_image(source_path)?;
                 }
@@ -585,7 +647,7 @@ fn run_action(
                 }
                 let output = Path::new(&item.output.output_path);
                 read_only::require_source_mutation(output)?;
-                if hash(Path::new(&item.output.source_path))? != item.source_hash {
+                if fingerprint(Path::new(&item.output.source_path))? != item.source_hash {
                     bail!("A source changed after preview. Preview again.")
                 }
                 if plan.recipe.kind == "video" {
@@ -674,7 +736,7 @@ fn run_action(
                         if let (Some(runtime), Some(before)) = (&media, &media_source) {
                             media_recipes::verify_stage(runtime.as_ref(), &plan.recipe, before, &stage)?;
                         }
-                        if hash(source)? != item.source_hash {
+                        if fingerprint(source)? != item.source_hash {
                             bail!("A source changed during export; its output was not published")
                         }
                         if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
@@ -906,11 +968,14 @@ fn validate_image(path: &Path) -> Result<()> {
     if u64::from(width) * u64::from(height) > PHOTO_MAX_PIXELS {
         bail!("This adapter currently limits input images to 100 megapixels")
     }
-    if decoder.icc_profile()?.is_some() {
-        bail!("This adapter requires untagged sRGB input; use color-managed conversion for embedded ICC profiles")
+    if let Some(bytes) = decoder.icc_profile()?
+        && crate::util::icc::Profile::parse(&bytes).is_none()
+    {
+        bail!(UNSUPPORTED_COLOUR_PROFILE)
     }
     Ok(())
 }
+const UNSUPPORTED_COLOUR_PROFILE: &str = "This photo uses a colour profile FileID can’t convert yet. Export a copy as sRGB from the app that made it, then try again.";
 fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<()> {
     if recipe.kind != "photo" || !supports(recipe) {
         bail!("Unsupported photo recipe.")
@@ -924,6 +989,7 @@ fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<(
     reader.limits(limits);
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation()?;
+    let profile = decoder.icc_profile()?.and_then(|bytes| crate::util::icc::Profile::parse(&bytes));
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
     if recipe.allow_upscale == Some(true) || image.width().max(image.height()) > recipe.max_dimension {
@@ -933,7 +999,16 @@ fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<(
             image::imageops::FilterType::Lanczos3,
         );
     }
-    let rgba = image.to_rgba8();
+    let mut rgba = image.to_rgba8();
+    if let Some(profile) = profile {
+        let converter = profile.converter();
+        if !converter.is_identity() {
+            for pixel in rgba.pixels_mut() {
+                let [r, g, b] = converter.pixel([pixel[0], pixel[1], pixel[2]]);
+                *pixel = image::Rgba([r, g, b, pixel[3]]);
+            }
+        }
+    }
     image = if recipe.format == "jpeg" {
         let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
         for (x, y, pixel) in rgba.enumerate_pixels() {
@@ -1218,9 +1293,90 @@ mod tests {
         let refused = execute(&mut fixture.conn, &request);
         let message = refused.as_ref().map(|r| r.message.clone()).unwrap_or_else(|e| e.to_string());
         assert!(refused.is_err(), "preview accepted a source execute refuses: {message}");
-        assert!(message.contains("ICC"), "{message}");
+        assert!(message.contains("colour profile") && !message.contains("ICC") && !message.contains("adapter"), "{message}");
         let exports = fs::read_dir(&fixture.root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("Export")).count();
         assert_eq!(exports, 0, "nothing was written");
+    }
+
+    #[test]
+    fn a_display_p3_photo_is_exported_converted_to_srgb() {
+        use image::ImageEncoder;
+        let mut fixture = Fixture::new();
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_icc_profile(crate::util::icc::tests::profile(crate::util::icc::tests::DISPLAY_P3)).unwrap();
+        encoder.write_image(&[200u8, 100, 100].repeat(32 * 16), 32, 16, image::ExtendedColorType::Rgb8).unwrap();
+        fs::write(&fixture.source, png).unwrap();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let done = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(done.status, "ok", "{}", done.message);
+        let output = image::open(&done.outputs[0].output_path).unwrap().to_rgba8();
+        let pixel = output.get_pixel(0, 0);
+        assert!(pixel[0] > 205 && pixel[1] < 95, "the P3 red must be re-expressed in sRGB: {pixel:?}");
+    }
+
+    #[test]
+    fn an_unreachable_source_is_explained_in_plain_words() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        fs::remove_file(&fixture.source).unwrap();
+        let missing = execute(&mut fixture.conn, &request).unwrap_err();
+        let message = user_message(&missing);
+        assert!(!message.contains("os error") && !message.contains("No such file"), "{message}");
+        assert!(message.contains("can’t find that file"), "{message}");
+        let mut request = fixture.request("png");
+        request.file_ids = Some(vec![99]);
+        let unknown = execute(&mut fixture.conn, &request).unwrap_err();
+        assert_eq!(user_message(&unknown), "That file is no longer in your library.");
+    }
+
+    struct Counting {
+        position: u64,
+        len: u64,
+        read: u64,
+    }
+    impl Read for Counting {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let n = (buffer.len() as u64).min(self.len - self.position) as usize;
+            buffer[..n].fill(7);
+            self.position += n as u64;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+    impl Seek for Counting {
+        fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+            self.position = match from {
+                SeekFrom::Start(at) => at,
+                SeekFrom::End(back) => (self.len as i64 + back) as u64,
+                SeekFrom::Current(by) => (self.position as i64 + by) as u64,
+            };
+            Ok(self.position)
+        }
+    }
+
+    #[test]
+    fn fingerprinting_a_huge_source_reads_only_its_edges() {
+        let mut huge = Counting { position: 0, len: 4 * 1024 * 1024 * 1024, read: 0 };
+        fingerprint_of(&mut huge, 4 * 1024 * 1024 * 1024, 1).unwrap();
+        assert!(huge.read <= 2 * 1024 * 1024, "read {} bytes", huge.read);
+        let mut small = Counting { position: 0, len: 10, read: 0 };
+        assert_eq!(fingerprint_of(&mut small, 10, 1).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn an_edited_source_changes_its_fingerprint_even_in_the_middle() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("big.bin");
+        fs::write(&path, vec![1u8; 5 * 1024 * 1024]).unwrap();
+        let before = fingerprint(&path).unwrap();
+        assert_eq!(before, fingerprint(&path).unwrap());
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(2 * 1024 * 1024)).unwrap();
+        file.write_all(&[9]).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+        assert_ne!(before, fingerprint(&path).unwrap());
     }
 
     #[test]
