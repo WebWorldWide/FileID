@@ -75,10 +75,10 @@ impl Drop for Submitted {
     }
 }
 
-/// `cancel` is polled every 25 ms and forwarded once.
-pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> Result<Value> {
+/// `cancel` is checked before every event and at least every 25 ms, and forwarded once.
+pub async fn request(body: &Value, cancel: &AtomicBool, on_event: impl FnMut(Event)) -> Result<Value> {
     let bytes = serde_json::to_vec(body)?;
-    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = mpsc::unbounded_channel();
     let forward = ffi::VlmReceiver(Box::new(move |event, bytes| {
         let _ = sender.send(message(event, bytes));
     }));
@@ -92,35 +92,46 @@ pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut
         bail!("The description model didn’t accept this request. Try again.");
     }
     let mut submitted = Submitted { handle, finished: false };
+    drive(receiver, cancel, on_event, &mut submitted.finished, || {
+        // SAFETY: plain handle of a running request.
+        unsafe { ffi::fileid_apple_vlm_cancel(handle) };
+    })
+    .await
+}
+
+async fn drive(
+    mut receiver: mpsc::UnboundedReceiver<Message>,
+    cancel: &AtomicBool,
+    mut on_event: impl FnMut(Event),
+    finished: &mut bool,
+    mut forward_cancel: impl FnMut(),
+) -> Result<Value> {
     let mut forwarded = false;
     loop {
+        if !forwarded && cancel.load(Ordering::Acquire) {
+            forward_cancel();
+            forwarded = true;
+        }
         let message = tokio::select! {
             message = receiver.recv() => message,
-            () = tokio::time::sleep(Duration::from_millis(25)), if !forwarded => {
-                if cancel.load(Ordering::Acquire) {
-                    // SAFETY: plain handle of a running request.
-                    unsafe { ffi::fileid_apple_vlm_cancel(handle) };
-                    forwarded = true;
-                }
-                continue;
-            }
+            () = tokio::time::sleep(Duration::from_millis(25)), if !forwarded => continue,
         };
         match message {
             Some(Message::Event(event)) => on_event(event),
             Some(Message::Done(value)) => {
-                submitted.finished = true;
+                *finished = true;
                 return Ok(value);
             }
             Some(Message::Failed { cancelled: true, .. }) => {
-                submitted.finished = true;
+                *finished = true;
                 return Err(Cancelled.into());
             }
             Some(Message::Failed { message, .. }) => {
-                submitted.finished = true;
+                *finished = true;
                 bail!(message);
             }
             None => {
-                submitted.finished = true;
+                *finished = true;
                 bail!("The description model stopped without an answer. Try again.");
             }
         }
@@ -523,6 +534,39 @@ impl MlxLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stop_reaches_the_model_while_tokens_keep_streaming() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        for index in 0..50 {
+            sender.send(Message::Event(Event::Token(index.to_string()))).unwrap();
+        }
+        sender.send(Message::Done(Value::Null)).unwrap();
+        let cancel = AtomicBool::new(false);
+        let forwards = std::cell::Cell::new(0);
+        let mut finished = false;
+        let mut seen = 0;
+        let mut forwards_at_fourth = None;
+        let result = drive(
+            receiver,
+            &cancel,
+            |_| {
+                seen += 1;
+                if seen == 3 {
+                    cancel.store(true, Ordering::Release);
+                }
+                if seen == 4 {
+                    forwards_at_fourth = Some(forwards.get());
+                }
+            },
+            &mut finished,
+            || forwards.set(forwards.get() + 1),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(forwards_at_fourth, Some(1), "cancel must reach the model before the next streamed token");
+        assert_eq!(forwards.get(), 1, "cancel is forwarded once");
+    }
 
     #[test]
     fn analysis_failures_match_the_swift_runner() {

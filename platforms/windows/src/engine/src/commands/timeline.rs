@@ -17,6 +17,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 pub(crate) const JOB_KIND: &str = "timelineSample";
 const INTERVAL_SECONDS: f64 = 10.0;
@@ -437,6 +438,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     let cancel = Arc::new(AtomicBool::new(false));
     *worker().running.lock() = Some((id.to_owned(), cancel.clone()));
     let frames = frames_root().join(id);
+    let mut skipped_videos = 0usize;
     let outcome = async {
         let owned = id.to_owned();
         let Some(mut job) = with_db(database, move |conn| start(conn, &owned)).await? else {
@@ -462,7 +464,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
             let lease = lease?;
             use_loaded_model_if_smaller(id, sink, database, &mut job, &candidates, loaded).await?;
             let model = MlxFrames(tokio::sync::Mutex::new(lease));
-            process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
+            skipped_videos = process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
             drop(model);
             if apple_speech {
                 apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
@@ -486,7 +488,8 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         use_loaded_model_if_smaller(id, sink, database, &mut job, &candidates, loaded).await?;
         let result = process(id, &job, &lease, &frames, &cancel, sink, database, visual_share).await;
         let cleanup = lease.finish(result.is_ok()).await;
-        result.and(cleanup)?;
+        skipped_videos = result?;
+        cleanup?;
         if apple_speech {
             apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
             return Ok(());
@@ -525,7 +528,11 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         Ok(())
     })
     .await;
-    publish(id, sink, database).await;
+    let note = (skipped_videos > 0).then(|| {
+        let plural = if skipped_videos == 1 { "video" } else { "videos" };
+        format!("{skipped_videos} {plural} couldn’t be read, so they stay incomplete. The rest were analysed.")
+    });
+    publish_with_note(id, sink, database, note).await;
     let owned = id.to_owned();
     with_db(database, move |conn| {
         Ok(conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [owned], |r| r.get::<_, String>(0))?)
@@ -731,160 +738,201 @@ async fn process<M: FrameModel>(
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
     share: f64,
-) -> Result<()> {
+) -> Result<usize> {
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
     let mut next_pool: Option<(i64, PoolTask)> = None;
+    let (mut attempted, mut skipped, mut last_error) = (0usize, 0usize, None);
     for (index, &file_id) in job.ids.iter().enumerate().skip(job.index) {
-        let source = running_source(database, id, file_id).await?;
-        let probe = {
-            let (path, flag) = (source.path.clone(), cancel.clone());
-            blocking(move || timeline_media::probe(&path, &flag))
-                .await
-                .map_err(|error| interrupted_or(cancel, error))?
-        };
-        let duration = probe.duration;
-        let version = job.recipe.model_version.as_str();
-        {
-            let (coverage, revision, model_version) = (format!("{id}-{file_id}-coverage"), source.revision.clone(), version.to_owned());
-            with_db(database, move |conn| {
-                upsert_coverage(conn, &coverage, file_id, 0.0, duration, "incomplete", &revision, &model_version)
-            })
-            .await?;
+        attempted += 1;
+        match process_video(id, job, model, frames, cancel, sink, database, share, (index, file_id, total), &mut next_pool).await {
+            Ok(()) => {}
+            Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => return Err(error),
+            Err(error) => {
+                tracing::warn!(file_id, error = %format!("{error:#}"), "timeline skipped a video it could not analyse");
+                let _ = std::fs::remove_dir_all(frames.join(format!("pool-{file_id}")));
+                skipped += 1;
+                last_error = Some(error);
+                let job_id = id.to_owned();
+                while_running(database, id, move |conn| {
+                    conn.execute(
+                        "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
+                        params![(index + 1).to_string(), share * (index + 1) as f64 / total as f64, now(), job_id],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+                publish(id, sink, database).await;
+            }
         }
+    }
+    match last_error {
+        Some(error) if skipped == attempted => Err(error),
+        _ => Ok(skipped),
+    }
+}
 
-        let pool_folder = frames.join(format!("pool-{file_id}"));
-        let scan = if timeline_media::FRAME_POOL {
-            let prefetched = match next_pool.take() {
-                Some((next, task)) if next == file_id => Some(task),
-                Some((_, stale)) => {
-                    stale.abort();
-                    None
-                }
-                None => None,
-            };
-            let scan = pool_signals(id, file_id, &source, duration, &pool_folder, prefetched, cancel, database).await?;
-            if let Some(&next) = job.ids.get(index + 1)
-                && let Ok(next_source) = running_source(database, id, next).await
-            {
-                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
-            }
-            scan
-        } else {
-            scan_signals(id, file_id, &source, duration, cancel, database).await?
-        };
-        let signals = scan.signals;
-        let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
-        let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
-        let scene_pool = scan.pool.clone().filter(|_| version.starts_with(SCENE_PREFIX));
-        if let Some(pool) = &scene_pool {
-            scene_captions(id, file_id, &source, duration, pool, version, model, &caption_prompt, cancel, database).await?;
-        }
-        let frame_times = if scene_pool.is_some() {
-            Vec::new()
-        } else {
-            analysis::sample_times(duration, job.recipe.interval_seconds, &signals)
-        };
-        for seconds in frame_times {
-            let evidence = format!(
-                "frame:{file_id}:{}:{version}:{}",
-                source.revision,
-                analysis::millis(seconds)
-            );
-            let (lookup, revision) = (evidence.clone(), source.revision.clone());
-            let exists: bool = while_running(database, id, move |conn| {
-                Ok(conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
-                    params![lookup, revision],
-                    |r| r.get(0),
-                )?)
-            })
-            .await?;
-            if exists {
-                continue;
-            }
-            let frame = decode_jpeg(
-                &source.path,
-                seconds.min((duration - 0.05).max(0.0)),
-                size,
-                frames.join(format!("{}.jpg", analysis::millis(seconds))),
-                cancel,
-            )
-            .await?;
-            let caption = model
-                .caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone())
-                .await;
-            let _ = std::fs::remove_file(&frame);
-            let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-            let caption = caption.trim();
-            if caption.is_empty() {
-                return Err(unreadable());
-            }
-            let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
-            while_running(database, id, move |conn| {
-                checked.verify(conn, file_id)?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
-                    params![evidence, file_id, seconds, caption, checked.revision, model_version],
-                )?;
-                upsert_coverage(
-                    conn,
-                    &evidence,
-                    file_id,
-                    seconds,
-                    duration.min(seconds + 0.001).max(seconds + 0.000_001),
-                    "sampled",
-                    &checked.revision,
-                    &model_version,
-                )
-            })
-            .await?;
-        }
-
-        if job.recipe.timeline_mode.as_deref() == Some("moments") {
-            let grid = match &scan.pool {
-                Some(pool) => Some(pool.frames.iter().map(|(seconds, signature, _)| (*seconds, signature.clone())).collect()),
-                None if scan.complete => activity_grid(&source, duration, scan.signatures, cancel).await?,
-                None => None,
-            };
-            let moments = analyze_moments(
-                id,
-                file_id,
-                &source,
-                duration,
-                (&signals, grid.as_deref()),
-                size,
-                version,
-                (index, total, share),
-                model,
-                frames,
-                cancel,
-                sink,
-                database,
-                moment_decoder(scan.pool.clone()),
-            )
-            .await;
-            let _ = std::fs::remove_dir_all(&pool_folder);
-            moments?;
-        }
-        let _ = std::fs::remove_dir_all(&pool_folder);
-        let (checked, model_version, job_id) = (source.clone(), version.to_owned(), id.to_owned());
-        while_running(database, id, move |conn| {
-            persist_chapter_suggestions(conn, file_id, &checked, &model_version, duration)?;
-            conn.execute(
-                "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
-                params![
-                    (index + 1).to_string(),
-                    share * (index + 1) as f64 / total as f64,
-                    now(),
-                    job_id
-                ],
-            )?;
-            Ok(())
+#[allow(clippy::too_many_arguments)]
+async fn process_video<M: FrameModel>(
+    id: &str,
+    job: &Job,
+    model: &M,
+    frames: &Path,
+    cancel: &Arc<AtomicBool>,
+    sink: &Sink,
+    database: &Arc<Mutex<Connection>>,
+    share: f64,
+    (index, file_id, total): (usize, i64, usize),
+    next_pool: &mut Option<(i64, PoolTask)>,
+) -> Result<()> {
+    let source = running_source(database, id, file_id).await?;
+    let probe = {
+        let (path, flag) = (source.path.clone(), cancel.clone());
+        blocking(move || timeline_media::probe(&path, &flag))
+            .await
+            .map_err(|error| interrupted_or(cancel, error))?
+    };
+    let duration = probe.duration;
+    let version = job.recipe.model_version.as_str();
+    {
+        let (coverage, revision, model_version) = (format!("{id}-{file_id}-coverage"), source.revision.clone(), version.to_owned());
+        with_db(database, move |conn| {
+            upsert_coverage(conn, &coverage, file_id, 0.0, duration, "incomplete", &revision, &model_version)
         })
         .await?;
-        publish(id, sink, database).await;
     }
+
+    let pool_folder = frames.join(format!("pool-{file_id}"));
+    let scan = if timeline_media::FRAME_POOL {
+        let prefetched = match next_pool.take() {
+            Some((next, task)) if next == file_id => Some(task),
+            Some((_, stale)) => {
+                drop(stale);
+                None
+            }
+            None => None,
+        };
+        let scan = pool_signals(id, file_id, &source, duration, &pool_folder, prefetched, cancel, database).await?;
+        if let Some(&next) = job.ids.get(index + 1)
+            && let Ok(next_source) = running_source(database, id, next).await
+        {
+            *next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
+        }
+        scan
+    } else {
+        scan_signals(id, file_id, &source, duration, cancel, database).await?
+    };
+    let signals = scan.signals;
+    let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
+    let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
+    let scene_pool = scan.pool.clone().filter(|_| version.starts_with(SCENE_PREFIX));
+    if let Some(pool) = &scene_pool {
+        scene_captions(id, file_id, &source, duration, pool, version, model, &caption_prompt, cancel, database).await?;
+    }
+    let frame_times = if scene_pool.is_some() {
+        Vec::new()
+    } else {
+        analysis::sample_times(duration, job.recipe.interval_seconds, &signals)
+    };
+    for seconds in frame_times {
+        let evidence = format!(
+            "frame:{file_id}:{}:{version}:{}",
+            source.revision,
+            analysis::millis(seconds)
+        );
+        let (lookup, revision) = (evidence.clone(), source.revision.clone());
+        let exists: bool = while_running(database, id, move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
+                params![lookup, revision],
+                |r| r.get(0),
+            )?)
+        })
+        .await?;
+        if exists {
+            continue;
+        }
+        let frame = decode_jpeg(
+            &source.path,
+            seconds.min((duration - 0.05).max(0.0)),
+            size,
+            frames.join(format!("{}.jpg", analysis::millis(seconds))),
+            cancel,
+        )
+        .await?;
+        let caption = model
+            .caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone())
+            .await;
+        let _ = std::fs::remove_file(&frame);
+        let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
+        let caption = caption.trim();
+        if caption.is_empty() {
+            return Err(unreadable());
+        }
+        let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
+        while_running(database, id, move |conn| {
+            checked.verify(conn, file_id)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
+                params![evidence, file_id, seconds, caption, checked.revision, model_version],
+            )?;
+            upsert_coverage(
+                conn,
+                &evidence,
+                file_id,
+                seconds,
+                duration.min(seconds + 0.001).max(seconds + 0.000_001),
+                "sampled",
+                &checked.revision,
+                &model_version,
+            )
+        })
+        .await?;
+    }
+
+    if job.recipe.timeline_mode.as_deref() == Some("moments") {
+        let grid = match &scan.pool {
+            Some(pool) => Some(pool.frames.iter().map(|(seconds, signature, _)| (*seconds, signature.clone())).collect()),
+            None if scan.complete => activity_grid(&source, duration, scan.signatures, cancel).await?,
+            None => None,
+        };
+        let moments = analyze_moments(
+            id,
+            file_id,
+            &source,
+            duration,
+            (&signals, grid.as_deref()),
+            size,
+            version,
+            (index, total, share),
+            model,
+            frames,
+            cancel,
+            sink,
+            database,
+            moment_decoder(scan.pool.clone()),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&pool_folder);
+        moments?;
+    }
+    let _ = std::fs::remove_dir_all(&pool_folder);
+    let (checked, model_version, job_id) = (source.clone(), version.to_owned(), id.to_owned());
+    while_running(database, id, move |conn| {
+        persist_chapter_suggestions(conn, file_id, &checked, &model_version, duration)?;
+        conn.execute(
+            "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
+            params![
+                (index + 1).to_string(),
+                share * (index + 1) as f64 / total as f64,
+                now(),
+                job_id
+            ],
+        )?;
+        Ok(())
+    })
+    .await?;
+    publish(id, sink, database).await;
     Ok(())
 }
 
@@ -959,16 +1007,57 @@ async fn scene_captions<M: FrameModel>(
 
 /// Decodes in the background for the job's next video so its hardware decode overlaps this video's captions (Swift's
 /// `nextPool`).
-type PoolTask = tokio::task::JoinHandle<Result<timeline_media::Pool>>;
+struct PoolTask {
+    handle: tokio::task::JoinHandle<Result<timeline_media::Pool>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl PoolTask {
+    async fn finish(mut self) -> Result<timeline_media::Pool> {
+        (&mut self.handle).await.map_err(|error| anyhow!(error)).and_then(|pool| pool)
+    }
+}
+
+/// Dropping the task, on any exit from the job, stops the decode it started.
+impl Drop for PoolTask {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
 
 fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTask {
-    let (path, directory, flag) = (source.to_owned(), folder.to_owned(), cancel.clone());
-    tokio::task::spawn_blocking(move || {
+    let (path, directory) = (source.to_owned(), folder.to_owned());
+    spawn_stoppable(cancel, move |stop| {
         let _ = std::fs::remove_dir_all(&directory);
         // The duration is only the worker's time limit (Swift: one hour). CLIP vectors are not computed here: they
         // would compete with this video's captions.
-        timeline_media::pool(&path, 3_600.0, &directory, &flag)
+        timeline_media::pool(&path, 3_600.0, &directory, stop)
     })
+}
+
+/// The work sees one flag that is set by the job's cancel or by dropping the returned task.
+fn spawn_stoppable(
+    cancel: &Arc<AtomicBool>,
+    work: impl FnOnce(&AtomicBool) -> Result<timeline_media::Pool> + Send + 'static,
+) -> PoolTask {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (flag, job_cancel) = (stop.clone(), cancel.clone());
+    tokio::spawn(async move {
+        while !flag.load(Ordering::Acquire) {
+            if job_cancel.load(Ordering::Acquire) {
+                flag.store(true, Ordering::Release);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    let flag = stop.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        let result = work(&flag);
+        flag.store(true, Ordering::Release);
+        result
+    });
+    PoolTask { handle, stop }
 }
 
 struct SignalScan {
@@ -1003,7 +1092,7 @@ async fn pool_signals(
     let waited = std::time::Instant::now();
     let was_prefetched = prefetched.is_some();
     let decoded = match prefetched {
-        Some(task) => task.await.map_err(|error| anyhow!(error)).and_then(|pool| pool),
+        Some(task) => task.finish().await,
         None => {
             let _ = std::fs::remove_dir_all(folder);
             let (path, directory, flag) = (source.path.clone(), folder.to_owned(), cancel.clone());

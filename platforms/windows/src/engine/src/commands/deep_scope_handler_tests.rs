@@ -82,6 +82,20 @@ fn handler_scope_whole_library_exclusion_uses_directory_boundaries() {
 }
 
 #[test]
+fn handler_scope_one_vanished_file_is_skipped_not_fatal() {
+    let f = Fixture::new();
+    let private = f.folder("private");
+    let public = f.folder("public");
+    f.row(1, &f.file(&public, "kept.png"), "image", 0);
+    f.row(2, &public.join("moved-since-scan.png"), "image", 0);
+    f.row(3, &f.file(&public, "also-kept.png"), "image", 0);
+    let scope = DeepScope::from_fields(None, Some(&[private.to_str().unwrap().into()])).unwrap();
+    assert_eq!(collect_scoped_file_ids(&f.db, &scope).unwrap(), vec![1, 3]);
+    let error = scoped_catalog_path(&f.db, &scope, 2).unwrap_err();
+    assert!(crate::commands::deep_analyze::file_left_the_scope(&error));
+}
+
+#[test]
 fn handler_scope_disappeared_root_fails_before_target_planning() {
     let f = Fixture::new();
     let excluded = f.folder("excluded");

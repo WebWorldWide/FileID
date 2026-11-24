@@ -199,10 +199,11 @@ fn number(value: &Value) -> Option<f64> {
 fn parse_probe(data: &[u8]) -> Result<Probe> {
     let document: Value = serde_json::from_slice(data).context("Invalid video metadata")?;
     let streams = document["streams"].as_array().context("Missing video streams")?;
-    ensure!((1..=2).contains(&streams.len()), "Video must have one video and at most one audio stream");
     let video = streams.iter().filter(|stream| stream["codec_type"] == "video").collect::<Vec<_>>();
     let audio = streams.iter().filter(|stream| stream["codec_type"] == "audio").collect::<Vec<_>>();
-    ensure!(video.len() == 1 && audio.len() <= 1 && video.len() + audio.len() == streams.len(), "Video must have one video and at most one audio stream");
+    // Phone clips carry timecode and metadata tracks and sometimes a second audio track. The export maps only the first
+    // video and audio stream and drops the rest, so they are not a reason to refuse.
+    ensure!(video.len() == 1, "Video must have exactly one video stream");
     let video = video[0];
     let width = video["width"].as_u64().context("Missing video width")?;
     let height = video["height"].as_u64().context("Missing video height")?;
@@ -236,7 +237,7 @@ fn parse_probe(data: &[u8]) -> Result<Probe> {
         video_start: number(&video["start_time"]).context("Invalid video timestamps")?,
         audio_start,
         audio_duration,
-        audio_count: audio.len(),
+        audio_count: audio.len().min(1),
         video_codec: video["codec_name"].as_str().unwrap_or("").to_owned(),
         audio_codec: audio_stream.and_then(|stream| stream["codec_name"].as_str()).map(str::to_owned),
     })
@@ -538,8 +539,8 @@ mod tests {
         let good = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","codec_name":"h264","width":640,"height":360,"start_time":"0","pix_fmt":"yuv420p"}]}"#;
         let probe = parse_probe(good).unwrap();
         assert_eq!((probe.width, probe.height), (640, 360));
-        let extra = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0"},{"codec_type":"subtitle"}]}"#;
-        assert!(parse_probe(extra).is_err());
+        let two_videos = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0"},{"codec_type":"video","width":640,"height":360,"start_time":"0"}]}"#;
+        assert!(parse_probe(two_videos).is_err());
         let hdr = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0","pix_fmt":"yuv420p10le"}]}"#;
         assert!(parse_probe(hdr).is_err());
         let hdr_transfer = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0","pix_fmt":"yuv420p","color_transfer":"arib-std-b67"}]}"#;
@@ -548,6 +549,19 @@ mod tests {
         assert!(parse_probe(wide_gamut).is_err());
         let subsampling = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0","pix_fmt":"yuv422p"}]}"#;
         assert!(parse_probe(subsampling).is_err());
+    }
+
+    #[test]
+    fn a_phone_clip_with_metadata_tracks_and_two_audio_tracks_is_accepted() {
+        let clip = br#"{"format":{"duration":"2.0"},"streams":[
+            {"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"start_time":"0","pix_fmt":"yuv420p"},
+            {"codec_type":"audio","codec_name":"aac","start_time":"0","duration":"2.0"},
+            {"codec_type":"audio","codec_name":"aac","start_time":"0","duration":"2.0"},
+            {"codec_type":"data","codec_tag_string":"mebx"},
+            {"codec_type":"data","codec_tag_string":"tmcd"}]}"#;
+        let probe = parse_probe(clip).unwrap();
+        assert_eq!((probe.width, probe.height, probe.audio_count), (1920, 1080, 1));
+        assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
     }
 
     #[test]
