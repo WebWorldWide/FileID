@@ -171,7 +171,10 @@ struct PeopleView: View {
                                 let n = await CatalogWrites.merge(engine, store: store, target: t.id, sources: [s.id])
                                 if let n {
                                     setStatus("Merged into “\(displayName)” (\(Plural.noun(n, "photo", "photos"))).")
-                                    suggestions.removeAll { $0.id == candidateID }
+                                    let alive = await Task.detached(priority: .userInitiated) { [store] in
+                                        Set(store.persons(includeUnknown: true).map(\.id))
+                                    }.value
+                                    suggestions = MergeSuggestionPair.stillMergeable(suggestions.filter { $0.id != candidateID }, alive: alive)
                                 } else {
                                     setStatus(Self.mergeFailed)
                                 }
@@ -217,10 +220,7 @@ struct PeopleView: View {
                             let alive = await Task.detached(priority: .userInitiated) { [store] in
                                 Set(store.persons(includeUnknown: true).map(\.id))
                             }.value
-                            suggestions.removeAll {
-                                batchToRemove.contains($0.id)
-                                    && !(alive.contains($0.sourcePersonID) && alive.contains($0.destinationPersonID))
-                            }
+                            suggestions.removeAll { batchToRemove.contains($0.id) && !$0.involvesOnly(alive) }
                             if merged == 0 {
                                 setStatus(mergeStopRequested ? "Stopped. Nothing was merged." : Self.mergeFailed)
                             } else if merged < total {
@@ -1923,5 +1923,17 @@ enum PersonCardText {
         if isUnknown { return "Unknown person" }
         let preview = nameParts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
         return preview.isEmpty ? "Person \(personID)" : preview
+    }
+}
+
+
+extension MergeSuggestionPair {
+    func involvesOnly(_ alive: Set<Int64>) -> Bool {
+        alive.contains(sourcePersonID) && alive.contains(destinationPersonID)
+    }
+
+    /// A merge folds one card into another, so any other pair naming the folded card has no row left to draw and must not be counted.
+    static func stillMergeable(_ pairs: [MergeSuggestionPair], alive: Set<Int64>) -> [MergeSuggestionPair] {
+        pairs.filter { $0.involvesOnly(alive) }
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import FileIDShared
 import Testing
 @testable import FileID
 
@@ -52,5 +53,20 @@ struct PersonCountsTests {
         #expect(Outcome(photosMoved: 3, photosAsked: 3).status(target: "Alex") == "Moved 3 photos to Alex.")
         #expect(Outcome(photosMoved: 1, photosAsked: 1).status(target: "Alex") == "Moved 1 photo to Alex.")
         #expect(Outcome(photosMoved: 2, photosAsked: 5).status(target: "Alex") == "Moved 2 photos of 5 to Alex. The rest stayed where they were.")
+    }
+}
+
+@Suite struct SuggestedMergeGhostRowTests {
+    private func pair(_ a: Int64, _ b: Int64) -> MergeSuggestionPair {
+        MergeSuggestionPair(sourcePersonID: a, destinationPersonID: b, similarity: 0.8, sourceAnchorFaceID: 1, destinationAnchorFaceID: 2,
+                            sourceMemberCount: 3, destinationMemberCount: 4)
+    }
+
+    @Test func afterOneMergeEveryPairNamingTheFoldedPersonIsDropped() {
+        let pairs = [pair(1, 3), pair(2, 3), pair(4, 5)]
+        let left = MergeSuggestionPair.stillMergeable(pairs, alive: [1, 2, 4, 5])
+        #expect(left.map(\.id) == ["4:5"])
+        #expect(MergeSuggestionPair.stillMergeable(pairs, alive: [1, 2, 3, 4, 5]).count == 3)
+        #expect(MergeSuggestionPair.stillMergeable(pairs, alive: []).isEmpty)
     }
 }
