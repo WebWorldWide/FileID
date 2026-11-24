@@ -1001,18 +1001,19 @@ mod tests {
         std::fs::write(root.join("notes.txt"), b"").unwrap();
         let mut used = existing_group_names(&root);
         assert!(used.contains("beach trip") && !used.contains("notes.txt") && used.len() == 1);
-        let files: Vec<SemanticFile> = (0..6)
+        let files: Vec<SemanticFile> = (0..12)
             .map(|i| SemanticFile {
                 file_id: i,
                 source: root.join(format!("loose/{i}.jpg")),
-                clip: unit(vec![1.0, 0.0, 0.0, 0.0]),
-                tags: vec!["beach".into(), "trip".into()],
+                clip: unit(if i < 6 { vec![1.0, 0.0, 0.0, 0.0] } else { vec![0.0, 1.0, 0.0, 0.0] }),
+                tags: if i < 6 { vec!["beach".into(), "trip".into()] } else { vec!["office".into()] },
                 time_unix: 0.0,
             })
             .collect();
         let moves = semantic_classify(&files, &[], &root, &mut used, &mut std::collections::HashSet::new());
-        assert!(!moves.is_empty());
-        assert!(moves.iter().all(|m| !m.destination.parent().is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case(&root.join("Beach Trip").to_string_lossy()))), "{:?}", moves[0].destination);
+        let named = |m: &&ProposedMove| m.destination.parent().and_then(Path::file_name).is_some_and(|name| name.to_string_lossy().to_lowercase().starts_with("beach trip"));
+        assert!(moves.iter().any(|m| named(&m)), "the beach group was not formed: {:?}", moves.iter().map(|m| &m.destination).collect::<Vec<_>>());
+        assert!(moves.iter().filter(named).all(|m| m.destination.parent().and_then(Path::file_name).is_some_and(|name| name.to_string_lossy().to_lowercase() != "beach trip")), "{:?}", moves[0].destination);
         std::fs::remove_dir_all(root).unwrap();
     }
 
