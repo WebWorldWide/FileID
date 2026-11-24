@@ -382,17 +382,24 @@ fn snapshot(conn: &Connection, event_id: &str) -> Result<Option<Snapshot>> {
 
 fn restore(conn: &Connection, snapshot: &Snapshot) -> Result<()> {
     let event = &snapshot.event;
+    let mut live = Vec::with_capacity(event.file_ids.len());
+    for file_id in &event.file_ids {
+        if conn.query_row("SELECT EXISTS(SELECT 1 FROM files WHERE id=?1)", [file_id], |row| row.get::<_, bool>(0))? {
+            live.push(*file_id);
+        }
+    }
+    ensure!(live.len() >= 2, "Most of this event's photos are no longer in your library, so it can't be brought back.");
     conn.execute(
         "INSERT INTO catalog_events(id,title,goal,user_edited) VALUES(?1,?2,?3,?4)",
         params![event.id, event.title, event.goal, event.user_edited],
     )?;
-    for file_id in &event.file_ids {
+    for file_id in &live {
         conn.execute(
             "INSERT INTO catalog_event_files(event_id,file_id) VALUES(?1,?2)",
             params![event.id, file_id],
         )?;
     }
-    for score in &snapshot.scores {
+    for score in snapshot.scores.iter().filter(|score| live.contains(&score.file_id)) {
         upsert(conn, score)?;
     }
     Ok(())
@@ -548,5 +555,29 @@ mod tests {
             assert_eq!(reply.inner.status, "error");
             assert!(reply.inner.message.as_deref().is_some_and(|message| !message.trim().is_empty()), "{:?}", reply.inner.request_id);
         }
+    }
+
+    #[test]
+    fn undoing_a_deleted_event_skips_photos_that_left_the_library() {
+        let mut conn = fixture();
+        crate::db::test_support::insert_file(&conn, 3, "/internal/3.mov", "video");
+        run(&mut conn, serde_json::json!({"requestID":"save","action":"saveEvent","event":{"id":"game","title":"Baseball","goal":"Alex gets a hit","fileIDs":[1,2,3],"userEdited":false}}));
+        conn.execute("INSERT INTO catalog_take_scores(event_id,file_id,confidence,explanation,source_revision,model_version,preferred) VALUES('game',3,0.5,'x','r','m',1)", []).unwrap();
+        run(&mut conn, serde_json::json!({"requestID":"delete","action":"deleteEvent","eventID":"game"}));
+        conn.execute("DELETE FROM files WHERE id=3", []).unwrap();
+        let restored = run(&mut conn, serde_json::json!({"requestID":"restore","action":"undoEventEdit","eventID":"game"}));
+        assert_eq!(restored.events.unwrap()[0].file_ids, vec![1, 2]);
+        let scores: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_take_scores WHERE event_id='game'", [], |row| row.get(0)).unwrap();
+        assert_eq!(scores, 0);
+    }
+
+    #[test]
+    fn undoing_a_deleted_event_with_almost_no_photos_left_explains_in_words() {
+        let mut conn = fixture();
+        run(&mut conn, serde_json::json!({"requestID":"save","action":"saveEvent","event":{"id":"game","title":"Baseball","goal":"Alex gets a hit","fileIDs":[1,2],"userEdited":false}}));
+        run(&mut conn, serde_json::json!({"requestID":"delete","action":"deleteEvent","eventID":"game"}));
+        conn.execute("DELETE FROM files WHERE id=2", []).unwrap();
+        let error = crate::commands::catalog::execute(&mut conn, &request(serde_json::json!({"requestID":"restore","action":"undoEventEdit","eventID":"game"}))).unwrap_err();
+        assert!(error.to_string().contains("no longer in your library"), "{error}");
     }
 }
