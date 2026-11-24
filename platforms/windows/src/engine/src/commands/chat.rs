@@ -2502,13 +2502,13 @@ mod tests {
         let mut conn = crate::db::test_support::memory_db();
         conn.execute_batch(
             "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,'Kyle','Kyle',0,0);
-             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description) VALUES
-             (1,'/lib/a.jpg',1,1000,1688472000,0,'image','jpg','Kyle at the beach'),
-             (2,'/lib/b.jpg',2,1000,1688472000,0,'image','jpg','A crowd'),
-             (3,'/lib/c.jpg',3,1000,1688472000,0,'image','jpg','Many people at a market'),
-             (4,'/lib/d.jpg',4,1000,1688472000,0,'image','jpg','A tree'),
-             (5,'/lib/people.docx',5,1000,1688472000,0,'doc','docx',NULL),
-             (6,'/lib/e.mov',6,1000,1688472000,0,'video','mov',NULL);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description,has_faces) VALUES
+             (1,'/lib/a.jpg',1,1000,1688472000,0,'image','jpg','Kyle at the beach',1),
+             (2,'/lib/b.jpg',2,1000,1688472000,0,'image','jpg','A crowd',1),
+             (3,'/lib/c.jpg',3,1000,1688472000,0,'image','jpg','Many people at a market',0),
+             (4,'/lib/d.jpg',4,1000,1688472000,0,'image','jpg','A tree',0),
+             (5,'/lib/people.docx',5,1000,1688472000,0,'doc','docx',NULL,0),
+             (6,'/lib/e.mov',6,1000,1688472000,0,'video','mov',NULL,1);
              INSERT INTO face_prints(file_id,person_id,print_data,bbox,excluded) VALUES
              (1,1,X'00','[0,0,1,1]',0),(2,NULL,X'00','[0,0,1,1]',0),(4,NULL,X'00','[0,0,1,1]',1),(6,NULL,X'00','[0,0,1,1]',0);",
         )
@@ -2518,7 +2518,7 @@ mod tests {
             execute(&mut conn, &request).unwrap().message
         };
         assert_eq!(ask("how many photos of people do I have?"), "Found 2 photos with people, using 2.0 KB.");
-        assert_eq!(ask("how many pictures with faces?"), "Found 2 photos with people, using 2.0 KB.");
+        assert_eq!(ask("how many pictures with faces?"), "Found 2 photos with faces, using 2.0 KB.");
         assert_eq!(ask("how many files have people in them"), "Found 3 files with people, using 3.0 KB.");
         assert_eq!(ask("how many photos of Kyle"), "Found 1 photo of Kyle, using 1.0 KB.");
         assert_eq!(ask("how many photos of people at a market?"), "Found 1 photo matching “people market”, using 1.0 KB.");

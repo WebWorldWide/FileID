@@ -547,7 +547,7 @@ fn faces_of_people_marked_unknown_do_not_use_up_the_face_window() {
 #[test]
 fn a_pass_with_nothing_to_cluster_still_reports_the_people_it_kept() {
     let catalog = Catalog::new();
-    catalog.person(10, None, true);
+    catalog.person(10, Some("Maya"), false);
     catalog.face(1, 0, 0.6, Some(10));
     let (catalog, outcome) = catalog.run();
     assert!(outcome.error.is_none());

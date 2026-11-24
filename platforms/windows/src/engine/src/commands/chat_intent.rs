@@ -688,11 +688,12 @@ pub fn parse_question(text: &str) -> Question {
             "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
             "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
             "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
-            "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all", "this",
+            "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all",
         ];
         for (index, word) in words.iter().enumerate() {
-            let names_the_library = matches!(word.as_str(), "this" | "the" | "our")
-                && words.get(index + 1).is_some_and(|next| next == "library" || next == "collection");
+            let names_the_library = (matches!(word.as_str(), "this" | "the" | "our")
+                && words.get(index + 1).is_some_and(|next| next == "library" || next == "collection"))
+                || (word == "this" && index + 1 == words.len());
             if filler.contains(&word.as_str()) || names_the_library {
                 used.insert(index);
             }
