@@ -821,6 +821,7 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
             ensure!(person > 0 && !preserved.contains(&person) && reused.insert(person) && live == 1, "invalid plan");
         }
     }
+    prune_emptied_people(tx, &reused, preserved)?;
     let existing: i64 = tx.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?;
     let created = clusters.iter().filter(|cluster| cluster.person.is_none()).count();
     ensure!(existing as usize + created <= MAX_PERSONS, "too many people");
@@ -870,7 +871,28 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
          WHERE representative_face_id IS NULL OR representative_face_id NOT IN (SELECT id FROM face_prints WHERE person_id=persons.id)",
         [],
     )?;
+    prune_emptied_people(tx, &HashSet::new(), preserved)?;
     Ok(tx.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?)
+}
+
+/// Merging and re-splitting leave unnamed people with no faces behind; they would pile up toward the people cap. Named, unknown-person and protected rows are never touched.
+fn prune_emptied_people(tx: &Connection, keep: &HashSet<i64>, preserved: &HashSet<i64>) -> Result<()> {
+    let keep: HashSet<i64> = keep.union(preserved).copied().collect();
+    let keep = face_review::json_ids(&keep);
+    let emptied = "FROM persons WHERE COALESCE(is_unknown,0)=0 \
+           AND NOT EXISTS (SELECT 1 FROM face_prints WHERE person_id=persons.id) \
+           AND id NOT IN (SELECT value FROM json_each(?1)) \
+           AND COALESCE(TRIM(name),'')='' AND COALESCE(TRIM(title),'')='' AND COALESCE(TRIM(first_name),'')='' \
+           AND COALESCE(TRIM(middle_name),'')='' AND COALESCE(TRIM(last_name),'')='' AND COALESCE(TRIM(suffix),'')=''";
+    tx.execute(
+        &format!(
+            "DELETE FROM face_verifications WHERE (face_a IS NULL OR face_b IS NULL) \
+               AND (person_a IN (SELECT id {emptied}) OR person_b IN (SELECT id {emptied}))"
+        ),
+        [&keep],
+    )?;
+    tx.execute(&format!("DELETE {emptied}"), [&keep])?;
+    Ok(())
 }
 
 fn match_priors(clusters: &[Vec<i64>], candidates: &[Prior]) -> Vec<Option<i64>> {

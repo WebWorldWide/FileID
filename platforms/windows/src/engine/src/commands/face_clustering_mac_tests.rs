@@ -134,7 +134,7 @@ fn person_count_is_the_number_of_people_the_page_shows() {
     let (catalog, outcome) = catalog.run();
     let stored: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
     let shown = crate::read::people::active_people(&catalog.conn, None).unwrap().len();
-    assert_eq!(stored, 3, "the emptied person stays in the catalog");
+    assert_eq!(stored, 2, "the emptied unnamed person is cleared so it cannot pile up toward the person limit");
     assert_eq!(shown, 2);
     assert_eq!(outcome.result.person_count as usize, shown);
 }
@@ -582,7 +582,7 @@ fn a_plan_that_would_pass_the_person_limit_writes_nothing() {
     catalog.face(2, 1, 0.6, None);
     let tx = catalog.conn.unchecked_transaction().unwrap();
     for id in 100..100 + MAX_PERSONS as i64 - 1 {
-        tx.execute("INSERT INTO persons(id,is_unknown,created_at,file_count) VALUES(?1,0,0,0)", [id]).unwrap();
+        tx.execute("INSERT INTO persons(id,name,is_unknown,created_at,file_count) VALUES(?1,'Kept',0,0,0)", [id]).unwrap();
     }
     tx.commit().unwrap();
     let plan = |faces: &[i64]| -> Vec<Planned> {
@@ -600,6 +600,26 @@ fn a_plan_that_would_pass_the_person_limit_writes_nothing() {
     assert_eq!(catalog.assignments(), vec![(1, None), (2, None)]);
     let tx = catalog.conn.unchecked_transaction().unwrap();
     assert_eq!(apply(&tx, &plan(&[1]), &pool, &HashSet::new(), 1.0).unwrap(), MAX_PERSONS as i64, "exactly the limit fits");
+}
+
+#[test]
+fn unnamed_people_left_without_faces_are_cleared_and_do_not_count_toward_the_person_limit() {
+    let catalog = Catalog::new();
+    catalog.face(1, 0, 0.6, None);
+    catalog.person(5, Some("Named"), false);
+    catalog.person(6, None, true);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    for id in 100..100 + MAX_PERSONS as i64 {
+        tx.execute("INSERT INTO persons(id,is_unknown,created_at,file_count) VALUES(?1,0,0,0)", [id]).unwrap();
+    }
+    tx.commit().unwrap();
+    let plan = vec![Planned { person: None, faces: vec![1], representative: 1, centroid: decode(&vector(0, 1, 0.0)), radius: 0.1 }];
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    apply(&tx, &plan, &HashSet::from([1]), &HashSet::new(), 1.0).unwrap();
+    tx.commit().unwrap();
+    let kept = person_ids(&catalog);
+    assert!(kept.contains(&5) && kept.contains(&6), "named and unknown people stay");
+    assert_eq!(kept.len(), 3, "{kept:?}");
 }
 
 #[test]
