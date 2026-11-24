@@ -41,11 +41,40 @@ pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
     }
 }
 
-/// Files are read with no database lock held; the writer is taken per chunk.
+fn progress_path(state_dir: &Path, root: &Path) -> PathBuf {
+    let mut path = marker(state_dir, root).into_os_string();
+    path.push(".progress");
+    PathBuf::from(path)
+}
+
+/// The last photo id a pass checked, so a cancelled pass resumes there instead of reading every file again.
+fn saved_progress(path: &Path) -> i64 {
+    std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Writes the fixes found so far and records how far the pass got; `false` when the catalog could not be updated.
+fn flush(database: &Mutex<Connection>, fixes: &mut Vec<(i64, f64)>, progress: &Path, checked_to: i64) -> bool {
+    for chunk in fixes.chunks(WRITE_CHUNK) {
+        if let Err(error) = write_chunk(&mut database.lock(), chunk) {
+            tracing::warn!(%error, "capture-date backfill could not update the catalog; retrying next scan");
+            return false;
+        }
+    }
+    fixes.clear();
+    if let Some(parent) = progress.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(progress, checked_to.to_string());
+    true
+}
+
+/// Files are read with no database lock held; the writer is taken per chunk, and each chunk is kept even when the pass is cancelled.
 pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root: &Path, cancelled: &dyn Fn() -> bool) -> usize {
     if marker(state_dir, root).exists() {
         return 0;
     }
+    let progress = progress_path(state_dir, root);
+    let resume = saved_progress(&progress);
     let photos = match photos_under(database, root) {
         Ok(photos) => photos,
         Err(error) => {
@@ -54,9 +83,14 @@ pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root
         }
     };
     let mut fixes: Vec<(i64, f64)> = Vec::new();
-    for (id, path, stored, kind) in &photos {
+    let (mut fixed, mut checked_to) = (0usize, resume);
+    for (id, path, stored, kind) in photos.iter().filter(|photo| photo.0 > resume) {
         if cancelled() {
-            return 0;
+            let count = fixes.len();
+            if flush(database, &mut fixes, &progress, checked_to) {
+                fixed += count;
+            }
+            return fixed;
         }
         let path = Path::new(path);
         let readable_here = std::fs::metadata(path).is_ok_and(|metadata| !super::discovery::is_online_only(&metadata));
@@ -64,22 +98,29 @@ pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root
             "video" => crate::util::video_creation_date::container_creation_unix(path),
             _ => super::tagging::capture_time_from_head(path),
         };
-        let Some(captured) = readable_here.then(|| read(path)).flatten() else {
-            continue;
-        };
-        if stored.is_none_or(|stored| (stored - captured).abs() > 1.0) {
+        if let Some(captured) = readable_here.then(|| read(path)).flatten()
+            && stored.is_none_or(|stored| (stored - captured).abs() > 1.0)
+        {
             fixes.push((*id, captured));
         }
-    }
-    for chunk in fixes.chunks(WRITE_CHUNK) {
-        if let Err(error) = write_chunk(&mut database.lock(), chunk) {
-            tracing::warn!(%error, "capture-date backfill could not update the catalog; retrying next scan");
-            return 0;
+        checked_to = *id;
+        if fixes.len() >= WRITE_CHUNK {
+            let count = fixes.len();
+            if !flush(database, &mut fixes, &progress, checked_to) {
+                return fixed;
+            }
+            fixed += count;
         }
     }
+    let count = fixes.len();
+    if !flush(database, &mut fixes, &progress, checked_to) {
+        return fixed;
+    }
+    fixed += count;
     mark_done(state_dir, root);
-    tracing::info!(checked = photos.len(), fixed = fixes.len(), "capture dates backfilled");
-    fixes.len()
+    let _ = std::fs::remove_file(&progress);
+    tracing::info!(checked = photos.len(), fixed, "capture dates backfilled");
+    fixed
 }
 
 fn photos_under(database: &Mutex<Connection>, root: &Path) -> Result<Vec<(i64, String, Option<f64>, String)>> {
@@ -95,7 +136,7 @@ fn query_photos(conn: &Connection, root: &Path) -> Result<Vec<(i64, String, Opti
     let hi = prefix_upper_bound(&lo).unwrap_or_else(|| char::MAX.to_string());
     let mut statement = conn.prepare(
         "SELECT id, path_text, created_at, kind FROM files \
-         WHERE kind IN ('image', 'video') AND failed = 0 AND path_text >= ?1 AND path_text < ?2",
+         WHERE kind IN ('image', 'video') AND failed = 0 AND path_text >= ?1 AND path_text < ?2 ORDER BY id",
     )?;
     let rows = statement
         .query_map(params![lo, hi], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
@@ -201,6 +242,7 @@ mod tests {
         assert_eq!(run_if_needed(&database, &state, &root, &|| true), 0, "a cancelled pass changes nothing");
         assert!(!marker(&state, &root).exists());
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 2);
+        assert!(!progress_path(&state, &root).exists(), "a finished pass leaves no progress file");
         let stored: Vec<f64> = {
             let conn = database.lock();
             let mut statement = conn.prepare("SELECT created_at FROM files ORDER BY id").unwrap();
@@ -214,6 +256,38 @@ mod tests {
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 0, "the marker keeps it to one pass per folder");
         mark_done(&state, &scratch);
         assert!(marker(&state, &scratch).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_pass_keeps_its_fixes_and_the_next_pass_resumes_after_them() {
+        let scratch = std::env::temp_dir().join(format!("fileid-capture-resume-{}", uuid::Uuid::new_v4()));
+        let (root, state) = (scratch.join("Library"), scratch.join("state"));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for id in 1..=3_i64 {
+            let path = root.join(format!("{id}.jpg"));
+            std::fs::write(&path, jpeg_taken_at("2019:07:04 12:00:00", "+00:00", "")).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(?1,?2,?1,1,0,'image','jpg',1700000000)",
+                params![id, path.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        let database = Mutex::new(conn);
+        let calls = std::cell::Cell::new(0);
+        let cancel_on_third = || {
+            calls.set(calls.get() + 1);
+            calls.get() >= 3
+        };
+        assert_eq!(run_if_needed(&database, &state, &root, &cancel_on_third), 2);
+        assert!(!marker(&state, &root).exists());
+        let fixed: i64 = database.lock().query_row("SELECT COUNT(*) FROM files WHERE created_at < 1600000000", [], |row| row.get(0)).unwrap();
+        assert_eq!(fixed, 2, "the two photos checked before the cancel keep their corrected dates");
+        std::fs::remove_file(root.join("1.jpg")).unwrap();
+        std::fs::remove_file(root.join("2.jpg")).unwrap();
+        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 1, "the resumed pass starts after the checked photos");
+        assert!(marker(&state, &root).exists());
         std::fs::remove_dir_all(scratch).unwrap();
     }
 }
