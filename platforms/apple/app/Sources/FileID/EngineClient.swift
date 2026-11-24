@@ -506,6 +506,11 @@ public final class EngineClient {
     /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE.
     nonisolated static func refuseSigpipe(on pipe: Pipe) {
         _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    /// A deep-analyze error ends the run unless it is a per-file notice: the engine reports a file that changed since its scan and carries on with the rest.
+    nonisolated static func deepErrorEndsRun(_ kind: String) -> Bool {
+        kind.hasPrefix("deep") && kind != "deep_source_changed"
+    }
+
     }
 
     /// Frame samples can carry full user paths in JSON values (e.g. a torn deepAnalyzeProgress `currentPath`): scrub home and volume prefixes before they persist in app.log. External-volume paths carry no username but volume + share names identify the user's NAS layout, so they collapse too.
@@ -648,7 +653,7 @@ public final class EngineClient {
             if e.kind.hasPrefix("face_cluster") {
                 faceClusteringInFlight = false
             }
-            if e.kind.hasPrefix("deep") {
+            if Self.deepErrorEndsRun(e.kind) {
                 // A deep-analyze error (e.g. unknown model kind → "deep_invalid") means .deepAnalyzeComplete, the only clearer of these flags, never arrives: clear them here or the UI stays stuck "analyzing…".
                 deepAnalyzeInFlight = false
                 deepAnalyzeProgress = nil
