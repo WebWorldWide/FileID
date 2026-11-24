@@ -179,7 +179,7 @@ public final class EngineClient {
     public private(set) var canUndoRestructure = false
     /// The folder whose last Organize is waiting to be undone after a relaunch (from the engine's journal on disk); nil when the undo came from this session's own apply.
     public private(set) var restructureUndoRoot: String?
-    private var undoRestructureInFlight = false
+    var undoRestructureInFlight = false
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -495,6 +495,11 @@ public final class EngineClient {
     }
 
     /// Error kinds that are a notice, not a failure: the user's own Cancel, a scan that fell back to the CPU, a repeated Scan click (Swift sends `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
+    /// Errors that end an Organize move or undo with no result event, so the page has to release its in-flight state itself.
+    nonisolated static func endsRestructureWithoutResult(_ kind: String) -> Bool {
+        kind == "apply_restructure" || kind == "undo_restructure" || kind == "db_unavailable"
+    }
+
     nonisolated static func isQuietNotice(_ kind: String) -> Bool {
         switch kind {
         case "prewarm_cancelled", "scan_already_queued", "scan_already_running", "rescan_no_changes",
@@ -644,6 +649,8 @@ public final class EngineClient {
                 if e.kind == "scan_slower_path" { scanRunsOnCPU = true }
                 return
             }
+            // A rejected undo (scan paused, another move running, handler panic) never gets a result, so its flag would otherwise make the next forward move read as an undo.
+            if e.kind == "undo_restructure" { undoRestructureInFlight = false }
             lastError = e
             if e.kind.hasPrefix("face_cluster") {
                 faceClusteringInFlight = false

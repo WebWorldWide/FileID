@@ -341,10 +341,12 @@ struct RestructureView: View {
             // event arrives) would wedge `applying` true forever — the apply bar +
             // Undo button stay disabled and re-entry-guarded. Release it here,
             // mirroring the engineResetSignal handler above.
-            if applying, kind == "db_unavailable" {
+            if applying, EngineClient.endsRestructureWithoutResult(kind) {
                 applying = false
                 undoing = false
-                status = "FileID is still getting ready. Try again in a moment."
+                status = kind == "db_unavailable"
+                    ? "FileID is still getting ready. Try again in a moment."
+                    : "FileID couldn’t finish that. Nothing else moved. Try again in a moment."
                 statusIsError = true
             }
             guard loading else { return }
