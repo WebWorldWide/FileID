@@ -294,10 +294,31 @@ public final class ThumbnailService {
         min(size, 3072 / max(scale, 1))
     }
 
+    nonisolated static func hasAlpha(_ image: CGImage) -> Bool {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: false
+        default: true
+        }
+    }
+
+    /// JPEG has no alpha, so see-through pixels would be encoded as black. White is the backing a printed page or icon sits on.
+    nonisolated static func flattenedOnWhite(_ image: CGImage) -> CGImage {
+        guard hasAlpha(image),
+              let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return image }
+        let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(bounds)
+        context.interpolationQuality = .high
+        context.draw(image, in: bounds)
+        return context.makeImage() ?? image
+    }
+
     nonisolated static func jpegData(_ image: CGImage) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        CGImageDestinationAddImage(destination, flattenedOnWhite(image), [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 }
