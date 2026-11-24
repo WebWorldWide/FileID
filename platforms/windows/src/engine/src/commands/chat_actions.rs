@@ -203,6 +203,32 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
     Ok(Ok(Scope { filter, everything }))
 }
 
+/// Splits targets into the ones FileID may change and the number on read-only drives, with the first such drive's name.
+fn writable_only<T>(items: Vec<T>, path: impl Fn(&T) -> &str) -> (Vec<T>, usize, Option<String>) {
+    let (mut kept, mut left_out, mut drive) = (Vec::with_capacity(items.len()), 0usize, None);
+    for item in items {
+        match crate::util::read_only::read_only_location(Path::new(path(&item))) {
+            Some(name) => {
+                left_out += 1;
+                drive.get_or_insert(name);
+            }
+            None => kept.push(item),
+        }
+    }
+    (kept, left_out, drive)
+}
+
+fn left_out_note(left_out: usize, drive: Option<&str>) -> String {
+    match (left_out, drive) {
+        (0, _) | (_, None) => String::new(),
+        (count, Some(name)) => format!(
+            " {} on \u{201c}{name}\u{201d}, a read-only drive, {} left out.",
+            count_noun(count as i64, "file", "files"),
+            if count == 1 { "was" } else { "were" }
+        ),
+    }
+}
+
 fn examples(hits: &[CatalogHit]) -> Option<Vec<String>> {
     Some(hits.iter().take(5).map(|hit| hit.path.clone()).collect())
 }
@@ -248,6 +274,11 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let Some(path) = folder(intent.folder.as_ref())? else {
                 return Ok(Resolution::say("Scan a folder first; there is nothing to organize yet."));
             };
+            if intent.kind != "suggestFolderLayout"
+                && let Some(name) = crate::util::read_only::read_only_location(Path::new(&path))
+            {
+                return Ok(Resolution::say(crate::util::read_only::location_sentence(&name)));
+            }
             if intent.kind == "undoLastMove" && !crate::pipeline::restructure_apply::undo_pending(Path::new(&path)) {
                 return Ok(Resolution::say("There's no applied layout to undo."));
             }
@@ -339,9 +370,19 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             };
             let filter = scope.filter.clone();
             let qualifiers = filter.qualifiers();
-            let found = extras(conn, &filter, if intent.kind == "findDuplicates" { SHOWN } else { MAX_IDS })?;
+            let mut found = extras(conn, &filter, if intent.kind == "findDuplicates" { SHOWN } else { MAX_IDS })?;
             if found.count == 0 {
                 return Ok(Resolution::say(format!("No identical copies found{qualifiers}. Nothing to move.")));
+            }
+            let (mut left_out, mut drive) = (0, None);
+            if intent.kind == "moveDuplicatesToTrash" {
+                let (copies, count, name) = writable_only(std::mem::take(&mut found.copies), |copy| copy.2.as_str());
+                if copies.is_empty() && let Some(name) = &name {
+                    return Ok(Resolution::say(crate::util::read_only::location_sentence(name)));
+                }
+                found.count -= count as i64;
+                found.copies = copies;
+                (left_out, drive) = (count, name);
             }
             let hits = extra_hits(&found);
             if intent.kind == "findDuplicates" {
@@ -370,6 +411,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             if found.count > count {
                 let _ = write!(detail, " This covers the largest {}; ask again for the rest.", count_label(count));
             }
+            detail.push_str(&left_out_note(left_out, drive.as_deref()));
             let mut proposed = action(context, "moveDuplicatesToTrash", format!("Move {} to Trash", count_noun(count, "extra copy", "extra copies")), detail);
             proposed.undo = Some("You can restore them from the Trash.".into());
             proposed.file_count = Some(count);
@@ -463,6 +505,10 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             if renames.is_empty() {
                 return Ok(Resolution::say(format!("No files{qualifiers} have suggested names yet. Describe them first, then ask again.")));
             }
+            let (renames, left_out, drive) = writable_only(renames, |(_, path, _)| path.as_str());
+            if renames.is_empty() && let Some(name) = &drive {
+                return Ok(Resolution::say(crate::util::read_only::location_sentence(name)));
+            }
             let count = renames.len() as i64;
             let mut proposed = action(
                 context,
@@ -470,6 +516,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 format!("Rename {} to suggested names", count_noun(count, "file", "files")),
                 format!("Renames {}{qualifiers} in place to the names Describe Files suggested. Folders don't change.", count_noun(count, "file", "files")),
             );
+            proposed.detail.push_str(&left_out_note(left_out, drive.as_deref()));
             proposed.undo = Some("Rename a file again from Library to change it back.".into());
             proposed.file_count = Some(count);
             proposed.examples = Some(renames.iter().take(5).map(|(_, path, name)| format!("{} → {name}", file_name(path))).collect());
@@ -773,7 +820,7 @@ mod tests {
     fn undo_with_nothing_applied_proposes_nothing_and_cards_show_names_not_paths() {
         let conn = crate::db::test_support::memory_db();
         let (people, events) = (KnownPeople::new(), KnownEvents::new());
-        let chat = ChatContext { library_root: Some("/nowhere/Photos".into()), ..ChatContext::default() };
+        let chat = ChatContext { library_root: Some(format!("{}/nowhere/Photos", writable_root())), ..ChatContext::default() };
         let context = context(Some(&chat), &people, &events, "undo the last move");
         let intent = Intent { kind: "undoLastMove".into(), folder: Some("library".into()), ..Intent::default() };
         let resolved = resolve(&conn, &intent, &context).unwrap();
@@ -782,7 +829,7 @@ mod tests {
         let suggest = Intent { kind: "suggestFolderLayout".into(), folder: Some("library".into()), ..Intent::default() };
         let card = resolve(&conn, &suggest, &context).unwrap().actions.remove(0);
         assert!(!card.detail.contains("/nowhere") && card.detail.contains("Photos"), "{}", card.detail);
-        assert_eq!(card.path.as_deref(), Some("/nowhere/Photos"));
+        assert_eq!(card.path, chat.library_root);
     }
 
     #[test]
@@ -869,6 +916,7 @@ mod tests {
              (3,'/lib/c.mov',3,9000,10,0,'video','mov',X'02'),(4,'/lib/d/c.mov',4,9000,30,0,'video','mov',X'02'),(5,'/lib/e/c.mov',5,9000,40,0,'video','mov',X'02');",
         )
         .unwrap();
+        conn.execute("UPDATE files SET path_text = ?1 || path_text", [writable_root()]).unwrap();
         let (people, events) = (vec![], vec![]);
         let ctx = context(None, &people, &events, "move the extra copies to the trash");
         let intent = super::super::chat_intent::parse_intent("move the extra copies to the trash").unwrap();
@@ -980,6 +1028,7 @@ mod tests {
             insert.execute(params![last + 1, "/lib/small/b.jpg", 1000, vec![2_u8]]).unwrap();
         }
         tx.commit().unwrap();
+        conn.execute("UPDATE files SET path_text = ?1 || path_text", [writable_root()]).unwrap();
         let (people, events) = (KnownPeople::new(), KnownEvents::new());
         let ctx = context(None, &people, &events, "move extra copies to trash");
         let intent = super::super::chat_intent::parse_intent("move extra copies to trash").unwrap();
@@ -987,5 +1036,89 @@ mod tests {
         assert_eq!(proposed.file_count, Some(MAX_IDS as i64));
         assert!(proposed.detail.starts_with("Keeps one copy of each of 1 file and moves"), "{}", proposed.detail);
         assert!(proposed.detail.contains("covers the largest"), "{}", proposed.detail);
+    }
+
+    /// The sealed system volume on macOS is read-only, so fake library paths must sit somewhere writable.
+    fn writable_root() -> String {
+        std::env::temp_dir().to_string_lossy().trim_end_matches('/').to_owned()
+    }
+
+    fn duplicate_pair(conn: &Connection, first: i64, dir: &std::path::Path, name: &str) {
+        for (offset, suffix) in ["a", "b"].into_iter().enumerate() {
+            let id = first + offset as i64;
+            crate::db::test_support::insert_file(conn, id, &dir.join(format!("{name}_{suffix}.jpg")).to_string_lossy(), "image");
+            conn.execute("UPDATE files SET content_hash=?2, scanned_at=1 WHERE id=?1", rusqlite::params![id, name.as_bytes()]).unwrap();
+        }
+    }
+
+    fn read_only_dir(tag: &str, drive: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fileid-chat-ro-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::util::read_only::mark_read_only_for_tests(&dir, drive);
+        dir
+    }
+
+    #[test]
+    fn trashing_copies_that_all_sit_on_a_read_only_drive_answers_in_words_and_proposes_nothing() {
+        let conn = crate::db::test_support::memory_db();
+        let dir = read_only_dir("trash-all", "Vault");
+        duplicate_pair(&conn, 1, &dir, "one");
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let context = context(None, &people, &events, "trash my duplicates");
+        let intent = Intent { kind: "moveDuplicatesToTrash".into(), ..Intent::default() };
+        let resolved = resolve(&conn, &intent, &context).unwrap();
+        assert!(resolved.actions.is_empty());
+        assert!(resolved.message.contains("\u{201c}Vault\u{201d} is a read-only drive"), "{}", resolved.message);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn trashing_copies_proposes_only_the_writable_ones_and_says_how_many_were_left_out() {
+        let conn = crate::db::test_support::memory_db();
+        let dir = read_only_dir("trash-some", "Vault");
+        let open = std::env::temp_dir().join(format!("fileid-chat-open-{}", std::process::id()));
+        duplicate_pair(&conn, 1, &dir, "locked");
+        duplicate_pair(&conn, 3, &open, "free");
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let context = context(None, &people, &events, "trash my duplicates");
+        let intent = Intent { kind: "moveDuplicatesToTrash".into(), ..Intent::default() };
+        let mut resolved = resolve(&conn, &intent, &context).unwrap();
+        assert!(!resolved.actions.is_empty(), "{}", resolved.message);
+        let card = resolved.actions.remove(0);
+        assert_eq!(card.file_count, Some(1));
+        assert_eq!(card.file_ids.as_ref().map(Vec::len), Some(1));
+        assert!(card.file_ids.unwrap().iter().all(|id| *id > 2), "a read-only copy was proposed");
+        assert!(card.detail.contains("1 file on \u{201c}Vault\u{201d}, a read-only drive, was left out."), "{}", card.detail);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renaming_files_on_a_read_only_drive_answers_in_words_and_proposes_nothing() {
+        let conn = crate::db::test_support::memory_db();
+        let dir = read_only_dir("rename-all", "Vault");
+        crate::db::test_support::insert_file(&conn, 1, &dir.join("IMG_1.jpg").to_string_lossy(), "image");
+        conn.execute("UPDATE files SET vlm_proposed_name='Beach day' WHERE id=1", []).unwrap();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let context = context(None, &people, &events, "rename to suggested names");
+        let intent = Intent { kind: "renameToSuggested".into(), ..Intent::default() };
+        let resolved = resolve(&conn, &intent, &context).unwrap();
+        assert!(resolved.actions.is_empty());
+        assert!(resolved.message.contains("read-only drive"), "{}", resolved.message);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn applying_a_layout_to_a_read_only_drive_answers_in_words_but_a_suggestion_still_shows() {
+        let conn = crate::db::test_support::memory_db();
+        let dir = read_only_dir("layout", "Vault");
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let chat = ChatContext { library_root: Some(dir.to_string_lossy().into_owned()), ..ChatContext::default() };
+        let context = context(Some(&chat), &people, &events, "organize my library");
+        let apply = Intent { kind: "applyFolderLayout".into(), folder: Some("library".into()), ..Intent::default() };
+        let resolved = resolve(&conn, &apply, &context).unwrap();
+        assert!(resolved.actions.is_empty() && resolved.message.contains("read-only drive"), "{}", resolved.message);
+        let suggest = Intent { kind: "suggestFolderLayout".into(), folder: Some("library".into()), ..Intent::default() };
+        assert_eq!(resolve(&conn, &suggest, &context).unwrap().actions.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
