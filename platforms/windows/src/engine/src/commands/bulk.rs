@@ -424,23 +424,28 @@ fn companion_key(path: &std::path::Path) -> Option<(CompanionKey, bool)> {
     Some((key, role != Role::Sidecar))
 }
 
+type RenameRow = rusqlite::Result<(PathBuf, Option<u64>, Option<String>)>;
+
+fn rename_row(conn: &rusqlite::Connection, file_id: i64) -> RenameRow {
+    conn.query_row(
+        "SELECT path_text, file_ref, vlm_proposed_name FROM files WHERE id = ?1",
+        rusqlite::params![file_id],
+        |r| {
+            Ok((
+                PathBuf::from(r.get::<_, String>(0)?),
+                r.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                r.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )
+}
+
+/// Takes the catalog row already read, so the stat of the file on its (possibly slow) drive runs without the writer lock.
 fn plan_rename(
-    conn: &rusqlite::Connection,
     slot: usize,
     entry: &ipc::RenameEntry,
+    row: RenameRow,
 ) -> Result<PlannedRename, (String, Option<PathBuf>)> {
-    let row = conn
-        .query_row(
-            "SELECT path_text, file_ref, vlm_proposed_name FROM files WHERE id = ?1",
-            rusqlite::params![entry.file_id],
-            |r| {
-                Ok((
-                    PathBuf::from(r.get::<_, String>(0)?),
-                    r.get::<_, Option<i64>>(1)?.map(|value| value as u64),
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            },
-        );
     if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
         return Err((
             crate::util::path_safety::unsafe_filename_reason().into(),
@@ -479,8 +484,8 @@ fn plan_rename(
     })
 }
 
-/// Uncatalogued `.xmp`/`.aae` sidecars that follow each planned rename (see `smart_name_companions::following_sidecars`); each folder is read once.
-fn plan_following_sidecars(conn: &rusqlite::Connection, planned: &mut [PlannedRename]) {
+/// Uncatalogued `.xmp`/`.aae` sidecars that follow each planned rename (see `smart_name_companions::following_sidecars`); each folder is read once. The folder reads and stats run without the writer lock; it is taken once, briefly, to drop sidecars the catalog already knows.
+fn plan_following_sidecars(db: &parking_lot::Mutex<rusqlite::Connection>, planned: &mut [PlannedRename]) {
     use crate::util::smart_name_companions::{self as companions, Role};
     let mut folders: Vec<(PathBuf, Vec<usize>)> = Vec::new();
     let mut folder_index: HashMap<PathBuf, usize> = HashMap::new();
@@ -492,6 +497,7 @@ fn plan_following_sidecars(conn: &rusqlite::Connection, planned: &mut [PlannedRe
         });
         folders[slot].1.push(index);
     }
+    let mut candidates: Vec<(usize, PathBuf, String)> = Vec::new();
     for (dir, members) in folders {
         let names: Vec<String> = members.iter().map(|&index| file_name_of(&planned[index].src)).collect();
         if !names.iter().any(|name| companions::base(name).is_some_and(|(_, _, role)| role != Role::Sidecar)) {
@@ -502,15 +508,21 @@ fn plan_following_sidecars(conn: &rusqlite::Connection, planned: &mut [PlannedRe
             entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
         for (owner, name, suffix) in companions::following_sidecars(&names, &listing) {
             let path = dir.join(&name);
-            if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
-                continue;
+            if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                candidates.push((members[owner], path, suffix));
             }
-            let row = conn
-                .query_row("SELECT 1 FROM files WHERE path_text = ?1", [path.to_string_lossy()], |_| Ok(()))
-                .optional();
-            if matches!(row, Ok(None)) {
-                planned[members[owner]].sidecars.push((path, suffix));
-            }
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    let conn = db.lock();
+    for (owner, path, suffix) in candidates {
+        let row = conn
+            .query_row("SELECT 1 FROM files WHERE path_text = ?1", [path.to_string_lossy()], |_| Ok(()))
+            .optional();
+        if matches!(row, Ok(None)) {
+            planned[owner].sidecars.push((path, suffix));
         }
     }
 }
@@ -621,10 +633,13 @@ fn rename_files_blocking(
     let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
     let mut rejected: Vec<(PathBuf, String)> = Vec::new();
 
-    // Phase 1: resolve and validate every rename under a short writer-lock scope (read-only SELECTs) and collect the moves, so the per-file filesystem work runs with NO lock held; a large batch must not wedge the only writer across every MoveFileExW.
-    let conn = db.lock();
-    for (slot, entry) in payload.renames.iter().enumerate() {
-        match plan_rename(&conn, slot, entry) {
+    // Phase 1: resolve and validate every rename reading the catalog rows under a short writer-lock scope (read-only SELECTs) and collect the moves, so the per-file filesystem work runs with NO lock held; a large batch must not wedge the only writer across every MoveFileExW.
+    let rows: Vec<RenameRow> = {
+        let conn = db.lock();
+        payload.renames.iter().map(|entry| rename_row(&conn, entry.file_id)).collect()
+    };
+    for (slot, (entry, row)) in payload.renames.iter().zip(rows).enumerate() {
+        match plan_rename(slot, entry, row) {
             Ok(p) => planned.push(p),
             Err((message, path)) => {
                 if let Some(path) = path {
@@ -660,8 +675,7 @@ fn rename_files_blocking(
         results[p.slot] = failed_item(p.file_id, format!("not renamed: {why}, so its group keeps its names"));
         false
     });
-    plan_following_sidecars(&conn, &mut planned);
-    drop(conn);
+    plan_following_sidecars(db, &mut planned);
 
     let mut units: Vec<Vec<usize>> = Vec::new();
     let mut unit_of: HashMap<CompanionKey, usize> = HashMap::new();
