@@ -786,10 +786,11 @@ fn is_takeout_sidecar(name: &str) -> bool {
     let strip_counter = |text: &str| -> String {
         if let Some(open) = text.rfind('(') {
             let digits = &text[open + 1..];
-            if let Some(number) = digits.strip_suffix(')') {
-                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
-                    return text[..open].to_string();
-                }
+            if let Some(number) = digits.strip_suffix(')')
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_digit())
+            {
+                return text[..open].to_string();
             }
         }
         text.to_string()
