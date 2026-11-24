@@ -70,3 +70,13 @@ struct RestructureRejectionTests {
         #expect(engine.canUndoRestructure)
     }
 }
+
+@Suite("Organize page revisit")
+struct RestructureRevisitTests {
+    @Test("a delivered plan with nothing listed, as a large plan is, is not planned again on return")
+    func deliveredPlanIsKept() {
+        #expect(!RestructureView.needsReplan(storeVersion: 4, planStoreVersion: 4, planDelivered: true))
+        #expect(RestructureView.needsReplan(storeVersion: 5, planStoreVersion: 4, planDelivered: true))
+        #expect(RestructureView.needsReplan(storeVersion: 4, planStoreVersion: 4, planDelivered: false))
+    }
+}

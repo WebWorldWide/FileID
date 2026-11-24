@@ -31,6 +31,7 @@ struct RestructureView: View {
     @State private var planVersion = 0
     /// `store.version` when the plan on screen was asked for.
     @State private var planStoreVersion = 0
+    @State private var planDelivered = false
     @State private var sankeyHeaderStat = ""
     /// Single-flight guard for the apply / convert paths. A real move is
     /// irreversible inside the app, so a double-click must never run apply
@@ -281,7 +282,7 @@ struct RestructureView: View {
         // it plans again only when files changed or the last plan never arrived.
         .onPageVisibility(shown: {
             guard libraryRoot != nil, !loading, !applying, !confirmApply, !confirmLargeApply else { return }
-            if store.version != planStoreVersion || proposals.isEmpty { requestPlan() }
+            if Self.needsReplan(storeVersion: store.version, planStoreVersion: planStoreVersion, planDelivered: planDelivered) { requestPlan() }
         })
         // Apply finished engine-side — surface the result, release the
         // single-flight guard, and re-request a fresh plan (moved files now
@@ -979,6 +980,7 @@ struct RestructureView: View {
         loading = true
         status = nil
         planStoreVersion = store.version
+        planDelivered = false
         if !engine.planRestructure(libraryRoot: root.path) {
             loading = false
             status = "FileID is still getting ready. Open this page again in a moment to see your plan."
@@ -1017,6 +1019,7 @@ struct RestructureView: View {
             sankeyHeaderStat = ""
             planVersion &+= 1
             loading = false
+            planDelivered = true
             status = nil
             statusIsError = false
             return
@@ -1051,7 +1054,13 @@ struct RestructureView: View {
             embeddingCounts = model.embeddings
             planVersion &+= 1
             loading = false
+            planDelivered = true
         }
+    }
+
+    /// Coming back to the page re-plans only when files changed or the last plan never arrived: a large plan keeps no proposals on screen, so an empty list says nothing about whether it was delivered.
+    nonisolated static func needsReplan(storeVersion: Int, planStoreVersion: Int, planDelivered: Bool) -> Bool {
+        storeVersion != planStoreVersion || !planDelivered
     }
 
     nonisolated static func buildModel(
