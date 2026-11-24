@@ -145,3 +145,27 @@ struct LibrarySortTests {
         #expect(LibrarySort(storedKey: "kind", ascending: false).summary == "Kind ↓")
     }
 }
+
+@Suite struct LibraryShownDateTests {
+    private func row(id: Int64, path: String = "/a/x.jpg", taken: Date?, added: Date) -> FileRow {
+        FileRow(id: id, pathText: path, sizeBytes: 1, createdAt: taken, modifiedAt: nil, scannedAt: added, kind: "image", extension: "jpg", phash: nil,
+                aesthetic: nil, hasFaces: false, hasText: false, cameraModel: nil, locationLat: nil, locationLon: nil, failed: false, errorMessage: nil)
+    }
+
+    @Test func dateAddedShowsWhenItWasAddedAndOtherSortsShowTheCaptureDate() {
+        let taken = Date(timeIntervalSince1970: 1_000), added = Date(timeIntervalSince1970: 9_000)
+        let file = row(id: 1, taken: taken, added: added)
+        #expect(LibrarySort(key: .dateAdded, ascending: false).shownDate(of: file) == added)
+        #expect(LibrarySort(key: .dateTaken, ascending: false).shownDate(of: file) == file.displayDate)
+        #expect(file.displayDate != added)
+    }
+
+    @Test func aRefreshComparesPathsAtTheSameSpotAndFindsMovedRowsElsewhere() {
+        let day = Date(timeIntervalSince1970: 5)
+        let old = [row(id: 1, path: "/a/1.jpg", taken: nil, added: day), row(id: 2, path: "/a/2.jpg", taken: nil, added: day)]
+        #expect(!old[0].pathDiffers(at: 0, from: old))
+        #expect(row(id: 2, path: "/b/2.jpg", taken: nil, added: day).pathDiffers(at: 1, from: old))
+        #expect(!old[1].pathDiffers(at: 0, from: old))
+        #expect(row(id: 3, taken: nil, added: day).pathDiffers(at: 2, from: old))
+    }
+}

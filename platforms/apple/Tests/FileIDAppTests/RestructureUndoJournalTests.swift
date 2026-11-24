@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import FileIDShared
 @testable import FileID
 
 @Suite("Organize undo after a relaunch")

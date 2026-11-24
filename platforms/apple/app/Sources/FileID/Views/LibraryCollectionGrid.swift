@@ -17,6 +17,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     var scrollToTopToken: Int = 0
     var textSize: TextSize = .standard
     var offline: OfflineRoots = .none
+    var sort: LibrarySort = .standard
     var onSelect: (FileRow) -> Void
     var onOpen: (FileRow) -> Void
     var onToggleCheck: (FileRow) -> Void
@@ -70,6 +71,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastSelected: Int64?
         private var lastTextSize: TextSize = .standard
         private var lastOffline: OfflineRoots = .none
+        private var lastSort: LibrarySort = .standard
         private var lastRows: [FileRow] = []
         private var lastContentVersion = Int.min
         private var lastScrollToTopToken = 0
@@ -93,7 +95,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             let contentChanged = force || grid.contentVersion != lastContentVersion
             let newIDs = contentChanged ? grid.rows.map(\.id) : ids
             let stateChanged = grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
-                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize || grid.offline != lastOffline
+                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize || grid.offline != lastOffline || grid.sort != lastSort
             if !grid.selectMode { cursorID = nil }
             if contentChanged {
                 showsChipRow = grid.rows.contains { !LibraryTileItem.displayTags(grid.tagsByFile[$0.id] ?? [], kind: $0.kind).isEmpty }
@@ -110,13 +112,13 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                     let paths = Set((old..<newIDs.count).map { IndexPath(item: $0, section: 0) })
                     NSAnimationContext.runAnimationGroup { $0.duration = 0; collection.insertItems(at: paths) }
                     if stateChanged || contentChanged {
-                        reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken)
+                        reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken, contentChanged: contentChanged)
                     }
                 } else {
                     collection.reloadData()
                 }
             } else if stateChanged || contentChanged {
-                reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken)
+                reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken, contentChanged: contentChanged)
             }
             if let selected = grid.selectedID, selected != lastSelected, let index = newIDs.firstIndex(of: selected) {
                 collection.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .nearestHorizontalEdge)
@@ -127,6 +129,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastSelected = grid.selectedID
             lastTextSize = grid.textSize
             lastOffline = grid.offline
+            lastSort = grid.sort
             lastRows = grid.rows
             lastContentVersion = grid.contentVersion
             if grid.scrollToTopToken != lastScrollToTopToken {
@@ -138,14 +141,16 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             }
         }
 
-        private func reconfigureVisible(_ grid: LibraryCollectionGrid, reloadImages: Bool) {
+        private func reconfigureVisible(_ grid: LibraryCollectionGrid, reloadImages: Bool, contentChanged: Bool = false) {
             guard let collection else { return }
-            let oldPaths = Dictionary(lastRows.map { ($0.id, $0.pathText) }, uniquingKeysWith: { a, _ in a })
+            // Paths can only differ when the rows were replaced; a selection or key-press refresh keeps them, so nothing is built for the whole loaded list.
+            let comparePaths = contentChanged && !reloadImages
             for item in collection.visibleItems() {
                 guard let tile = item as? LibraryTileItem, let path = collection.indexPath(for: item),
                       path.item < grid.rows.count else { continue }
                 let row = grid.rows[path.item]
-                configure(tile, row: row, reloadImage: reloadImages || oldPaths[row.id] != row.pathText)
+                let moved = comparePaths && row.pathDiffers(at: path.item, from: lastRows)
+                configure(tile, row: row, reloadImage: reloadImages || moved)
             }
         }
 
@@ -209,6 +214,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 checked: model.checkedIDs.contains(row.id),
                 offline: model.offline.isOffline(row.pathText),
                 textSize: model.textSize,
+                sort: model.sort,
                 reservesChipRow: showsChipRow,
                 reloadImage: reloadImage)
             tile.onClick = { [weak self] count in
@@ -554,7 +560,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.commit()
     }
 
-    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, offline: Bool, textSize: TextSize, reservesChipRow: Bool = true, reloadImage: Bool) {
+    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, offline: Bool, textSize: TextSize, sort: LibrarySort = .standard, reservesChipRow: Bool = true, reloadImage: Bool) {
         let changedFile = rowID != row.id
         if textSize != self.textSize {
             self.textSize = textSize
@@ -579,7 +585,8 @@ final class LibraryTileItem: NSCollectionViewItem {
             if index < tags.count { chip.text = tags[index] }
         }
         size.text = row.sizeBytes == 0 ? "0 bytes" : ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file)
-        date.text = row.displayDate?.formatted(date: .numeric, time: .omitted) ?? ""
+        let shownDate = sort.shownDate(of: row)
+        date.text = shownDate?.formatted(date: .numeric, time: .omitted) ?? ""
         check.isHidden = !selectMode
         check.image = NSImage(systemSymbolName: checked ? "checkmark.circle.fill" : "circle", accessibilityDescription: nil)
         check.contentTintColor = checked ? Theme.nsGold : NSColor.white.withAlphaComponent(0.7)
@@ -589,7 +596,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel([row.url.lastPathComponent, proposed.isEmpty ? nil : "suggested name \(proposed)", row.failed ? "couldn’t be read" : FileKindLabel.title(row.kind),
                                     offline ? "offline" : nil,
-                                    row.displayDate?.formatted(date: .abbreviated, time: .omitted),
+                                    shownDate?.formatted(date: .abbreviated, time: .omitted),
                                     row.hasFaces ? "contains faces" : nil, row.hasText ? "contains text" : nil]
             .compactMap { $0 }.joined(separator: ", "))
         applyColors()

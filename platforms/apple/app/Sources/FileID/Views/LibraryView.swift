@@ -1020,6 +1020,7 @@ struct LibraryView: View {
                 scrollToTopToken: scrollToTopToken,
                 textSize: ContentTextScale.shared.size,
                 offline: offlineRoots,
+                sort: sort,
                 onSelect: { paneSelectedID = $0.id },
                 onOpen: { openPreview($0) },
                 onToggleCheck: toggleCheck,

@@ -163,12 +163,12 @@ struct LibraryListTable: NSViewRepresentable {
                 ids = newIDs
                 if appended {
                     NSAnimationContext.runAnimationGroup { $0.duration = 0; table.insertRows(at: IndexSet(old..<newIDs.count), withAnimation: []) }
-                    if stateChanged || contentChanged { reconfigureVisible(list, reloadImages: list.refreshToken != lastToken) }
+                    if stateChanged || contentChanged { reconfigureVisible(list, reloadImages: list.refreshToken != lastToken, contentChanged: contentChanged) }
                 } else {
                     table.reloadData()
                 }
             } else if stateChanged || contentChanged {
-                reconfigureVisible(list, reloadImages: list.refreshToken != lastToken)
+                reconfigureVisible(list, reloadImages: list.refreshToken != lastToken, contentChanged: contentChanged)
             }
             if let selected = list.selectedID, selected != lastSelected, let index = newIDs.firstIndex(of: selected) {
                 table.scrollRowToVisible(index)
@@ -220,14 +220,14 @@ struct LibraryListTable: NSViewRepresentable {
             showSort(model.sort)
         }
 
-        private func reconfigureVisible(_ list: LibraryListTable, reloadImages: Bool) {
+        private func reconfigureVisible(_ list: LibraryListTable, reloadImages: Bool, contentChanged: Bool = false) {
             guard let table else { return }
-            let oldPaths = Dictionary(lastRows.map { ($0.id, $0.pathText) }, uniquingKeysWith: { a, _ in a })
+            let comparePaths = contentChanged && !reloadImages
             let visible = table.rows(in: table.visibleRect)
             for index in visible.location..<(visible.location + visible.length) where index < list.rows.count {
                 guard let rowView = table.rowView(atRow: index, makeIfNecessary: false) as? ListRowView else { continue }
                 let row = list.rows[index]
-                configure(rowView, row: row, reloadImage: reloadImages || oldPaths[row.id] != row.pathText)
+                configure(rowView, row: row, reloadImage: reloadImages || (comparePaths && row.pathDiffers(at: index, from: lastRows)))
             }
         }
 
@@ -581,7 +581,7 @@ final class ListRowView: NSTableRowView {
         let described = (row.vlmProposedName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         detail.text = row.failed ? (row.errorMessage ?? "Couldn’t be read") : tags.joined(separator: " · ")
         offlineBadge.isHidden = !offline
-        let shownDate = sort.key == .dateAdded ? row.scannedAt : row.displayDate
+        let shownDate = sort.shownDate(of: row)
         date.text = shownDate?.formatted(date: .abbreviated, time: .omitted) ?? "—"
         size.text = row.sizeBytes == 0 ? "0 bytes" : ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file)
         kind.text = row.failed ? "Unreadable" : FileKindLabel.title(row.kind)

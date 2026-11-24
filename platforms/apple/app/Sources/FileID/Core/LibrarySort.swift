@@ -1,4 +1,5 @@
 import Foundation
+import FileIDShared
 
 public enum LibrarySortKey: String, CaseIterable, Identifiable, Sendable {
     case dateAdded, dateTaken, name, size, kind
@@ -74,4 +75,20 @@ public struct LibrarySort: Equatable, Sendable {
 
     /// The text after the last "/" of `path_text`: strips the longest leading run that ends in a slash.
     static let fileNameSQL = "REPLACE(path_text, RTRIM(path_text, REPLACE(path_text, '/', '')), '')"
+}
+
+extension LibrarySort {
+    /// The date a row shows under this sort: when it was added for Date added, the capture date otherwise, so the dates read in the order the rows come.
+    func shownDate(of row: FileRow) -> Date? {
+        key == .dateAdded ? row.scannedAt : row.displayDate
+    }
+}
+
+extension FileRow {
+    /// Whether this row's file moved since `old` was shown, so its picture must be loaded again. `index` is where it sits now; the same spot is checked first so a refresh costs nothing per row.
+    func pathDiffers(at index: Int, from old: [FileRow]) -> Bool {
+        if index < old.count, old[index].id == id { return old[index].pathText != pathText }
+        guard let match = old.first(where: { $0.id == id }) else { return true }
+        return match.pathText != pathText
+    }
 }
