@@ -408,16 +408,14 @@ impl CatalogIndex {
                 let Some(exact) = self.exact_nearest(&tx, &query_vector, wanted)? else {
                     drop(tx);
                     drop(retrieval_lease);
-                    self.prepare()?;
+                    let prepared = self.prepare();
                     response.status = if mode == "semantic" { "error" } else { "ok" }.into();
-                    response.message = Some(
-                        if mode == "semantic" {
-                            "Preparing the local visual search index. Similarity results are not available yet."
-                        } else {
-                            "Keyword results only. Preparing the local visual search index."
-                        }
-                        .into(),
-                    );
+                    response.message = Some(match (&prepared, mode) {
+                        (Err(error), "semantic") => error.to_string(),
+                        (Err(_), _) => "Keyword results only. The visual search index is paused; resume its job to add similar-image results.".into(),
+                        (Ok(_), "semantic") => "Preparing the local visual search index. Similarity results are not available yet.".into(),
+                        (Ok(_), _) => "Keyword results only. Preparing the local visual search index.".into(),
+                    });
                     response.jobs = crate::commands::catalog::jobs(&conn)?;
                     response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
                     return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });

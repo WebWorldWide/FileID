@@ -1062,6 +1062,28 @@ fn a_catalog_past_the_exact_limit_still_answers_with_keyword_rows_while_the_grap
 }
 
 #[test]
+fn a_paused_index_job_still_gives_hybrid_search_its_keyword_rows_on_a_catalog_past_the_exact_limit() {
+    let (_directory, index) = fixture();
+    index.exact_max.store(2, Ordering::Relaxed);
+    index
+        .writer
+        .lock()
+        .execute(
+            "INSERT OR REPLACE INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES(?1,'catalogIndex','[]','{}','paused',1,0,0)",
+            [CatalogIndex::job_id()],
+        )
+        .unwrap();
+    let hybrid = request(
+        serde_json::json!({"requestID":"hybrid","action":"search","searchMode":"hybrid","query":"birthday","queryVector":vector(0),"embeddingModel":clip_space::model_id()}),
+    );
+    let response = index.search(&hybrid).unwrap();
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.hits.len(), 1);
+    assert!(response.message.as_deref().unwrap().contains("Keyword results only"));
+    index.shutdown();
+}
+
+#[test]
 #[ignore = "timing run on generated vectors"]
 fn exact_scan_and_build_times() {
     for count in [454usize, 5_000, 20_000, 50_000] {
