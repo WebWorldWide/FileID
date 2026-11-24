@@ -622,7 +622,11 @@ struct CleanupView: View {
                 var newExactCapped = false
                 var stopped = false
                 if isSimilar {
-                    newGroups = await store.similarImageGroupsAsync()
+                    let engine = engine
+                    let threshold = ReadStore.defaultNearDupHamming
+                    newGroups = await store.similarImageGroupsAsync(maxHamming: threshold) { offset, limit in
+                        await engine.similarClusters(offset: offset, limit: limit, threshold: threshold)
+                    }
                     newExactPartial = false
                     newExactCandidateCount = 0
                     newExactSkipped = 0

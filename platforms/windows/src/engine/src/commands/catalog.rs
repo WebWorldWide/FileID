@@ -94,7 +94,7 @@ pub async fn handle(
     .await;
 }
 
-const POOLED_READS: [&str; 5] = ["search", "detail", "jobs", "proposeNames", "autoTakeGroups"];
+const POOLED_READS: [&str; 6] = ["search", "detail", "jobs", "proposeNames", "autoTakeGroups", "similarGroups"];
 
 fn execute_with_index(
     database: Option<Arc<Mutex<Connection>>>,
@@ -172,6 +172,8 @@ pub(crate) fn response(id: &str, status: &str, message: Option<String>) -> Catal
         take_groups: None,
         take_qualities: None,
         take_goal_ranking: None,
+        similar_groups: None,
+        similar_group_total: None,
     }
 }
 
@@ -365,6 +367,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             result.take_goal_ranking = Some(Box::new(super::catalog_take_auto::goal_unavailable(goal, ids)));
         }
         "scoreTakes" => bail!("Scoring runs outside the catalog lock"),
+        "similarGroups" => return super::catalog_similar::page(conn, request),
         "listEvents" | "suggestTakeGroups" | "saveEvent" | "deleteEvent" | "undoEventEdit" | "takeGroup"
         | "setTakeFeedback" | "undoTakeFeedback" => {
             crate::commands::catalog_takes::execute(conn, request, &mut result)?;

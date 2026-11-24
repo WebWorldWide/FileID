@@ -1304,6 +1304,8 @@ mod tests {
             take_groups: None,
             take_qualities: None,
             take_goal_ranking: None,
+            similar_groups: None,
+            similar_group_total: None,
         };
         assert_eq!(
             control_failed_text(&response),

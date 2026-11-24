@@ -804,7 +804,12 @@ public final class ReadStore: @unchecked Sendable {
             let hashes = ids.map { contentHashByID[$0] }
             return !(!hashes.contains(nil) && Set(hashes.compactMap { $0 }).count == 1)
         }
-        guard !clusters.isEmpty else { return [] }
+        return buildSimilarGroups(clusters: clusters, contentHashByID: contentHashByID)
+    }
+
+    /// Loads the clustered members as full rows, ranks each group's copies, and applies the display caps. `contentHashByID` drops a group of byte-identical files; an engine-made cluster has had that done already, so it passes none.
+    private func buildSimilarGroups(clusters: [[Int64]], contentHashByID: [Int64: Data]) -> [DuplicateGroup] {
+        guard let q = queue, !clusters.isEmpty else { return [] }
         var fileByID: [Int64: FileRow] = [:]
         do {
             let wanted = clusters.flatMap { $0 }
@@ -864,9 +869,36 @@ public final class ReadStore: @unchecked Sendable {
         return Array(groups.prefix(Self.cleanupMaxGroups))
     }
 
-    /// Off-main twin of `similarImageGroups`; only the assignment lands on main.
-    public func similarImageGroupsAsync(maxHamming: Int = ReadStore.defaultNearDupHamming) async -> [DuplicateGroup] {
-        await Task.detached(priority: .userInitiated) { [self] in
+    public struct SimilarClusterPage: Sendable, Equatable {
+        public var clusters: [[Int64]]
+        public var total: Int
+        public init(clusters: [[Int64]], total: Int) { self.clusters = clusters; self.total = total }
+    }
+
+    static let similarPageSize = 100
+
+    /// Collects the engine's look-alike clusters, largest first, up to the number the Cleanup page can show. Nil when the engine cannot answer, so the caller falls back to grouping locally.
+    static func collectSimilarClusters(page: @Sendable (_ offset: Int, _ limit: Int) async -> SimilarClusterPage?) async -> [[Int64]]? {
+        var clusters: [[Int64]] = []
+        while clusters.count < cleanupMaxGroups {
+            guard let next = await page(clusters.count, similarPageSize) else { return clusters.isEmpty ? nil : clusters }
+            clusters += next.clusters
+            if next.clusters.isEmpty || clusters.count >= next.total { break }
+        }
+        return clusters
+    }
+
+    /// Off-main twin of `similarImageGroups`; only the assignment lands on main. With `page` the engine finds the clusters, so the app never loads every photo's hash; without it, or when the engine cannot answer, they are found here.
+    public func similarImageGroupsAsync(
+        maxHamming: Int = ReadStore.defaultNearDupHamming,
+        page: (@Sendable (_ offset: Int, _ limit: Int) async -> SimilarClusterPage?)? = nil
+    ) async -> [DuplicateGroup] {
+        if let page, let clusters = await Self.collectSimilarClusters(page: page) {
+            return await Task.detached(priority: .userInitiated) { [self] in
+                buildSimilarGroups(clusters: clusters, contentHashByID: [:])
+            }.value
+        }
+        return await Task.detached(priority: .userInitiated) { [self] in
             similarImageGroups(maxHamming: maxHamming)
         }.value
     }

@@ -101,6 +101,8 @@ fn catalog_selection_clears_chapters_and_rejects_stale_controls_through_failed_b
             take_groups: None,
             take_qualities: None,
             take_goal_ranking: None,
+            similar_groups: None,
+            similar_group_total: None,
         }));
     engine
         .borrow_mut()
@@ -118,6 +120,8 @@ fn catalog_selection_clears_chapters_and_rejects_stale_controls_through_failed_b
             take_groups: None,
             take_qualities: None,
             take_goal_ranking: None,
+            similar_groups: None,
+            similar_group_total: None,
         }));
     pump_until(|| ui.status.text() == "B detail failed (fixture)");
     assert!(ui.chapters.first_child().is_none());

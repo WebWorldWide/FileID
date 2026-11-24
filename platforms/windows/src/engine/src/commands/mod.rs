@@ -37,6 +37,7 @@ pub mod catalog;
 pub(crate) mod catalog_search;
 pub(crate) mod catalog_retrieval;
 pub(crate) mod catalog_names;
+pub(crate) mod catalog_similar;
 
 pub mod catalog_takes;
 pub mod catalog_take_auto;

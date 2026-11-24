@@ -101,6 +101,8 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         take_decision: None,
         naming: None,
         name_edits: None,
+        offset: None,
+        similar_threshold: None,
     }
 }
 

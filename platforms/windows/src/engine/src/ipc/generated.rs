@@ -772,7 +772,12 @@ pub struct CatalogRequest {
     /// location is unreachable) or failed, and reports progress in jobs; listFaceReview with queue
     /// refresh reads the counts. pauseJob, resumeJob and cancelJob control it, and an interrupted
     /// run comes back paused and resumes where it stopped. It replies with the job in jobs, or
-    /// status error when no face model is installed.
+    /// status error when no face model is installed. similarGroups (schema 1.29.0) pages the
+    /// Cleanup look-alike groups: images whose perceptual hashes differ by at most similarThreshold
+    /// bits (0 to 16, default 8), chained, with groups that are all byte-identical and a RAW beside
+    /// its own rendered twin left out. Groups come largest first (ties by smallest file id); offset
+    /// (default 0) and limit (1 to 100, default 50) select a page. It replies with similarGroups
+    /// for the page and similarGroupTotal for all of them.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -826,6 +831,13 @@ pub struct CatalogRequest {
     /// only). unlearnNames sends the same entries back after the renames are undone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_edits: Option<Vec<CatalogNameEdit>>,
+    /// similarGroups only (schema 1.29.0): how many groups to skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    /// similarGroups only (schema 1.29.0): the most perceptual-hash bits two images may differ by
+    /// and still be look-alikes. Default 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_threshold: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1696,6 +1708,12 @@ pub struct CatalogResponse {
     pub suggested_take_groups: Option<Vec<CatalogTakeGroupSuggestion>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_groups: Option<Vec<CatalogTakeAutoGroup>>,
+    /// similarGroups only (schema 1.29.0): the requested page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_groups: Option<Vec<CatalogSimilarGroup>>,
+    /// similarGroups only (schema 1.29.0): how many groups there are in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_group_total: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_qualities: Option<Vec<CatalogTakeQuality>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1812,6 +1830,16 @@ pub struct CatalogTakeShot {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_at: Option<f64>,
+}
+
+/// Schema 1.29.0. One group of look-alike images. fileIDs lists at most 2,000 members, ascending;
+/// totalCount is the real size of the group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSimilarGroup {
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+    pub total_count: i64,
 }
 
 /// Model-free score of one shot within its group (relative to the other tries) with short plain

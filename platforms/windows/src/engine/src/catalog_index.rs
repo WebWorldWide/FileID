@@ -381,6 +381,8 @@ impl CatalogIndex {
             take_groups: None,
             take_qualities: None,
             take_goal_ranking: None,
+            similar_groups: None,
+            similar_group_total: None,
         };
         if mode == "keyword" {
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);

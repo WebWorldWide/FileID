@@ -48,6 +48,13 @@ public final class EngineClient {
         return await catalogResponse(for: request.requestID, timeout: timeout)
     }
 
+    func similarClusters(offset: Int, limit: Int, threshold: Int) async -> ReadStore.SimilarClusterPage? {
+        let request = CatalogRequest(requestID: UUID().uuidString, action: "similarGroups", limit: limit, offset: offset, similarThreshold: min(16, max(0, threshold)))
+        guard let reply = await catalogReply(to: request, timeout: .seconds(300)), reply.status == "ok",
+              let groups = reply.similarGroups, let total = reply.similarGroupTotal else { return nil }
+        return ReadStore.SimilarClusterPage(clusters: groups.map(\.fileIDs), total: total)
+    }
+
     func catalogResponse(for id: String, timeout: Duration) async -> CatalogResponse? {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: timeout)
