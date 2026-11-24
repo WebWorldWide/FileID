@@ -197,6 +197,26 @@ fn different_people_verdicts_bar_the_other_person() {
 }
 
 #[test]
+fn different_people_verdicts_keyed_by_face_id_alone_bar_the_other_person() {
+    let conn = library();
+    face(&conn, 3, 3, None, (1.0, 0.6));
+    conn.execute(
+        "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) \
+         VALUES(1,9,0,1,'user',0,3,1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) \
+         VALUES(1,8,1,1,'user',0,3,2)",
+        [],
+    )
+    .unwrap();
+    run(&conn, &Settings::default());
+    assert_eq!(candidates(&conn)[0].1, 2);
+}
+
+#[test]
 fn best_score_claims_the_person_for_its_photo() {
     let conn = library();
     face(&conn, 20, 3, None, (0.95, 0.6));

@@ -255,30 +255,57 @@ pub(crate) fn owner_of(conn: &Connection, legacy: Option<i64>, file: Option<i64>
         .flatten())
 }
 
-fn verdict_owners(conn: &Connection, face: i64, file: i64, bbox: &str) -> rusqlite::Result<Vec<i64>> {
-    type Side = (Option<i64>, Option<i64>, Option<String>);
-    let mut statement = conn.prepare_cached(
-        "SELECT face_a, file_a, bbox_a, face_b, file_b, bbox_b FROM face_verifications WHERE same_person=0 \
-         AND (face_a=?1 OR (file_a=?2 AND bbox_a=?3) OR face_b=?1 OR (file_b=?2 AND bbox_b=?3))",
-    )?;
-    let rows: Vec<(Side, Side)> = statement
-        .query_map(params![face, file, bbox], |row| {
-            Ok(((row.get(0)?, row.get(1)?, row.get(2)?), (row.get(3)?, row.get(4)?, row.get(5)?)))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let is_face = |side: &Side| side.0 == Some(face) || (side.1 == Some(file) && side.2.as_deref() == Some(bbox));
-    let mut owners = Vec::new();
-    for (a, b) in rows {
-        let other = match (is_face(&a), is_face(&b)) {
-            (true, false) => b,
-            (false, true) => a,
-            _ => continue,
-        };
-        if let Some(owner) = owner_of(conn, other.0, other.1, other.2.as_deref())? {
-            owners.push(owner);
+type VerdictSide = (Option<i64>, Option<i64>, Option<String>);
+
+/// The "not the same person" verdicts, read once: `face_verifications` has no index on these columns, so asking per face scans the whole table each time.
+struct Verdicts {
+    rows: Vec<(VerdictSide, VerdictSide)>,
+    by_face: HashMap<i64, Vec<usize>>,
+    by_spot: HashMap<(i64, String), Vec<usize>>,
+}
+
+impl Verdicts {
+    fn load(conn: &Connection) -> rusqlite::Result<Self> {
+        let mut statement = conn.prepare_cached(
+            "SELECT face_a, file_a, bbox_a, face_b, file_b, bbox_b FROM face_verifications WHERE same_person=0 ORDER BY rowid",
+        )?;
+        let rows: Vec<(VerdictSide, VerdictSide)> = statement
+            .query_map([], |row| Ok(((row.get(0)?, row.get(1)?, row.get(2)?), (row.get(3)?, row.get(4)?, row.get(5)?))))?
+            .collect::<rusqlite::Result<_>>()?;
+        let (mut by_face, mut by_spot): (HashMap<i64, Vec<usize>>, HashMap<(i64, String), Vec<usize>>) = Default::default();
+        for (index, (a, b)) in rows.iter().enumerate() {
+            for side in [a, b] {
+                if let Some(face) = side.0 {
+                    by_face.entry(face).or_default().push(index);
+                }
+                if let (Some(file), Some(bbox)) = (side.1, side.2.as_ref()) {
+                    by_spot.entry((file, bbox.clone())).or_default().push(index);
+                }
+            }
         }
+        Ok(Self { rows, by_face, by_spot })
     }
-    Ok(owners)
+
+    fn owners(&self, conn: &Connection, face: i64, file: i64, bbox: &str) -> rusqlite::Result<Vec<i64>> {
+        let mut hits: Vec<usize> = self.by_face.get(&face).into_iter().flatten().copied().collect();
+        hits.extend(self.by_spot.get(&(file, bbox.to_owned())).into_iter().flatten().copied());
+        hits.sort_unstable();
+        hits.dedup();
+        let is_face = |side: &VerdictSide| side.0 == Some(face) || (side.1 == Some(file) && side.2.as_deref() == Some(bbox));
+        let mut owners = Vec::new();
+        for index in hits {
+            let (a, b) = &self.rows[index];
+            let other = match (is_face(a), is_face(b)) {
+                (true, false) => b,
+                (false, true) => a,
+                _ => continue,
+            };
+            if let Some(owner) = owner_of(conn, other.0, other.1, other.2.as_deref())? {
+                owners.push(owner);
+            }
+        }
+        Ok(owners)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +330,7 @@ pub(crate) fn assess(
     }
     let namespace = format!("{model}|{processing}");
     let people = receivers(conn, model, processing)?;
+    let verdicts = Verdicts::load(conn)?;
     let mut candidates = Vec::new();
     {
         let mut statement = conn.prepare(
@@ -327,7 +355,7 @@ pub(crate) fn assess(
             let mut barred: HashSet<i64> = people.iter().filter(|receiver| receiver.unknown).map(|receiver| receiver.person).collect();
             barred.extend(same_file_owners(conn, face, file)?);
             barred.extend(constraint_owners(conn, file, &bbox)?);
-            barred.extend(verdict_owners(conn, face, file, &bbox)?);
+            barred.extend(verdicts.owners(conn, face, file, &bbox)?);
             candidates.push(Candidate { face, file, previous, scored, barred });
         }
     }
