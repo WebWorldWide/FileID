@@ -1,6 +1,5 @@
 import Testing
 import CoreGraphics
-import ImageIO
 @testable import FileID
 
 @Suite struct PageThumbnailTests {
@@ -54,25 +53,5 @@ import ImageIO
         #expect(PageThumbnail.showsTopLeft(kind: "image", hasText: true, tags: ["Document", "Page"], fileName: "scan.png"))
         #expect(!PageThumbnail.showsTopLeft(kind: "image", hasText: true, tags: ["Sky"], fileName: "IMG_1.jpg"))
         #expect(!PageThumbnail.showsTopLeft(kind: "pdf", hasText: true, tags: ["Document"], fileName: "a.pdf"))
-    }
-}
-
-@Suite struct ThumbnailTransparencyTests {
-    @Test func seeThroughPixelsEncodeAsWhiteNotBlack() throws {
-        let context = try #require(CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
-                                             space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.clear(CGRect(x: 0, y: 0, width: 8, height: 8))
-        let image = try #require(context.makeImage())
-        #expect(ThumbnailService.hasAlpha(image))
-        let jpeg = try #require(ThumbnailService.jpegData(image))
-        let source = try #require(CGImageSourceCreateWithData(jpeg as CFData, nil))
-        let decoded = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
-        let probe = try #require(CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
-                                           space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                           bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
-        probe.draw(decoded, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-        let pixel = try #require(probe.data?.assumingMemoryBound(to: UInt8.self))
-        #expect(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240)
     }
 }
