@@ -10,7 +10,7 @@ use sha2::Digest;
 use crate::scan_session::{prefix_upper_bound, root_descendant_prefix};
 
 const VERSION: &str = "v2";
-const WRITE_CHUNK: usize = 500;
+const READ_CHUNK: usize = 200;
 
 pub(crate) fn marker(state_dir: &Path, root: &Path) -> PathBuf {
     let root = root.to_string_lossy();
@@ -41,8 +41,34 @@ pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
     }
 }
 
-/// Files are read with no database lock held; the writer is taken per chunk.
-pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root: &Path, cancelled: &dyn Fn() -> bool) -> usize {
+const READ_THREADS: usize = 4;
+
+/// Files are read with no database lock held, a few at a time; the writer is taken per chunk, so a cancel keeps
+/// every fix already written and only the marker (written when the whole folder was checked) waits for the next scan.
+pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root: &Path, cancelled: &(dyn Fn() -> bool + Sync)) -> usize {
+    run_reporting(database, state_dir, root, cancelled, &|_| {})
+}
+
+pub(crate) fn run_reporting(
+    database: &Mutex<Connection>,
+    state_dir: &Path,
+    root: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(super::catch_up::Progress) + Sync),
+) -> usize {
+    run_chunked(database, state_dir, root, cancelled, progress, READ_CHUNK)
+}
+
+fn run_chunked(
+    database: &Mutex<Connection>,
+    state_dir: &Path,
+    root: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(super::catch_up::Progress) + Sync),
+    read_chunk: usize,
+) -> usize {
+    use super::catch_up::Progress;
+    use rayon::prelude::*;
     if marker(state_dir, root).exists() {
         return 0;
     }
@@ -53,33 +79,44 @@ pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root
             return 0;
         }
     };
-    let mut fixes: Vec<(i64, f64)> = Vec::new();
-    for (id, path, stored, kind) in &photos {
+    progress(Progress::Total(photos.len() as u64));
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(READ_THREADS).thread_name(|index| format!("capture-dates-{index}")).build();
+    let mut fixed = 0;
+    for chunk in photos.chunks(read_chunk) {
         if cancelled() {
-            return 0;
+            return fixed;
         }
-        let path = Path::new(path);
-        let readable_here = std::fs::metadata(path).is_ok_and(|metadata| !super::discovery::is_online_only(&metadata));
-        let read = |path: &Path| match kind.as_str() {
-            "video" => crate::util::video_creation_date::container_creation_unix(path),
-            _ => super::tagging::capture_time_from_head(path),
+        let check = |(id, path, stored, kind): &(i64, String, Option<f64>, String)| {
+            if cancelled() {
+                return None;
+            }
+            let path = Path::new(path);
+            let readable_here = std::fs::metadata(path).is_ok_and(|metadata| !super::discovery::is_online_only(&metadata));
+            let captured = readable_here
+                .then(|| match kind.as_str() {
+                    "video" => crate::util::video_creation_date::container_creation_unix(path),
+                    _ => super::tagging::capture_time_from_head(path),
+                })
+                .flatten()?;
+            stored.is_none_or(|stored| (stored - captured).abs() > 1.0).then_some((*id, captured))
         };
-        let Some(captured) = readable_here.then(|| read(path)).flatten() else {
-            continue;
+        let fixes: Vec<(i64, f64)> = match &pool {
+            Ok(pool) => pool.install(|| chunk.par_iter().filter_map(check).collect()),
+            Err(_) => chunk.iter().filter_map(check).collect(),
         };
-        if stored.is_none_or(|stored| (stored - captured).abs() > 1.0) {
-            fixes.push((*id, captured));
+        if cancelled() {
+            return fixed;
         }
-    }
-    for chunk in fixes.chunks(WRITE_CHUNK) {
-        if let Err(error) = write_chunk(&mut database.lock(), chunk) {
+        if let Err(error) = write_chunk(&mut database.lock(), &fixes) {
             tracing::warn!(%error, "capture-date backfill could not update the catalog; retrying next scan");
-            return 0;
+            return fixed;
         }
+        fixed += fixes.len();
+        progress(Progress::Advance(chunk.len() as u64));
     }
     mark_done(state_dir, root);
-    tracing::info!(checked = photos.len(), fixed = fixes.len(), "capture dates backfilled");
-    fixes.len()
+    tracing::info!(checked = photos.len(), fixed, "capture dates backfilled");
+    fixed
 }
 
 fn photos_under(database: &Mutex<Connection>, root: &Path) -> Result<Vec<(i64, String, Option<f64>, String)>> {
@@ -160,6 +197,44 @@ mod tests {
         out.extend_from_slice(&tiff);
         out.extend_from_slice(&encoded[2..]);
         out
+    }
+
+    #[test]
+    fn a_cancelled_backfill_keeps_the_fixes_already_written_and_reports_progress() {
+        let scratch = std::env::temp_dir().join(format!("fileid-capture-dates-{}", uuid::Uuid::new_v4()));
+        let (root, state) = (scratch.join("Library"), scratch.join("state"));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for id in 1..=4 {
+            let path = root.join(format!("{id}.jpg"));
+            std::fs::write(&path, jpeg_taken_at("2019:07:04 12:00:00", "+00:00", "")).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(?1,?2,?1,1,0,'image','jpg',1700000000)",
+                params![id, path.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        let database = Mutex::new(conn);
+        let advanced = std::sync::atomic::AtomicU64::new(0);
+        let total = std::sync::atomic::AtomicU64::new(0);
+        let progress = |event: super::super::catch_up::Progress| match event {
+            super::super::catch_up::Progress::Total(count) => total.store(count, std::sync::atomic::Ordering::SeqCst),
+            super::super::catch_up::Progress::Advance(count) => {
+                advanced.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        let cancelled = || advanced.load(std::sync::atomic::Ordering::SeqCst) >= 2;
+        assert_eq!(run_chunked(&database, &state, &root, &cancelled, &progress, 2), 2);
+        assert_eq!(total.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let fixed: i64 =
+            database.lock().query_row("SELECT COUNT(*) FROM files WHERE created_at < 1600000000", [], |row| row.get(0)).unwrap();
+        assert_eq!(fixed, 2);
+        assert!(!marker(&state, &root).exists(), "a stopped pass is finished by the next scan");
+        advanced.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(run_chunked(&database, &state, &root, &|| false, &progress, 2), 2);
+        assert_eq!(advanced.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(marker(&state, &root).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     #[test]
