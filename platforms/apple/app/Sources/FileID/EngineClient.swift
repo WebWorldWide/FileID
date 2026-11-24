@@ -1020,6 +1020,8 @@ public final class EngineClient {
         let fm = FileManager.default
         if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
             FactoryReset.erase(root: AppSupportPath.fileID, keeping: [ModelCachePaths.huggingFaceRoot], fileManager: fm)
+        // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
+        deepAnalyzeComplete = nil
         }
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
