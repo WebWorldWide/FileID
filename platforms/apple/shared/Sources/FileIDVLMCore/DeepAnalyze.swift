@@ -1502,25 +1502,70 @@ public actor DeepAnalyze {
     /// so they ALWAYS land. The model treats the "use these names" hint as
     /// optional, so the names often never reach the FILENAME even when injected
     /// into the prompt. Each person's first-name token — lowercase
-    /// ASCII-alphanumeric, ≥2 chars, deduped against words already in the name and
+    /// ASCII-alphanumeric after folding Latin-1 / Latin Extended-A accents, ≥2 chars, deduped against words already in the name and
     /// against each other, capped at 3 sorted alphabetically — is prefixed, then
     /// the whole thing is re-sanitized. Byte-faithful with the Rust engine's
     /// `apply_person_prefix`. (item 3)
     static func applyPersonPrefix(_ name: String?, faceNames: [String]) -> String? {
         guard let name, !name.isEmpty else { return name }
-        let existing = Set(
-            name.lowercased().split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }.map(String.init))
+        let existing = Set(foldPrefixText(name.lowercased(), otherIsSeparator: true)
+            .split(separator: " ").map(String.init))
         var tokens: [String] = []
         for display in faceNames {
-            guard let firstWord = display.split(separator: " ").first else { continue }
-            let token = String(firstWord).lowercased()
-                .filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+            guard let firstWord = display.split(whereSeparator: { $0.isWhitespace }).first else { continue }
+            let token = foldPrefixText(String(firstWord).lowercased(), otherIsSeparator: false)
             guard token.count >= 2, !existing.contains(token), !tokens.contains(token) else { continue }
             tokens.append(token)
         }
         guard !tokens.isEmpty else { return name }
         let prefix = tokens.sorted().prefix(3).joined(separator: " ")
         return sanitize(filename: "\(prefix) \(name)") ?? name
+    }
+
+    /// Mirror of the Rust `fold_prefix_text`: scalar by scalar so a decomposed accent is not one grapheme.
+    static func foldPrefixText(_ lowered: String, otherIsSeparator: Bool) -> String {
+        var out = ""
+        for scalar in lowered.unicodeScalars {
+            if scalar.isASCII, scalar.properties.isAlphabetic || (scalar.value >= 0x30 && scalar.value <= 0x39) {
+                out.unicodeScalars.append(scalar)
+            } else if let folded = foldLatinLetter(scalar) {
+                out += folded
+            } else if scalar.value >= 0x300 && scalar.value <= 0x36F {
+                continue
+            } else if otherIsSeparator {
+                out += " "
+            }
+        }
+        return out
+    }
+
+    static func foldLatinLetter(_ scalar: Unicode.Scalar) -> String? {
+        switch String(scalar) {
+        case "à", "á", "â", "ã", "ä", "å", "ā", "ă", "ą": return "a"
+        case "ç", "ć", "ĉ", "ċ", "č": return "c"
+        case "ð", "ď", "đ": return "d"
+        case "è", "é", "ê", "ë", "ē", "ĕ", "ė", "ę", "ě": return "e"
+        case "ĝ", "ğ", "ġ", "ģ": return "g"
+        case "ĥ", "ħ": return "h"
+        case "ì", "í", "î", "ï", "ĩ", "ī", "ĭ", "į", "ı": return "i"
+        case "ĵ": return "j"
+        case "ķ": return "k"
+        case "ĺ", "ļ", "ľ", "ŀ", "ł": return "l"
+        case "ñ", "ń", "ņ", "ň": return "n"
+        case "ò", "ó", "ô", "õ", "ö", "ø", "ō", "ŏ", "ő": return "o"
+        case "ŕ", "ŗ", "ř": return "r"
+        case "ś", "ŝ", "ş", "š": return "s"
+        case "ţ", "ť", "ŧ": return "t"
+        case "ù", "ú", "û", "ü", "ũ", "ū", "ŭ", "ů", "ű", "ų": return "u"
+        case "ŵ": return "w"
+        case "ý", "ÿ", "ŷ": return "y"
+        case "ź", "ż", "ž": return "z"
+        case "æ": return "ae"
+        case "œ": return "oe"
+        case "ß": return "ss"
+        case "þ": return "th"
+        default: return nil
+        }
     }
 
     // MARK: - Self-heal old model dirs
