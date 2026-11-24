@@ -825,7 +825,6 @@ fn plan_large_library_in_with_cancel(
                     size_bytes: row.get::<_, Option<i64>>(8)?.map(|size| size as u64),
                     file_ref: row.get::<_, Option<i64>>(9)?.map(|file_ref| file_ref as u64),
                     modified_at: row.get(10)?,
-                    ..Default::default()
                 })
             })?;
             write_stored_plan_in_with_cancel(
