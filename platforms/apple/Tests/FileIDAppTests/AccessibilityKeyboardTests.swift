@@ -22,6 +22,12 @@ struct AccessibilityKeyboardTests {
         #expect(Notification.Name.fileIDFindInPage != Notification.Name.fileIDFocusSearch)
     }
 
+    @Test func theDescribePageNeverHidesTheEnginesRawMessageInAHover() throws {
+        let view = try Self.source("Views/DeepAnalyzeViews.swift")
+        #expect(!view.contains("(ModelFailureText.plain(error), error.message)"))
+        #expect(view.components(separatedBy: "(ModelFailureText.plain(error), \"\")").count == 3)
+    }
+
     @Test func findReachesOnlyTheVisiblePage() {
         #expect(FindRouting.accepts(pageActive: true))
         #expect(!FindRouting.accepts(pageActive: false))

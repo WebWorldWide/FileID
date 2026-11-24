@@ -90,7 +90,7 @@ struct DeepAnalyzeModelPickerCard: View {
             guard requested != nil, let error = engine.lastError else { return }
             if error.kind == "prewarm_cancelled" { requested = nil; return }
             guard ModelFailureText.isModelFailure(error) else { return }
-            failure = (ModelFailureText.plain(error), error.message)
+            failure = (ModelFailureText.plain(error), "")
             requested = nil
         }
         .confirmationDialog("Remove this description model?",
@@ -443,7 +443,7 @@ struct DeepAnalyzeView: View {
         }
         .onChange(of: engine.lastErrorSignal) { _, _ in
             guard let error = engine.lastError, ModelFailureText.isModelFailure(error) else { return }
-            runFailure = (ModelFailureText.plain(error), error.message)
+            runFailure = (ModelFailureText.plain(error), "")
         }
         .onChange(of: engine.deepAnalyzeInFlight) { _, running in
             if running { runFailure = nil }
