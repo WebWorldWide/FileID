@@ -349,7 +349,10 @@ struct MainWindow: View {
         // and a second scan would start on top of the running one.
         let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
         if scanning {
-            guard pickedURL != url else { return }
+            guard pickedURL != url else {
+                toasts.show("Already reading \(url.lastPathComponent).")
+                return
+            }
             let alert = NSAlert()
             alert.messageText = "A scan is running. Stop it and scan the new folder?"
             alert.informativeText = "Files already read are kept. You can scan the first folder again later and it picks up where it stopped."
@@ -357,7 +360,9 @@ struct MainWindow: View {
             alert.addButton(withTitle: "Stop and Scan \(url.lastPathComponent)")
             alert.addButton(withTitle: "Keep Scanning")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
-            engine.cancelScan()
+            pickedURL = url
+            engine.replaceScan(with: url)
+            return
         }
         if pickedURL != url { engine.clearProgress() }
         pickedURL = url

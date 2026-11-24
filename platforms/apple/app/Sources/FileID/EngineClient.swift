@@ -206,6 +206,9 @@ public final class EngineClient {
 
     /// When non-nil, the next engine exit deletes the SQLite library before the respawn and the next `.ready` auto-starts a scan of this URL (`wipeAndRescan(rootURL:)`).
     private var pendingWipeAndRescanRoot: URL?
+    /// A folder to scan the moment the scan being stopped has ended; the engine refuses a start while the old scan is still draining.
+    private(set) var pendingScanRoot: URL?
+    private var scanBusyRetriesLeft = 0
 
     /// 2 Hz throttle on `deepAnalyzeLast`; otherwise SwiftUI's
     /// AttributeGraph overflows on a fast Deep Analyze run.
@@ -503,14 +506,14 @@ public final class EngineClient {
         }
     }
 
-    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE.
-    nonisolated static func refuseSigpipe(on pipe: Pipe) {
-        _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     /// A deep-analyze error ends the run unless it is a per-file notice: the engine reports a file that changed since its scan and carries on with the rest.
     nonisolated static func deepErrorEndsRun(_ kind: String) -> Bool {
         kind.hasPrefix("deep") && kind != "deep_source_changed"
     }
 
+    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE.
+    nonisolated static func refuseSigpipe(on pipe: Pipe) {
+        _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
 
     /// Frame samples can carry full user paths in JSON values (e.g. a torn deepAnalyzeProgress `currentPath`): scrub home and volume prefixes before they persist in app.log. External-volume paths carry no username but volume + share names identify the user's NAS layout, so they collapse too.
@@ -607,14 +610,24 @@ public final class EngineClient {
             lastProgress = p
             // Release the App-Nap token on any terminal scan phase; cancel/fail arrive here as a phase change, not as .scanComplete.
             switch p.phase {
-            case .completed, .cancelled, .failed: endScanActivity()
-            case .idle, .discovering, .tagging, .postScan: break
+            case .completed, .cancelled, .failed:
+                endScanActivity()
+                startPendingScan()
+            case .discovering, .tagging, .postScan: pendingScanRetryRoot = nil
+            case .idle: break
             }
         case .phaseChanged(let phase):
             // The Swift engine ends a scan with a terminal progress snapshot; the shared engine announces it with this event alone, so the snapshot keeps its post-scan phase unless the event settles it.
             if let settled = lastProgress?.settled(by: phase) {
                 lastProgress = settled
+            }
+            // A scan the engine rejects or cancels before its first progress snapshot has nothing to settle, but its App-Nap token must still go.
+            switch phase {
+            case .completed, .cancelled, .failed:
                 endScanActivity()
+                startPendingScan()
+            case .discovering: pendingScanRetryRoot = nil
+            case .idle, .tagging, .postScan: break
             }
         case .discoveryComplete:
             break
@@ -625,6 +638,7 @@ public final class EngineClient {
         case .scanComplete:
             lastTerminalEventAt = Date()
             endScanActivity()
+            startPendingScan()
         case .error(let e):
             queryReplies.deliver(e)
             // Startup capability warning, not a real error: Deep Analyze can't run on this build.
@@ -646,6 +660,7 @@ public final class EngineClient {
             // The user's own Cancel, a repeated click and a declined license aren't failures; the request already told them.
             if Self.isQuietNotice(e.kind) {
                 Self.debug("engine notice: \(e.kind)")
+                if e.kind == "scan_already_running" { retryScanStartWhileOldScanDrains() }
                 if e.kind == "scan_slower_path" { scanRunsOnCPU = true }
                 return
             }
@@ -768,6 +783,8 @@ public final class EngineClient {
         resumeBulkResultWaiters(with: nil)
         // A dead engine emits no terminal event, so release both App-Nap tokens here (both helpers no-op when not held).
         endScanActivity()
+        pendingScanRoot = nil
+        pendingScanRetryRoot = nil
         endDeepAnalyzeActivity()
         // Likewise the undo affordance: a crash mid-undo never emits the terminal restructureApplyResult, so without the reset the NEXT apply's result is mis-attributed as the dead undo's.
         undoRestructureInFlight = false
@@ -858,12 +875,16 @@ public final class EngineClient {
 
     // MARK: - App Nap activity (begin/end must stay balanced)
 
-    private func beginScanActivity() {
+    func setPendingScanRootForTesting(_ url: URL?) { pendingScanRoot = url }
+
+    var scanActivityHeld: Bool { scanActivityToken != nil }
+
+    func beginScanActivity() {
         guard scanActivityToken == nil else { return }
         scanActivityToken = AppSleepActivity.begin(reason: "FileID is scanning files")
     }
 
-    private func endScanActivity() {
+    func endScanActivity() {
         guard let token = scanActivityToken else { return }
         AppSleepActivity.end(token)
         scanActivityToken = nil
@@ -918,6 +939,52 @@ public final class EngineClient {
         return true
     }
 
+    /// Stops the scan that is running and starts `rootURL` once the engine reports the old one ended; with no scan running it starts at once.
+    public func replaceScan(with rootURL: URL) {
+        let running = lastProgress.map { [ScanPhase.discovering, .tagging, .postScan].contains($0.phase) } ?? false
+        guard running else {
+            startScan(rootURL: rootURL)
+            return
+        }
+        pendingScanRoot = rootURL
+        scanBusyRetriesLeft = 8
+        if !send(.cancelScan) {
+            pendingScanRoot = nil
+            startScan(rootURL: rootURL)
+            return
+        }
+        isPaused = false
+    }
+
+    private func startPendingScan() {
+        guard let root = pendingScanRoot else { return }
+        pendingScanRoot = nil
+        clearProgress()
+        startScan(rootURL: root)
+        pendingScanRetryRoot = root
+    }
+
+    private var pendingScanRetryRoot: URL?
+
+    /// The engine can report the old scan ended a moment before it frees its slot, so a start sent right then bounces; try again a few times rather than dropping the user's folder.
+    private func retryScanStartWhileOldScanDrains() {
+        guard let root = pendingScanRetryRoot else { return }
+        guard scanBusyRetriesLeft > 0 else {
+            pendingScanRetryRoot = nil
+            endScanActivity()
+            lastError = EngineError(kind: "scan_not_started",
+                                    message: "The scan couldn’t start because the last one was still stopping. Press Scan again.")
+            return
+        }
+        scanBusyRetriesLeft -= 1
+        endScanActivity()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self, self.pendingScanRetryRoot == root else { return }
+            self.startScan(rootURL: root)
+        }
+    }
+
     public func clearProgress() {
         lastProgress = nil
         lastBatch = nil
@@ -953,6 +1020,8 @@ public final class EngineClient {
 
     public func startScan(rootURL: URL) {
         isPaused = false
+        // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
+        deepAnalyzeComplete = nil
         scanRunsOnCPU = false
         let displayPath = rootURL.path
         // The persisted app-scoped bookmark stays in the app; the engine gets a separate implicit-scope bookmark that can cross the process boundary.
@@ -1020,8 +1089,6 @@ public final class EngineClient {
         let fm = FileManager.default
         if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
             FactoryReset.erase(root: AppSupportPath.fileID, keeping: [ModelCachePaths.huggingFaceRoot], fileManager: fm)
-        // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
-        deepAnalyzeComplete = nil
         }
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
