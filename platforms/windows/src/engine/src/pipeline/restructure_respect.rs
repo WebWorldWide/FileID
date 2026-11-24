@@ -278,8 +278,8 @@ where
     let mut loose: Vec<(&FileForClassify, f64)> = files
         .iter()
         .filter(|f| matches!(f.kind, FileKind::Image | FileKind::Video) && !is_organized(&f.source, root))
-        .map(|f| (f, f.created_unix.unwrap_or(f.modified_unix)))
-        .filter(|(_, t)| *t > 0.0)
+        .map(|f| (f, f.date_unix()))
+        .filter(|(_, t)| *t >= super::restructure::MIN_PLAUSIBLE_UNIX)
         .collect();
     loose.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
     let mut groups: Vec<Vec<(&FileForClassify, f64)>> = Vec::new();
@@ -340,8 +340,8 @@ pub fn event_spans(files: &[FileForClassify], root: &Path) -> Vec<EventSpan> {
         if is_generic_folder_name(top) {
             continue;
         }
-        let t = f.created_unix.unwrap_or(f.modified_unix);
-        if t > 0.0 {
+        let t = f.date_unix();
+        if t >= super::restructure::MIN_PLAUSIBLE_UNIX {
             times.entry(top.clone()).or_default().push(t);
         }
         if folders.last().and_then(|n| folder_role(n)).is_some()
@@ -379,8 +379,8 @@ pub fn event_spans(files: &[FileForClassify], root: &Path) -> Vec<EventSpan> {
 }
 
 pub fn event_destination(f: &FileForClassify, spans: &[EventSpan]) -> Option<PathBuf> {
-    let t = f.created_unix.unwrap_or(f.modified_unix);
-    if t <= 0.0 {
+    let t = f.date_unix();
+    if t < super::restructure::MIN_PLAUSIBLE_UNIX {
         return None;
     }
     let slack = 3.0 * 3_600.0;
