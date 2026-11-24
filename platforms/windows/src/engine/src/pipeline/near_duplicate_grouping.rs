@@ -158,6 +158,14 @@ pub fn groups_with(items: &[Item], limits: &Thresholds) -> Vec<Group> {
     result
 }
 
+/// Two files with one stem are one shot only when the pictures agree. Without embeddings, only a RAW and a non-RAW file in the same folder (a camera's RAW+JPEG pair) count; `IMG_0001` from two folders or two cameras does not.
+fn is_same_shot_sidecar(a: &Item, b: &Item) -> bool {
+    match (a.embedding.as_deref(), b.embedding.as_deref()) {
+        (Some(x), Some(y)) => cosine(x, y) >= SIDECAR_COSINE,
+        _ => is_raw(&a.path) != is_raw(&b.path) && Path::new(&a.path).parent() == Path::new(&b.path).parent(),
+    }
+}
+
 fn joins(item: &Item, current: &[&Item], limits: &Thresholds) -> bool {
     let last = current[current.len() - 1];
     let (Some(time), Some(last_time), Some(first_time)) = (item.time, last.time, current[0].time) else {
@@ -170,7 +178,7 @@ fn joins(item: &Item, current: &[&Item], limits: &Thresholds) -> bool {
         return false;
     }
     let item_stem = stem(&item.path);
-    if current.iter().any(|c| stem(&c.path) == item_stem && c.path != item.path) {
+    if current.iter().any(|c| stem(&c.path) == item_stem && c.path != item.path && is_same_shot_sidecar(item, c)) {
         return true;
     }
     let (Some(embedding), Some(last_embedding), Some(seed)) =
@@ -389,6 +397,22 @@ mod tests {
         let found = groups(&items);
         assert_eq!(found.iter().map(|g| g.members.clone()).collect::<Vec<_>>(), vec![vec![1, 2, 3, 4], vec![5]]);
         assert_eq!(found[0].representative, 1);
+    }
+
+    #[test]
+    fn same_stem_files_with_different_pictures_or_folders_stay_separate() {
+        let unrelated = groups(&[
+            item(1, "/camera/IMG_0001.jpg", Some(100.0), Some(0.0)),
+            item(2, "/cabinet/IMG_0001.png", Some(101.0), Some(1.5)),
+        ]);
+        assert_eq!(unrelated.iter().map(|g| g.members.clone()).collect::<Vec<_>>(), vec![vec![1], vec![2]]);
+        let no_embeddings = groups(&[
+            item(1, "/a/x.jpg", Some(100.0), None),
+            item(2, "/b/x.jpg", Some(100.0), None),
+            item(3, "/a/y.jpg", Some(200.0), None),
+            item(4, "/b/y.dng", Some(200.0), None),
+        ]);
+        assert!(no_embeddings.iter().all(|g| g.members.len() == 1), "two JPEGs, or a pair split across folders, are not one shot");
     }
 
     #[test]
