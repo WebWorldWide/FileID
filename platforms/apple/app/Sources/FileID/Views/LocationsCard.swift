@@ -85,8 +85,8 @@ struct LocationRow: View {
             Spacer()
             Button("Rescan") { engine.startScan(rootURL: URL(fileURLWithPath: root.path)) }
                 .buttonStyle(DSSecondaryButtonStyle())
-                .disabled(!root.online)
-                .help(root.online ? "Scan this location again" : "Reconnect the drive to rescan")
+                .disabled(!root.online || engine.scanInProgress)
+                .help(!root.online ? "Reconnect the drive to rescan" : engine.scanInProgress ? "A scan is running. Rescan when it finishes, or stop it first." : "Scan this location again")
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(root.display), \(root.online ? "online" : "offline"), \(LocationText.summary(root))")

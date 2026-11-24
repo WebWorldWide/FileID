@@ -953,9 +953,13 @@ public final class EngineClient {
         _ = send(.grantFolderAccess(rootPath: path, rootBookmark: bookmark))
     }
 
+    /// A scan owns the engine from discovery to post-scan, paused or not; a second start would be refused and must not touch the pause state.
+    public var scanInProgress: Bool {
+        guard let phase = lastProgress?.phase else { return false }
+        return phase == .discovering || phase == .tagging || phase == .postScan
+    }
+
     public func startScan(rootURL: URL) {
-        isPaused = false
-        scanRunsOnCPU = false
         let displayPath = rootURL.path
         // The persisted app-scoped bookmark stays in the app; the engine gets a separate implicit-scope bookmark that can cross the process boundary.
         let client = self
@@ -982,6 +986,8 @@ public final class EngineClient {
                 if client.send(.startScan(rootPath: resolvedPath, rootBookmark: rootBookmark,
                                           rootDisplay: displayPath,
                                           rescan: false, excludedPaths: nil)) {
+                    client.isPaused = false
+                    client.scanRunsOnCPU = false
                     client.beginScanActivity()
                 } else {
                     client.lastError = EngineError(
