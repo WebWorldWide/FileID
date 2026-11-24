@@ -1065,21 +1065,21 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    /// The faces of `personID` on `fileIDs`: what "Move to another person"
+    /// The faces of `personID` on `fileIDs`, each with its photo: what "Move to another person"
     /// hands the engine, one face at a time. Every face of that person on a
     /// chosen photo moves, so a photo never stays half in each group.
-    public func faceIDs(personID: Int64, fileIDs: [Int64]) -> [Int64] {
+    public func faceFiles(personID: Int64, fileIDs: [Int64]) -> [(face: Int64, file: Int64)] {
         guard let q = queue, !fileIDs.isEmpty else { return [] }
-        return (try? q.read { db -> [Int64] in
-            var ids: [Int64] = []
+        return (try? q.read { db -> [(face: Int64, file: Int64)] in
+            var ids: [(face: Int64, file: Int64)] = []
             for start in stride(from: 0, to: fileIDs.count, by: 500) {
                 let chunk = fileIDs[start..<min(start + 500, fileIDs.count)]
                 let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
                 var args: [DatabaseValueConvertible] = [personID]
                 args.append(contentsOf: chunk.map { Int($0) })
-                ids += try Int64.fetchAll(db, sql: """
-                    SELECT id FROM face_prints WHERE person_id = ? AND file_id IN (\(placeholders)) ORDER BY id
-                    """, arguments: StatementArguments(args))
+                ids += try Row.fetchAll(db, sql: """
+                    SELECT id, file_id FROM face_prints WHERE person_id = ? AND file_id IN (\(placeholders)) ORDER BY id
+                    """, arguments: StatementArguments(args)).map { (face: $0["id"], file: $0["file_id"]) }
             }
             return ids
         }) ?? []

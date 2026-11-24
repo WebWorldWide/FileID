@@ -172,7 +172,10 @@ struct PeopleView: View {
                                 let n = await CatalogWrites.merge(engine, store: store, target: t.id, sources: [s.id])
                                 if let n {
                                     setStatus("Merged into “\(displayName)” (\(Plural.noun(n, "photo", "photos"))).")
-                                    suggestions.removeAll { $0.id == candidateID }
+                                    let alive = await Task.detached(priority: .userInitiated) { [store] in
+                                        Set(store.persons(includeUnknown: true).map(\.id))
+                                    }.value
+                                    suggestions = MergeSuggestionPair.stillMergeable(suggestions.filter { $0.id != candidateID }, alive: alive)
                                 } else {
                                     setStatus(Self.mergeFailed)
                                 }
@@ -218,10 +221,7 @@ struct PeopleView: View {
                             let alive = await Task.detached(priority: .userInitiated) { [store] in
                                 Set(store.persons(includeUnknown: true).map(\.id))
                             }.value
-                            suggestions.removeAll {
-                                batchToRemove.contains($0.id)
-                                    && !(alive.contains($0.sourcePersonID) && alive.contains($0.destinationPersonID))
-                            }
+                            suggestions.removeAll { batchToRemove.contains($0.id) && !$0.involvesOnly(alive) }
                             if merged == 0 {
                                 setStatus(mergeStopRequested ? "Stopped. Nothing was merged." : Self.mergeFailed)
                             } else if merged < total {
@@ -668,6 +668,7 @@ struct PeopleView: View {
                                 engine: engine,
                                 store: store,
                                 onDropped: { sourceID in
+                                    guard persons.contains(where: { $0.id == sourceID }) else { return }
                                     pendingDragMerge = PendingDragMerge(source: sourceID, target: person.id, targetName: person.displayName)
                                 }
                             ))
@@ -814,6 +815,18 @@ struct PeopleView: View {
 
 // MARK: - Card
 
+/// What a dragged person card carries, so a number typed or dragged in from elsewhere is never taken for a person.
+enum PersonDragPayload {
+    private static let prefix = "fileid-person:"
+
+    static func encode(_ personID: Int64) -> String { prefix + String(personID) }
+
+    static func decode(_ text: String) -> Int64? {
+        guard text.hasPrefix(prefix) else { return nil }
+        return Int64(text.dropFirst(prefix.count))
+    }
+}
+
 /// Drag-merge drop target for a PersonCard, applied conditionally: off in merge and mark-unknown modes.
 private struct PersonCardDragMergeModifier: ViewModifier {
     let enabled: Bool
@@ -826,10 +839,10 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content
-                .draggable("\(personID)")
+                .draggable(PersonDragPayload.encode(personID))
                 .dropDestination(for: String.self) { items, _ in
                     guard let s = items.first,
-                          let sourceID = Int64(s),
+                          let sourceID = PersonDragPayload.decode(s),
                           sourceID != personID else { return false }
                     onDropped(sourceID)
                     return true
@@ -1160,10 +1173,12 @@ private struct PersonDetailSheet: View {
                 engine: engine,
                 store: store,
                 fileIDs: Array(checked),
-                onMoved: { count, targetName in
-                    moveStatus = "Moved \(count) photo\(count == 1 ? "" : "s") to \(targetName)."
-                    selectMode = false
-                    checked.removeAll()
+                onMoved: { outcome, targetName in
+                    moveStatus = outcome.status(target: targetName)
+                    if outcome.photosMoved > 0 {
+                        selectMode = false
+                        checked.removeAll()
+                    }
                     loadFiles()
                 }
             )
@@ -1457,7 +1472,7 @@ private struct MovePhotosTargetPicker: View {
     let engine: EngineClient
     let store: ReadStore
     let fileIDs: [Int64]
-    let onMoved: @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
+    let onMoved: @Sendable @MainActor (_ outcome: CatalogWrites.FaceMoveOutcome, _ targetName: String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var candidates: [ReadStore.PersonRow] = []
     @State private var pendingTarget: ReadStore.PersonRow?
@@ -1470,8 +1485,8 @@ private struct MovePhotosTargetPicker: View {
         let completion = onMoved
         dismiss()
         Task { [engine, store] in
-            let moved = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
-            completion(moved, targetName)
+            let outcome = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
+            completion(outcome, targetName)
         }
     }
 
@@ -1930,5 +1945,17 @@ enum PersonCardText {
         if isUnknown { return "Unknown person" }
         let preview = nameParts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
         return preview.isEmpty ? "Person \(personID)" : preview
+    }
+}
+
+
+extension MergeSuggestionPair {
+    func involvesOnly(_ alive: Set<Int64>) -> Bool {
+        alive.contains(sourcePersonID) && alive.contains(destinationPersonID)
+    }
+
+    /// A merge folds one card into another, so any other pair naming the folded card has no row left to draw and must not be counted.
+    static func stillMergeable(_ pairs: [MergeSuggestionPair], alive: Set<Int64>) -> [MergeSuggestionPair] {
+        pairs.filter { $0.involvesOnly(alive) }
     }
 }

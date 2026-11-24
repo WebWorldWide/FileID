@@ -25,6 +25,28 @@ extension SankeyFlowView {
         var sourceFolderCount: Int { Self.folderCount(nodes: sources.count, rolledUp: rollupSourceFolders.count) }
         var destinationFolderCount: Int { Self.folderCount(nodes: destinations.count, rolledUp: rollupDestBuckets.count) }
 
+        /// The node a source folder is drawn in: its own, or the rollup when it fell in the long tail.
+        func sourceNodeID(forFolder folder: String) -> String { srcSlots["src:\(folder)"] != nil ? "src:\(folder)" : SankeyFlowView.otherSourceID }
+        func destNodeID(forBucket bucket: String) -> String { dstSlots["dst:\(bucket)"] != nil ? "dst:\(bucket)" : SankeyFlowView.otherDestID }
+
+        /// The ribbons a hover traces: the folder's or bucket's own flows, the flows of an outcome, or the single hovered ribbon.
+        func highlightedFlowIDs(for context: RestructureHoverContext?) -> Set<String> {
+            switch context {
+            case .none:
+                return []
+            case .flow(let folder, let bucket)?:
+                return Set(flows.filter { $0.sourceFolder == folder && $0.destBucket == bucket }.map(\.id))
+            case .sourceFolder(let folder)?:
+                let node = sourceNodeID(forFolder: folder)
+                return Set(flows.filter { $0.sourceID == node }.map(\.id))
+            case .destBucket(let bucket)?:
+                let node = destNodeID(forBucket: bucket)
+                return Set(flows.filter { $0.destID == node }.map(\.id))
+            case .outcome(let outcome)?:
+                return Set(flows.filter { $0.outcomes.contains(outcome) }.map(\.id))
+            }
+        }
+
         static let empty = Layout(
             sources: [], destinations: [], flows: [],
             flowsByID: [:], srcSlots: [:], dstSlots: [:],
@@ -56,6 +78,10 @@ extension SankeyFlowView {
         let destBucket: String
         let tint: Color
         let count: Int
+        /// What the ribbon's ends are called: the folder, or "N other folders" when an end is the rolled-up long tail.
+        var sourceName: String = ""
+        var destName: String = ""
+        var outcomes: Set<RestructureOutcome> = []
     }
 
     struct Slot: Hashable {

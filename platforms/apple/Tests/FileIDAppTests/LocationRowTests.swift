@@ -25,3 +25,23 @@ struct LocationRowTests {
         #expect(text.hasSuffix("not scanned yet"))
     }
 }
+
+@MainActor
+@Suite struct LocationRescanGuardTests {
+    private func progress(_ phase: ScanPhase) -> ScanProgress {
+        ScanProgress(sessionID: "s", phase: phase, total: 400, discovered: 400, processed: 120, failed: 0,
+                     filesPerSecond: 42, etaSeconds: 7, residentMB: 300, availableMB: 9000)
+    }
+
+    @Test func aRunningOrPausedScanIsInProgressAndAFinishedOneIsNot() {
+        let engine = EngineClient()
+        #expect(!engine.scanInProgress)
+        engine.handleEvent(IPCEvent(payload: .progress(progress(.tagging))))
+        #expect(engine.scanInProgress)
+    }
+
+    @Test func rescanIsDisabledWhileAScanRuns() throws {
+        let source = try appSource("Views/LocationsCard.swift")
+        #expect(source.contains(".disabled(!root.online || engine.scanInProgress)"))
+    }
+}

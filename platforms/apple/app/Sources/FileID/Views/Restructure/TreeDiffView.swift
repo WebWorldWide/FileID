@@ -166,6 +166,8 @@ struct TreeDiffView: View {
         Button { onTapSource(row.folder) } label: { label }
             .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
         .help(sourceHelp(for: row))
+        .accessibilityLabel(RestructureSpeech.sourceFolder(name: row.displayName, files: row.movingFiles, staysBehind: row.kind == .mixed))
+        .accessibilityHint(RestructureSpeech.pathHint(row.folder))
         .onHover { hovering in
             hoverBus.set(hovering ? .sourceFolder(row.folder) : nil)
         }
@@ -181,6 +183,7 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
+                .accessibilityHidden(true)
             Image(systemName: "folder.fill")
                 .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
@@ -213,6 +216,8 @@ struct TreeDiffView: View {
                                  isHighlighted: isHighlighted)
         Button { onTapDestination(row.bucket) } label: { label }
             .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
+        .accessibilityLabel(RestructureSpeech.destination(name: row.bucket, files: row.count))
+        .accessibilityHint("Shows the files moving into this folder")
         .help("\(row.count) file\(row.count == 1 ? "" : "s") arriving in this folder.")
         .onHover { hovering in
             hoverBus.set(hovering ? .destBucket(row.bucket) : nil)
@@ -229,6 +234,7 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
+                .accessibilityHidden(true)
             Image(systemName: bucketIconName(row.bucket))
                 .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
@@ -269,4 +275,24 @@ struct TreeDiffView: View {
             return "Reorganized: \(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") moving out."
         }
     }
+}
+
+
+/// What VoiceOver says for Organize Folders rows and map folders: the name, how many files, and what happens, not the badge letter.
+enum RestructureSpeech {
+    private static func files(_ count: Int) -> String { Plural.noun(count, "file", "files") }
+
+    static func sourceFolder(name: String, files count: Int, staysBehind: Bool) -> String {
+        "\(name), \(files(count)) moving out, \(staysBehind ? "the folder stays" : "the folder is emptied")"
+    }
+
+    static func destination(name: String, files count: Int) -> String {
+        "\(name), \(files(count)) arriving"
+    }
+
+    static func mapFolder(direction: String, name: String, files count: Int) -> String {
+        "\(direction) \(name), \(files(count))"
+    }
+
+    static func pathHint(_ path: String) -> String { "In \(path). Shows the files moving out of this folder." }
 }

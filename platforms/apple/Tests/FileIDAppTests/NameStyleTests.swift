@@ -193,3 +193,12 @@ struct NameStyleTests {
         #expect(NameStyle.learnedSummary(learned, enabled: false) == "Names follow the style above only.")
     }
 }
+
+@Suite struct SmartNameResultStatusTests {
+    @Test func theRenameOrUndoResultSurvivesTheReloadItTriggered() {
+        let result = "Renamed 0 files · 3 couldn’t be renamed."
+        #expect(SmartNamePreviewSheet.statusAfterPreview(result, keepingResult: true, hasUndoableBatch: false) == result)
+        #expect(SmartNamePreviewSheet.statusAfterPreview(result, keepingResult: false, hasUndoableBatch: true) == result)
+        #expect(SmartNamePreviewSheet.statusAfterPreview(result, keepingResult: false, hasUndoableBatch: false) == nil)
+    }
+}

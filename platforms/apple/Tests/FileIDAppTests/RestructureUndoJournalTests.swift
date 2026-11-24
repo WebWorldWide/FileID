@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import FileIDShared
 @testable import FileID
 
 @Suite("Organize undo after a relaunch")
@@ -43,5 +44,39 @@ struct RestructureUndoJournalTests {
         let message = "1 file stayed where it is because FileID can't use its name in a new folder, for example \"IMG_0001\n.jpg\". Rename it, then organize again. The other files were handled as usual."
         #expect(Sidebar.errorTitle("apply_restructure_skipped", message: message) == "Some files weren’t moved")
         #expect(Sidebar.errorText(kind: "apply_restructure_skipped", message: message) == message)
+    }
+}
+
+@MainActor
+@Suite("Organize move or undo the engine rejects")
+struct RestructureRejectionTests {
+    @Test("a rejected move or undo is an error that ends the move with no result event")
+    func rejectionsReleaseTheMovePage() {
+        for kind in ["apply_restructure", "undo_restructure", "db_unavailable"] {
+            #expect(EngineClient.endsRestructureWithoutResult(kind))
+        }
+        for kind in ["plan_restructure_failed", "library_busy", "apply_restructure_skipped"] {
+            #expect(!EngineClient.endsRestructureWithoutResult(kind))
+        }
+    }
+
+    @Test("a rejected undo does not make the next move's result read as an undo")
+    func rejectedUndoDoesNotLatchTheUndoFlag() {
+        let engine = EngineClient()
+        engine.undoRestructureInFlight = true
+        engine.handleEvent(IPCEvent(payload: .error(EngineError(kind: "undo_restructure", message: "Organize Folders couldn't undo the move"))))
+        #expect(!engine.undoRestructureInFlight)
+        engine.handleEvent(IPCEvent(payload: .restructureApplyResult(RestructureApplyResult(applied: 4, failed: 0, cancelled: false))))
+        #expect(engine.canUndoRestructure)
+    }
+}
+
+@Suite("Organize page revisit")
+struct RestructureRevisitTests {
+    @Test("a delivered plan with nothing listed, as a large plan is, is not planned again on return")
+    func deliveredPlanIsKept() {
+        #expect(!RestructureView.needsReplan(storeVersion: 4, planStoreVersion: 4, planDelivered: true))
+        #expect(RestructureView.needsReplan(storeVersion: 5, planStoreVersion: 4, planDelivered: true))
+        #expect(RestructureView.needsReplan(storeVersion: 4, planStoreVersion: 4, planDelivered: false))
     }
 }

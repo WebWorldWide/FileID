@@ -44,3 +44,11 @@ struct PagePolishTests {
         #expect(Theme.disabledOpacity >= 0.55)
     }
 }
+
+@Suite struct ShimmerRadiusTests {
+    @Test func theShimmerClipsToTheRadiusItIsGiven() throws {
+        let source = try appSource("Views/MotionPrimitives.swift")
+        let shimmer = try #require(source.range(of: "struct ShimmerView"))
+        #expect(source[shimmer.upperBound...].contains(".clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))"))
+    }
+}

@@ -181,7 +181,7 @@ public final class EngineClient {
     public private(set) var canUndoRestructure = false
     /// The folder whose last Organize is waiting to be undone after a relaunch (from the engine's journal on disk); nil when the undo came from this session's own apply.
     public private(set) var restructureUndoRoot: String?
-    private var undoRestructureInFlight = false
+    var undoRestructureInFlight = false
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -500,6 +500,11 @@ public final class EngineClient {
     }
 
     /// Error kinds that are a notice, not a failure: the user's own Cancel, a scan that fell back to the CPU, a repeated Scan click (Swift sends `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
+    /// Errors that end an Organize move or undo with no result event, so the page has to release its in-flight state itself.
+    nonisolated static func endsRestructureWithoutResult(_ kind: String) -> Bool {
+        kind == "apply_restructure" || kind == "undo_restructure" || kind == "db_unavailable"
+    }
+
     nonisolated static func isQuietNotice(_ kind: String) -> Bool {
         switch kind {
         case "prewarm_cancelled", "scan_already_queued", "scan_already_running", "rescan_no_changes",
@@ -666,6 +671,8 @@ public final class EngineClient {
                 if e.kind == "scan_slower_path" { scanRunsOnCPU = true }
                 return
             }
+            // A rejected undo (scan paused, another move running, handler panic) never gets a result, so its flag would otherwise make the next forward move read as an undo.
+            if e.kind == "undo_restructure" { undoRestructureInFlight = false }
             lastError = e
             if e.kind.hasPrefix("face_cluster") {
                 faceClusteringInFlight = false
@@ -1029,11 +1036,13 @@ public final class EngineClient {
         _ = send(.grantFolderAccess(rootPath: path, rootBookmark: bookmark))
     }
 
+    /// A scan owns the engine from discovery to post-scan, paused or not; a second start would be refused and must not touch the pause state.
+    public var scanInProgress: Bool {
+        guard let phase = lastProgress?.phase else { return false }
+        return phase == .discovering || phase == .tagging || phase == .postScan
+    }
+
     public func startScan(rootURL: URL) {
-        isPaused = false
-        // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
-        deepAnalyzeComplete = nil
-        scanRunsOnCPU = false
         let displayPath = rootURL.path
         // The persisted app-scoped bookmark stays in the app; the engine gets a separate implicit-scope bookmark that can cross the process boundary.
         let client = self
@@ -1060,6 +1069,10 @@ public final class EngineClient {
                 if client.send(.startScan(rootPath: resolvedPath, rootBookmark: rootBookmark,
                                           rootDisplay: displayPath,
                                           rescan: false, excludedPaths: nil)) {
+                    client.isPaused = false
+                    client.scanRunsOnCPU = false
+                    // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
+                    client.deepAnalyzeComplete = nil
                     client.beginScanActivity()
                 } else {
                     client.lastError = EngineError(

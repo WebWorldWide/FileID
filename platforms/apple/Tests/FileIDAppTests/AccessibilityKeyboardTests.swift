@@ -90,3 +90,18 @@ struct AccessibilityKeyboardTests {
         #expect(toasts.current == nil)
     }
 }
+
+@MainActor
+@Suite struct ListRowVoiceOverTests {
+    @Test func aListRowCanBePressedAndOpenedWithVoiceOver() throws {
+        let row = ListRowView(frame: NSRect(x: 0, y: 0, width: 600, height: 56))
+        var pressed = 0, opened = 0
+        row.onPress = { pressed += 1 }
+        row.onOpenPreview = { opened += 1 }
+        #expect(row.accessibilityPerformPress())
+        #expect(pressed == 1)
+        let open = try #require(row.accessibilityCustomActions()?.first { $0.name == "Open preview" })
+        #expect(open.handler?() == true)
+        #expect(opened == 1)
+    }
+}
