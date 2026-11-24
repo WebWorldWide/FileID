@@ -369,3 +369,22 @@ fn undo_brings_back_the_merged_away_persons_pending_suggestions() {
     assert_eq!(candidate_row(&conn, for_keep), Some((keep.0, Some(other.0))));
     assert_eq!(candidate_row(&conn, for_third), Some((third.0, None)));
 }
+
+#[test]
+fn merging_clears_the_destination_centroid_so_suggestions_see_the_merged_faces() {
+    let conn = db();
+    let (source, _) = person(&conn, Some("A"), None, false, 2);
+    let (target, _) = person(&conn, Some("B"), None, false, 2);
+    conn.execute(
+        "UPDATE persons SET centroid=X'0000803f', anchor_radius=0.5, last_clustered_at=5.0 WHERE id=?1",
+        [target],
+    )
+    .unwrap();
+    merge_clusters(&conn, source, target).unwrap();
+    let state: (Option<Vec<u8>>, Option<f64>, Option<f64>) = conn
+        .query_row("SELECT centroid, anchor_radius, last_clustered_at FROM persons WHERE id=?1", [target], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(state, (None, None, None));
+}
