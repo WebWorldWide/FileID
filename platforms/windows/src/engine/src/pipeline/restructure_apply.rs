@@ -5267,6 +5267,8 @@ mod tests {
     }
 
     /// One file whose destination name can't be used must be skipped with a reason; the other files in the same plan still move.
+    // Windows cannot create a file whose name holds a newline, so the fixture exists only on Unix.
+    #[cfg(unix)]
     #[test]
     fn apply_skips_an_unusable_destination_name_and_moves_the_rest() {
         let root = std::env::temp_dir().join(format!("fileid-apply-badname-{}", uuid::Uuid::new_v4()));

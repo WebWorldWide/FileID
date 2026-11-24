@@ -828,14 +828,6 @@ pub mod trash {
         trash_into(path, &trash)
     }
 
-    pub(crate) fn trash_path_as(
-        source: &Path,
-        original_path: &Path,
-        expected: crate::platform::FileIdentity,
-    ) -> Result<()> {
-        trash_path_landed(source, original_path, expected).map(|_| ())
-    }
-
     /// Where the item landed in the Trash; `None` when the source was already gone.
     pub(crate) fn trash_path_landed(
         source: &Path,
