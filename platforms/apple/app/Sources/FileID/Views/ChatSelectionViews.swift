@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 /// Files attached to the next chat question ("12 selected photos").
 struct ChatScope: Equatable {
@@ -20,14 +21,14 @@ struct ChatScope: Equatable {
         return ChatScope(fileIDs: unique, label: "\(unique.count) selected \(noun(kinds, count: unique.count))")
     }
 
-    /// Chosen answer files, labelled by their kind (photos unless a file plays).
+    /// Chosen answer files, labelled by their kind (photo, video, or plain file).
     static func selected(_ ids: [Int64], from hits: [CatalogHit]) -> ChatScope? {
         let paths = Dictionary(hits.map { ($0.fileID, $0.path) }, uniquingKeysWith: { a, _ in a })
         return selected(ids, kinds: ids.map { kind(paths[$0] ?? "") })
     }
 
     static func kind(_ path: String) -> String {
-        MediaPlayback.extensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) ? "video" : "image"
+        FileTypes.kind(forExtension: URL(fileURLWithPath: path).pathExtension).rawValue
     }
 
     /// The matches of a scoped answer, which become the scope of the next question.

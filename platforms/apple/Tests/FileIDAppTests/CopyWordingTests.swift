@@ -69,3 +69,18 @@ struct CopyWordingTests {
         #expect(RestructureView.nothingToMoveBody(rootName: nil).hasPrefix("Your folders in it are already well organized."))
     }
 }
+
+@Suite("Chat scope wording")
+struct ChatScopeWordingTests {
+    @Test("documents, audio and unknown files are never called photos or videos")
+    func onlyRealPhotosAndVideosGetThoseNames() {
+        func label(_ paths: [String]) -> String? {
+            ChatScope.selected(Array(1...Int64(paths.count)), kinds: paths.map(ChatScope.kind))?.label
+        }
+        #expect(label(["/a/one.pdf", "/a/two.docx"]) == "2 selected files")
+        #expect(label(["/a/song.mp3"]) == "1 selected file")
+        #expect(label(["/a/notes"]) == "1 selected file")
+        #expect(label(["/a/p.JPG", "/a/q.heic"]) == "2 selected photos")
+        #expect(label(["/a/m.mov", "/a/n.mp4"]) == "2 selected videos")
+    }
+}
