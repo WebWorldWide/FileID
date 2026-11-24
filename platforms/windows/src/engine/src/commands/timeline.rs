@@ -807,7 +807,7 @@ async fn process_video<M: FrameModel>(
         let prefetched = match next_pool.take() {
             Some((next, task)) if next == file_id => Some(task),
             Some((_, stale)) => {
-                stale.abort();
+                drop(stale);
                 None
             }
             None => None,
@@ -1013,8 +1013,6 @@ struct PoolTask {
 }
 
 impl PoolTask {
-    fn abort(self) {}
-
     async fn finish(mut self) -> Result<timeline_media::Pool> {
         (&mut self.handle).await.map_err(|error| anyhow!(error)).and_then(|pool| pool)
     }
