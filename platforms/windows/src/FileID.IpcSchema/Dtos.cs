@@ -27,7 +27,8 @@ public sealed record LibraryRoot(
     long FileCount,
     long TotalBytes,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? LastScanAt = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LastStatus = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LastStatus = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? ReadOnly = null);
 
 /// <summary>Reply to <c>listRoots</c>.</summary>
 public sealed record RootsList(

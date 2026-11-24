@@ -2001,6 +2001,14 @@ impl RestructureApply {
                     continue;
                 }
 
+            if record_undo
+                && (crate::util::read_only::require_source_mutation(Path::new(&m.source)).is_err()
+                    || crate::util::read_only::require_source_mutation(&dest).is_err())
+            {
+                failed += 1;
+                continue;
+            }
+
             if let Some(parent) = dest.parent() {
                 // SEC-5 TOCTOU defense, pass 1: check the EXISTING ancestor chain BEFORE create_dir_all extends it; an attacker may have planted a junction in a pre-existing folder under library_root that redirects the write outside the root.
                 if has_reparse_point_in_chain(parent, &canonical_root) {
@@ -3877,6 +3885,27 @@ mod tests {
         assert!(!should_emit_apply_progress(2, 1000, 500));
         assert!(!should_emit_apply_progress(499, 1000, 500));
         assert!(!should_emit_apply_progress(501, 1000, 500));
+    }
+
+    /// A move whose source is on a read-only drive is refused before its destination folders are made.
+    #[test]
+    fn a_refused_move_creates_no_destination_folders() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-ro-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        crate::util::read_only::mark_read_only_for_tests(&locked, "Archive");
+        let src = locked.join("a.jpg");
+        std::fs::write(&src, b"data").unwrap();
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false);
+        let dest = root.join("Sorted/2020/a.jpg").to_string_lossy().into_owned();
+        let res = apply.apply(&[move_fixture(1, &src.to_string_lossy(), &dest)]).unwrap();
+        assert_eq!((res.applied, res.failed), (0, 1));
+        assert!(!root.join("Sorted").exists(), "no folder may be created for a refused move");
+        assert!(src.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A pre-cancelled apply must break before touching the filesystem: no move, and a cancel is NOT counted as a failure.

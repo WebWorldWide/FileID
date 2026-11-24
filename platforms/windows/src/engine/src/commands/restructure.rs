@@ -1494,6 +1494,9 @@ pub(crate) async fn handle_undo_restructure(
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(r))))
                 .await;
         }
+        Ok(Err(err)) if crate::util::user_message::read_only_sentence(&err).is_some() => {
+            send_read_only_apply_refusal(&sink, &err, 1).await;
+        }
         Ok(Err(err)) => {
             tracing::warn!(?err, "undoRestructure failed");
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
@@ -1538,6 +1541,12 @@ fn unusable_names_notice(unusable: &UnusableNames) -> Option<String> {
     ))
 }
 
+async fn send_read_only_apply_refusal(sink: &Sink, error: &anyhow::Error, requested: usize) {
+    let sentence = crate::util::user_message::read_only_sentence(error).unwrap_or_default();
+    sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+    sink.send(EngineError::event("location_read_only", format!("{sentence} Nothing was moved."))).await;
+}
+
 pub(crate) async fn handle_apply_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1545,6 +1554,10 @@ pub(crate) async fn handle_apply_restructure(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let requested = payload.moves.len();
+    if let Err(error) = crate::util::read_only::require_writable(std::path::Path::new(&payload.library_root)) {
+        send_read_only_apply_refusal(&sink, &anyhow::Error::from(error), requested).await;
+        return;
+    }
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<(ipc::RestructureApplyResult, UnusableNames)> {
             // Inject the operation token the CancelRestructure dispatch arm sets so a long apply is actually stoppable (the flag is reset to false in the ApplyRestructure arm so a stale cancel can't pre-stop a fresh apply).
@@ -1600,6 +1613,9 @@ pub(crate) async fn handle_apply_restructure(
             if let Some(message) = unusable_names_notice(&unusable) {
                 sink.send(EngineError::event("apply_restructure_skipped", message)).await;
             }
+        }
+        Ok(Err(err)) if crate::util::user_message::read_only_sentence(&err).is_some() => {
+            send_read_only_apply_refusal(&sink, &err, requested).await;
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");

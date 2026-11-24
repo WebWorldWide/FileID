@@ -491,6 +491,7 @@ fn event_exemplars() -> Vec<EventPayload> {
                 total_bytes: 3_400_000_000,
                 last_scan_at: Some(1_700_000_000.0),
                 last_status: Some("completed".into()),
+                read_only: Some(false),
             }],
         })),
         EventPayload::ModelCatalog(Wrap::new(ModelCatalog {

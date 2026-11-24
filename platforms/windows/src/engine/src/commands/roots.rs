@@ -135,7 +135,8 @@ pub fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
         )?;
         let online = is_online(&path);
         let display = display_name(&path, display);
-        roots.push(LibraryRoot { id, path, display, kind, enabled, online, file_count, total_bytes, last_scan_at, last_status });
+        let read_only = Some(crate::util::read_only::read_only_location(std::path::Path::new(&path)).is_some());
+        roots.push(LibraryRoot { id, path, display, kind, enabled, online, file_count, total_bytes, last_scan_at, last_status, read_only });
     }
     Ok(roots)
 }
@@ -151,6 +152,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, payloa
     }
     let request_id = payload.request_id;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<LibraryRoot>> {
+        crate::util::read_only::refresh();
         let Some(database) = database else { return Ok(vec![]) };
         match crate::db::reader_for(&database)? {
             Some(reader) => Ok(list(&reader)?),

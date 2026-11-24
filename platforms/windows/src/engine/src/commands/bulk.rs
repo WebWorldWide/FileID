@@ -203,6 +203,54 @@ fn apply_tags_row(
     }
 }
 
+/// Paths of the cataloged files for these ids; ids with no row are left to each handler's own "not found" report.
+fn cataloged_paths(db: &parking_lot::Mutex<rusqlite::Connection>, ids: &[i64]) -> Vec<PathBuf> {
+    let conn = db.lock();
+    let Ok(mut statement) = conn.prepare_cached("SELECT path_text FROM files WHERE id = ?1") else { return Vec::new() };
+    ids.iter()
+        .filter_map(|id| statement.query_row(rusqlite::params![id], |row| row.get::<_, String>(0)).ok())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// A batch with any target on a read-only drive is refused whole, before any file, folder, hash or journal entry.
+fn read_only_refusal(
+    action: &str,
+    ids: &[i64],
+    refusal: &crate::util::read_only::BatchRefusal,
+    protected_reason: bool,
+) -> BulkActionResult {
+    let sentence = refusal.sentence();
+    BulkActionResult {
+        command_id: None,
+        action: action.into(),
+        succeeded: 0,
+        failed: ids.len().min(u32::MAX as usize) as u32,
+        messages: ids
+            .iter()
+            .map(|id| BulkActionItem {
+                file_id: Some(*id),
+                ok: false,
+                message: Some(sentence.clone()),
+                reason: protected_reason.then(|| "protected".to_owned()),
+                operation_id: None,
+            })
+            .collect(),
+    }
+}
+
+fn check_batch_writable(
+    db: &parking_lot::Mutex<rusqlite::Connection>,
+    action: &str,
+    ids: &[i64],
+    protected_reason: bool,
+) -> Option<BulkActionResult> {
+    let paths = cataloged_paths(db, ids);
+    crate::util::read_only::require_all_writable(paths.iter().map(PathBuf::as_path))
+        .err()
+        .map(|refusal| read_only_refusal(action, ids, &refusal, protected_reason))
+}
+
 /// Bulk-applies tags: updates the DB `tags` table and writes the sidecar JSON so Explorer and future scans see the same set.
 pub(crate) async fn handle_apply_tags(
     sink: Sink,
@@ -231,6 +279,9 @@ pub(crate) async fn handle_apply_tags(
                     operation_id: None,
                 }],
             });
+        }
+        if let Some(refused) = check_batch_writable(&db, "applyTags", &payload.file_ids, false) {
+            return Ok(refused);
         }
         let mut succeeded = 0u32;
         let mut failed = 0u32;
@@ -386,6 +437,9 @@ struct PlannedRename {
 
 /// What a person is told when the move itself failed: the usual causes in words, anything else as the system reports it.
 fn rename_failure_text(err: &anyhow::Error, dest: &std::path::Path) -> String {
+    if let Some(sentence) = crate::util::user_message::read_only_sentence(err) {
+        return sentence;
+    }
     if let Some(cause) = crate::util::user_message::io_cause(err) {
         return cause.sentence().into();
     }
@@ -402,6 +456,9 @@ fn rename_failure_text(err: &anyhow::Error, dest: &std::path::Path) -> String {
 
 fn tag_failure_text(err: &anyhow::Error) -> String {
     use crate::util::user_message::{io_cause, IoCause};
+    if let Some(sentence) = crate::util::user_message::read_only_sentence(err) {
+        return sentence;
+    }
     match io_cause(err) {
         Some(IoCause::ReadOnly) => "This disk is read-only, so Finder tags can’t be added.".into(),
         Some(cause) => cause.sentence().into(),
@@ -620,6 +677,11 @@ fn rename_files_blocking(
     let mut results: Vec<Option<BulkActionItem>> = vec![None; payload.renames.len()];
     let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
     let mut rejected: Vec<(PathBuf, String)> = Vec::new();
+
+    let ids: Vec<i64> = payload.renames.iter().map(|entry| entry.file_id).collect();
+    if let Some(refused) = check_batch_writable(db, "renameFiles", &ids, false) {
+        return refused;
+    }
 
     // Phase 1: resolve and validate every rename under a short writer-lock scope (read-only SELECTs) and collect the moves, so the per-file filesystem work runs with NO lock held; a large batch must not wedge the only writer across every MoveFileExW.
     let conn = db.lock();
@@ -961,6 +1023,14 @@ fn restore_failed_claim(candidate: &TrashCandidate, reason: String) -> CheckedTr
 }
 
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters", not(test)), allow(dead_code))]
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn trash_failure_text(error: &std::io::Error) -> String {
+    match crate::util::read_only::location_in_io(error) {
+        Some(location) => location.to_string(),
+        None => error.to_string(),
+    }
+}
+
 fn checked_trash_one_with(
     candidate: &TrashCandidate,
     trash: impl FnOnce(
@@ -1036,6 +1106,9 @@ fn before_trash_move(path: &std::path::Path) {
 /// macOS trashes in place, as the Swift engine does, so the Trash shows the file's own name and Finder's Put Back works: identity and content checks run on the path itself and the backend re-checks identity on both sides of FileManager.trashItem.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
+    if let Err(error) = crate::util::read_only::require_source_mutation(&candidate.path) {
+        return CheckedTrashOutcome::Failed(trash_failure_text(&error));
+    }
     let _exact_guards = match validate_trash_candidate_at(candidate, &candidate.path, true) {
         Ok(guards) => guards,
         Err(reason) => return CheckedTrashOutcome::Rejected(reason),
@@ -1044,7 +1117,7 @@ fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     before_trash_move(&candidate.path);
     match crate::shell::trash::trash_in_place(&candidate.path, candidate.source_identity) {
         Ok(landed) => CheckedTrashOutcome::TrashedAt(landed),
-        Err(error) => CheckedTrashOutcome::Failed(error.to_string()),
+        Err(error) => CheckedTrashOutcome::Failed(trash_failure_text(&error)),
     }
 }
 
@@ -1228,6 +1301,9 @@ pub(crate) async fn handle_trash_files(
         let mut file_ids = payload.file_ids;
         let mut seen_ids = std::collections::HashSet::with_capacity(file_ids.len());
         file_ids.retain(|file_id| seen_ids.insert(*file_id));
+        if let Some(refused) = check_batch_writable(&db, "trashFiles", &file_ids, true) {
+            return Ok(refused);
+        }
         let library_roots = super::trash::library_roots(&db.lock()).unwrap_or_default();
         let mut candidates = Vec::with_capacity(file_ids.len());
         let mut snapshots = std::collections::HashMap::new();
@@ -1447,8 +1523,8 @@ pub(crate) async fn handle_trash_files(
                     messages.push(BulkActionItem {
                         file_id: Some(candidate.file_id),
                         ok: false,
-                        message: Some(format!("trash failed: {error}")),
-                        reason: Some("failed".into()),
+                        message: Some(if error.contains("is a read-only drive") { error.clone() } else { format!("trash failed: {error}") }),
+                        reason: Some(if error.contains("is a read-only drive") { "protected" } else { "failed" }.into()),
                         operation_id: None,
                     });
                 }
@@ -4589,5 +4665,45 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(single.join(" "), "Grandma");
+    }
+
+    #[test]
+    fn a_rename_batch_with_a_read_only_target_changes_nothing_and_names_the_drive() {
+        let (directory, db) = rename_fixture("readonly", &[(1, "a.jpg"), (2, "b.jpg")]);
+        crate::util::read_only::mark_read_only_for_tests(&directory, "Archive");
+        let result = rename_files_blocking(&db, &renames(&[(1, "x.jpg"), (2, "y.jpg")]), &no_clobber_rename_bound);
+        assert_eq!((result.succeeded, result.failed), (0, 2));
+        assert_eq!(listed(&directory), ["a.jpg", "b.jpg"]);
+        let (ok, text) = message_of(&result, 1);
+        assert!(!ok && text.starts_with("\u{201c}Archive\u{201d} is a read-only drive."), "{text}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_rename_batch_with_one_read_only_target_leaves_the_writable_files_alone_too() {
+        let (directory, db) = rename_fixture("readonly-mixed", &[(1, "a.jpg")]);
+        let locked = directory.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("c.jpg"), b"c").unwrap();
+        crate::util::read_only::mark_read_only_for_tests(&locked, "Archive");
+        db.lock()
+            .execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(3,?1,3,1,0,'image','jpg')",
+                [locked.join("c.jpg").to_string_lossy()],
+            )
+            .unwrap();
+        let result = rename_files_blocking(&db, &renames(&[(1, "x.jpg"), (3, "z.jpg")]), &no_clobber_rename_bound);
+        assert_eq!((result.succeeded, result.failed), (0, 2));
+        assert!(directory.join("a.jpg").exists() && !directory.join("x.jpg").exists());
+        assert!(message_of(&result, 1).1.contains("1 of 2"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn the_guard_error_reads_as_the_read_only_sentence_in_tag_and_rename_failures() {
+        let error = anyhow::Error::from(crate::util::read_only::require_writable(std::path::Path::new("/Volumes/Adlon/x.jpg")).unwrap_err());
+        assert!(tag_failure_text(&error).starts_with("\u{201c}Adlon\u{201d} is a read-only drive."));
+        assert!(rename_failure_text(&error, std::path::Path::new("/Volumes/Adlon/y.jpg")).starts_with("\u{201c}Adlon\u{201d} is a read-only drive."));
+        assert!(!tag_failure_text(&error).contains("example data"));
     }
 }
