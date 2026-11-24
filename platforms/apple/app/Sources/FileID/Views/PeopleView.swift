@@ -667,6 +667,7 @@ struct PeopleView: View {
                                 engine: engine,
                                 store: store,
                                 onDropped: { sourceID in
+                                    guard persons.contains(where: { $0.id == sourceID }) else { return }
                                     pendingDragMerge = PendingDragMerge(source: sourceID, target: person.id, targetName: person.displayName)
                                 }
                             ))
@@ -813,6 +814,18 @@ struct PeopleView: View {
 
 // MARK: - Card
 
+/// What a dragged person card carries, so a number typed or dragged in from elsewhere is never taken for a person.
+enum PersonDragPayload {
+    private static let prefix = "fileid-person:"
+
+    static func encode(_ personID: Int64) -> String { prefix + String(personID) }
+
+    static func decode(_ text: String) -> Int64? {
+        guard text.hasPrefix(prefix) else { return nil }
+        return Int64(text.dropFirst(prefix.count))
+    }
+}
+
 /// Drag-merge drop target for a PersonCard, applied conditionally: off in merge and mark-unknown modes.
 private struct PersonCardDragMergeModifier: ViewModifier {
     let enabled: Bool
@@ -825,10 +838,10 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content
-                .draggable("\(personID)")
+                .draggable(PersonDragPayload.encode(personID))
                 .dropDestination(for: String.self) { items, _ in
                     guard let s = items.first,
-                          let sourceID = Int64(s),
+                          let sourceID = PersonDragPayload.decode(s),
                           sourceID != personID else { return false }
                     onDropped(sourceID)
                     return true

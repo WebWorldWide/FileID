@@ -70,3 +70,13 @@ struct PersonCountsTests {
         #expect(MergeSuggestionPair.stillMergeable(pairs, alive: []).isEmpty)
     }
 }
+
+@Suite struct PersonDragPayloadTests {
+    @Test func onlyADraggedPersonCardCanStartAMerge() {
+        #expect(PersonDragPayload.decode(PersonDragPayload.encode(42)) == 42)
+        #expect(PersonDragPayload.decode("42") == nil)
+        #expect(PersonDragPayload.decode("fileid-person:") == nil)
+        #expect(PersonDragPayload.decode("fileid-person:abc") == nil)
+        #expect(PersonDragPayload.decode("hello") == nil)
+    }
+}
