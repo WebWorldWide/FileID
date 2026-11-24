@@ -112,4 +112,32 @@ struct ReadStoreEngineHiddenRowsTests {
         #expect(ReadStore.engineHiddenMessages.count == 2)
         #expect(ReadStore.notEngineHiddenSQL.contains("File is no longer present under the completed scan root."))
     }
+
+    @Test("look-alikes still group on a library with far more than 20,000 hashed photos")
+    func lookAlikesBeyondTwentyThousandPhotos() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-lookalike-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try seed(root)
+        try DatabaseQueue(path: url.path).write { db in
+            var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+            for id in 100..<30_100 {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                let hash = Int64(bitPattern: state | 1)
+                try db.execute(sql: "INSERT INTO files(id,path_text,kind,phash,content_hash) VALUES (?,?,'image',?,?)",
+                               arguments: [id, "/lib/p\(id).jpg", hash, "h\(id)"])
+                if id == 200 {
+                    try db.execute(sql: "INSERT INTO files(id,path_text,kind,phash,content_hash) VALUES (?,?,'image',?,?)",
+                                   arguments: [90, "/lib/near.jpg", hash ^ 0b11, "other"])
+                }
+            }
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        let groups = store.similarImageGroups(maxHamming: 8)
+        #expect(groups.count == 1)
+        #expect(Set(groups.first?.files.map(\.id) ?? []) == [90, 200])
+    }
 }

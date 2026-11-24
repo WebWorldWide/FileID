@@ -51,6 +51,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v34_scan_catchup", include_str!("../../../../../../shared/catalog/v34.sql")),
         ("v35_foreign_key_indexes", include_str!("../../../../../../shared/catalog/v35.sql")),
         ("v36_scan_failures", include_str!("../../../../../../shared/catalog/v36.sql")),
+        ("v37_files_size_index", include_str!("../../../../../../shared/catalog/v37.sql")),
     ]
 }
 
@@ -449,7 +450,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 36, "expected 36 applied migrations");
+        assert_eq!(n, 37, "expected 37 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -519,7 +520,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 36);
+        assert_eq!(n, 37);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -606,7 +607,7 @@ mod tests {
     /// `catalog_the_swift_engine_wrote_matches_the_migrations`).
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 36] = [
+        const CANONICAL: [&str; 37] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -643,13 +644,14 @@ mod tests {
             "v34_scan_catchup",
             "v35_foreign_key_indexes",
             "v36_scan_failures",
+            "v37_files_size_index",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
     }
 
-    /// A catalog the retired Swift engine wrote (GRDB, all 36 migrations) names
-    /// exactly the migrations registered here and holds the same tables and
+    /// A catalog the retired Swift engine wrote (GRDB, its 36 migrations) names
+    /// the first migrations registered here and holds the same tables and
     /// indexes (index names differ for `files_on_kind`/`files_on_path_hash`).
     #[test]
     fn catalog_the_swift_engine_wrote_matches_the_migrations() {
@@ -660,12 +662,38 @@ mod tests {
         };
         let swift_migrations = names(&swift.conn, "SELECT identifier FROM grdb_migrations ORDER BY rowid");
         let ids: Vec<String> = registry().iter().map(|(id, _)| (*id).to_string()).collect();
-        assert_eq!(swift_migrations, ids);
+        assert_eq!(swift_migrations, ids[..swift_migrations.len()]);
 
         let fresh = Connection::open_in_memory().unwrap();
         apply(&fresh).unwrap();
         let tables = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
         assert_eq!(names(&swift.conn, tables), names(&fresh, tables));
+    }
+
+    #[test]
+    fn library_size_sort_and_duplicate_size_classes_walk_an_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let details: Vec<String> =
+                statement.query_map([], |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            details.join(" | ")
+        };
+        let sorted = plan("SELECT id FROM files WHERE failed = 0 ORDER BY size_bytes DESC, id DESC LIMIT 200");
+        assert!(sorted.contains("files_on_size") && !sorted.contains("TEMP B-TREE"), "{sorted}");
+        let added = plan("SELECT id FROM files WHERE failed = 0 ORDER BY scanned_at DESC, id DESC LIMIT 200");
+        assert!(added.contains("idx_files_scanned") && !added.contains("TEMP B-TREE"), "{added}");
+        for (direction, index) in [("DESC", "files_on_taken_newest"), ("ASC", "files_on_taken_oldest")] {
+            let taken = plan(&format!(
+                "SELECT id FROM files WHERE failed = 0 ORDER BY (COALESCE(created_at, modified_at) IS NULL), \
+                 COALESCE(created_at, modified_at) {direction}, id {direction} LIMIT 200"
+            ));
+            assert!(taken.contains(index) && !taken.contains("TEMP B-TREE"), "{taken}");
+        }
+        let classes =
+            plan("SELECT size_bytes, COUNT(*) FROM files WHERE failed = 0 AND size_bytes >= 0 GROUP BY size_bytes HAVING COUNT(*) > 1");
+        assert!(classes.contains("INDEX files_on_size"), "{classes}");
     }
 
     #[test]

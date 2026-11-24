@@ -144,4 +144,31 @@ struct LibrarySortTests {
         #expect(LibrarySort(storedKey: "garbage", ascending: true) == LibrarySort(key: .dateAdded, ascending: true))
         #expect(LibrarySort(storedKey: "kind", ascending: false).summary == "Kind ↓")
     }
+
+    @Test("Date added, Date taken and Size page through an index, never a full sort")
+    func indexedSortsNeedNoTempSorter() throws {
+        let sql = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appending(path: "shared/catalog/v37.sql")
+        let queue = try DatabaseQueue()
+        try queue.write { db in
+            try db.execute(sql: """
+                CREATE TABLE files (id INTEGER PRIMARY KEY, size_bytes INTEGER NOT NULL DEFAULT 0, created_at REAL, modified_at REAL,
+                    scanned_at REAL NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, path_text TEXT NOT NULL DEFAULT '');
+                CREATE INDEX idx_files_scanned ON files(scanned_at);
+                """)
+            try db.execute(sql: String(contentsOf: sql, encoding: .utf8))
+        }
+        for key in [LibrarySortKey.dateAdded, .dateTaken, .size] {
+            for ascending in [true, false] {
+                let sort = LibrarySort(key: key, ascending: ascending)
+                let plan = try queue.read { db in
+                    try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN SELECT id FROM files WHERE failed = 0 ORDER BY \(sort.orderSQL) LIMIT 200")
+                        .map { ($0["detail"] as String) }.joined(separator: " | ")
+                }
+                #expect(!plan.contains("TEMP B-TREE"), "\(sort.summary): \(plan)")
+            }
+        }
+    }
 }
