@@ -252,7 +252,12 @@ struct SmartNamePreviewSheet: View {
         }
     }
 
-    private func preview() async {
+    /// A fresh preview clears an old notice, but never the result of the rename or undo that just ran and asked for this reload.
+    nonisolated static func statusAfterPreview(_ status: String?, keepingResult: Bool, hasUndoableBatch: Bool) -> String? {
+        keepingResult || hasUndoableBatch ? status : nil
+    }
+
+    private func preview(keepingResult: Bool = false) async {
         generation += 1
         let mine = generation
         guard !fileIDs.isEmpty else { status = "Choose files in Library first."; return }
@@ -265,7 +270,7 @@ struct SmartNamePreviewSheet: View {
             return
         }
         withAnimation(rowSpring) { rows = next }
-        if lastBatch.isEmpty { status = nil }
+        status = Self.statusAfterPreview(status, keepingResult: keepingResult, hasUndoableBatch: !lastBatch.isEmpty)
     }
 
     private func apply() {
@@ -284,7 +289,7 @@ struct SmartNamePreviewSheet: View {
             learnedRefresh += 1
             status = StyledNames.renamedSummary(result)
             applying = false
-            await preview()
+            await preview(keepingResult: true)
         }
     }
 
@@ -299,7 +304,7 @@ struct SmartNamePreviewSheet: View {
             learnedRefresh += 1
             status = StyledNames.undoneSummary(result)
             applying = false
-            await preview()
+            await preview(keepingResult: true)
         }
     }
 }
