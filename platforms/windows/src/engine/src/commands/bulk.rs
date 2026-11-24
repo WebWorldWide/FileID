@@ -1419,6 +1419,7 @@ pub(crate) async fn handle_trash_files(
                     source_identity: Some(candidate.source_identity),
                     trashed_path: None,
                     rows: snapshots.remove(&candidate.file_id).unwrap_or_default(),
+                    settled: false,
                 })
                 .collect(),
         };
@@ -1434,6 +1435,13 @@ pub(crate) async fn handle_trash_files(
         bind_windows_trash_receipts(&candidates, &mut outcomes, &mut entry);
         #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
         bind_landed_trash_receipts(&mut outcomes, &mut entry);
+        if !outcomes.iter().any(|outcome| matches!(outcome, CheckedTrashOutcome::Trashed)) {
+            let mut closing = entry.clone();
+            closing.items.iter_mut().for_each(|item| item.settled = true);
+            if let Err(error) = trash_log::append(&closing) {
+                tracing::warn!(?error, "could not close a Trash batch that moved nothing");
+            }
+        }
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         let mut trashed_persons: Vec<i64> = Vec::new();
