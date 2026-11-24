@@ -45,6 +45,7 @@ const READ_THREADS: usize = 4;
 
 /// Files are read with no database lock held, a few at a time; the writer is taken per chunk, so a cancel keeps
 /// every fix already written and only the marker (written when the whole folder was checked) waits for the next scan.
+#[cfg(test)]
 pub(crate) fn run_if_needed(database: &Mutex<Connection>, state_dir: &Path, root: &Path, cancelled: &(dyn Fn() -> bool + Sync)) -> usize {
     run_reporting(database, state_dir, root, cancelled, &|_| {})
 }

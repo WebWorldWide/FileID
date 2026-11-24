@@ -667,7 +667,7 @@ fn top_k_neighbours(mut hits: Vec<Neighbor>, k: usize) -> Vec<Neighbor> {
 
 /// Names of the folders already directly under the library root, so a new group is never minted with a name that would silently join an unrelated existing folder.
 pub(crate) fn existing_group_names(library_root: &Path) -> std::collections::HashSet<String> {
-    let Ok(entries) = std::fs::read_dir(library_root) else { return Default::default() };
+    let Ok(entries) = std::fs::read_dir(library_root) else { return std::collections::HashSet::default() };
     entries
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
