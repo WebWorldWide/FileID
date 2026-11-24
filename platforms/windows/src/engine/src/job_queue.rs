@@ -195,6 +195,7 @@ mod tests {
         let id = queue.push(JobCategory::Scan, "Scan", None);
         queue.promote_next();
         queue.finish(&id);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut last = None;
         while let Ok(Some(event)) = tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await {
             if let EventPayload::QueueState(state) = event.payload {
