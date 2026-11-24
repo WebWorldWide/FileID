@@ -340,7 +340,7 @@ fn semantic_classify_profiled(
                     let safe_base = crate::util::path_safety::safe_filename_component(&pretty);
                     let mut safe = safe_base.clone();
                     // Disambiguate in the SANITIZED namespace that backs the folder: names differing only in chars safe_filename_component maps to '_' ("16:9" vs "16/9") would otherwise collide into one directory. Prefer the next distinctive term first.
-                    if used_group_names.contains(&safe)
+                    if used_group_names.contains(&group_key(&safe))
                         && let Some(extra) = terms.get(2) {
                             pretty = format!("{} {}", base, title_case(extra));
                             safe = crate::util::path_safety::safe_filename_component(&pretty);
@@ -350,7 +350,7 @@ fn semantic_classify_profiled(
                     // +1 iterations.
                     const SAFE_NAME_MAX: usize = 200; // mirrors safe_filename_component MAX_LEN
                     let mut n = 2usize;
-                    while used_group_names.contains(&safe) {
+                    while used_group_names.contains(&group_key(&safe)) {
                         let suffix = format!(" {n}");
                         let room = SAFE_NAME_MAX.saturating_sub(suffix.chars().count());
                         let prefix: String = safe_base.chars().take(room).collect();
@@ -358,7 +358,7 @@ fn semantic_classify_profiled(
                         pretty = format!("{} {}", base, n);
                         n += 1;
                     }
-                    used_group_names.insert(safe.clone());
+                    used_group_names.insert(group_key(&safe));
                     let confidence = if coh >= profile.auto_cohesion
                         && members.len() >= profile.auto_min_members
                     {
@@ -671,8 +671,13 @@ pub(crate) fn existing_group_names(library_root: &Path) -> std::collections::Has
     entries
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| entry.file_name().to_str().map(crate::util::path_safety::safe_filename_component))
+        .filter_map(|entry| entry.file_name().to_str().map(|name| group_key(&crate::util::path_safety::safe_filename_component(name))))
         .collect()
+}
+
+/// Registry keys are lower-cased: the default Mac and Windows volumes treat "Beach Trip" and "beach trip" as one folder.
+fn group_key(name: &str) -> String {
+    name.to_lowercase()
 }
 
 /// Multi-hot vectors up to this many files are searched against every other file; past it, only files that share a token are scored.
@@ -992,10 +997,10 @@ mod tests {
     #[test]
     fn a_new_group_never_takes_the_name_of_a_folder_already_in_the_library() {
         let root = std::env::temp_dir().join(format!("fileid-group-names-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("Beach Trip")).unwrap();
+        std::fs::create_dir_all(root.join("beach trip")).unwrap();
         std::fs::write(root.join("notes.txt"), b"").unwrap();
         let mut used = existing_group_names(&root);
-        assert!(used.contains("Beach Trip") && !used.contains("notes.txt") && used.len() == 1);
+        assert!(used.contains("beach trip") && !used.contains("notes.txt") && used.len() == 1);
         let files: Vec<SemanticFile> = (0..6)
             .map(|i| SemanticFile {
                 file_id: i,
@@ -1007,7 +1012,7 @@ mod tests {
             .collect();
         let moves = semantic_classify(&files, &[], &root, &mut used, &mut std::collections::HashSet::new());
         assert!(!moves.is_empty());
-        assert!(moves.iter().all(|m| m.destination.parent() != Some(&root.join("Beach Trip"))), "{:?}", moves[0].destination);
+        assert!(moves.iter().all(|m| !m.destination.parent().is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case(&root.join("Beach Trip").to_string_lossy()))), "{:?}", moves[0].destination);
         std::fs::remove_dir_all(root).unwrap();
     }
 
