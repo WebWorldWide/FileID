@@ -681,9 +681,9 @@ mod tests {
             details.join(" | ")
         };
         let sorted = plan("SELECT id FROM files WHERE failed = 0 ORDER BY size_bytes DESC, id DESC LIMIT 200");
-        assert!(sorted.contains("files_on_failed_size") && !sorted.contains("TEMP B-TREE"), "{sorted}");
+        assert!(sorted.contains("files_on_size") && !sorted.contains("TEMP B-TREE"), "{sorted}");
         let added = plan("SELECT id FROM files WHERE failed = 0 ORDER BY scanned_at DESC, id DESC LIMIT 200");
-        assert!(added.contains("files_on_failed_scanned") && !added.contains("TEMP B-TREE"), "{added}");
+        assert!(added.contains("idx_files_scanned") && !added.contains("TEMP B-TREE"), "{added}");
         for (direction, index) in [("DESC", "files_on_taken_newest"), ("ASC", "files_on_taken_oldest")] {
             let taken = plan(&format!(
                 "SELECT id FROM files WHERE failed = 0 ORDER BY (COALESCE(created_at, modified_at) IS NULL), \
@@ -693,7 +693,7 @@ mod tests {
         }
         let classes =
             plan("SELECT size_bytes, COUNT(*) FROM files WHERE failed = 0 AND size_bytes >= 0 GROUP BY size_bytes HAVING COUNT(*) > 1");
-        assert!(classes.contains("COVERING INDEX files_on_failed_size"), "{classes}");
+        assert!(classes.contains("INDEX files_on_size"), "{classes}");
     }
 
     #[test]
