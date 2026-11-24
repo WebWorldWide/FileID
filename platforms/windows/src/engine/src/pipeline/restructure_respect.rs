@@ -379,6 +379,9 @@ pub fn event_spans(files: &[FileForClassify], root: &Path) -> Vec<EventSpan> {
 }
 
 pub fn event_destination(f: &FileForClassify, spans: &[EventSpan]) -> Option<PathBuf> {
+    if !matches!(f.kind, FileKind::Image | FileKind::Video) {
+        return None;
+    }
     let t = f.created_unix.unwrap_or(f.modified_unix);
     if t <= 0.0 {
         return None;
@@ -565,6 +568,20 @@ mod tests {
         assert_eq!(event_destination(&loose, &spans), Some(Path::new(ROOT).join("Kyle Baseball Game 9-19-26/Photos/RAWs/D5.ARW")));
         let old = file(98, "Downloads/old.JPG", FileKind::Image, Some(day - 200.0 * 86_400.0));
         assert_eq!(event_destination(&old, &spans), None);
+    }
+
+    #[test]
+    fn a_pdf_or_song_made_during_an_event_is_not_filed_into_the_photo_event() {
+        let day = 1_790_000_000.0;
+        let files: Vec<_> = (0..6)
+            .map(|i| file(i, &format!("Kyle Baseball Game 9-19-26/Photos/RAWs/K{i}.ARW"), FileKind::Image, Some(day + i as f64 * 600.0)))
+            .collect();
+        let spans = event_spans(&files, Path::new(ROOT));
+        for (name, kind) in [("Downloads/receipt.pdf", FileKind::Pdf), ("Downloads/song.m4a", FileKind::Audio), ("Downloads/notes.docx", FileKind::Doc)] {
+            assert_eq!(event_destination(&file(90, name, kind, Some(day + 1_200.0)), &spans), None, "{name}");
+        }
+        let (moves, _) = apply(vec![mv(91, "Downloads/receipt.pdf", "Documents/receipt.pdf")], &[file(91, "Downloads/receipt.pdf", FileKind::Pdf, Some(day + 1_200.0))], Path::new(ROOT));
+        assert!(moves.iter().all(|m| !m.destination.starts_with(Path::new(ROOT).join("Kyle Baseball Game 9-19-26"))));
     }
 
     #[test]
