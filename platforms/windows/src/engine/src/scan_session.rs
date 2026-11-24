@@ -207,6 +207,7 @@ impl ScanSession {
     {
         // Boost process priority + prevent sleep for the lifetime of the
         // scan. Both are RAII so a panic / cancel still releases them.
+        stop_late_careful_reads();
         let _priority = PriorityBoost::acquire();
         let _sleep = SleepGuard::acquire();
 
@@ -991,7 +992,7 @@ impl ScanSession {
                         }
                         match finished {
                             Ok((summary, analyzer)) if summary.careful_waiting && !self.coordinator.is_cancelled() => {
-                                spawn_late_careful_reads(self.db_conn.clone(), late_root, analyzer);
+                                spawn_late_careful_reads(self.db_conn.clone(), late_root, analyzer, self.coordinator.clone());
                             }
                             Ok(_) => {}
                             Err(error) => tracing::warn!(%error, "[SCAN] the catch-up pass stopped"),
@@ -1168,6 +1169,12 @@ pub(crate) fn count_retryable_timeouts(conn: &Connection, root: &Path, since: f6
 }
 
 static LATE_CAREFUL_READS_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LATE_CAREFUL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ends the background careful reads of an earlier scan: a new scan, a cancel and engine shutdown all call it, so nothing keeps reading the drive after the scan that owed them is gone.
+pub(crate) fn stop_late_careful_reads() {
+    LATE_CAREFUL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
 
 /// The careful text reader was still warming up when the scan ended, so the scan finished without it. This waits for
 /// it in the background (one at a time) and reads what was left owed.
@@ -1175,6 +1182,7 @@ fn spawn_late_careful_reads(
     db_conn: Arc<Mutex<Connection>>,
     root: std::path::PathBuf,
     analyzer: Box<dyn crate::pipeline::catch_up::Analyzer + Send>,
+    coordinator: ScanCoordinator,
 ) {
     struct Running;
     impl Drop for Running {
@@ -1185,9 +1193,13 @@ fn spawn_late_careful_reads(
     if LATE_CAREFUL_READS_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
+    let generation = LATE_CAREFUL_GENERATION.load(std::sync::atomic::Ordering::Acquire);
     tokio::task::spawn_blocking(move || {
         let _running = Running;
-        crate::pipeline::catch_up::finish_careful_when_ready(&db_conn, Some(&root), analyzer.as_ref(), &|| false);
+        let stopped = || {
+            LATE_CAREFUL_GENERATION.load(std::sync::atomic::Ordering::Acquire) != generation || coordinator.is_cancelled()
+        };
+        crate::pipeline::catch_up::finish_careful_when_ready(&db_conn, Some(&root), analyzer.as_ref(), &stopped);
     });
 }
 
@@ -2144,6 +2156,41 @@ fn maybe_emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NeverWarm;
+
+    impl crate::pipeline::catch_up::Analyzer for NeverWarm {
+        fn ready(&self, _phase: crate::pipeline::catch_up::Phase) -> bool {
+            false
+        }
+        fn parallelism(&self) -> usize {
+            1
+        }
+        fn ready_wait(&self, _phase: crate::pipeline::catch_up::Phase) -> Duration {
+            Duration::from_secs(300)
+        }
+        fn analyse(
+            &self,
+            _file: &crate::pipeline::catch_up::Pending,
+            _phase: crate::pipeline::catch_up::Phase,
+            _context: Option<&crate::pipeline::catch_up::Context>,
+        ) -> crate::pipeline::catch_up::Outcome {
+            crate::pipeline::catch_up::Outcome::Leave
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_or_a_new_scan_ends_the_background_careful_reads_of_an_earlier_scan() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        spawn_late_careful_reads(conn, std::env::temp_dir(), Box::new(NeverWarm), ScanCoordinator::new());
+        assert!(LATE_CAREFUL_READS_RUNNING.load(std::sync::atomic::Ordering::Acquire));
+        stop_late_careful_reads();
+        let started = Instant::now();
+        while LATE_CAREFUL_READS_RUNNING.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(started.elapsed() < Duration::from_secs(5), "the late reads kept waiting after the stop");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 
     #[test]
     fn a_session_row_carries_the_file_count_in_both_columns() {
