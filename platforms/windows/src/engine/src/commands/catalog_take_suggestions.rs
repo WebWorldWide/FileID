@@ -37,7 +37,7 @@ pub(super) fn discover(
            AND f.id NOT IN (SELECT file_id FROM catalog_event_files)
          ORDER BY f.created_at, f.id",
     )?;
-    let mut rows = statement.query(params!["mobileclip_s2", scope])?;
+    let mut rows = statement.query(params![crate::models::clip_space::model_id(), scope])?;
     let mut active: Vec<Group> = Vec::new();
     let mut finished: Vec<Group> = Vec::new();
     let mut seen_hashes: HashSet<(Vec<u8>, i64)> = HashSet::new();
@@ -135,7 +135,7 @@ mod tests {
                                     (4, 1.0, 0.0), (5, 1.0, 0.0), (6, 1.0, 0.0), (7, 1.0, 0.0)] {
             conn.execute(
                 "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)",
-                params![id, blob(first, second), if id == 7 { "old-model" } else { "mobileclip_s2" }],
+                params![id, blob(first, second), if id == 7 { "old-model" } else { crate::models::clip_space::model_id() }],
             ).unwrap();
         }
         conn.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(1,6,'export','{}')", []).unwrap();
@@ -164,8 +164,8 @@ mod tests {
                 params![id, format!("/internal/{id}.mov"), size, time, vec![if id < 3 { 1_u8 } else { 3 }]],
             ).unwrap();
             conn.execute(
-                "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,'mobileclip_s2')",
-                params![id, blob(1.0, 0.0)],
+                "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)",
+                params![id, blob(1.0, 0.0), crate::models::clip_space::model_id()],
             ).unwrap();
         }
         let groups = discover(&conn, &[1, 2, 3, 4], 20).unwrap();
