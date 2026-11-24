@@ -136,7 +136,7 @@ pub(crate) fn repair(journal: &Path, conn: &rusqlite::Connection) -> usize {
             .map(|extension| extension.to_string_lossy().to_lowercase())
             .filter(|extension| !extension.is_empty());
         let updated = conn.execute(
-            "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?3, extension = ?4 \
+            "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?3, extension = ?4, name_sort = ?7 \
              WHERE id = ?5 AND path_text = ?6",
             rusqlite::params![
                 intent.to,
@@ -145,6 +145,7 @@ pub(crate) fn repair(journal: &Path, conn: &rusqlite::Connection) -> usize {
                 extension,
                 intent.file_id,
                 intent.from,
+                crate::db::name_sort::name_sort_key(&intent.to),
             ],
         );
         match updated {
