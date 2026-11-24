@@ -380,6 +380,11 @@ fn fingerprint_of<R: Read + Seek>(reader: &mut R, len: u64, modified_nanos: u128
     Ok(hex::encode(digest.finalize()))
 }
 
+/// Operation records written before the fingerprint hold the source's full SHA-256; those still match by content.
+fn source_unchanged(path: &Path, recorded: &str) -> Result<bool> {
+    Ok(fingerprint(path)? == recorded || hash(path)? == recorded)
+}
+
 fn hash(path: &Path) -> Result<String> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -647,7 +652,7 @@ fn run_action(
                 }
                 let output = Path::new(&item.output.output_path);
                 read_only::require_source_mutation(output)?;
-                if fingerprint(Path::new(&item.output.source_path))? != item.source_hash {
+                if !source_unchanged(Path::new(&item.output.source_path), &item.source_hash)? {
                     bail!("A source changed after preview. Preview again.")
                 }
                 if plan.recipe.kind == "video" {
@@ -736,7 +741,7 @@ fn run_action(
                         if let (Some(runtime), Some(before)) = (&media, &media_source) {
                             media_recipes::verify_stage(runtime.as_ref(), &plan.recipe, before, &stage)?;
                         }
-                        if fingerprint(source)? != item.source_hash {
+                        if !source_unchanged(source, &item.source_hash)? {
                             bail!("A source changed during export; its output was not published")
                         }
                         if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
@@ -1377,6 +1382,18 @@ mod tests {
         file.write_all(&[9]).unwrap();
         file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
         assert_ne!(before, fingerprint(&path).unwrap());
+    }
+
+    #[test]
+    fn a_record_holding_the_full_content_hash_still_matches_its_unchanged_source() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("legacy.bin");
+        fs::write(&path, b"legacy source").unwrap();
+        let (full, short) = (hash(&path).unwrap(), fingerprint(&path).unwrap());
+        assert!(source_unchanged(&path, &full).unwrap());
+        assert!(source_unchanged(&path, &short).unwrap());
+        fs::write(&path, b"legacy sourcf").unwrap();
+        assert!(!source_unchanged(&path, &full).unwrap());
     }
 
     #[test]
