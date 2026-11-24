@@ -225,12 +225,7 @@ async fn async_main() -> Result<()> {
 
     // Sidebar job tracker (macOS JobQueue parity): scan / cluster / deep-analyze jobs push on accept and finish via RAII guards, each transition emitting a queueState event for the app's SidebarQueueList.
     let jobs = job_queue::JobQueue::new();
-    {
-        let qs_sink = sink.clone();
-        jobs.on_change(move |state| {
-            let _ = qs_sink.try_send(IpcEvent::now(EventPayload::QueueState(Wrap::new(state))));
-        });
-    }
+    jobs.forward_to(sink.clone());
 
     // Shared HTTP client (HTTP/2 + connection pool) for the parallel downloader, built once and cloned via Arc into every prewarm task.
     let http_client = match crate::downloader::build_shared_client() {
