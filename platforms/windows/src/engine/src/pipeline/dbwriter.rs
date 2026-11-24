@@ -987,7 +987,7 @@ fn heal_candidate_moved(old_path: &str) -> bool {
         std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(path)),
         Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
     );
-    gone && removable_volume_root(path).is_none_or(|root| std::fs::metadata(root).is_ok())
+    gone && removable_volume_root(path).is_none_or(|root| std::fs::read_dir(root).is_ok_and(|mut entries| entries.next().is_some()))
 }
 
 /// The mount point of a drive the path lives on, when that drive can be unplugged. A path under an unmounted volume fails to stat exactly like a deleted file, so an offline library's rows must not look "moved".

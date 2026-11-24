@@ -81,7 +81,7 @@ pub fn classify_folders(
             || folder
                 .to_string_lossy()
                 .eq_ignore_ascii_case(&library_root.to_string_lossy())
-            || (same_final_name(&folder, library_root)
+            || ((same_final_name(&folder, library_root) || canonical_root.as_deref().is_some_and(|root| same_final_name(&folder, root)))
                 && matches!((std::fs::canonicalize(&folder), &canonical_root), (Ok(folder), Some(root)) if folder == *root));
         let classification = if generic || total <= 2 {
             FolderClassification::Junk
@@ -639,6 +639,22 @@ mod tests {
         let m = classify(&[both], Path::new("D:/Library"));
         assert_eq!(m[0].confidence, Confidence::Ask);
         assert!(!m[0].destination.to_string_lossy().contains("1980"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_symlinked_under_another_name_is_still_the_library_root() {
+        let base = std::env::temp_dir().join(format!("fileid_root_rename_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("Pictures")).unwrap();
+        std::os::unix::fs::symlink(base.join("Pictures"), base.join("Photos")).unwrap();
+        let mut moves = Vec::new();
+        for i in 0..4 {
+            moves.append(&mut classify(&[img(i, &format!("{}/Pictures/{i}.jpg", base.display()), 1_710_504_000.0)], &base.join("Photos")));
+        }
+        let classified = classify_folders(&moves, &base.join("Photos"));
+        assert!(classified.iter().all(|c| c.classification != FolderClassification::Anchor), "{classified:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]
