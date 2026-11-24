@@ -66,6 +66,7 @@ pub fn job_failure_text(error: &anyhow::Error) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn os(code: i32) -> anyhow::Error {
         anyhow::Error::from(std::io::Error::from_raw_os_error(code)).context("outer layer")
     }
