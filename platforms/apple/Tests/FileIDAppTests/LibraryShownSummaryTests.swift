@@ -27,4 +27,15 @@ struct LibraryShownSummaryTests {
         #expect(Detail.libraryMeta(total: 10, unreadable: 10, location: "Photos") == "0 files in Photos · 10 couldn’t be read")
         #expect(Detail.libraryMeta(total: 0, unreadable: 0, location: nil) == "")
     }
+
+    @Test func a_search_or_filter_never_borrows_the_whole_librarys_size() {
+        #expect(LibraryView.shownSummary(rows: 12, total: nil) == "12 shown")
+        #expect(LibraryView.shownSummary(rows: 300, total: nil, moreToLoad: true) == "300+ shown")
+        #expect(LibraryView.shownSummary(rows: 300, total: nil, moreToLoad: true, short: true) == "300+")
+    }
+
+    @Test func the_preview_sheet_fits_the_smallest_window() {
+        #expect(FilePreviewSheet.minimumWidth <= WindowSizes.minimum.width)
+        #expect(FilePreviewSheet.minimumWidth >= 340 + 480)
+    }
 }

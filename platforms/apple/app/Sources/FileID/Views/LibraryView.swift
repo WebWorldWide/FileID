@@ -763,7 +763,7 @@ struct LibraryView: View {
             if let visualSummary {
                 MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize(horizontal: !wrapped, vertical: true)
             } else {
-                MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize(horizontal: !wrapped, vertical: true)
+                MetaText(Self.shownSummary(rows: rows.count, total: listingTotal, moreToLoad: canLoadMore), size: 11).fixedSize(horizontal: !wrapped, vertical: true)
             }
         }
 
@@ -900,10 +900,14 @@ struct LibraryView: View {
     }
 
     /// The listing can load a moment before the store's file count catches up after a scan;
-    /// the total never reads lower than the rows already drawn.
-    static func shownSummary(rows: Int, total: Int, short: Bool = false) -> String {
-        let total = max(total, rows)
-        return short ? "\(rows.formatted())/\(total.formatted())" : "\(rows.formatted()) of \(total.formatted()) shown"
+    /// the total never reads lower than the rows already drawn. A search or kind filter has no cheap total, so it says how many are loaded, with "+" while more pages wait.
+    static func shownSummary(rows: Int, total: Int?, moreToLoad: Bool = false, short: Bool = false) -> String {
+        guard let known = total else {
+            let loaded = rows.formatted() + (moreToLoad ? "+" : "")
+            return short ? loaded : "\(loaded) shown"
+        }
+        let shownOf = max(known, rows)
+        return short ? "\(rows.formatted())/\(shownOf.formatted())" : "\(rows.formatted()) of \(shownOf.formatted()) shown"
     }
 
     /// "3 of 472" once the listing's size is known; "3 of 300+" while more pages remain unloaded and the size isn't.
@@ -1273,7 +1277,9 @@ struct LibraryView: View {
 // MARK: - Preview sheet
 //
 // Full-bleed preview + metadata panel + tags. Reveal-in-Finder.
-private struct FilePreviewSheet: View {
+struct FilePreviewSheet: View {
+    /// The sheet must fit inside the smallest window; the 340-pt info panel still leaves the picture room.
+    static let minimumWidth = WindowSizes.minimum.width - 60
     let siblings: [FileRow]              // for prev/next arrow nav
     /// Position of each sibling, built once when the list changes.
     let indexByID: [Int64: Int]
@@ -1396,7 +1402,7 @@ private struct FilePreviewSheet: View {
             }
             .animation(Theme.springStandard, value: showInfo)
         }
-        .frame(minWidth: 1040, idealWidth: 1280, minHeight: 680, idealHeight: 820)
+        .frame(minWidth: FilePreviewSheet.minimumWidth, idealWidth: 1280, minHeight: 680, idealHeight: 820)
         .background(Theme.canvas, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
         .focusable()
