@@ -114,6 +114,18 @@ pub(crate) async fn handle_deep_analyze_file(
         })
         .await
         .unwrap_or_default();
+        if ids.is_empty() {
+            sink.send(EngineError::event("deep_analyze_failed", "FileID can’t describe this file. It may have moved, or its type isn’t supported.")).await;
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(DeepAnalyzeComplete {
+                processed: 0,
+                failed: 1,
+                total_seconds: 0.0,
+                model_kind: payload.model_kind.clone(),
+                cancelled: cancel.load(Ordering::Relaxed),
+            }))))
+            .await;
+            return;
+        }
         return super::deep_analyze_mlx::run_batch(sink, db, &payload.model_kind, ids, cancel, false, false, true, None).await;
     }
     #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(unreachable_code))]
@@ -256,6 +268,26 @@ pub(crate) async fn handle_deep_analyze_file(
     }
 }
 
+/// An empty folder means the whole library. Otherwise the range is the folder's children (separator-terminated, so
+/// "Takeout" never matches "Takeout - Unzipped") plus the folder path itself.
+fn folder_file_ids(db: &Arc<Mutex<rusqlite::Connection>>, folder: &str) -> rusqlite::Result<Vec<i64>> {
+    let filter = deep_analyze_target_filter();
+    if folder.is_empty() {
+        return collect_file_ids(db, &format!("WHERE {filter}"), &[]);
+    }
+    let trimmed = folder.trim_end_matches(['\\', '/']);
+    let lo = if trimmed.is_empty() { folder.to_string() } else { format!("{trimmed}{}", std::path::MAIN_SEPARATOR) };
+    // Sargable range seek on the path_text index, not a `LIKE 'prefix%'` full-table scan.
+    match crate::scan_session::prefix_upper_bound(&lo) {
+        Some(hi) => collect_file_ids(
+            db,
+            &format!("WHERE (path_text = ?3 OR (path_text >= ?1 AND path_text < ?2)) AND {filter}"),
+            &[&lo, &hi, &trimmed],
+        ),
+        None => collect_file_ids(db, &format!("WHERE {filter}"), &[]),
+    }
+}
+
 pub(crate) async fn handle_deep_analyze_folder(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -266,18 +298,9 @@ pub(crate) async fn handle_deep_analyze_folder(
     if !super::deep_analyze_mlx::announce(&sink, &payload.model_kind).await {
         return;
     }
-    // Sargable range seek on the path_text index, not a `LIKE 'prefix%'` full-table scan.
-    let lo = payload.path_prefix.clone();
-    let filter = deep_analyze_target_filter();
+    let folder = payload.path_prefix.clone();
     let query_db = db.clone();
-    let ids_result = tokio::task::spawn_blocking(move || match crate::scan_session::prefix_upper_bound(&lo) {
-        Some(hi) => collect_file_ids(
-            &query_db,
-            &format!("WHERE path_text >= ?1 AND path_text < ?2 AND {filter}"),
-            &[&lo, &hi],
-        ),
-        None => collect_file_ids(&query_db, &format!("WHERE {filter}"), &[]),
-    })
+    let ids_result = tokio::task::spawn_blocking(move || folder_file_ids(&query_db, &folder))
     .await
     .unwrap_or_else(|join| Err(rusqlite::Error::ToSqlConversionFailure(Box::new(join))));
     let ids = match ids_result {
@@ -472,6 +495,11 @@ fn collect_scoped_file_ids_cancelable(
         }
     }
     Ok(ids)
+}
+
+/// One row that was removed or moved since the scan is that file's problem, not the run's.
+pub(super) fn file_left_the_scope(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<ScopeError>(), Some(ScopeError::ExcludedTarget))
 }
 
 pub(super) fn scoped_catalog_path(
@@ -768,6 +796,10 @@ async fn run_deep_analyze_batch(
 
         if let Some(scope) = &scope
             && let Err(error) = scoped_catalog_path(&db, scope, file_id) {
+                if file_left_the_scope(&error) {
+                    failed += 1;
+                    continue;
+                }
                 finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
                     processed, failed: failed + 1, total_seconds: started_at.elapsed().as_secs_f64(),
                     model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
@@ -1169,6 +1201,20 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn describing_a_folder_leaves_sibling_folders_with_the_same_start_alone() {
+        let db = in_memory_db();
+        let sep = std::path::MAIN_SEPARATOR;
+        let path = |tail: &str| format!("{sep}lib{sep}Takeout{tail}");
+        let inside = insert_file(&db, &path(&format!("{sep}a.jpg")), "image", 0, None, None);
+        let nested = insert_file(&db, &path(&format!("{sep}2020{sep}b.jpg")), "image", 0, None, None);
+        let sibling = insert_file(&db, &path(&format!(" - Unzipped{sep}c.jpg")), "image", 0, None, None);
+        let folder = path("");
+        assert_eq!(super::folder_file_ids(&db, &folder).unwrap(), vec![inside, nested]);
+        assert_eq!(super::folder_file_ids(&db, &format!("{folder}{sep}")).unwrap(), vec![inside, nested]);
+        assert_eq!(super::folder_file_ids(&db, "").unwrap(), vec![inside, nested, sibling]);
     }
 
     #[test]
