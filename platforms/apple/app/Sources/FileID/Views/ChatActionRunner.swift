@@ -181,10 +181,19 @@ final class ChatActionRunner {
         case "scanFolder", "rescan":
             guard let path = action.path else { return }
             let url = action.kind == "rescan" ? (handoff.libraryRoot ?? URL(fileURLWithPath: path)) : URL(fileURLWithPath: path)
+            let priorSession = engine.lastProgress?.sessionID
+            let reset = engine.engineResetSignal, errors = engine.lastErrorSignal
             if action.kind == "scanFolder" { handoff.chooseFolder(url) } else { engine.startScan(rootURL: url) }
             phases[action.id] = .running("Starting the scan")
-            await watch(action, started: { [.discovering, .tagging, .postScan].contains(engine.lastProgress?.phase) },
-                        finished: { ![.discovering, .tagging, .postScan].contains(engine.lastProgress?.phase) }) {
+            let isLive: () -> Bool = { [.discovering, .tagging, .postScan].contains(engine.lastProgress?.phase) }
+            let isNew: () -> Bool = { engine.lastProgress != nil && engine.lastProgress?.sessionID != priorSession }
+            await watch(action, started: { isLive() || isNew() },
+                        finished: { isNew() && !isLive() },
+                        interrupted: {
+                            ChatActionRunner.scanInterruption(engineRestarted: engine.engineResetSignal != reset,
+                                                              newError: engine.lastErrorSignal != errors ? engine.lastError : nil)
+                        },
+                        mustStart: true) {
                 guard let progress = engine.lastProgress else { return "Scan complete." }
                 if progress.phase == .cancelled { return "Scan stopped. Files found so far stay in the library." }
                 if progress.phase == .failed { return "The scan didn’t finish. Scan again to pick up where it left off." }
@@ -429,9 +438,20 @@ final class ChatActionRunner {
     /// job up to 5 s to report that it started. `interrupted` ends the wait
     /// when the job can no longer report back (engine restart or a rejection).
     func watch(_ action: ChatAction, started: @escaping () -> Bool, finished: @escaping () -> Bool,
-               interrupted: @escaping () -> String? = { nil }, result: @escaping () -> String) async {
-        let deadline = Date().addingTimeInterval(5)
-        while !started(), Date() < deadline { try? await Task.sleep(for: .milliseconds(200)) }
+               interrupted: @escaping () -> String? = { nil }, mustStart: Bool = false, startWait: TimeInterval = 5,
+               result: @escaping () -> String) async {
+        let deadline = Date().addingTimeInterval(startWait)
+        while !started(), Date() < deadline {
+            if mustStart, let reason = interrupted() {
+                if case .running = phase(action) { phases[action.id] = .failed(reason) }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        if mustStart, !started() {
+            if case .running = phase(action) { phases[action.id] = .failed("The scan didn’t start. Check that FileID’s helper is running, then try again.") }
+            return
+        }
         while !finished() {
             if let reason = interrupted() {
                 if case .running = phase(action) { phases[action.id] = .failed(reason) }
@@ -450,6 +470,13 @@ final class ChatActionRunner {
         "plan_restructure_store", "plan_restructure_library_busy", "plan_restructure_db_unavailable",
         "plan_restructure_invalid",
     ]
+
+    /// Why a scan a card is waiting on will never report back.
+    nonisolated static func scanInterruption(engineRestarted: Bool, newError: EngineError?) -> String? {
+        if engineRestarted { return "FileID’s helper restarted before the scan finished. Try again." }
+        guard let newError else { return nil }
+        return newError.message
+    }
 
     /// Why a folder job a card is waiting on will never send its reply.
     nonisolated static func folderJobInterruption(engineRestarted: Bool, newError: EngineError?) -> String? {

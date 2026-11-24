@@ -91,7 +91,7 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Total files",   store.totalFiles.formatted())
-                                infoRow("Photos tagged", store.totalImages.formatted())
+                                infoRow("Photos", store.totalImages.formatted())
                                 infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
                                 infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableBytes: store.totalReclaimableBytes))
                                 infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
@@ -336,6 +336,8 @@ struct DeepAnalyzeExclusionsCard: View {
             message = ("Done. Describe Files will skip this folder from the next run.", false)
         case .alreadyExcluded:
             message = ("That folder is already skipped.", false)
+        case .listFull:
+            message = ("Describe Files can skip at most \(DeepAnalyzeSettings.maxExcludedFolders) folders. Remove one first.", true)
         case .invalid:
             message = ("Couldn’t skip that folder. Choose a folder on this Mac.", true)
         }

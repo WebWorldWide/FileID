@@ -7,10 +7,8 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
     static let shared = DeepAnalyzeSettings()
     private let key = "deepAnalyzeActiveModel"
     private static let excludedFoldersKey = "deepAnalyzeExcludedFolders"
-    /// Tamper bound for `excludedFolders` — matches the schema's
-    /// `deepAnalyzeAll.excludedFolders` maxItems (also mirrored by the
-    /// Windows `AppSettings.MaxExcludedFolders`).
-    private static let maxExcludedFolders = 256
+    /// Matches the schema's `deepAnalyzeAll.excludedFolders` maxItems, which the engine's scope check enforces ("can skip at most 100 folders").
+    static let maxExcludedFolders = 100
 
     var activeKind: AIModelKind {
         didSet { UserDefaults.standard.set(activeKind.rawValue, forKey: key) }
@@ -48,7 +46,7 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
 
     /// Drop blank/relative entries, trim a trailing "/", dedupe, cap the
     /// list. Mirrors the Windows `AppSettings.SanitizeExcludedFolders` gate.
-    /// Case-sensitive, to match the engine's plain `LIKE` exclusion match (unlike Windows' case-insensitive comparison).
+    /// The engine canonicalizes each folder and skips files under it by path prefix.
     static func sanitizeExcludedFolders(_ raw: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
@@ -69,6 +67,7 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
     enum AddExcludedFolderResult {
         case added
         case alreadyExcluded
+        case listFull
         case invalid
     }
 
@@ -86,6 +85,7 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
         }
         guard !folder.isEmpty else { return .invalid }
         guard !excludedFolders.contains(folder) else { return .alreadyExcluded }
+        guard excludedFolders.count < Self.maxExcludedFolders else { return .listFull }
         excludedFolders = Self.sanitizeExcludedFolders(excludedFolders + [folder])
         return .added
     }

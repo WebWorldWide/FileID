@@ -31,6 +31,11 @@ enum HelperGate {
         startRequested || captionsRunning || faceClusteringInFlight || helperDown
     }
 
+    /// The folder menu's Rescan follows the sidebar's rule and also waits for a scan already running.
+    static func folderMenuRescanDisabled(scanRunning: Bool, captionsRunning: Bool, faceClusteringInFlight: Bool, helperDown: Bool) -> Bool {
+        scanRunning || rescanDisabled(startRequested: false, captionsRunning: captionsRunning, faceClusteringInFlight: faceClusteringInFlight, helperDown: helperDown)
+    }
+
     /// The title-bar pill's label when the helper is down; nil means the usual activity labels apply.
     static func pillLabel(for state: EngineClient.ConnectionState) -> String? {
         isDown(state) ? stoppedPillLabel : nil
