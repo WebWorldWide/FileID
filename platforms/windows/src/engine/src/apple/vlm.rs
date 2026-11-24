@@ -76,9 +76,9 @@ impl Drop for Submitted {
 }
 
 /// `cancel` is checked before every event and at least every 25 ms, and forwarded once.
-pub async fn request(body: &Value, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> Result<Value> {
+pub async fn request(body: &Value, cancel: &AtomicBool, on_event: impl FnMut(Event)) -> Result<Value> {
     let bytes = serde_json::to_vec(body)?;
-    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = mpsc::unbounded_channel();
     let forward = ffi::VlmReceiver(Box::new(move |event, bytes| {
         let _ = sender.send(message(event, bytes));
     }));

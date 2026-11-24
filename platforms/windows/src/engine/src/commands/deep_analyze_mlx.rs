@@ -439,7 +439,7 @@ mod tests {
         db
     }
 
-    async fn drain(mut rx: tokio::sync::mpsc::Receiver<IpcEvent>) -> Vec<EventPayload> {
+    fn drain(mut rx: tokio::sync::mpsc::Receiver<IpcEvent>) -> Vec<EventPayload> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             out.push(event.payload);
@@ -452,7 +452,7 @@ mod tests {
         let db = library_with(&[("/lib/a.jpg", "image", 0, Some("qwen3_vl_2b")), ("/lib/b.jpg", "image", 0, Some("qwen3_vl_2b"))]);
         let (sink, rx) = Sink::channel_for_test(64);
         run_batch(sink, db, "qwen3_vl_2b", vec![1, 2], Arc::new(AtomicBool::new(false)), true, false, true, None).await;
-        let events = drain(rx).await;
+        let events = drain(rx);
         assert_eq!(events.len(), 1, "only the terminal event: {}", events.len());
         assert!(matches!(&events[0], EventPayload::DeepAnalyzeComplete(done) if done.inner.processed == 0 && done.inner.failed == 0 && !done.inner.cancelled));
     }
@@ -478,7 +478,7 @@ mod tests {
         let (sink, rx) = Sink::channel_for_test(64);
         let payload = crate::ipc::DeepAnalyzeFilePayload { file_id: 1, model_kind: "qwen3_vl_2b".into() };
         crate::commands::deep_analyze::handle_deep_analyze_file(sink, db, payload, Arc::new(AtomicBool::new(false))).await;
-        let events = drain(rx).await;
+        let events = drain(rx);
         assert!(events.iter().any(|event| matches!(event, EventPayload::Error(error) if error.inner.kind == "deep_analyze_failed")));
         assert!(events.iter().any(|event| matches!(event, EventPayload::DeepAnalyzeComplete(done) if done.inner.failed == 1 && done.inner.processed == 0)));
     }
