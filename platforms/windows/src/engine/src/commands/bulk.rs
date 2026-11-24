@@ -1036,15 +1036,15 @@ fn restore_failed_claim(candidate: &TrashCandidate, reason: String) -> CheckedTr
     }
 }
 
-#[cfg_attr(all(target_os = "macos", feature = "apple-adapters", not(test)), allow(dead_code))]
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-fn trash_failure_text(error: &std::io::Error) -> String {
-    match crate::util::read_only::location_in_io(error) {
+fn trash_failure_text(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<std::io::Error>().and_then(crate::util::read_only::location_in_io) {
         Some(location) => location.to_string(),
         None => error.to_string(),
     }
 }
 
+#[cfg_attr(all(target_os = "macos", feature = "apple-adapters", not(test)), allow(dead_code))]
 fn checked_trash_one_with(
     candidate: &TrashCandidate,
     trash: impl FnOnce(
@@ -1121,7 +1121,7 @@ fn before_trash_move(path: &std::path::Path) {
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     if let Err(error) = crate::util::read_only::require_source_mutation(&candidate.path) {
-        return CheckedTrashOutcome::Failed(trash_failure_text(&error));
+        return CheckedTrashOutcome::Failed(trash_failure_text(&error.into()));
     }
     let _exact_guards = match validate_trash_candidate_at(candidate, &candidate.path, true) {
         Ok(guards) => guards,
