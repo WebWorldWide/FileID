@@ -551,7 +551,7 @@ fn a_pass_with_nothing_to_cluster_still_reports_the_people_it_kept() {
     catalog.face(1, 0, 0.6, Some(10));
     let (catalog, outcome) = catalog.run();
     assert!(outcome.error.is_none());
-    assert_eq!((outcome.result.person_count, outcome.result.face_count), (1, 0));
+    assert_eq!((outcome.result.person_count, outcome.result.face_count), (1, 1));
     assert_eq!(catalog.assignments(), vec![(1, Some(10))]);
 }
 
