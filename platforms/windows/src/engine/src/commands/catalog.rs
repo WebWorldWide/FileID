@@ -601,7 +601,7 @@ mod tests {
         crate::db::test_support::insert_file(&writer, 1, "/internal/IMG_0001.jpg", "image");
         let database = Arc::new(Mutex::new(writer));
         for value in [
-            serde_json::json!({"requestID":"names","action":"proposeNames","fileIDs":[1]}),
+            serde_json::json!({"requestID":"names","action":"proposeNames","fileIDs":[1],"naming":{"style":"short","maxLength":40}}),
             serde_json::json!({"requestID":"takes","action":"autoTakeGroups"}),
         ] {
             let request: CatalogRequest = serde_json::from_value(value).unwrap();
