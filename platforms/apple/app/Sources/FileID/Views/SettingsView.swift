@@ -336,6 +336,8 @@ struct DeepAnalyzeExclusionsCard: View {
             message = ("Done. Describe Files will skip this folder from the next run.", false)
         case .alreadyExcluded:
             message = ("That folder is already skipped.", false)
+        case .listFull:
+            message = ("Describe Files can skip at most \(DeepAnalyzeSettings.maxExcludedFolders) folders. Remove one first.", true)
         case .invalid:
             message = ("Couldn’t skip that folder. Choose a folder on this Mac.", true)
         }
