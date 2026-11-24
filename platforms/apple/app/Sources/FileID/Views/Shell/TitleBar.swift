@@ -176,7 +176,8 @@ struct TitleBar: View {
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
                         .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                        .disabled(engine.lastProgress.map { $0.phase == .discovering || $0.phase == .tagging || $0.phase == .postScan } ?? false)
+                        .disabled(HelperGate.folderMenuRescanDisabled(scanRunning: scanRunning, captionsRunning: engine.deepAnalyzeInFlight, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: HelperGate.isDown(engine)))
+                        .help(HelperGate.isDown(engine) ? "FileID’s helper isn’t running. Restart it, then scan again." : engine.deepAnalyzeInFlight || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files. Files already read are skipped.")
                 }
             }
             .padding(10)
@@ -410,11 +411,18 @@ struct TitleBar: View {
         }
     }
 
+    /// The pill must say what the sidebar says: paused is shown still and grey, and a tagging phase with no total yet is "counting", not 0%.
+    static func scanPill(paused: Bool, phase: ScanPhase, processed: Int, total: Int) -> (label: String, progress: Double?, paused: Bool) {
+        let frac = total > 0 ? Double(processed) / Double(total) : nil
+        if paused { return ("Paused", phase == .tagging ? frac : nil, true) }
+        return ("Scanning", phase == .tagging ? frac : nil, false)
+    }
+
     private var currentActivity: (label: String, color: Color, progress: Double?, tone: ProgressTone, idle: Bool) {
         if let stopped = HelperGate.pillLabel(for: engine.state) { return (stopped, Theme.danger, nil, .paused, true) }
         if scanRunning, let p = engine.lastProgress {
-            let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
-            return ("Scanning", Theme.gold, p.phase == .tagging ? frac : nil, .gold, false)
+            let pill = Self.scanPill(paused: engine.isPaused, phase: p.phase, processed: p.processed, total: p.total)
+            return (pill.label, pill.paused ? Theme.text3 : Theme.gold, pill.progress, pill.paused ? .paused : .gold, pill.paused)
         }
         if engine.deepAnalyzeInFlight, let d = engine.deepAnalyzeProgress {
             return ("Describing", Theme.ai, d.total > 0 ? Double(d.processed) / Double(d.total) : 0, .ai, false)
