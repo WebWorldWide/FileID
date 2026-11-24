@@ -1043,6 +1043,8 @@ public final class EngineClient {
     }
 
     public func startScan(rootURL: URL) {
+        // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
+        deepAnalyzeComplete = nil
         let displayPath = rootURL.path
         // The persisted app-scoped bookmark stays in the app; the engine gets a separate implicit-scope bookmark that can cross the process boundary.
         let client = self
@@ -1071,8 +1073,6 @@ public final class EngineClient {
                                           rescan: false, excludedPaths: nil)) {
                     client.isPaused = false
                     client.scanRunsOnCPU = false
-                    // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
-                    client.deepAnalyzeComplete = nil
                     client.beginScanActivity()
                 } else {
                     client.lastError = EngineError(
