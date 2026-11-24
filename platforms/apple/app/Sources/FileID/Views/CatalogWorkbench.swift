@@ -18,8 +18,7 @@ struct CatalogWorkbench: View {
     @State private var cast: [CatalogHit] = []
     @State private var selected: CatalogHit?
     @State private var selectedIndex: Int?
-    @State private var pendingID = ""
-    @State private var pendingAction = ""
+    @State private var pending = CatalogPendingRequests()
     @State private var searchTask: Task<Void, Never>?
     @State private var message = ""
     @State private var title = ""
@@ -148,7 +147,7 @@ struct CatalogWorkbench: View {
                     .onChange(of: captureWindow) { _, _ in search() }
                     .onChangeWhileActive(of: store?.scopeEpoch ?? 0) { search() }
                 HStack(spacing: 8) {
-                    if pendingAction == "search" {
+                    if pending.searching {
                         IndeterminateBar().frame(width: 80)
                     } else {
                         MetaText(resultsMeta, size: 12)
@@ -170,7 +169,7 @@ struct CatalogWorkbench: View {
             MomentResultsList(rows: resultRows, selectedIndex: selectedIndex, checked: checkedRows, textSize: ContentTextScale.shared.size, onSelect: clickRow)
             .equatable()
             .overlay {
-                if hits.isEmpty && pendingAction != "search", let readiness = libraryReadiness, !readiness.hasFiles {
+                if hits.isEmpty && !pending.searching, let readiness = libraryReadiness, !readiness.hasFiles {
                     VStack(spacing: 10) {
                         MetaText(readiness == .reading
                                  ? "FileID is reading your files. Search opens as soon as the first files are read."
@@ -186,7 +185,7 @@ struct CatalogWorkbench: View {
                         }
                     }
                     .padding(24)
-                } else if hits.isEmpty && pendingAction != "search" {
+                } else if hits.isEmpty && !pending.searching {
                     MetaText(message.isEmpty ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : message)
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }
@@ -580,33 +579,35 @@ struct CatalogWorkbench: View {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         let id = UUID().uuidString, rootID = store?.scope?.root.id, window = captureWindow
-        pendingID = id
-        pendingAction = "search"
+        pending.beginSearch(id)
         message = ""
         searchTask?.cancel()
         searchTask = Task { @MainActor in
             let vector = CLIPModelInstaller.shared.textEncoderReady ? await engine.embedTextQuery(text) : nil
-            guard !Task.isCancelled, pendingID == id else { return }
-            send(window.searchRequest(id: id, query: text, rootID: rootID, vector: vector))
+            guard !Task.isCancelled, pending.isCurrentSearch(id) else { return }
+            if !engine.send(.catalogRequest(request: window.searchRequest(id: id, query: text, rootID: rootID, vector: vector))) {
+                pending.cancelSearch()
+                message = "FileID is still getting ready. Try again in a moment."
+            }
         }
     }
 
     private func send(_ request: CatalogRequest) {
-        pendingID = request.requestID
-        pendingAction = request.action
+        pending.beginOther(request.requestID, action: request.action)
         message = ""
         if !engine.send(.catalogRequest(request: request)) {
-            pendingID = ""
-            pendingAction = ""
+            pending.cancelOther()
             message = "FileID is still getting ready. Try again in a moment."
         }
     }
 
     private func consume() {
-        guard !pendingID.isEmpty, let response = engine.catalogResponses[pendingID] else { return }
-        let action = pendingAction
-        pendingID = ""
-        pendingAction = ""
+        for settled in pending.settle(responses: engine.catalogResponses) {
+            handle(settled.response, action: settled.action)
+        }
+    }
+
+    private func handle(_ response: CatalogResponse, action: String) {
         let failed = response.status != "ok"
         let raw = response.message ?? ""
         // The helper's own wording is written for a log; show it only when it
@@ -623,6 +624,14 @@ struct CatalogWorkbench: View {
             } else {
                 ToastCenter.shared.show(message)
             }
+        }
+        if CatalogPendingRequests.dropsListedResults(action: action, status: response.status) {
+            hits = []
+            resultRows = []
+            checkedRows = []
+            hitFileCount = 0
+            weakerLeftOut = ""
+            selectedIndex = nil
         }
         guard !failed else { return }
         switch action {
@@ -956,3 +965,35 @@ enum MediaPlayback {
     }
 }
 
+
+/// The one search and the one detail/chapter/job request a workbench can have in flight; they are tracked apart so starting one never drops the other.
+struct CatalogPendingRequests: Equatable {
+    private(set) var searchID = ""
+    private(set) var otherID = ""
+    private(set) var otherAction = ""
+
+    var searching: Bool { !searchID.isEmpty }
+
+    /// A search that failed must not leave the last query's results standing as if they answered this one.
+    static func dropsListedResults(action: String, status: String) -> Bool { action == "search" && status != "ok" }
+
+    mutating func beginSearch(_ id: String) { searchID = id }
+    mutating func beginOther(_ id: String, action: String) { otherID = id; otherAction = action }
+    mutating func cancelSearch() { searchID = "" }
+    mutating func cancelOther() { otherID = ""; otherAction = "" }
+    func isCurrentSearch(_ id: String) -> Bool { searchID == id }
+
+    mutating func settle(responses: [String: CatalogResponse]) -> [(action: String, response: CatalogResponse)] {
+        var settled: [(action: String, response: CatalogResponse)] = []
+        if !searchID.isEmpty, let response = responses[searchID] {
+            searchID = ""
+            settled.append(("search", response))
+        }
+        if !otherID.isEmpty, let response = responses[otherID] {
+            let action = otherAction
+            cancelOther()
+            settled.append((action, response))
+        }
+        return settled
+    }
+}
