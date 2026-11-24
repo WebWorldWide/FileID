@@ -77,3 +77,14 @@ struct SankeyHoverTests {
         #expect(layout.highlightedFlowIDs(for: nil).isEmpty)
     }
 }
+
+@Suite("Organize spoken labels")
+struct RestructureSpeechTests {
+    @Test func foldersAreReadWithTheirCountAndWhatHappens() {
+        #expect(RestructureSpeech.sourceFolder(name: "Photos", files: 12, staysBehind: true) == "Photos, 12 files moving out, the folder stays")
+        #expect(RestructureSpeech.sourceFolder(name: "Junk", files: 1, staysBehind: false) == "Junk, 1 file moving out, the folder is emptied")
+        #expect(RestructureSpeech.destination(name: "Travel", files: 12) == "Travel, 12 files arriving")
+        #expect(RestructureSpeech.mapFolder(direction: "To", name: "Travel", files: 3) == "To Travel, 3 files")
+        #expect(RestructureSpeech.pathHint("/Users/me/Photos").contains("/Users/me/Photos"))
+    }
+}

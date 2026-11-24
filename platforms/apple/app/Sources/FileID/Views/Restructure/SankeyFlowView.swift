@@ -123,7 +123,7 @@ struct SankeyFlowView: View {
                                 nodeView(node, slot: slot, isFocused: isNodeFocused(node))
                             }
                             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
-                            .accessibilityLabel("From \(node.label)")
+                            .accessibilityLabel(RestructureSpeech.mapFolder(direction: "From", name: node.label, files: node.count))
                             .accessibilityHint("Shows the files moving out of this folder")
                                 .frame(width: nodeColW)
                                 .position(x: nodeColW / 2, y: slot.midY)
@@ -149,7 +149,7 @@ struct SankeyFlowView: View {
                                 nodeView(node, slot: slot, isFocused: isNodeFocused(node))
                             }
                             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
-                            .accessibilityLabel("To \(node.label)")
+                            .accessibilityLabel(RestructureSpeech.mapFolder(direction: "To", name: node.label, files: node.count))
                             .accessibilityHint("Shows the files moving into this folder")
                                 .frame(width: nodeColW)
                                 .position(x: totalW - nodeColW / 2,
