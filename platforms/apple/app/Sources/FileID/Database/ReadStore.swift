@@ -394,7 +394,8 @@ public final class ReadStore: @unchecked Sendable {
     private static func fetchFiles(_ db: Database, offset: Int, limit: Int, search: String,
                                    kindFilter: String?, scope: LibraryScope?, sort: LibrarySort) throws -> [FileRow] {
         let unreadable = kindFilter == Self.unreadableFilter
-        var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
+        // The sort and filters run over ids only, so a top-N sorter never carries whole rows; the page's rows are fetched by id after.
+        var sql = unreadable ? "SELECT id FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT id FROM files WHERE failed = 0"
         var args: StatementArguments = []
         let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
         if !trimmedSearch.isEmpty {
@@ -445,8 +446,12 @@ public final class ReadStore: @unchecked Sendable {
         }
         sql += " ORDER BY \(sort.orderSQL) LIMIT ? OFFSET ?"
         args += [limit, offset]
-        let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-        return rows.map { Self.toFileRow($0) }
+        let ids = try Int64.fetchAll(db, sql: sql, arguments: args)
+        guard !ids.isEmpty else { return [] }
+        let encoded = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
+        let rows = try Row.fetchAll(db, sql: "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?))", arguments: [encoded])
+        let byID = Dictionary(rows.map { ($0["id"] as Int64, Self.toFileRow($0)) }, uniquingKeysWith: { first, _ in first })
+        return ids.compactMap { byID[$0] }
     }
 
     /// Off-main twin of `files(...)`: the keyword search is a multi-table FTS + LIKE + face-join query that would stutter the UI on every throttled scan batch.
@@ -659,6 +664,11 @@ public final class ReadStore: @unchecked Sendable {
                                     ) - 1 END AS twins
                         FROM files
                         WHERE failed = 0 AND size_bytes >= 0
+                          AND size_bytes IN (
+                              SELECT size_bytes FROM files
+                              WHERE failed = 0 AND size_bytes >= 0
+                              GROUP BY size_bytes HAVING COUNT(*) > 1
+                          )
                     ),
                     candidate_sizes AS (
                         SELECT pf_size AS gsize, COUNT(*) AS n,
