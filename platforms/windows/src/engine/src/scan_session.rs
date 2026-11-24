@@ -855,6 +855,7 @@ impl ScanSession {
             }
             reachable
         };
+        let mut post_scan_announced = false;
         if clean_walk {
             {
                 let mut seen = discovered_seen_paths.lock();
@@ -885,14 +886,37 @@ impl ScanSession {
                     crate::pipeline::capture_date_backfill::mark_done(&state_dir, root);
                 }
                 Ok(state_dir) => {
-                    let (database, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
-                    let backfill = tokio::task::spawn_blocking(move || {
-                        crate::pipeline::capture_date_backfill::run_if_needed(&database, &state_dir, &root, &|| {
-                            coordinator.is_cancelled()
-                        })
-                    });
-                    if let Err(error) = backfill.await {
-                        tracing::warn!(%error, "[SCAN] capture-date backfill stopped");
+                    if !crate::pipeline::capture_date_backfill::marker(&state_dir, root).exists() && !self.coordinator.is_cancelled() {
+                        on_phase(SessionPhase::PostScan);
+                        emit_phase(SessionPhase::PostScan);
+                        post_scan_announced = true;
+                        let report = Arc::new(CatchUpProgress {
+                            sink: sink.clone(),
+                            session_id: session_id.clone(),
+                            discovered: discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                            processed: total + self.carried.0,
+                            failed: failed + self.carried.1,
+                            lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
+                            state: Mutex::new((0, 0, Instant::now())),
+                        });
+                        let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
+                        let (database, coordinator, root, report_pass) =
+                            (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf(), report.clone());
+                        let backfill = tokio::task::spawn_blocking(move || {
+                            crate::pipeline::capture_date_backfill::run_reporting(
+                                &database,
+                                &state_dir,
+                                &root,
+                                &|| coordinator.is_cancelled(),
+                                &|event| report_pass.report(event),
+                            )
+                        });
+                        let finished = backfill.await;
+                        heartbeat.abort();
+                        let _ = heartbeat.await;
+                        if let Err(error) = finished {
+                            tracing::warn!(%error, "[SCAN] capture-date backfill stopped");
+                        }
                     }
                 }
                 Err(error) => tracing::warn!(%error, "[SCAN] no state folder for the capture-date backfill marker"),
@@ -913,7 +937,6 @@ impl ScanSession {
         // text reads), and what an earlier cancelled or interrupted scan of
         // this folder still owes. A cancel here ends the scan as cancelled; the
         // rest stays owed.
-        let mut post_scan_announced = false;
         if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
             if self.rescan {
                 crate::pipeline::catch_up::forget_careful_reader_failures();
@@ -924,9 +947,11 @@ impl ScanSession {
                 tracing::info!(owed_careful, "[SCAN] careful text reads stay owed: the reader stopped answering recently");
             }
             if owed_tags + owed_careful > 0 && !reader_deferred {
-                on_phase(SessionPhase::PostScan);
-                emit_phase(SessionPhase::PostScan);
-                post_scan_announced = true;
+                if !post_scan_announced {
+                    on_phase(SessionPhase::PostScan);
+                    emit_phase(SessionPhase::PostScan);
+                    post_scan_announced = true;
+                }
                 match self.models.get().await {
                     Some(stack) => {
                         let analyzer = crate::pipeline::tagging::catch_up_analyzer(stack, self.coordinator.clone());
