@@ -374,7 +374,7 @@ enum SelfShot {
             _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: text)))
             await waitUntil(timeout: 30) { session.searchID.isEmpty && !session.hits.isEmpty }
             session.applyKindFilter()
-            note("\(name) search for \"\(text)\": \(session.allHits.count) results, \(session.hits.count) \(kind)")
+            note("\(name) search for “\(text)”: \(Plural.noun(session.allHits.count, "result", "results")), \(session.hits.count) \(kind)")
             if !session.hits.isEmpty { break }
         }
         try? await Task.sleep(for: .seconds(1))
