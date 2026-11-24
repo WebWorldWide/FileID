@@ -78,6 +78,7 @@ struct LocationRow: View {
                 HStack(spacing: 8) {
                     Text(root.display).font(Theme.Font.body(13.5, .medium)).foregroundStyle(Theme.text1)
                     if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
+                    if engine.readOnlyGate.drive(for: root.path) != nil { ReadOnlyBadge() }
                 }
                 MetaText(LocationText.summary(root))
                 Text(PathText.abbreviated(root.path)).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head).help(root.path)
@@ -89,6 +90,6 @@ struct LocationRow: View {
                 .help(root.online ? "Scan this location again" : "Reconnect the drive to rescan")
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(root.display), \(root.online ? "online" : "offline"), \(LocationText.summary(root))")
+        .accessibilityLabel("\(root.display), \(root.online ? "online" : "offline"), \(engine.readOnlyGate.drive(for: root.path) != nil ? "read-only, " : "")\(LocationText.summary(root))")
     }
 }

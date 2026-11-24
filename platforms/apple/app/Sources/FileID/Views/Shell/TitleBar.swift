@@ -134,6 +134,7 @@ struct TitleBar: View {
                         }
                         Spacer(minLength: 8)
                         if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
+                        if engine.readOnlyGate.drive(for: root.path) != nil { ReadOnlyBadge() }
                         MetaText(LibraryScope.fileCountText(root.fileCount), color: Theme.text2)
                     }
                     .help(root.path)

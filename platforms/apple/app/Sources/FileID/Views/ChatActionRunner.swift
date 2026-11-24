@@ -171,6 +171,11 @@ final class ChatActionRunner {
     func run(_ action: ChatAction, engine: EngineClient) async {
         guard ChatActions.isRunnable(action) else { phases[action.id] = .failed("This action isn’t available."); return }
         if case .running = phase(action) { return }
+        if ["applyFolderLayout", "moveDuplicatesToTrash", "renameToSuggested"].contains(action.kind),
+           let reason = engine.libraryReadOnlyReason {
+            phases[action.id] = .failed(reason)
+            return
+        }
         let handoff = ChatHandoff.shared
         switch action.kind {
         case "scanFolder", "rescan":
@@ -398,7 +403,7 @@ final class ChatActionRunner {
         let freed = ByteCountFormatter.string(fromByteCount: outcome.trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
         var summary = "Moved \(outcome.trashed.count.formatted()) \(outcome.trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
         if changed > 0 { summary += " · \(changed.formatted()) skipped because the file changed since the scan" }
-        if outcome.protectedLocation > 0 { summary += " · \(outcome.protectedLocation.formatted()) left alone in a protected location, such as a Photos library" }
+        if outcome.protectedLocation > 0 { summary += " · " + ExactDuplicateVerifier.protectedSummary(outcome) }
         if outcome.failed > 0 { summary += " · \(outcome.failed.formatted()) couldn’t be moved" }
         store.notifyChanged()
         phases[action.id] = .done(summary + ".")

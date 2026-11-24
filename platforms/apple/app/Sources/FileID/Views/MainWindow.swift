@@ -198,6 +198,9 @@ struct MainWindow: View {
                 if activeTab != .chat { chatPresented.toggle() }
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleMotion)) { _ in atmospherePaused.toggle() }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+                restorePickedFolderIfPossible()
+            }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()
@@ -383,22 +386,18 @@ struct MainWindow: View {
 
     private func restorePickedFolderIfPossible() {
         guard pickedURL == nil,
-              let data = UserDefaults.standard.data(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey)
+              UserDefaults.standard.data(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey) != nil
         else { return }
         let key = SecurityScopedBookmark.pickedFolderDefaultsKey
         Task.detached(priority: .utility) {
-            guard let accessibleURL = SecurityScopedBookmark.retainAccess(for: data) else {
-                await MainActor.run {
-                    guard self.pickedURL == nil else { return }
-                    UserDefaults.standard.removeObject(forKey: key)
-                }
-                return
-            }
-            var isDir: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: accessibleURL.path, isDirectory: &isDir) && isDir.boolValue
+            let url = PickedFolderRestore.accessibleFolder(
+                defaults: .standard, key: key,
+                retain: { SecurityScopedBookmark.retainAccess(for: $0) },
+                isDirectory: { var isDir: ObjCBool = false; return FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDir) && isDir.boolValue })
+            guard let url else { return }
             await MainActor.run {
                 guard self.pickedURL == nil else { return }
-                if exists { self.pickedURL = accessibleURL } else { UserDefaults.standard.removeObject(forKey: key) }
+                self.pickedURL = url
             }
         }
     }

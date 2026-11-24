@@ -393,7 +393,7 @@ struct RestructureView: View {
     }
 
     private func beginApply() {
-        guard !applying else { return }
+        guard !applying, readOnlyReason == nil else { return }
         if storedPlanMoveCount > 0 {
             pendingMoves = []
             pendingPlanID = storedPlanID
@@ -412,6 +412,11 @@ struct RestructureView: View {
         } else {
             confirmApply = true
         }
+    }
+
+    private var readOnlyReason: String? {
+        guard let root = libraryRoot else { return nil }
+        return engine.readOnlyGate.reasonIfAll([root.path])
     }
 
     private var largeApplyBlocked: Bool { storedPlanMoveCount > 0 && storedPlanFolders.isEmpty }
@@ -502,12 +507,16 @@ struct RestructureView: View {
                     if planReady && applyCount > 0 {
                         Button("Move \(applyCount.formatted()) file\(applyCount == 1 ? "" : "s")") { beginApply() }
                             .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
-                            .disabled(largeApplyBlocked)
-                            .help(largeApplyBlocked
+                            .disabled(largeApplyBlocked || readOnlyReason != nil)
+                            .help(readOnlyReason ?? (largeApplyBlocked
                                   ? "This plan is too large to show, so it can’t be checked. Choose a smaller folder."
-                                  : "Move the chosen files into their new folders. You confirm first, and you can undo.")
+                                  : "Move the chosen files into their new folders. You confirm first, and you can undo."))
+                            .accessibilityHint(readOnlyReason ?? "")
                         if largeApplyBlocked {
                             MetaText("Too large to check. Choose a smaller folder.", color: Theme.warning, size: 11.5)
+                        }
+                        if let readOnlyReason {
+                            MetaText("\(readOnlyReason) You can look at the plan, but Move is off.", size: 11.5)
                         }
                     }
                     if moved {

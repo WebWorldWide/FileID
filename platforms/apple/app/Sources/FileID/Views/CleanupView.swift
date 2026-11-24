@@ -2,6 +2,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 struct CleanupView: View {
     let engine: EngineClient
@@ -167,7 +168,9 @@ struct CleanupView: View {
                         Button("Select all extra copies") { selectAllNonKeepers() }
                             .buttonStyle(.dsSecondary)
                             .fixedSize()
-                            .help("Choose every copy except the one marked KEEP in each group")
+                            .disabled(engine.libraryReadOnlyReason != nil)
+                            .accessibilityHint(engine.libraryReadOnlyReason ?? "")
+                            .help(engine.libraryReadOnlyReason ?? "Choose every copy except the one marked KEEP in each group")
                     }
                     Button("Clear selection") { selection.removeAll() }
                         .buttonStyle(.dsSecondary)
@@ -185,8 +188,9 @@ struct CleanupView: View {
                     .fixedSize()
                 }
                 .buttonStyle(DSDangerButtonStyle(height: Theme.Metrics.control))
-                .disabled(totalSelected == 0)
-                .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards.")
+                .disabled(totalSelected == 0 || trashReadOnlyReason != nil)
+                .accessibilityHint(trashReadOnlyReason ?? "")
+                .help(trashReadOnlyReason ?? (totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards."))
                 .confirmationDialog(
                     "Move \(confirmCount) file\(confirmCount == 1 ? "" : "s") to Trash?",
                     isPresented: $confirmDelete,
@@ -341,7 +345,8 @@ struct CleanupView: View {
                         onSelectAllExceptKeeper: { setGroupNonKeepers(group) },
                         onInvert: { invertGroup(group) },
                         onSkip: { skippedGroups.insert(group.id) },
-                        onDeleteGroup: { confirmGroup = group; confirmDelete = true }
+                        onDeleteGroup: { confirmGroup = group; confirmDelete = true },
+                        gate: engine.readOnlyGate
                     )
                 }
                 if let s = status {
@@ -405,6 +410,21 @@ struct CleanupView: View {
     private func selectAllNonKeepers() {
         selection.removeAll()
         for g in visibleGroups { setGroupNonKeepers(g) }
+        // Copies on a read-only drive can't be moved, so they are never offered for the Trash.
+        let gate = engine.readOnlyGate
+        if !gate.entries.isEmpty {
+            let locked = Set(visibleGroups.flatMap(\.files).filter { gate.drive(for: $0.url) != nil }.map(\.id))
+            selection.subtract(locked)
+        }
+    }
+
+    /// The reason the Trash button is off when every chosen copy sits on a read-only drive.
+    private var trashReadOnlyReason: String? {
+        guard !selection.isEmpty else { return nil }
+        let gate = engine.readOnlyGate
+        guard !gate.entries.isEmpty else { return nil }
+        let chosen = visibleGroups.flatMap(\.files).filter { selection.contains($0.id) }.map(\.url)
+        return gate.reasonIfAll(chosen)
     }
 
     // MARK: - Trash actions
@@ -530,7 +550,7 @@ struct CleanupView: View {
             summary += " · \(verificationRejected) skipped because the file changed since the scan"
         }
         if protectedCount > 0 {
-            summary += " · \(protectedCount) left alone because \(protectedCount == 1 ? "it is" : "they are") in a protected location, such as a Photos library"
+            summary += " · " + ExactDuplicateVerifier.protectedSummary(outcome)
         }
         if trashFailures > 0 {
             summary += " · \(trashFailures.formatted()) couldn’t be moved to Trash"
@@ -657,8 +677,13 @@ private struct GroupCard: View {
     let onInvert: () -> Void
     let onSkip: () -> Void
     let onDeleteGroup: () -> Void
+    var gate: ReadOnlyGate = .none
     @State private var hoveredFile: Int64?
     @Environment(\.hoverPaused) private var hoverPaused
+
+    private var readOnlyReason: String? {
+        gate.reasonIfAll(group.files.filter { selection.contains($0.id) }.map(\.url))
+    }
 
     private var selectedInGroup: Int {
         group.files.reduce(0) { $0 + (selection.contains($1.id) ? 1 : 0) }
@@ -705,8 +730,9 @@ private struct GroupCard: View {
 
                     Button { onDeleteGroup() } label: { Label(selectedInGroup == 0 ? "Move to Trash" : "Move \(selectedInGroup) to Trash", systemImage: "trash") }
                     .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle()))
-                    .disabled(selectedInGroup == 0)
-                    .help(selectedInGroup == 0 ? "Click the copies you want to remove first" : "Move the chosen copies in this group to Trash")
+                    .disabled(selectedInGroup == 0 || readOnlyReason != nil)
+                    .accessibilityHint(readOnlyReason ?? "")
+                    .help(readOnlyReason ?? (selectedInGroup == 0 ? "Click the copies you want to remove first" : "Move the chosen copies in this group to Trash"))
 
                     Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
                     .buttonStyle(DSSecondaryButtonStyle(height: 26))

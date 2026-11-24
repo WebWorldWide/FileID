@@ -232,12 +232,13 @@ public struct LibraryRoot: Codable, Sendable, Equatable {
     public let totalBytes: Int64
     public let lastScanAt: Double?
     public let lastStatus: String?
+    public let readOnly: Bool?
 
     public init(id: Int64, path: String, display: String, kind: String, enabled: Bool, online: Bool,
-                fileCount: Int64, totalBytes: Int64, lastScanAt: Double?, lastStatus: String?) {
+                fileCount: Int64, totalBytes: Int64, lastScanAt: Double?, lastStatus: String?, readOnly: Bool? = nil) {
         self.id = id; self.path = path; self.display = display; self.kind = kind; self.enabled = enabled
         self.online = online; self.fileCount = fileCount; self.totalBytes = totalBytes
-        self.lastScanAt = lastScanAt; self.lastStatus = lastStatus
+        self.lastScanAt = lastScanAt; self.lastStatus = lastStatus; self.readOnly = readOnly
     }
 }
 

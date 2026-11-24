@@ -238,6 +238,7 @@ struct Sidebar: View {
         case "list_roots_failed": return "FileID can’t reach that folder"
         case "plan_restructure_root": return "This folder isn’t available"
         case "plan_restructure_library_busy": return "A folder move is already running"
+        case "location_read_only": return "This drive is read-only"
         case "apply_restructure": return "The folder move didn’t finish"
         case "apply_restructure_skipped": return "Some files weren’t moved"
         case "undo_restructure": return "Putting folders back didn’t finish"
@@ -275,7 +276,7 @@ struct Sidebar: View {
         case "deep_analyze_selection_too_large", "command_limit_exceeded": return "Select fewer files and try again."
         case "model_integrity_failed", "sentinel_attestation_failed", "sentinel_dir_create_failed", "sentinel_rename_failed",
              "sentinel_write_failed", "zip_extract_failed": return "Open Settings and download the model again."
-        case "apply_restructure_skipped": return message
+        case "apply_restructure_skipped", "location_read_only": return message
         case "restructure_undo_journal": return "Some files may already have moved. Undo them from Organize Folders, check that there’s free disk space, then try again."
         case "library_busy": return "Resume or cancel the scan, then try again."
         case "db_write_failed", "face_cluster_persist_failed", "face_print_persist_failed":

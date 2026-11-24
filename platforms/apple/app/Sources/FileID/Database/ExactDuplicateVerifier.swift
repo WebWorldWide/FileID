@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import FileIDShared
+import FileIDModelInfo
 
 struct ExactDuplicateSnapshot: Sendable {
     let groups: [DuplicateGroup]
@@ -224,6 +225,8 @@ struct DuplicateTrashOutcome: Sendable {
     var trashed: [(id: Int64, size: Int64)] = []
     var verificationFailed = 0
     var protectedLocation = 0
+    /// The read-only drive that refused the batch, so the summary can name it.
+    var readOnlyDrive: String?
     var failed = 0
     var failureMessage: String?
     var batchID: String?
@@ -240,6 +243,13 @@ extension ExactDuplicateVerifier {
     static func trashThroughEngine(_ work: [DuplicateTrashItem], engine: EngineClient,
                                    progress: (@MainActor @Sendable (String) -> Void)? = nil) async -> DuplicateTrashOutcome {
         var outcome = DuplicateTrashOutcome()
+        // A batch with any target on a read-only drive is refused whole before a single byte is hashed.
+        if let refusal = ReadOnlyLocations.batchRefusal(work.map(\.url)) {
+            outcome.protectedLocation = work.count
+            outcome.readOnlyDrive = refusal.drive
+            outcome.failureMessage = refusal.errorDescription
+            return outcome
+        }
         progress?("Checking copies")
         let evidence = await withTaskGroup(of: (Int64, ExactTrashIdentity?, Bool).self) { group -> [(Int64, ExactTrashIdentity?, Bool)] in
             var results: [(Int64, ExactTrashIdentity?, Bool)] = []
@@ -289,7 +299,12 @@ extension ExactDuplicateVerifier {
         SpotlightIndexer.deindex(ids: outcome.trashed.map(\.id))
         for refusal in result.messages where !refusal.ok {
             switch trashRefusal(refusal) {
-            case "protected": outcome.protectedLocation += 1
+            case "protected":
+                outcome.protectedLocation += 1
+                if outcome.readOnlyDrive == nil, let text = refusal.message, text.contains("is a read-only drive"),
+                   let open = text.firstIndex(of: "\u{201C}"), let close = text.firstIndex(of: "\u{201D}"), open < close {
+                    outcome.readOnlyDrive = String(text[text.index(after: open)..<close])
+                }
             case "changed": outcome.verificationFailed += 1
             default:
                 outcome.failed += 1
@@ -300,11 +315,16 @@ extension ExactDuplicateVerifier {
         return outcome
     }
 
+    nonisolated static func protectedSummary(_ outcome: DuplicateTrashOutcome) -> String {
+        if let drive = outcome.readOnlyDrive { return ReadOnlyLocations.sentence(forDrive: drive) }
+        return "\(outcome.protectedLocation.formatted()) \(outcome.protectedLocation == 1 ? "is" : "are") in a managed media library, such as a Photos library, so FileID can’t change \(outcome.protectedLocation == 1 ? "it" : "them")"
+    }
+
     /// Why a batch that moved nothing says so plainly: the card must not show a success for an empty move.
     nonisolated static func nothingMovedSummary(_ outcome: DuplicateTrashOutcome, skippedAsChanged: Int) -> String {
         var reasons: [String] = []
         if skippedAsChanged > 0 { reasons.append("\(skippedAsChanged.formatted()) changed since the scan, so FileID left \(skippedAsChanged == 1 ? "it" : "them") alone") }
-        if outcome.protectedLocation > 0 { reasons.append("\(outcome.protectedLocation.formatted()) \(outcome.protectedLocation == 1 ? "is" : "are") in a protected location, such as a Photos library") }
+        if outcome.protectedLocation > 0 { reasons.append(protectedSummary(outcome)) }
         if outcome.failed > 0 { reasons.append(outcome.failureMessage ?? "\(outcome.failed.formatted()) couldn’t be moved to the Trash") }
         return reasons.isEmpty ? "Nothing was moved to the Trash. Your files are untouched." : "Nothing was moved to the Trash: " + reasons.joined(separator: "; ") + ". Your files are untouched."
     }
@@ -314,7 +334,7 @@ extension ExactDuplicateVerifier {
     nonisolated static func trashRefusal(_ item: BulkActionItem) -> String {
         if let reason = item.reason { return reason }
         let text = item.message ?? ""
-        if text.hasPrefix("This file belongs to a managed media library") || text.hasPrefix("This location is read-only") {
+        if text.hasPrefix("This file belongs to a managed media library") || text.contains("is a read-only drive") {
             return "protected"
         }
         if text.hasPrefix("File changed since") || text.hasSuffix("Nothing was moved.") { return "changed" }
