@@ -565,6 +565,14 @@ mod tests {
     }
 
     #[test]
+    fn real_ffprobe_output_for_a_timecoded_clip_with_two_audio_tracks_is_accepted() {
+        let clip = br#"{"streams":[{"index":0,"codec_name":"h264","codec_long_name":"H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10","profile":"High","level":13,"codec_type":"video","codec_tag_string":"avc1","codec_tag":"0x31637661","mime_codec_string":"avc1.64000d","width":320,"height":180,"coded_width":320,"coded_height":180,"has_b_frames":2,"sample_aspect_ratio":"1:1","display_aspect_ratio":"16:9","pix_fmt":"yuv420p","chroma_location":"left","field_order":"progressive","is_avc":"true","nal_length_size":"4","id":"0x1","r_frame_rate":"30/1","avg_frame_rate":"30/1","time_base":"1/15360","start_pts":0,"start_time":"0.000000","duration_ts":30720,"duration":"2.000000","bit_rate":"6688","bits_per_raw_sample":"8","nb_frames":"60","extradata_size":47},{"index":1,"codec_name":"aac","codec_long_name":"AAC (Advanced Audio Coding)","profile":"LC","codec_type":"audio","codec_tag_string":"mp4a","codec_tag":"0x6134706d","mime_codec_string":"mp4a.40.2","sample_fmt":"fltp","sample_rate":"44100","channels":1,"channel_layout":"mono","bits_per_sample":0,"initial_padding":1024,"seek_preroll":1024,"id":"0x2","r_frame_rate":"0/0","avg_frame_rate":"0/0","time_base":"1/44100","start_pts":0,"start_time":"0.000000","duration_ts":88200,"duration":"2.000000","bit_rate":"67766","nb_frames":"88","extradata_size":5},{"index":2,"codec_name":"aac","codec_long_name":"AAC (Advanced Audio Coding)","profile":"LC","codec_type":"audio","codec_tag_string":"mp4a","codec_tag":"0x6134706d","mime_codec_string":"mp4a.40.2","sample_fmt":"fltp","sample_rate":"44100","channels":1,"channel_layout":"mono","bits_per_sample":0,"initial_padding":1024,"seek_preroll":1024,"id":"0x3","r_frame_rate":"0/0","avg_frame_rate":"0/0","time_base":"1/44100","start_pts":0,"start_time":"0.000000","duration_ts":88200,"duration":"2.000000","bit_rate":"67504","nb_frames":"88","extradata_size":5},{"index":3,"codec_type":"data","codec_tag_string":"tmcd","codec_tag":"0x64636d74","id":"0x4","r_frame_rate":"0/0","avg_frame_rate":"30/1","time_base":"1/30","start_pts":0,"start_time":"0.000000","duration_ts":60,"duration":"2.000000","bit_rate":"16","nb_frames":"1","extradata_size":20}],"format":{"duration":"2.000000"}}"#;
+        let probe = parse_probe(clip).unwrap();
+        assert_eq!((probe.width, probe.height, probe.audio_count), (320, 180, 1));
+        assert_eq!(probe.video_codec, "h264");
+    }
+
+    #[test]
     fn frame_dimensions_preserve_source_or_fit_selected_canvas() {
         let source = Probe { duration: 2.0, width: 640, height: 360, video_start: 0.0,
             audio_start: None, audio_duration: None, audio_count: 0, video_codec: "h264".into(), audio_codec: None };
