@@ -1651,6 +1651,15 @@ pub(crate) fn read_image_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8
     read_capped(file, MAX_IMAGE_FILE_BYTES)
 }
 
+/// First bytes of an image file, enough for a JPEG's headers (APP segments are 64 KB each); reading the whole file only to size a reservation would double the I/O of every large image.
+fn read_image_head(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    const HEAD_BYTES: u64 = 4 * 1024 * 1024;
+    let file = open_image_file(path)?;
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, HEAD_BYTES), &mut buf)?;
+    Ok(buf)
+}
+
 fn read_capped(mut file: impl std::io::Read + Len, cap: u64) -> std::io::Result<Vec<u8>> {
     let len = file.len()?;
     if len > cap {
@@ -1813,7 +1822,7 @@ fn scaled_jpeg_reservation_for(path: &std::path::Path, bytes: Option<&[u8]>) -> 
     if !jpeg_scaled_decode_enabled() {
         return None;
     }
-    let bytes = read_image_bytes(path).ok()?;
+    let bytes = read_image_head(path).ok()?;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&bytes))).ok().flatten()
 }
 
@@ -3195,6 +3204,10 @@ mod tests {
         }
     }
 
+    fn production_source() -> &'static str {
+        include_str!("tagging.rs").split("#[cfg(test)]\nmod tests").next().unwrap()
+    }
+
     #[test]
     fn image_files_are_read_into_memory_never_mapped() {
         for (name, source) in [
@@ -4141,6 +4154,11 @@ mod tests {
         assert_eq!(scaled_jpeg_reservation_for(&path, None), Some(reserved));
         assert_eq!(scaled_jpeg_reservation_for(&path, Some(&big)), Some(reserved));
         std::fs::write(dir.join("not.jpg"), b"not a jpeg at all").unwrap();
+        let mut padded = big.clone();
+        padded.resize(40 * 1024 * 1024, 0);
+        std::fs::write(dir.join("padded.jpg"), &padded).unwrap();
+        assert_eq!(scaled_jpeg_reservation_for(&dir.join("padded.jpg"), None), Some(reserved), "only the head of a large file is needed");
+        assert!(production_source().contains("read_image_head(path).ok()?"), "the reservation must not read the whole file");
         assert_eq!(scaled_jpeg_reservation_for(&dir.join("not.jpg"), None), None);
         assert_eq!(scaled_jpeg_reservation_for(&dir.join("missing.jpg"), None), None);
         let _ = std::fs::remove_dir_all(&dir);
