@@ -32,3 +32,48 @@ struct SankeySlotTests {
         }
     }
 }
+
+@MainActor @Suite("Folder map hover")
+struct SankeyHoverTests {
+    private func proposal(_ id: Int64, from folder: String, to bucket: String, kind: RestructureView.ProposalKind = .movedOutAsOutlier) -> RestructureView.Proposal {
+        RestructureView.Proposal(fileID: id, oldPath: "\(folder)/\(id).jpg", newPath: "\(bucket)/\(id).jpg", bucket: bucket, sourceFolder: folder,
+                                 filename: "\(id).jpg", sourceName: folder, kind: kind)
+    }
+
+    private func crowded() -> SankeyFlowView.Layout {
+        var proposals: [RestructureView.Proposal] = []
+        var id: Int64 = 0
+        for folder in 0..<12 {
+            for _ in 0..<(40 - folder) {
+                id += 1
+                proposals.append(proposal(id, from: "/lib/Folder\(folder)", to: "Bucket\(folder)", kind: folder.isMultiple(of: 2) ? .dissolved : .movedOutAsOutlier))
+            }
+        }
+        return SankeyFlowView.computeLayout(proposals: proposals, width: 900, height: 600)
+    }
+
+    @Test func aRibbonIntoTheRolledUpGroupNamesTheGroupNotOneFolder() throws {
+        let layout = crowded()
+        let rolled = try #require(layout.flows.first { $0.sourceID == SankeyFlowView.otherSourceID && $0.destID == SankeyFlowView.otherDestID })
+        #expect(rolled.sourceName == SankeyFlowView.otherFoldersName(layout.rollupSourceFolders.count))
+        #expect(rolled.destName == SankeyFlowView.otherFoldersName(layout.rollupDestBuckets.count))
+        let own = try #require(layout.flows.first { $0.sourceID != SankeyFlowView.otherSourceID })
+        #expect(own.sourceName == "Folder0" || own.sourceName.hasPrefix("Folder"))
+    }
+
+    @Test func hoveringAFolderOrBucketOrOutcomeTracesItsRibbons() throws {
+        let layout = crowded()
+        let visibleFolder = try #require(layout.sources.first { $0.id != SankeyFlowView.otherSourceID })
+        let traced = layout.highlightedFlowIDs(for: .sourceFolder(visibleFolder.identityKey))
+        #expect(!traced.isEmpty)
+        #expect(traced.allSatisfy { layout.flowsByID[$0]?.sourceID == visibleFolder.id })
+        let bucket = try #require(layout.destinations.first { $0.id != SankeyFlowView.otherDestID })
+        let into = layout.highlightedFlowIDs(for: .destBucket(bucket.identityKey))
+        #expect(!into.isEmpty && into.allSatisfy { layout.flowsByID[$0]?.destID == bucket.id })
+        let tail = try #require(layout.rollupSourceFolders.first)
+        #expect(!layout.highlightedFlowIDs(for: .sourceFolder(tail)).isEmpty)
+        #expect(!layout.highlightedFlowIDs(for: .outcome(.reorganize)).isEmpty)
+        #expect(layout.highlightedFlowIDs(for: .outcome(.keep)).isEmpty)
+        #expect(layout.highlightedFlowIDs(for: nil).isEmpty)
+    }
+}
