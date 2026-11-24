@@ -665,6 +665,16 @@ fn top_k_neighbours(mut hits: Vec<Neighbor>, k: usize) -> Vec<Neighbor> {
     hits
 }
 
+/// Names of the folders already directly under the library root, so a new group is never minted with a name that would silently join an unrelated existing folder.
+pub(crate) fn existing_group_names(library_root: &Path) -> std::collections::HashSet<String> {
+    let Ok(entries) = std::fs::read_dir(library_root) else { return Default::default() };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().to_str().map(crate::util::path_safety::safe_filename_component))
+        .collect()
+}
+
 /// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
 /// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
 fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec<usize> {
@@ -874,6 +884,29 @@ mod tests {
         assert!(ids[..40].iter().zip(&ids[3_500..3_540]).all(|(a, b)| a == b), "identical vectors share a cluster");
     }
 
+    #[test]
+    fn a_new_group_never_takes_the_name_of_a_folder_already_in_the_library() {
+        let root = std::env::temp_dir().join(format!("fileid-group-names-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("Beach Trip")).unwrap();
+        std::fs::write(root.join("notes.txt"), b"").unwrap();
+        let mut used = existing_group_names(&root);
+        assert!(used.contains("Beach Trip") && !used.contains("notes.txt") && used.len() == 1);
+        let files: Vec<SemanticFile> = (0..6)
+            .map(|i| SemanticFile {
+                file_id: i,
+                source: root.join(format!("loose/{i}.jpg")),
+                clip: unit(vec![1.0, 0.0, 0.0, 0.0]),
+                tags: vec!["beach".into(), "trip".into()],
+                time_unix: 0.0,
+            })
+            .collect();
+        let moves = semantic_classify(&files, &[], &root, &mut used, &mut std::collections::HashSet::new());
+        assert!(!moves.is_empty());
+        assert!(moves.iter().all(|m| m.destination.parent() != Some(&root.join("Beach Trip"))), "{:?}", moves[0].destination);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold they must not build a graph at all: counts HNSW distance evaluations (not time, so load can't flip it); building the graph for this shape took about 7 evaluations per pair.
     /// Bag-of-words vectors (the non-image pass) are multi-hot, so many pairs tie. Past the HNSW threshold they must not build a graph at all: counts HNSW distance evaluations (not time, so load can't flip it); building the graph for this shape took about 7 evaluations per pair.
     #[test]
     fn quantized_vectors_past_the_hnsw_threshold_build_no_graph() {
