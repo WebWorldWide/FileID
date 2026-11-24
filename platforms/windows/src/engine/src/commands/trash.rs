@@ -550,13 +550,16 @@ pub(crate) fn library_roots(conn: &rusqlite::Connection) -> rusqlite::Result<Vec
 }
 
 /// The roots the catalog and this journal item recorded that are not reachable now, such as an unplugged drive. Used only to word a refusal; it never authorizes anything.
-fn unreachable_roots(conn: &rusqlite::Connection, item: &trash_log::TrashLogItem) -> Vec<std::path::PathBuf> {
-    let mut raw: Vec<String> = conn
-        .prepare("SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL")
-        .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>())
-        .unwrap_or_default();
+fn unreachable_roots(mut raw: Vec<String>, item: &trash_log::TrashLogItem) -> Vec<std::path::PathBuf> {
     raw.extend(item.library_root.clone());
     raw.into_iter().map(std::path::PathBuf::from).filter(|root| std::fs::canonicalize(root).is_err()).collect()
+}
+
+/// Read under the lock; the reachability checks of these roots must run after it is released.
+fn recorded_scan_roots(conn: &rusqlite::Connection) -> Vec<String> {
+    conn.prepare("SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL")
+        .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>())
+        .unwrap_or_default()
 }
 
 fn refusal_text(unreachable: &[std::path::PathBuf], original: &std::path::Path) -> String {
@@ -608,6 +611,7 @@ pub(crate) fn restore_batch(
         let mut entry = trash_log::read_batch(batch_id)?
             .ok_or_else(|| anyhow::anyhow!("trash log batch {batch_id} not found"))?;
         let library_roots = library_roots(&db.lock())?;
+        let scan_roots = recorded_scan_roots(&db.lock());
 
         let mut outcomes: Vec<Option<RestoreOutcome>> =
             std::iter::repeat_with(|| None).take(entry.items.len()).collect();
@@ -622,7 +626,7 @@ pub(crate) fn restore_batch(
             let occupied = original.symlink_metadata().is_ok();
             match restore_disposition(allowed, occupied) {
                 RestoreDisposition::Refused => {
-                    outcomes[index] = Some(RestoreOutcome::Refused(refusal_text(&unreachable_roots(&db.lock(), item), original)));
+                    outcomes[index] = Some(RestoreOutcome::Refused(refusal_text(&unreachable_roots(scan_roots.clone(), item), original)));
                 }
                 RestoreDisposition::Conflict => {
                     outcomes[index] = Some(occupied_outcome(&db.lock(), item, original));
@@ -1842,7 +1846,7 @@ mod tests {
             conn.execute("INSERT INTO scan_sessions(id,root_path,started_at,status) VALUES(?1,?2,0,'completed')", [id, root.to_string_lossy().as_ref()]).unwrap();
         }
         let item = journal_item(&missing.join("trip/a.jpg"), None);
-        let unreachable = unreachable_roots(&conn, &item);
+        let unreachable = unreachable_roots(recorded_scan_roots(&conn), &item);
         assert_eq!(unreachable, vec![missing.clone()]);
         assert!(refusal_text(&unreachable, &missing.join("trip/a.jpg")).contains("Reconnect"));
         let elsewhere = refusal_text(&unreachable, &base.join("other/a.jpg"));
