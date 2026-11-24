@@ -959,9 +959,14 @@ public final class EngineClient {
     private func startPendingScan() {
         guard let root = pendingScanRoot else { return }
         pendingScanRoot = nil
-        clearProgress()
-        startScan(rootURL: root)
         pendingScanRetryRoot = root
+        // The ended scan's remaining terminal events (phase change, scanComplete) follow its first one within moments; a start sent now would have its App-Nap token released by them.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self, self.pendingScanRetryRoot == root else { return }
+            self.clearProgress()
+            self.startScan(rootURL: root)
+        }
     }
 
     private var pendingScanRetryRoot: URL?
@@ -969,6 +974,10 @@ public final class EngineClient {
     /// The engine can report the old scan ended a moment before it frees its slot, so a start sent right then bounces; try again a few times rather than dropping the user's folder.
     private func retryScanStartWhileOldScanDrains() {
         guard let root = pendingScanRetryRoot else { return }
+        if let phase = lastProgress?.phase, [.discovering, .tagging, .postScan].contains(phase) {
+            pendingScanRetryRoot = nil
+            return
+        }
         guard scanBusyRetriesLeft > 0 else {
             pendingScanRetryRoot = nil
             endScanActivity()
