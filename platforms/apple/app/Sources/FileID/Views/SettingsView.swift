@@ -91,7 +91,7 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Storage").font(Theme.Font.body(12.5, .semibold))
                                 infoRow("Total files",   store.totalFiles.formatted())
-                                infoRow("Photos tagged", store.totalImages.formatted())
+                                infoRow("Photos", store.totalImages.formatted())
                                 infoRow("Sets of duplicates", store.totalDuplicateGroups.formatted())
                                 infoRow("Space duplicates use", Self.duplicateSpaceLabel(reclaimableBytes: store.totalReclaimableBytes))
                                 infoRow("Library file", PathText.abbreviated(ReadStore.defaultDBURL.path), isPath: true)
