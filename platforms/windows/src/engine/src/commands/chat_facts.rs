@@ -43,6 +43,8 @@ pub(crate) struct Filter {
     pub max_bytes: Option<i64>,
     pub camera: Option<String>,
     pub root: Option<RootScope>,
+    /// Only files showing someone ("photos of people"): a face that is not excluded, or a person observed by the user.
+    pub with_faces: bool,
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Value {
@@ -108,6 +110,9 @@ impl Filter {
             parts.push("lower(trim(f.camera_model))=lower(?)".into());
             args.push(Value::Text(camera.clone()));
         }
+        if self.with_faces {
+            parts.push("f.id IN (SELECT file_id FROM face_prints WHERE COALESCE(excluded,0)=0 UNION SELECT file_id FROM catalog_observations WHERE person_id IS NOT NULL AND stale=0)".into());
+        }
         if let Some(min) = self.min_bytes {
             parts.push("f.size_bytes>?".into());
             args.push(Value::Integer(min));
@@ -170,6 +175,9 @@ impl Filter {
         let mut text = String::new();
         if let Some(subject) = self.subject.as_deref().filter(|subject| !subject.is_empty()) {
             let _ = write!(text, " matching “{subject}”");
+        }
+        if self.with_faces {
+            text += " with people";
         }
         if !self.extensions.is_empty() {
             let _ = write!(text, " in {} format", format_label(&self.extensions));
@@ -824,6 +832,13 @@ pub(crate) const SUBJECT_LIMIT: usize = 200_000;
 /// first few (Swift `ChatFacts.subjectGroups`).
 pub(crate) const SUBJECT_MAX_GROUPS: usize = 6;
 pub(crate) const SUBJECT_MAX_WORDS: usize = 8;
+
+const PEOPLE_SUBJECTS: [&str; 9] = ["people", "person", "persons", "faces", "face", "anyone", "someone", "somebody", "humans"];
+
+/// "photos of people", "pictures with faces": the subject asks for anyone at all, not for a word.
+pub(crate) fn asks_for_anyone(query: &str) -> bool {
+    matches!(subject_groups(query).as_slice(), [group] if !group.is_empty() && group.iter().all(|word| PEOPLE_SUBJECTS.contains(&word.as_str())))
+}
 
 pub(crate) fn subject_groups(query: &str) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = vec![vec![]];

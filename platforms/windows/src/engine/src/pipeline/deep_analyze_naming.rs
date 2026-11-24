@@ -724,6 +724,19 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_without_tags_keeps_its_other_sections_and_leaves_tags_to_the_fallback() {
+        let (description, tags, proposed_name) =
+            parse_combined_visual_completion("DESCRIPTION: A lake below snowy peaks.\nFILENAME: mountain-lake-at-dawn", true);
+        assert_eq!(description.as_deref(), Some("A lake below snowy peaks."));
+        assert!(tags.is_empty(), "no TAGS section, so the tag fallback runs");
+        assert_eq!(proposed_name.as_deref(), Some("mountain-lake-at-dawn"));
+        let named = combined_visual_prompt(&[], true);
+        let plain = combined_visual_prompt(&[], false);
+        assert!(named.contains("TAGS:") && named.contains("FILENAME:"));
+        assert!(plain.contains("TAGS:") && !plain.contains("FILENAME:"), "a pass without renames never asks for a name");
+    }
+
+    #[test]
     fn grounded_tag_fallback_recovers_specific_caption_terms() {
         let tags = grounded_fallback_tags(
             "The sign reads Missouri Baptist Medical Center on a black background.",

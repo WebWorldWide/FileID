@@ -688,7 +688,7 @@ pub fn parse_question(text: &str) -> Question {
             "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
             "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
             "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
-            "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all",
+            "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all", "this",
         ];
         for (index, word) in words.iter().enumerate() {
             let names_the_library = matches!(word.as_str(), "this" | "the" | "our")

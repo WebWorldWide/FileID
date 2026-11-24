@@ -189,7 +189,9 @@ fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
     let gap = time_gap_secs();
     let (mut timed, untimed): (Vec<usize>, Vec<usize>) =
         (0..files.len()).partition(|&i| files[i].time_unix > 0.0);
-    timed.sort_unstable_by(|&a, &b| {
+    // Stable: files with one capture time (copies) keep their catalog order, which is the
+    // order the Swift engine's stable sort gives and the order the clusterer's tie-breaks see.
+    timed.sort_by(|&a, &b| {
         files[a]
             .time_unix
             .partial_cmp(&files[b].time_unix)
@@ -563,11 +565,12 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
 
 /// Lowercase alphanumeric filename tokens, extension dropped; drops pure-numeric, very short and generic camera/scan tokens, so `IMG_4821.heic` yields nothing while `acme_invoice_2023.pdf` yields `acme` + `invoice`.
 pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    // A name stored decomposed (e + U+0301) must tokenize like its composed twin:
+    // the combining mark is not alphanumeric and would split "résumé" into "r" "sum".
+    let stem = crate::pipeline::dbwriter::nfc_path_search(
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+    )
+    .to_lowercase();
     stem.split(|c: char| !c.is_alphanumeric())
         .filter(|t| {
             t.chars().count() >= 3
@@ -651,7 +654,19 @@ fn time_features(time_unix: f64) -> [f32; 5] {
 }
 
 
-/// Two-pass density clustering: brute-force cosine kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
+/// The `k` most similar neighbours, most similar first, ties by index.
+fn top_k_neighbours(mut hits: Vec<Neighbor>, k: usize) -> Vec<Neighbor> {
+    let cmp = |a: &Neighbor, b: &Neighbor| b.similarity.total_cmp(&a.similarity).then_with(|| a.idx.cmp(&b.idx));
+    if hits.len() > k {
+        hits.select_nth_unstable_by(k, cmp);
+        hits.truncate(k);
+    }
+    hits.sort_by(cmp);
+    hits
+}
+
+/// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
+/// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
 fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec<usize> {
     const HNSW_MIN: usize = 5_000;
     let n = fused.len();
@@ -660,21 +675,13 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
 
     let hnsw = (n >= HNSW_MIN && !exact_only).then(|| crate::util::hnsw_index::DedupIndex::build(fused));
 
-    // Bounded top-k: O(n) partition instead of an O(n log n) sort of all n-1 neighbors when only k are used.
-    let top_k = |mut hits: Vec<Neighbor>| {
-        let cmp = |a: &Neighbor, b: &Neighbor| {
-            b.similarity
-                .total_cmp(&a.similarity)
-                .then_with(|| a.idx.cmp(&b.idx))
-        };
-        if hits.len() > k {
-            hits.select_nth_unstable_by(k, cmp);
-            hits.truncate(k);
-        }
-        hits.sort_by(cmp);
-        hits
-    };
-    // Below HNSW_MIN every list is computed once, in parallel, up front: the clusterer asks for each file's neighbours up to three times, and the per-query scalar scan was most of a plan's time (1.1 s of 1.9 s on 3,400 photos).
+    // Bounded top-k: O(n) partition instead of an O(n log n) full sort of all n-1
+    // neighbors when only k are used; sort just the k kept.
+    let top_k = |hits: Vec<Neighbor>| top_k_neighbours(hits, k);
+    // Below HNSW_MIN every list is computed once, in parallel, before clustering:
+    // the clusterer asks for each file's neighbours up to three times, and the
+    // per-query scalar scan was most of a plan's time (1.1 s of 1.9 s on 3,400
+    // photos). The Swift engine does the same with one Accelerate matrix multiply.
     let exact: Option<Vec<Vec<Neighbor>>> = hnsw.is_none().then(|| {
         use rayon::prelude::*;
         (0..n)
@@ -691,7 +698,10 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
     });
 
     let mut knn_search = crate::util::hnsw_index::Searcher::default();
-    let result = identity_clustering::cluster(
+    // Single linkage, as the Swift engine's Restructure uses: the mutual-kNN gate that
+    // `identity_clustering::cluster` takes from the face settings (and the
+    // FILEID_FACE_MUTUAL_KNN variable) was never part of the calibration of these cosines.
+    let result = identity_clustering::cluster_with_options(
         fused,
         |i| match (&exact, &hnsw) {
             (Some(lists), _) => lists[i].clone(),
@@ -705,6 +715,8 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters, exact_only: bool) -> Vec
             (None, None) => Vec::new(),
         },
         params,
+        &[],
+        false,
     );
     result.cluster_ids
 }
@@ -902,6 +914,72 @@ mod tests {
             clip: unit(clip),
             tags: tags.iter().map(|&s| s.to_string()).collect(),
             time_unix: 0.0,
+        }
+    }
+
+    /// Two 13-photo folders 36 degrees apart and a stray 17 degrees from the first and 19 from the second.
+    /// The stray is in none of their 12-nearest lists (each photo has 12 identical neighbours nearer), so
+    /// a mutual-kNN gate leaves it out and the margin rule (0.01 < 0.08) keeps it out of both; single
+    /// linkage joins it to the first through its own list.
+    fn two_folders_and_a_stray() -> Vec<SemanticFile> {
+        let at = |degrees: f32| vec![degrees.to_radians().cos(), degrees.to_radians().sin(), 0.0];
+        let mut files: Vec<SemanticFile> =
+            (0..13).map(|i| file(i, &format!("/lib/Alpha/a{i}.jpg"), at(0.0), &[])).collect();
+        files.extend((13..26).map(|i| file(i, &format!("/lib/Beta/b{i}.jpg"), at(36.0), &[])));
+        files.push(file(99, "/lib/Inbox/stray.jpg", at(17.0), &[]));
+        files
+    }
+
+    /// The Swift engine's `RestructureSemanticTests` pins the same plan.
+    #[test]
+    fn a_stray_is_clustered_by_single_linkage() {
+        let files = two_folders_and_a_stray();
+        let protos = folder_prototypes(&files, 4);
+        let moves = semantic_classify(
+            &files,
+            &protos,
+            Path::new("/lib"),
+            &mut std::collections::HashSet::new(),
+            &mut std::collections::HashSet::new(),
+        );
+        let stray = moves.iter().find(|m| m.file_id == 99).expect("the stray is routed");
+        assert_eq!(stray.destination, PathBuf::from("/lib/Alpha/stray.jpg"));
+    }
+
+    #[test]
+    fn the_face_mutual_knn_setting_does_not_reach_restructure() {
+        let _guard = crate::util::hnsw_index::tests::COUNTING.lock().unwrap_or_else(|e| e.into_inner());
+        let fused: Vec<Vec<f32>> = two_folders_and_a_stray().iter().map(|f| f.clip.clone()).collect();
+        let default = cluster(&fused, file_hyperparams(), false);
+        // SAFETY: serialised by the shared test lock above; no other test reads this variable.
+        unsafe { std::env::set_var("FILEID_FACE_MUTUAL_KNN", "1") };
+        let forced = cluster(&fused, file_hyperparams(), false);
+        unsafe { std::env::remove_var("FILEID_FACE_MUTUAL_KNN") };
+        assert_eq!(default, forced);
+        assert_eq!(default[26], default[0], "the stray shares the first folder's cluster");
+        assert_ne!(default[0], default[13]);
+    }
+
+    /// Copies share a capture time. The segment order must be the catalog order for them (a stable
+    /// sort), whatever the slice length: the clusterer's tie-breaks follow it.
+    #[test]
+    fn equal_capture_times_keep_catalog_order_in_a_segment() {
+        let mut state = 11u64;
+        let files: Vec<SemanticFile> = (0..90)
+            .map(|i| {
+                let mut f = file(i, &format!("/lib/f{i}.jpg"), vec![1.0, 0.0, 0.0], &[]);
+                f.time_unix = 1_700_000_000.0 + (((lcg(&mut state) + 0.5) * 6.0) as i64) as f64 * 60.0;
+                f
+            })
+            .collect();
+        let segments = time_segment_indices(&files);
+        assert_eq!(segments.len(), 1);
+        for pair in segments[0].windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                files[a].time_unix.total_cmp(&files[b].time_unix).then(a.cmp(&b)).is_lt(),
+                "{a} before {b}"
+            );
         }
     }
 
@@ -1104,6 +1182,25 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_outside_the_library_root_is_never_a_routing_target() {
+        let files: Vec<SemanticFile> = (0..5)
+            .map(|i| file(i, &format!("inbox/d{i}.jpg"), vec![1.0, 0.0, 0.0], &["dog"]))
+            .collect();
+        // A perfect content match, but one is elsewhere and one only shares the root's spelling as a prefix.
+        let protos: Vec<FolderPrototype> = ["/other/Dogs", "/library/Dogs"]
+            .iter()
+            .map(|path| FolderPrototype {
+                path: PathBuf::from(path),
+                centroid: unit(vec![1.0, 0.0, 0.0]),
+                name_tokens: std::collections::HashSet::default(),
+            })
+            .collect();
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        assert!(!moves.is_empty(), "the cluster still gets a group inside the root");
+        assert!(moves.iter().all(|m| Path::new(&m.destination).starts_with("/lib")), "every destination stays inside the root: {moves:?}");
+    }
+
+    #[test]
     fn folder_prototypes_skip_sparse_folders() {
         let files = vec![
             file(1, "/lib/A/x.jpg", vec![1.0, 0.0], &[]),
@@ -1210,6 +1307,18 @@ mod tests {
 
 
     #[test]
+    fn filename_tokens_are_the_same_for_composed_and_decomposed_names() {
+        assert_eq!(
+            filename_tokens(Path::new("/a/re\u{301}sume\u{301}_u\u{308}ni\u{308}code_1.pdf")),
+            vec!["r\u{e9}sum\u{e9}".to_string(), "\u{fc}n\u{ef}code".to_string()]
+        );
+        assert_eq!(
+            filename_tokens(Path::new("/a/r\u{e9}sum\u{e9}_\u{fc}n\u{ef}code_1.pdf")),
+            vec!["r\u{e9}sum\u{e9}".to_string(), "\u{fc}n\u{ef}code".to_string()]
+        );
+    }
+
+    #[test]
     fn filename_tokens_keep_content_drop_generic() {
         assert_eq!(
             filename_tokens(Path::new("/a/acme_invoice_2023.pdf")),
@@ -1239,5 +1348,41 @@ mod tests {
         let dirs: std::collections::HashSet<_> =
             moves.iter().filter_map(|m| m.destination.parent().map(|p| p.to_path_buf())).collect();
         assert_eq!(dirs.len(), 2, "two content groups → two folders: {dirs:?}");
+    }
+
+    #[test]
+    fn the_k_nearest_selection_matches_a_full_sort_for_several_k() {
+        let n = 300usize;
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32) / 16_777_216.0 - 0.5
+        };
+        let vectors: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..48).map(|_| next()).collect();
+                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                for x in &mut v {
+                    *x /= norm;
+                }
+                v
+            })
+            .collect();
+        for query in [0usize, 17, 299] {
+            let all: Vec<Neighbor> = (0..n)
+                .filter(|&j| j != query)
+                .map(|j| Neighbor { idx: j, similarity: vectors[query].iter().zip(&vectors[j]).map(|(a, b)| a * b).sum() })
+                .collect();
+            let mut reference = all.clone();
+            reference.sort_by(|a, b| b.similarity.total_cmp(&a.similarity).then_with(|| a.idx.cmp(&b.idx)));
+            for k in [1, 5, n - 1] {
+                let got = top_k_neighbours(all.clone(), k);
+                let got: Vec<_> = got.iter().map(|h| (h.idx, h.similarity.to_bits())).collect();
+                let want: Vec<_> = reference.iter().take(k).map(|h| (h.idx, h.similarity.to_bits())).collect();
+                assert_eq!(got, want, "query {query}, k {k}");
+            }
+        }
     }
 }

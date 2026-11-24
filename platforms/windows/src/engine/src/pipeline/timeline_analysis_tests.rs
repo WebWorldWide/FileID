@@ -77,6 +77,15 @@ fn parse_moments_accepts_wrapped_json_and_rejects_bad_ranges() {
     assert!(parse_moments(reversed, &four).is_err());
 }
 
+#[test]
+fn a_moment_reply_over_sixteen_kilobytes_is_refused() {
+    let four = [0.0, 0.5, 1.0, 1.5];
+    let reply = "{\"moments\":[{\"title\":\"Kid swings bat\",\"summary\":\"\",\"firstFrame\":1,\"lastFrame\":3}]}";
+    let at_limit = format!("{reply}{}", " ".repeat(16_384 - reply.len()));
+    assert_eq!(parse_moments(&at_limit, &four).unwrap().len(), 1);
+    assert!(parse_moments(&format!("{at_limit} "), &four).is_err());
+}
+
 fn spans(moments: &[Moment]) -> Vec<(usize, usize)> {
     moments.iter().map(|m| (m.first_frame, m.last_frame)).collect()
 }
@@ -220,4 +229,30 @@ fn transcripts_strip_model_framing() {
     assert_eq!(transcript_text("language None<asr_text>"), "");
     assert_eq!(transcript_text("[SILENCE]"), "");
     assert_eq!(transcript_text("<asr_text>Hi</asr_text>"), "Hi");
+}
+
+#[test]
+fn similar_captions_confirm_no_chapter_change() {
+    let captions: Vec<Caption> = (0..5)
+        .map(|i| Caption { seconds: f64::from(i) * 10.0, text: "A birthday cake with candles on a table".into() })
+        .collect();
+    assert!(chapter_suggestions(1, "rev", "v", 50.0, &captions).is_empty());
+}
+
+#[test]
+fn moment_chapters_need_finite_increasing_frame_times_inside_the_window() {
+    let window = Window { start: 0.0, end: 10.0, times: vec![] };
+    let moments = vec![Moment { title: "Jump".into(), summary: String::new(), first_frame: 0, last_frame: 1 }];
+    assert_eq!(moment_chapters(&moments, &[0.0, 1.0, 2.0], &window, 1, "r", "v").len(), 1, "positive control");
+    for times in [
+        vec![0.0, f64::NAN, 2.0],
+        vec![0.0, f64::INFINITY, 2.0],
+        vec![2.0, 1.0, 0.0],
+        vec![0.0, 1.0, 1.0],
+        vec![0.0, 1.0, 11.0],
+        vec![-1.0, 1.0, 2.0],
+        vec![0.0],
+    ] {
+        assert!(moment_chapters(&moments, &times, &window, 1, "r", "v").is_empty(), "{times:?}");
+    }
 }

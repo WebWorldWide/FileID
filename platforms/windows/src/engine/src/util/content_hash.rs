@@ -651,6 +651,27 @@ mod tests {
     }
 
     #[test]
+    fn composite_hash_notices_a_change_in_only_the_first_or_only_the_last_edge_byte() {
+        // Larger than the 1 MiB head and tail chunks, so each edge is its own read.
+        let len = 6 * 1024 * 1024;
+        let base = vec![7u8; len];
+        let hash = |bytes: &[u8]| {
+            let p = tmp_with(bytes);
+            let h = hash_with_threshold(&p, len as u64, 4096, false).unwrap().0;
+            let _ = std::fs::remove_file(&p);
+            h
+        };
+        let reference = hash(&base);
+        let mut head = base.clone();
+        head[0] ^= 1;
+        let mut tail = base.clone();
+        tail[len - 1] ^= 1;
+        assert_ne!(hash(&head), reference, "a first byte alone changes the hash");
+        assert_ne!(hash(&tail), reference, "a last byte alone changes the hash");
+        assert_eq!(hash(&base), reference, "the same bytes hash the same");
+    }
+
+    #[test]
     fn legacy_under_cap_reproduces_the_full_blake3_v001_stamped() {
         let body: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);

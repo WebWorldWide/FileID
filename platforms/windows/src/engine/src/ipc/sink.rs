@@ -363,6 +363,33 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_channel_writes_and_flushes_every_buffered_event_including_the_terminal_one() {
+        #[derive(Clone, Default)]
+        struct Shared(std::sync::Arc<std::sync::Mutex<CountingWriter>>);
+        impl Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().flush()
+            }
+        }
+        let stream = Shared::default();
+        let (tx, mut rx) = mpsc::channel::<IpcEvent>(256);
+        for i in 0..50 {
+            tx.try_send(log_event(format!("event-{i}"))).unwrap();
+        }
+        tx.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Cancelled)))).unwrap();
+        drop(tx);
+        let mut handle = std::io::BufWriter::with_capacity(1 << 20, stream.clone());
+        drain_to(&mut handle, &mut rx);
+        let written = String::from_utf8(stream.0.lock().unwrap().bytes.clone()).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 51, "nothing stays in the buffer when the sink closes");
+        assert!(lines[50].contains("Cancelled") || lines[50].contains("cancelled"), "the terminal event is last: {}", lines[50]);
+    }
+
+    #[test]
     fn burst_writes_do_not_flush_per_frame() {
         let mut out = CountingWriter::default();
         let mut buf = Vec::new();

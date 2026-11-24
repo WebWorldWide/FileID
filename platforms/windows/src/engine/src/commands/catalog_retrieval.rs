@@ -70,6 +70,18 @@ pub(super) fn search(
                 .query_map(params![quoted, kinds, people, events, time, root], hit)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
+        // Names are typed from the start ("IMG_41" for "IMG_4181"): add files whose
+        // name or description has a word starting with each term, after the exact ones (none when the exact ones already fill the page).
+        let prefixed = crate::db::read::text::fts_prefix_query(query);
+        if !prefixed.is_empty() && hits.len() < 100 {
+            let exact = serde_json::to_string(&hits.iter().map(|h| h.file_id).collect::<Vec<_>>())?;
+            let sql = format!("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),NULL,NULL,NULL FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid WHERE {filters} AND catalog_file_fts MATCH ?1 AND f.id NOT IN (SELECT value FROM json_each(?7)) ORDER BY bm25(catalog_file_fts),f.id LIMIT 100");
+            hits.extend(
+                conn.prepare_cached(&sql)?
+                    .query_map(params![prefixed, kinds, people, events, time, root, exact], hit)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
     }
     if !quoted.is_empty() || time.is_some() {
         let predicate = if quoted.is_empty() {
@@ -220,6 +232,24 @@ mod tests {
         assert!(hits.is_empty(), "kind filter applies");
         assert!(search(&conn, "grass", &[], &[], &[], None, None).unwrap()[1].text.starts_with("Tags: grassland"));
         assert_eq!(ids("dogs on grass"), vec![1], "plural words reach singular tags");
+    }
+    #[test]
+    fn a_partial_name_finds_the_file_after_whole_word_matches() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, name) in [(1, "IMG_4181.jpg"), (2, "IMG_41.jpg"), (3, "IMG_4200.jpg"), (4, "notes 41.txt"), (5, "IMG_4182.jpg")] {
+            crate::db::test_support::insert_file(&conn, id, &format!("/fixture/{name}"), "image");
+        }
+        let ids = |q: &str| search(&conn, q, &[], &[], &[], None, None).unwrap().into_iter().map(|h| h.file_id).collect::<Vec<_>>();
+        assert_eq!(ids("IMG_4181"), vec![1]);
+        let partial = ids("IMG_41");
+        assert_eq!(partial[0], 2, "the whole-word match stays first");
+        let mut rest = partial[1..].to_vec();
+        rest.sort_unstable();
+        assert_eq!(rest, vec![1, 5]);
+        assert!(ids("4").is_empty(), "one-character terms stay whole words");
+        let mut both = ids("img_41 jp");
+        both.sort_unstable();
+        assert_eq!(both, vec![1, 2, 5], "every term may be a prefix");
     }
     #[test]
     fn plural_words_add_singular_stems() {

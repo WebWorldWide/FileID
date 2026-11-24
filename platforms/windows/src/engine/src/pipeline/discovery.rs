@@ -1405,7 +1405,51 @@ mod tests {
         assert!(classify_entry(&p, &skip4, &errors).discovered.is_some(), "size change defeats the skip");
     }
 
-    /// End-to-end guard: every file the receiver gets already carries a complete payload (size + modified + kind) built in the walk stage, and the whole set is produced before the consumer drains anything, pinning that stat work isn't re-serialized onto recv.
+    #[test]
+    fn the_skip_decision_follows_size_and_modified_time_over_the_whole_matrix() {
+        let tmp = tempdir_or_skip();
+        let p = tmp.path().join("photo.jpg");
+        std::fs::write(&p, b"jpegbytes").unwrap();
+        let errors = AtomicU64::new(0);
+        let live = classify_entry(&p, &HashMap::new(), &errors).discovered.expect("a new file is discovered");
+        let size = live.size_bytes as i64;
+        let m = live.modified_unix;
+        let discovered = |stored: (i64, Option<f64>)| {
+            let mut skips = HashMap::new();
+            skips.insert(path_fingerprint(&p), stored);
+            classify_entry(&p, &skips, &errors).discovered.is_some()
+        };
+        assert!(!discovered((size, Some(m))), "same size and time skips");
+        assert!(!discovered((size, Some(m + 4e-7))), "drift under a microsecond still skips");
+        assert!(discovered((size, Some(m + 3e-6))), "drift over a microsecond re-reads");
+        assert!(discovered((size, Some(m - 86_400.0))), "an edit that kept the size but has an older time on disk is re-read");
+        assert!(discovered((size, Some(m + 86_400.0))), "a stored time newer than the disk is a change too");
+        assert!(discovered((size + 1, Some(m))), "a different size re-reads");
+        assert!(discovered((size - 1, Some(m))), "a smaller stored size re-reads");
+        assert!(discovered((size, None)), "a row with no stored time is never current");
+        assert_eq!(errors.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn plain_text_data_and_camera_raw_extensions_classify_as_indexed_kinds() {
+        for ext in ["csv", "tsv", "json", "yaml", "yml", "log", "toml", "xml", "md", "txt"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Doc, "{ext}");
+        }
+        for ext in ["arw", "cr2", "cr3", "nef", "dng", "orf", "rw2", "raf", "srw", "pef", "x3f"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Image, "{ext}");
+        }
+        for ext in ["flac", "wav", "m4a", "opus", "aiff"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Audio, "{ext}");
+        }
+    }
+
+    /// end-to-end guard: every file the receiver gets must already
+    /// carry a complete payload (size + modified + kind) built in the walk
+    /// stage, and the whole set must be produced (done flag set) before the
+    /// consumer drains a single item. With the stat/file_ref work parallelized
+    /// into process_read_dir, the consumer is a pure take-and-send; this pins
+    /// that contract so a regression that re-serializes stat work onto recv —
+    /// or drops payload fields — is caught.
     #[test]
     fn payloads_ready_before_consumer_drains() {
         use std::fs;

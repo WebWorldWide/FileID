@@ -553,7 +553,8 @@ impl catch_up::Analyzer for CatchUp {
     fn ready_wait(&self, phase: catch_up::Phase) -> Duration {
         let warming = std::env::var("FILEID_OCR_WARMUP").ok().is_none_or(|value| value != "0");
         match phase {
-            catch_up::Phase::CarefulText if warming => Duration::from_secs(180),
+            // Wait only for a reader that is still compiling; one paused after failures stays paused for minutes.
+            catch_up::Phase::CarefulText if warming && !scan::ocr_warmed() => Duration::from_secs(180),
             _ => Duration::ZERO,
         }
     }

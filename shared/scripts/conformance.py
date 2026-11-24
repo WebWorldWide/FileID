@@ -23,7 +23,7 @@ A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {std_path:rel} (the path as Foundation standardizes it on
 macOS, how the engine names output files: /private/var/… → /var/…), {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
 {size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state}, {conversation}, {hardware} (the Mac's benchmark hardware string), {clip_model} (the CLIP
-embedding model id the engine derives from the model manifest) and {bookmark:rel} (a base64
+embedding model id the engine derives from the model manifest), {clip_index_job} (the id of the visual index job for that model) and {bookmark:rel} (a base64
 bookmark of the path, as the Mac app sends; macOS only); {"$var": "name.key"}
 substitutes a value saved by an earlier step's "save" (a name, or
 {"name", "path", "after"} to keep one field, optionally the text after a marker).
@@ -33,10 +33,11 @@ so a later "expect" can require the engine to echo it (bulkActionResult.commandI
 
 A catalog step with "until": seconds resends its request until "expect" matches or the
 time runs out, for durable jobs that finish after their reply.
+A step {"schemaOf": "<fixture>"} requires the catalog to have that fixture's schema objects and columns.
 A case may reuse another case's tree, sql and env with "extends". Tree paths expand
 placeholders, so "{state}/…" seeds a file in the engine's state folder; an "fs" step
-also checks "symlinks", empties folders ("emptyDir") and writes tree entries ("tree") before
-its checks.
+also checks "symlinks", empties folders ("emptyDir"), checks a folder's exact entry names ("entries": {folder: [names]})
+and writes tree entries ("tree") before its checks.
 A tree entry with "copy" copies a repo file (synthetic media under shared/test-corpus).
 A tree entry with "mtimeNs": [seconds, nanoseconds] sets the modification time exactly.
 A {"restart": true} step stops the engine and starts it again on the same state.
@@ -51,6 +52,15 @@ inside the catalog stay true; the file identities the Swift run recorded are
 refreshed to the replayed files. Such cases are macOS-only ("os": ["darwin"]) and
 must not run alongside another conformance run. A fixture case's "sql" runs after the
 fixture is laid out (e.g. to move a journaled time to now for a time-limited undo).
+A case with "fixture": "<name>" that names no folder under fixtures/swift-written may instead name a folder
+under shared/test-corpus/swift-written/<name>/ (see its README), with optional "fixtureOmit" (state files
+to leave out), "fixtureDropLines" ({state file: text that removes the lines holding it}) and "sql" (statements
+run on the seeded catalog): the harness seeds the state folder, the library tree and the catalog from that folder
+before the engine's first start. --verify-fixture <name> seeds such a folder in a scratch library and captures it
+again, which must give the same folder; it needs no engine. Fixture text expands {root}, {state}, {std_root},
+{std_state} (the folders as Foundation standardizes them), {device} (the library's volume), {inode:rel},
+{state_inode:rel}, {path_hash:rel} and {std_path_hash:rel}.
+Cases that name "requires" another engine or a "start" engine need the retired Swift engine and are skipped.
 A case with "model": {"repo": "<org>/<name>"} needs that MLX model installed
 ($FILEID_CONFORMANCE_MODELS, else ~/Documents/huggingface, read only) and is skipped
 without it: a real model is too large to ship in the repo and no engine may download
@@ -98,6 +108,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
 CASES = ROOT / "shared/test-corpus/conformance"
+FIXTURES = ROOT / "shared/test-corpus/swift-written"
 TIMEOUT = 30.0
 FORBIDDEN_ROOTS = ("/volumes/adlon", "/srv/data")
 PLACEHOLDER = re.compile(r"\{([a-z0-9_]+(?::[^{}]*)?)\}")
@@ -399,10 +410,17 @@ class Context:
 
     def placeholder(self, token):
         name, _, argument = token.partition(":")
-        if name == "root":
-            return str(self.root)
-        if name == "state":
-            return str(self.state)
+        if name in ("root", "state", "std_root", "std_state"):
+            value = {"root": str(self.root), "state": str(self.state),
+                     "std_root": foundation_standardized(str(self.root)),
+                     "std_state": foundation_standardized(str(self.state))}[name]
+            return value.replace("/", "\\/") if argument == "json" else value
+        if name == "device":
+            return self.root.stat().st_dev
+        if name == "state_inode":
+            return (self.state / argument).stat().st_ino
+        if name == "std_path_hash":
+            return path_hash(foundation_standardized(self.path(argument)), self.os)
         if name == "pid":
             return self.pid
         if name == "path":
@@ -425,6 +443,8 @@ class Context:
             return self.conversation
         if name == "clip_model":
             return clip_model()
+        if name == "clip_index_job":
+            return "catalog-index-" + hashlib.sha256(clip_model().encode()).hexdigest()
         if name == "hardware":
             return mac_hardware()
         if name == "bookmark":
@@ -697,6 +717,9 @@ def run_step(engine, ctx, step, binary):
         actual = chat_until_done(engine, request, seen)
     elif "db" in step:
         actual = db_rows(ctx, step["db"])
+    elif "schemaOf" in step:
+        same_schema_as(ctx, step["schemaOf"])
+        return engine
     elif "fs" in step:
         spec = ctx.expand(step["fs"])
         for relative in spec.get("emptyDir", []):
@@ -707,6 +730,10 @@ def run_step(engine, ctx, step, binary):
         for relative in spec.get("exists", []):
             if not Path(ctx.path(relative)).exists():
                 raise Failure(f"expected {relative} to exist")
+        for relative, names in spec.get("entries", {}).items():
+            found = sorted(os.listdir(ctx.path(relative)))
+            if found != sorted(names):
+                raise Failure(f"{relative} holds {[ascii(n) for n in found]}, expected {[ascii(n) for n in sorted(names)]}")
         for relative in spec.get("absent", []):
             if Path(ctx.path(relative)).exists() or Path(ctx.path(relative)).is_symlink():
                 raise Failure(f"expected {relative} to be absent")
@@ -808,8 +835,440 @@ def stage_model(ctx, source):
     ctx.extra_env["FILEID_HF_CACHE_ROOT"] = str(ctx.state.parent / "hf")
 
 
+class Raw(str):
+    """SQL text emitted as is (a placeholder standing in for an integer)."""
+
+
+def sql_literal(value):
+    if isinstance(value, Raw):
+        return str(value)
+    if value is None:
+        return "NULL"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise Failure("a catalog holds a non-finite number; it cannot be a text fixture")
+        return repr(value)
+    if isinstance(value, bytes):
+        return "X'" + value.hex() + "'"
+    if "\x00" in value:
+        return "CAST(X'" + value.encode().hex() + "' AS TEXT)"
+    return "'" + value.replace("'", "''") + "'"
+
+
+def quote_name(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
+FTS_SHADOWS = ("_data", "_idx", "_content", "_docsize", "_config")
+
+
+def catalog_objects(connection):
+    """sqlite_master rows in creation order, split into the tables (virtual tables
+    included, their shadow tables not), the shadow tables of the full-text indexes, and
+    the indexes, triggers and views that are created after the data."""
+    rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY rowid").fetchall()
+    virtual = [name for kind, name, _, sql in rows if kind == "table" and (sql or "").upper().startswith("CREATE VIRTUAL")]
+
+    def shadow(name):
+        return any(name == v + suffix for v in virtual for suffix in FTS_SHADOWS)
+    tables = [r for r in rows if r[0] == "table" and r[3] and not shadow(r[1]) and r[1] != "sqlite_sequence"]
+    shadows = [r for r in rows if r[0] == "table" and shadow(r[1])]
+    after = [r for r in rows if r[0] in ("index", "trigger", "view") and r[3]]
+    return tables, shadows, after, virtual
+
+
+def fts_content(sql):
+    """None for a full-text table that keeps its own text, else the table its text lives in."""
+    found = re.search(r"content\s*=\s*'?(\w*)'?", sql)
+    if found and not found.group(1):
+        raise Failure("a contentless full-text table cannot be dumped as text")
+    return found.group(1) if found else None
+
+
+def table_columns(connection, name):
+    """(columns to dump, whether the rowid is a column of its own, whether the table is WITHOUT ROWID)."""
+    info = connection.execute(f"PRAGMA table_xinfo({quote_name(name)})").fetchall()
+    columns = [row[1] for row in info if row[6] == 0]
+    without_rowid = bool(connection.execute("SELECT wr FROM pragma_table_list WHERE name=? AND schema='main'", (name,)).fetchone()[0])
+    keys = [row for row in info if row[5] > 0]
+    alias = len(keys) == 1 and (keys[0][2] or "").upper() == "INTEGER"
+    return columns, (not without_rowid and not alias), without_rowid
+
+
+def table_rows(connection, name):
+    columns, own_rowid, without_rowid = table_columns(connection, name)
+    names = (["rowid"] if own_rowid else []) + columns
+    order = ",".join(quote_name(c) for c in columns) if without_rowid else "rowid"
+    select = ",".join("rowid" if c == "rowid" else quote_name(c) for c in names)
+    return names, connection.execute(f"SELECT {select} FROM {quote_name(name)} ORDER BY {order}").fetchall()
+
+
+JSON_SLASH = "\\/"
+LEFTOVERS = ("/Users/", "/private/var", "/var/folders", "FileIDConformance-", "\\/Users\\/", "\\/private\\/var", "\\/var\\/folders")
+
+
+class Templater:
+    """Turns a live run's machine-specific text and numbers into placeholders and
+    refuses to write anything machine-specific that it could not turn."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        pairs = {}
+        for needle, name in ((str(ctx.root), "root"), (foundation_standardized(str(ctx.root)), "std_root"),
+                             (str(ctx.state), "state"), (foundation_standardized(str(ctx.state)), "std_state")):
+            pairs.setdefault(needle, name)
+        self.pairs = sorted(pairs.items(), key=lambda item: -len(item[0]))
+        self.numbers = {ctx.root.stat().st_dev: "{device}"}
+        for path in sorted(ctx.root.rglob("*")):
+            if path.is_file():
+                self.numbers.setdefault(path.stat().st_ino, "{inode:%s}" % path.relative_to(ctx.root).as_posix())
+        trash = ctx.state / "Trash"
+        for path in sorted(trash.rglob("*")) if trash.is_dir() else []:
+            if path.is_file():
+                self.numbers.setdefault(path.stat().st_ino, "{state_inode:Trash/%s}" % path.relative_to(trash).as_posix())
+
+    def add_paths(self, texts):
+        """A hash placeholder for every library path seen in the catalog or a journal, kept
+        or gone: the hash is a function of the path text alone."""
+        for text in texts:
+            text = text.replace(JSON_SLASH, "/")
+            for needle, _ in self.pairs:
+                if text.startswith(needle + "/"):
+                    relative = text[len(needle) + 1:]
+                    full = str(self.ctx.root / relative)
+                    self.numbers.setdefault(path_hash(full, self.ctx.os), "{path_hash:%s}" % relative)
+                    self.numbers.setdefault(path_hash(foundation_standardized(full), self.ctx.os), "{std_path_hash:%s}" % relative)
+
+    def text(self, value):
+        if PLACEHOLDER.search(value):
+            raise Failure(f"text already looks like a placeholder: {value[:80]!r}")
+        for needle, name in self.pairs:
+            value = value.replace(needle.replace("/", JSON_SLASH), "{%s:json}" % name).replace(needle, "{%s}" % name)
+        return value
+
+    def number(self, value):
+        if isinstance(value, int) and abs(value) >= 1_000_000 and value in self.numbers:
+            return Raw(self.numbers[value])
+        return value
+
+    def journal(self, raw):
+        """A journal or plan file: paths become placeholders, and so do the large integers
+        that stand for a file of this run (its inode, its path hash)."""
+        out = self.text(raw)
+        return re.sub(r"(?<![\w.])-?\d{7,}(?![\w.])", lambda m: self.numbers.get(int(m.group(0)), m.group(0)), out)
+
+    def data(self, value):
+        if isinstance(value, str):
+            return self.text(value)
+        if isinstance(value, list):
+            return [self.data(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.data(item) for key, item in value.items()}
+        return value
+
+
+def refuse_leftovers(text, where):
+    lowered = text.lower()
+    for marker in (*LEFTOVERS, str(Path.home()), tempfile.gettempdir(), "/private/tmp", "/tmp/"):
+        if marker.lower() in lowered:
+            raise Failure(f"{where} still holds {marker}")
+
+
+def dump_catalog(path, templater):
+    """The catalog as SQL a reviewer can read: its schema exactly as stored, one INSERT per
+    row, and the objects that fire on writes created after the data."""
+    with tempfile.TemporaryDirectory(prefix="FileIDDump-") as temporary:
+        copy = Path(temporary) / "fileid.sqlite"
+        for suffix in ("", "-wal", "-shm"):
+            if Path(str(path) + suffix).exists():
+                shutil.copy2(str(path) + suffix, str(copy) + suffix)
+        connection = sqlite3.connect(copy)
+        try:
+            tables, shadows, after, virtual = catalog_objects(connection)
+            pragmas = {name: connection.execute(f"PRAGMA {name}").fetchone()[0]
+                       for name in ("user_version", "application_id", "journal_mode", "page_size", "auto_vacuum")}
+            # The full-text indexes are rebuilt from their text on load: their segment files are a
+            # product of insertion history and would carry the capture machine's paths as tokens.
+            data = [(name, True, table_rows(connection, name)) for _, name, _, _ in shadows if name.endswith("_config")]
+            data += [(name, False, table_rows(connection, name)) for _, name, _, sql in tables if name not in virtual]
+            for _, name, _, sql in tables:
+                if name in virtual and not fts_content(sql):
+                    columns = [row[1] for row in connection.execute(f"PRAGMA table_xinfo({quote_name(name)})") if row[6] == 0]
+                    rows = connection.execute(
+                        f"SELECT rowid,{','.join(quote_name(c) for c in columns)} FROM {quote_name(name)} ORDER BY rowid").fetchall()
+                    data.append((name, False, (["rowid"] + columns, rows)))
+            templater.add_paths([cell for _, _, (_, rows) in data for row in rows for cell in row if isinstance(cell, str)])
+            lines = ["BEGIN;"] + [sql.rstrip(";") + ";" for _, _, _, sql in tables]
+            for name, shadow, (names, rows) in data:
+                if shadow:
+                    lines.append(f"DELETE FROM {quote_name(name)};")
+                columns = ",".join("rowid" if c == "rowid" else quote_name(c) for c in names)
+                for row in rows:
+                    cells = [sql_literal(templater.text(v) if isinstance(v, str) else templater.number(v)) for v in row]
+                    lines.append(f"INSERT INTO {quote_name(name)}({columns}) VALUES({','.join(cells)});")
+            lines.extend(f"INSERT INTO {quote_name(name)}({quote_name(name)}) VALUES('rebuild');"
+                         for _, name, _, sql in tables if name in virtual and fts_content(sql))
+            has_sequence = connection.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone()
+            if has_sequence:
+                names, rows = table_rows(connection, "sqlite_sequence")
+                if rows:
+                    lines.append("DELETE FROM sqlite_sequence;")
+                    lines.extend(f"INSERT INTO sqlite_sequence({','.join(names)}) VALUES({','.join(sql_literal(v) for v in row)});" for row in rows)
+            lines.extend(sql.rstrip(";") + ";" for _, _, _, sql in after)
+            lines.append("COMMIT;")
+        finally:
+            connection.close()
+    return "\n".join(lines) + "\n", pragmas
+
+
+def load_catalog(database, sql_text, pragmas):
+    database.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database, isolation_level=None)
+    try:
+        if pragmas.get("page_size"):
+            connection.execute(f"PRAGMA page_size={int(pragmas['page_size'])}")
+        if pragmas.get("auto_vacuum"):
+            connection.execute(f"PRAGMA auto_vacuum={int(pragmas['auto_vacuum'])}")
+        if str(pragmas.get("journal_mode", "")).lower() == "wal":
+            connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.executescript(sql_text)
+        connection.execute(f"PRAGMA application_id={int(pragmas.get('application_id', 0))}")
+        connection.execute(f"PRAGMA user_version={int(pragmas['user_version'])}")
+    finally:
+        connection.close()
+
+
+def catalog_image(path):
+    """Everything a catalog file holds, to compare two of them: its schema objects, the
+    rows of every table (the shadow tables of the full-text indexes included) and its pragmas."""
+    with tempfile.TemporaryDirectory(prefix="FileIDImage-") as temporary:
+        copy = Path(temporary) / "c.sqlite"
+        for suffix in ("", "-wal", "-shm"):
+            if Path(str(path) + suffix).exists():
+                shutil.copy2(str(path) + suffix, str(copy) + suffix)
+        connection = sqlite3.connect(copy)
+        try:
+            master = sorted(connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master"), key=repr)
+            image = {"master": master,
+                     "pragmas": {name: connection.execute(f"PRAGMA {name}").fetchone()[0]
+                                 for name in ("user_version", "application_id", "page_size", "auto_vacuum", "encoding")}}
+            virtual = [name for kind, name, _, sql in master if kind == "table" and (sql or "").upper().startswith("CREATE VIRTUAL")]
+            for kind, name, _, sql in master:
+                if kind != "table" or any(name == v + suffix for v in virtual for suffix in FTS_SHADOWS if suffix != "_config"):
+                    continue
+                if name in virtual:
+                    # the index itself: every term with its row, column and position, whatever its segment layout
+                    connection.execute(f"CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main,{sql_literal(name)},'instance')")
+                    image["index " + name] = sorted(connection.execute("SELECT term,doc,col,offset FROM temp.vocab").fetchall())
+                    connection.execute("DROP TABLE temp.vocab")
+                    columns = [row[1] for row in connection.execute(f"PRAGMA table_xinfo({quote_name(name)})") if row[6] == 0]
+                    image["text " + name] = sorted(connection.execute(
+                        f"SELECT rowid,{','.join(quote_name(c) for c in columns)} FROM {quote_name(name)}").fetchall(), key=repr)
+                else:
+                    image["table " + name] = sorted(table_rows(connection, name)[1], key=repr)
+            return image
+        finally:
+            connection.close()
+
+
+def differing(left, right):
+    return [key for key in sorted(set(left) | set(right)) if left.get(key) != right.get(key)]
+
+
+FIXTURE_FORMAT = 1
+STATE_SKIP = ("FileID/fileid.sqlite", "FileID/logs/", "home/", "Models/")
+
+
+def fixture_files(ctx):
+    """(area, path, relative path) of the library files and state files a fixture keeps:
+    the state folder minus the catalog (kept as SQL), logs and the empty scratch folders."""
+    for path in sorted(ctx.root.rglob("*")):
+        if path.is_symlink():
+            raise Failure(f"{path} is a symbolic link; a fixture holds none")
+        if path.is_file():
+            yield "tree", path, path.relative_to(ctx.root).as_posix()
+    for path in sorted(ctx.state.rglob("*")):
+        relative = path.relative_to(ctx.state).as_posix()
+        if path.is_file() and not any(relative.startswith(skip) for skip in STATE_SKIP):
+            yield "state", path, relative
+
+
+CATALOG_HEADER = "-- The catalog the Swift engine wrote, as SQL (see README.md); placeholders expand when a case seeds it.\n"
+
+
+def capture_fixture(ctx, case, target, copies):
+    """Write the folder `target` from the closed-engine state of a run: the catalog as SQL,
+    the library tree, the state files, and the values earlier steps saved."""
+    target = Path(target)
+    if target.exists():
+        if not (target / "fixture.json").exists():
+            raise Failure(f"{target} exists and is not a fixture folder")
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    templater = Templater(ctx)
+    state_texts = {}
+    for area, path, relative in fixture_files(ctx):
+        if area == "state" and relative.endswith((".json", ".ndjson")):
+            state_texts[relative] = path.read_text(encoding="utf-8")
+            templater.add_paths(re.findall(r'"([^"]*)"', state_texts[relative].replace(JSON_SLASH, "/")))
+    sql_text, pragmas = dump_catalog(ctx.database, templater)
+    refuse_leftovers(sql_text, "catalog.sql")
+    (target / "catalog.sql").write_text(CATALOG_HEADER + sql_text, encoding="utf-8")
+    files = []
+    for area, path, relative in fixture_files(ctx):
+        stat = path.stat()
+        entry = {"area": area, "path": relative, "mtimeNs": [stat.st_mtime_ns // 1_000_000_000, stat.st_mtime_ns % 1_000_000_000]}
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        destination = target / area / relative
+        if area == "tree" and digest in copies:
+            entry["copy"] = copies[digest]
+        elif relative in state_texts:
+            text = templater.journal(state_texts[relative])
+            refuse_leftovers(text, relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text, encoding="utf-8", newline="")
+            entry["template"] = True
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        files.append(entry)
+    saved = templater.data(json.loads(json.dumps(ctx.saved)))
+    meta = {"format": FIXTURE_FORMAT, "capturedFrom": case["name"], "writtenBy": ctx.flavor, "conversation": ctx.conversation,
+            "pragmas": pragmas, "vars": saved, "files": files,
+            "dirs": [p.relative_to(ctx.root).as_posix() for p in sorted(ctx.root.rglob("*")) if p.is_dir()]}
+    refuse_leftovers(json.dumps(meta), "fixture.json")
+    (target / "fixture.json").write_text(json.dumps(meta, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def repo_copies():
+    """sha256 → repo path of the synthetic media files that cases copy into a library."""
+    found = {}
+    for folder in ("shared/test-corpus/conformance-media", "shared/test-corpus/ocr"):
+        for path in sorted((ROOT / folder).rglob("*")):
+            if path.is_file():
+                found.setdefault(hashlib.sha256(path.read_bytes()).hexdigest(), path.relative_to(ROOT).as_posix())
+    return found
+
+
+def expand_text(ctx, text):
+    """Placeholders inside a whole text, always as text (ctx.expand returns a number for a
+    string that is one placeholder)."""
+    return PLACEHOLDER.sub(lambda m: str(ctx.placeholder(m.group(1))), text)
+
+
+def seed_fixture(ctx, name, omit=(), drop_lines=None):
+    """Recreate a captured run before the engine's first start: library files with their
+    modification times, state files, the catalog, and the values earlier steps saved."""
+    base = FIXTURES / name
+    meta = json.loads((base / "fixture.json").read_text(encoding="utf-8"))
+    if meta["format"] != FIXTURE_FORMAT:
+        raise Failure(f"fixture {name} has format {meta['format']}")
+    (ctx.state / "FileID").mkdir(parents=True, exist_ok=True)
+    for relative in meta["dirs"]:
+        (ctx.root / relative).mkdir(parents=True, exist_ok=True)
+    roots = {"tree": ctx.root, "state": ctx.state}
+    for templated in (False, True):
+        for entry in meta["files"]:
+            if bool(entry.get("template")) != templated or (entry["area"] == "state" and entry["path"] in omit):
+                continue
+            destination = roots[entry["area"]] / entry["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source = base / entry["area"] / entry["path"]
+            if "copy" in entry:
+                destination.write_bytes((ROOT / entry["copy"]).read_bytes())
+            elif templated:
+                text = expand_text(ctx, source.read_text(encoding="utf-8"))
+                for needle in (drop_lines or {}).get(entry["path"], []):
+                    text = "".join(line for line in text.splitlines(keepends=True) if needle not in line)
+                destination.write_text(text, encoding="utf-8", newline="")
+            else:
+                destination.write_bytes(source.read_bytes())
+            seconds, nanoseconds = entry["mtimeNs"]
+            os.utime(destination, ns=(seconds * 1_000_000_000 + nanoseconds,) * 2)
+    sql_text = (base / "catalog.sql").read_text(encoding="utf-8")
+    load_catalog(ctx.database, expand_text(ctx, sql_text), meta["pragmas"])
+    ctx.saved.update(ctx.expand(meta["vars"]))
+    ctx.conversation = meta["conversation"]
+    return meta
+
+
+def schema_image(path):
+    """The objects (type, name, table) and, per table, the columns (name, type, not null, key) of a catalog."""
+    with tempfile.TemporaryDirectory(prefix="FileIDSchema-") as temporary:
+        copy = Path(temporary) / "c.sqlite"
+        for suffix in ("", "-wal", "-shm"):
+            if Path(str(path) + suffix).exists():
+                shutil.copy2(str(path) + suffix, str(copy) + suffix)
+        connection = sqlite3.connect(copy)
+        try:
+            objects = connection.execute("SELECT type,name,tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetchall()
+            tables = {name: connection.execute("SELECT name,type,\"notnull\",pk FROM pragma_table_info(?)", (name,)).fetchall()
+                      for kind, name, _ in objects if kind == "table"}
+            return {"objects": [list(row) for row in objects], "columns": tables}
+        finally:
+            connection.close()
+
+
+def same_schema_as(ctx, name):
+    """Fail unless this run's catalog has the objects and columns of the catalog in fixture `name`."""
+    with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=ctx.state.parent.parent) as temporary:
+        other = Context({"name": name}, ctx.flavor, ctx.os, Path(temporary))
+        seed_fixture(other, name)
+        wanted, actual = schema_image(other.database), schema_image(ctx.database)
+    problems = []
+    wanted_objects, actual_objects = {tuple(o) for o in wanted["objects"]}, {tuple(o) for o in actual["objects"]}
+    problems += [f"missing {kind} {object_name}" for kind, object_name, _ in sorted(wanted_objects - actual_objects)]
+    problems += [f"extra {kind} {object_name}" for kind, object_name, _ in sorted(actual_objects - wanted_objects)]
+    for table, columns in wanted["columns"].items():
+        if table in actual["columns"] and [list(c) for c in columns] != [list(c) for c in actual["columns"][table]]:
+            problems.append(f"table {table} has other columns")
+    if problems:
+        raise Failure(f"the catalog is not the {name} schema: " + "; ".join(problems[:12]))
+
+
+def fixture_tree(path):
+    return {p.relative_to(path).as_posix(): p.read_bytes() for p in sorted(Path(path).rglob("*")) if p.is_file()}
+
+
+def verify_fixture(name, parent, os_name):
+    """Seed a fixture into a scratch library and capture it again: the result must be the
+    same folder, so no placeholder is lost or invented. Needs no engine."""
+    with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
+        ctx = Context({"name": name}, "swift", os_name, Path(temporary))
+        meta = seed_fixture(ctx, name)
+        ctx.saved = ctx.expand(meta["vars"])
+        again = Path(temporary) / "again"
+        capture_fixture(ctx, {"name": meta["capturedFrom"]}, again, repo_copies())
+        left, right = fixture_tree(FIXTURES / name), fixture_tree(again)
+        same_forms = str(ctx.root) == foundation_standardized(str(ctx.root))
+        if same_forms:
+            for tree in (left, right):
+                for key, data in tree.items():
+                    tree[key] = data.replace(b"{std_root", b"{root").replace(b"{std_state", b"{state")
+        problems = [key for key in sorted(set(left) | set(right)) if left.get(key) != right.get(key)]
+        if problems:
+            raise Failure(f"fixture {name} does not capture back to itself: {', '.join(problems)}")
+        return same_forms
+
+
+def check_catalog_round_trip(ctx, directory):
+    """The captured SQL, expanded here, must rebuild the live catalog exactly."""
+    meta = json.loads((Path(directory) / "fixture.json").read_text(encoding="utf-8"))
+    sql_text = expand_text(ctx, (Path(directory) / "catalog.sql").read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory(prefix="FileIDRoundTrip-") as temporary:
+        rebuilt = Path(temporary) / "fileid.sqlite"
+        load_catalog(rebuilt, sql_text, meta["pragmas"])
+        problems = differing(catalog_image(ctx.database), catalog_image(rebuilt))
+    if problems:
+        raise Failure(f"the dump does not rebuild the catalog: {', '.join(problems)}")
+
+
 FIXTURE_FOLDER = Path("/private/tmp/fileid-conformance-fixture")
-FIXTURES = CASES / "fixtures/swift-written"
+PINNED_FIXTURES = CASES / "fixtures/swift-written"
 
 
 def lay_out_fixture(ctx):
@@ -817,7 +1276,7 @@ def lay_out_fixture(ctx):
     generated tree (no catalog rows: the fixture's catalog has them), then the files
     the Swift run added or changed, the ones it removed, every file's modification
     time, the chat conversation id, and the file identities of the replayed files (inodes cannot be committed)."""
-    source = FIXTURES / ctx.case["fixture"]
+    source = PINNED_FIXTURES / ctx.case["fixture"]
     manifest = json.loads((source / "fixture.json").read_text(encoding="utf-8"))
     build_tree(ctx, ctx.case.get("tree", []))
     if (source / "tree").is_dir():
@@ -837,7 +1296,7 @@ def lay_out_fixture(ctx):
 
 @contextlib.contextmanager
 def case_directory(case, parent):
-    if "fixture" not in case:
+    if "fixture" not in case or not (PINNED_FIXTURES / case["fixture"]).is_dir():
         with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
             yield Path(temporary)
         return
@@ -855,8 +1314,10 @@ def run_case(case, flavor, binary, os_name, parent):
         ctx = Context(case, flavor, os_name, directory)
         if case.get("model"):
             stage_model(ctx, model_source(case))
-        if "fixture" in case:
+        if "fixture" in case and (PINNED_FIXTURES / case["fixture"]).is_dir():
             lay_out_fixture(ctx)
+        elif "fixture" in case:
+            seed_fixture(ctx, case["fixture"], case.get("fixtureOmit", ()), case.get("fixtureDropLines"))
         else:
             start(binary, ctx).close()
             rows = build_tree(ctx, case.get("tree", []))
@@ -875,7 +1336,8 @@ def run_case(case, flavor, binary, os_name, parent):
                 except (Failure, TimeoutError, RuntimeError) as error:
                     raise Failure(f"{label}: {error}") from None
         finally:
-            engine.close()
+            if engine:
+                engine.close()
 
 
 def load_cases(selected):
@@ -916,17 +1378,32 @@ def safe_parent(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--engine", type=Path, required=True, help="engine binary under test")
+    parser.add_argument("--engine", type=Path, help="engine binary under test (not needed with --verify-fixture)")
     parser.add_argument("--flavor", choices=("auto", "rust"), default="auto")
     parser.add_argument("--case", action="append", default=[], help="glob of case names to run")
     parser.add_argument("--os", default=host_os(), help=argparse.SUPPRESS)
     parser.add_argument("--fixture-parent", type=Path, default=Path(tempfile.gettempdir()))
     parser.add_argument("--test-trash-root", action="store_true",
                         help="the engine was built with a test Trash root (see above)")
+    parser.add_argument("--verify-fixture", action="append", default=[], metavar="NAME",
+                        help="seed fixture NAME (a folder under shared/test-corpus/swift-written) in a scratch library, "
+                             "capture it again and require the same folder; needs no engine")
     args = parser.parse_args()
     global TEST_TRASH_ROOT
     TEST_TRASH_ROOT = args.test_trash_root
     parent = safe_parent(args.fixture_parent)
+    if args.verify_fixture:
+        failed = 0
+        for name in args.verify_fixture:
+            try:
+                same_forms = verify_fixture(name, parent, args.os)
+                print(f"VERIFIED {name}" + (" (the scratch folder has no /private form; std tokens compared as plain)" if same_forms else ""))
+            except Failure as failure:
+                failed += 1
+                print(f"FAIL   {name}: {failure}")
+        return 1 if failed else 0
+    if not args.engine:
+        parser.error("--engine is required unless --verify-fixture is given")
     binary = args.engine.resolve(strict=True)
     flavor = "rust"
     hosted_engine = is_app_hosted(binary, parent)
@@ -940,9 +1417,11 @@ def main():
         needs_symlinks = bool(case.get("requiresSymlinks")) and not symlinks_ok
         no_model = case.get("model") and model_source(case) is None
         unhosted = case.get("appHosted") and not hosted_engine
-        if needs_trash_root or unhosted or needs_symlinks or no_model or args.os not in case.get("os", [args.os]):
+        needs_peer = bool(case.get("requires") or case.get("start")) or "rust" not in case.get("engines", ["rust"])
+        if needs_peer or needs_trash_root or unhosted or needs_symlinks or no_model or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
-            reason = ("needs a test-trash-root engine build (--test-trash-root)" if needs_trash_root
+            reason = ("needs the retired Swift engine" if needs_peer
+                      else "needs a test-trash-root engine build (--test-trash-root)" if needs_trash_root
                       else "needs a runner account that may create symlinks" if needs_symlinks
                       else "needs the engine the Mac app hosts" if unhosted
                       else f"model {case['model']['repo']} is not installed" if no_model

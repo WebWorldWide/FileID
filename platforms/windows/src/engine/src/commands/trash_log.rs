@@ -959,3 +959,84 @@ mod tests {
         assert_eq!(restored, (1, Some(5.0)));
     }
 }
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use crate::util::hmac::{hmac_sha256_hex, log_hmac_key};
+    use std::sync::Arc;
+
+    fn entry(batch_id: &str, items: &[(i64, &std::path::Path)]) -> TrashLogEntry {
+        TrashLogEntry {
+            batch_id: batch_id.to_string(),
+            timestamp: 1_700_000_000.0,
+            items: items
+                .iter()
+                .map(|(file_id, path)| TrashLogItem {
+                    file_id: *file_id,
+                    original_path: path.to_string_lossy().into_owned(),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn append_raw_signed_by(key: &[u8], entry: &TrashLogEntry) {
+        let json = serde_json::to_string(entry).unwrap();
+        let line = format!("{json}\t{}\n", hmac_sha256_hex(key, json.as_bytes()));
+        let path = paths::trash_log_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        file.write_all(line.as_bytes()).unwrap();
+    }
+
+    fn rows(db: &Arc<parking_lot::Mutex<rusqlite::Connection>>) -> Vec<i64> {
+        let conn = db.lock();
+        let mut stmt = conn.prepare("SELECT id FROM files ORDER BY id").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    // A kill between the Trash move and the catalog commit leaves a row for a file that is now in the Trash.
+    #[test]
+    fn startup_drops_only_rows_of_signed_batches_whose_file_is_gone_and_found_in_the_trash() {
+        let dir = std::env::temp_dir().join(format!("fileid-reconcile-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = dir.join("gone.jpg");
+        let forged = dir.join("forged.jpg");
+        let unfound = dir.join("unfound.jpg");
+        let present = dir.join("present.jpg");
+        std::fs::write(&present, b"still here").unwrap();
+
+        let conn = crate::db::test_support::memory_db();
+        for (id, path) in [(1, &gone), (2, &forged), (3, &unfound), (4, &present)] {
+            crate::db::test_support::insert_file(&conn, id, &path.to_string_lossy(), "image");
+        }
+        conn.execute("INSERT INTO persons (id, name, file_count, created_at) VALUES (9, 'Kim', 1, 0)", []).unwrap();
+        conn.execute("INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES (1, 9, X'00', '{}')", []).unwrap();
+        let db = Arc::new(parking_lot::Mutex::new(conn));
+
+        let key = log_hmac_key().unwrap();
+        let batch = uuid::Uuid::new_v4().to_string();
+        let signed = entry(&format!("ok-{batch}"), &[(1, &gone), (3, &unfound), (4, &present)]);
+        append_at(&paths::trash_log_path().unwrap(), &key, &signed).unwrap();
+        append_raw_signed_by(b"another key entirely", &entry(&format!("forged-{batch}"), &[(2, &forged)]));
+
+        let trashed = dir.join("in-the-trash.jpg");
+        let found = {
+            let (unfound, trashed) = (unfound.clone(), trashed.clone());
+            move |item: &TrashLogItem| (item.original_path != unfound.to_string_lossy()).then(|| trashed.clone())
+        };
+        assert_eq!(reconcile_trashed_rows(&db, found), 1);
+
+        assert_eq!(rows(&db), vec![2, 3, 4], "only the signed, vanished, located file loses its row");
+        let count: i64 = db.lock().query_row("SELECT file_count FROM persons WHERE id = 9", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "the person's photo count follows");
+
+        let raw = std::fs::read(paths::trash_log_path().unwrap()).unwrap();
+        let journaled = find_batch_in(&raw, &key, &format!("ok-{batch}")).unwrap();
+        let first = journaled.items.iter().find(|item| item.file_id == 1).unwrap();
+        assert_eq!(first.trashed_path.as_deref(), Some(trashed.to_string_lossy().as_ref()), "the found location is journaled");
+        assert!(find_batch_in(&raw, &key, &format!("forged-{batch}")).is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+}

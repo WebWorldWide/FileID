@@ -115,6 +115,7 @@
     {"text": "pdfs under 500KB", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "pdfs", "maxBytes": 500000}},
     {"text": "photos at least 2.5 mb and at most 1 gb", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "photos and", "minBytes": 2500000, "maxBytes": 1000000000}},
     {"text": "how many files over 1e30 tb", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "over 1e30 tb"}},
+    {"text": "how many videos are in this library?", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "videos in"}},
     {"text": "how many photos per year?", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "photos", "breakdown": "year"}},
     {"text": "photos by month", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "photos", "breakdown": "month"}},
     {"text": "yearly video totals", "question": {"measure": "count", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "video totals", "breakdown": "year"}},

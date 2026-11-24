@@ -491,6 +491,101 @@ mod tests {
         assert!(execute(&mut conn, &undo).unwrap().chapters.is_empty());
         assert!(execute(&mut conn, &undo).is_err());
     }
+
+    fn save_chapter(conn: &mut Connection, chapter: CatalogChapter) -> Result<CatalogResponse> {
+        let mut request: CatalogRequest = serde_json::from_value(serde_json::json!({"requestID":"save","action":"saveChapter"})).unwrap();
+        request.chapter = Some(chapter);
+        execute(conn, &request)
+    }
+
+    fn chapter(id: &str, file: i64, start: f64, end: f64, title: &str) -> CatalogChapter {
+        CatalogChapter {
+            id: id.into(),
+            file_id: file,
+            start_seconds: start,
+            end_seconds: end,
+            title: title.into(),
+            summary: String::new(),
+            source_revision: String::new(),
+            model_version: "user".into(),
+            confidence: 1.0,
+            user_edited: true,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn a_chapter_cannot_replace_another_files_chapter_and_bad_times_are_refused() {
+        let mut conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 1, "/internal/1.mov", "video");
+        crate::db::test_support::insert_file(&conn, 2, "/internal/2.mov", "video");
+        save_chapter(&mut conn, chapter("one", 1, 2.0, 3.0, "One")).unwrap();
+        assert!(save_chapter(&mut conn, chapter("one", 2, 5.0, 6.0, "Taken over")).is_err());
+        let kept: (i64, f64, String) = conn
+            .query_row("SELECT file_id,start_seconds,title FROM catalog_chapters WHERE id='one'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(kept, (1, 2.0, "One".to_owned()), "the other file's chapter is untouched");
+        for bad in [
+            chapter("two", 2, -1.0, 3.0, "Two"),
+            chapter("two", 2, 4.0, 3.0, "Two"),
+            chapter("two", 2, 1.0, f64::INFINITY, "Two"),
+            chapter("two", 2, f64::NAN, 3.0, "Two"),
+            chapter("two", 2, 1.0, 3.0, "   "),
+            chapter("two", 2, 1.0, 3.0, &"x".repeat(201)),
+            chapter("", 2, 1.0, 3.0, "Two"),
+        ] {
+            let shown = format!("{bad:?}");
+            assert!(save_chapter(&mut conn, bad).is_err(), "{shown}");
+        }
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_chapters", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "nothing invalid was stored");
+        let journaled: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_corrections", [], |r| r.get(0)).unwrap();
+        assert_eq!(journaled, 1, "only the valid save was journaled");
+    }
+
+    #[test]
+    fn passages_observations_and_coverage_go_stale_when_the_source_changes() {
+        let mut conn = crate::db::test_support::memory_db();
+        for id in [1, 2] {
+            crate::db::test_support::insert_file(&conn, id, &format!("/internal/{id}.mov"), "video");
+            conn.execute(
+                "INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,1,2,'grandma sings happy birthday','100:10','speech',0.9)",
+                params![format!("passage-{id}"), id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?1,?2,0,5,'verified','100:10','speech')",
+                params![format!("coverage-{id}"), id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO catalog_observations(id,file_id,start_seconds,end_seconds,source_revision,model_version,confidence,user_edited) VALUES(?1,?2,1,2,'100:10','faces',0.9,1)",
+                params![format!("observation-{id}"), id],
+            )
+            .unwrap();
+        }
+        let query: CatalogRequest =
+            serde_json::from_value(serde_json::json!({"requestID":"search","action":"search","query":"grandma birthday"})).unwrap();
+        let state = |conn: &Connection, id: i64| -> (bool, String, bool) {
+            conn.query_row(
+                "SELECT p.stale,c.status,o.stale FROM catalog_passages p JOIN catalog_coverage c ON c.file_id=p.file_id \
+                 JOIN catalog_observations o ON o.file_id=p.file_id WHERE p.file_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        conn.execute("UPDATE files SET scanned_at=5 WHERE id=1", []).unwrap();
+        assert_eq!(state(&conn, 1), (false, "verified".into(), false), "a rescan of an unchanged file keeps its evidence");
+        assert_eq!(execute(&mut conn, &query).unwrap().hits.iter().filter(|h| h.file_id == 1).count(), 1);
+
+        conn.execute("UPDATE files SET size_bytes=200 WHERE id=1", []).unwrap();
+        assert_eq!(state(&conn, 1), (true, "stale".into(), true));
+        assert_eq!(state(&conn, 2), (false, "verified".into(), false), "another file keeps its evidence");
+        conn.execute("UPDATE files SET modified_at=11 WHERE id=2", []).unwrap();
+        assert_eq!(state(&conn, 2), (true, "stale".into(), true));
+        assert!(execute(&mut conn, &query).unwrap().hits.is_empty(), "stale transcripts never answer a search");
+    }
 }
 
 pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String], root: Option<&super::roots::RootScope>) -> Result<Vec<CatalogHit>> {

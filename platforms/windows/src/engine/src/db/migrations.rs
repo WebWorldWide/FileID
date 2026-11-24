@@ -410,6 +410,34 @@ mod tests {
     }
 
     #[test]
+    fn faces_already_in_a_catalog_are_marked_baseline_so_they_never_come_back_as_new() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
+        for (id, sql) in registry().into_iter().take_while(|(id, _)| *id != "v32_face_review") {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO grdb_migrations (identifier) VALUES (?1)", [id]).unwrap();
+        }
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/a.jpg',1,1,0,'image','jpg')", []).unwrap();
+        conn.execute(
+            "INSERT INTO face_prints(id,file_id,print_data,bbox,embedding_model,processing_version) VALUES(1,1,X'00','0,0,1,1','sface','macos-v3'),(2,1,X'00','0,0,.5,.5',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        apply(&conn).unwrap();
+        let rows: Vec<(i64, String, String)> = conn
+            .prepare("SELECT face_id,namespace,outcome FROM face_assignment_assessed ORDER BY face_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![(1, "sface|macos-v3".into(), "baseline".into()), (2, "|".into(), "baseline".into())]);
+        conn.execute("INSERT INTO face_prints(id,file_id,print_data,bbox) VALUES(3,1,X'00','0,0,.2,.2')", []).unwrap();
+        let assessed: i64 = conn.query_row("SELECT COUNT(*) FROM face_assignment_assessed WHERE face_id=3", [], |r| r.get(0)).unwrap();
+        assert_eq!(assessed, 0, "a face found after the migration is new");
+    }
+
+    #[test]
     fn fresh_database_applies_all_migrations() {
         let conn = Connection::open_in_memory().unwrap();
         for pragma in crate::db::SETUP_PRAGMAS {

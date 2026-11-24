@@ -379,12 +379,17 @@ fn persist_vlm_results(
         Some(reviewed) => reviewed.as_deref(),
         None => proposed_name,
     };
+    // A requested output replaces the old one even when it came back empty, as
+    // the Swift runner's persist does; an output not asked for is kept.
+    let description = description.filter(|text| !text.is_empty());
+    let proposed_name = proposed_name.filter(|name| !name.is_empty());
+    let (updates_description, updates_name) = (mode.requests_caption(), mode.requests_rename());
     if mode.establishes_completion() {
         tx.execute(
-            "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
-                              vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
+            "UPDATE files SET vlm_description=CASE WHEN ?6 THEN ?2 ELSE vlm_description END, \
+                              vlm_proposed_name=CASE WHEN ?7 THEN ?3 ELSE vlm_proposed_name END, \
                               vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4, vlm_inherited_from=NULL WHERE id=?5",
-            rusqlite::params![model_kind, description, proposed_name, now, file_id],
+            rusqlite::params![model_kind, description, proposed_name, now, file_id, updates_description, updates_name],
         )?;
     } else {
         let completed_with_model = tx.query_row(
@@ -394,22 +399,22 @@ fn persist_vlm_results(
         )?;
         if completed_with_model {
             tx.execute(
-                "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), vlm_inherited_from=NULL \
+                "UPDATE files SET vlm_description=CASE WHEN ?4 THEN ?1 ELSE vlm_description END, \
+                                  vlm_proposed_name=CASE WHEN ?5 THEN ?2 ELSE vlm_proposed_name END, vlm_inherited_from=NULL \
                  WHERE id=?3",
-                rusqlite::params![description, proposed_name, file_id],
+                rusqlite::params![description, proposed_name, file_id, updates_description, updates_name],
             )?;
         } else {
             tx.execute(
-                "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
+                "UPDATE files SET vlm_description=CASE WHEN ?4 THEN ?1 ELSE vlm_description END, \
+                                  vlm_proposed_name=CASE WHEN ?5 THEN ?2 ELSE vlm_proposed_name END, \
                                   vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL, vlm_inherited_from=NULL \
                  WHERE id=?3",
-                rusqlite::params![description, proposed_name, file_id],
+                rusqlite::params![description, proposed_name, file_id, updates_description, updates_name],
             )?;
         }
     }
-    if !tags.is_empty() {
+    if mode.requests_tags() {
         tx.execute(
             "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
             rusqlite::params![file_id],
@@ -417,7 +422,7 @@ fn persist_vlm_results(
         let mut stmt = tx.prepare(
             "INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'vlm', NULL)",
         )?;
-        for t in tags {
+        for t in tags.iter().map(|tag| tag.trim()).filter(|tag| !tag.is_empty()) {
             stmt.execute(rusqlite::params![file_id, t])?;
         }
     }
@@ -1231,6 +1236,78 @@ mod tests {
             let tags: i64 = source.conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
             assert_eq!(tags, 0, "{fault}");
         }
+    }
+
+    type Stored = (Option<String>, Option<String>, Option<String>, Option<String>, Vec<(String, String)>);
+
+    fn stored(source: &Source) -> Stored {
+        let (description, name, model, full) = source
+            .conn
+            .query_row("SELECT vlm_description,vlm_proposed_name,vlm_model,vlm_full_model FROM files WHERE id=1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        let mut statement = source.conn.prepare("SELECT source,tag FROM tags WHERE file_id=1 ORDER BY source,tag").unwrap();
+        let tags = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        (description, name, model, full, tags)
+    }
+
+    fn some(value: &str) -> Option<String> {
+        Some(value.to_owned())
+    }
+
+    fn tags(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(source, tag)| ((*source).to_owned(), (*tag).to_owned())).collect()
+    }
+
+    #[test]
+    fn a_full_pass_replaces_old_model_output_even_when_the_new_output_is_empty_and_keeps_user_tags() {
+        let source = source("full-clears");
+        source.conn.execute("INSERT INTO tags(file_id,tag,source,score) VALUES(1,'grandma','user',NULL),(1,'beach','ram',0.9)", []).unwrap();
+        let context = context(&source);
+        persist_vlm_results(&source.conn, 1, "model-a", AnalyzeMode::Both, Some("old desc"), Some("old-name"), &["old-tag".into()], &context).unwrap();
+        assert_eq!(
+            stored(&source),
+            (some("old desc"), some("old-name"), some("model-a"), some("model-a"), tags(&[("ram", "beach"), ("user", "grandma"), ("vlm", "old-tag")]))
+        );
+        persist_vlm_results(&source.conn, 1, "model-b", AnalyzeMode::Both, Some(""), None, &[" ".into()], &context).unwrap();
+        assert_eq!(
+            stored(&source),
+            (None, None, some("model-b"), some("model-b"), tags(&[("ram", "beach"), ("user", "grandma")])),
+            "nothing from model A is left under model B's name; tags the user or the scan gave stay"
+        );
+    }
+
+    #[test]
+    fn a_pass_changes_only_the_outputs_it_was_asked_for() {
+        let source = source("partial");
+        let context = context(&source);
+        persist_vlm_results(&source.conn, 1, "model-a", AnalyzeMode::Both, Some("old desc"), Some("keep-name"), &["old-tag".into()], &context).unwrap();
+        persist_vlm_results(&source.conn, 1, "model-a", AnalyzeMode::CaptionAndTags, Some(""), None, &[], &context).unwrap();
+        assert_eq!(stored(&source), (None, some("keep-name"), some("model-a"), some("model-a"), vec![]), "renames were not asked for");
+        persist_vlm_results(&source.conn, 1, "model-a", AnalyzeMode::Both, Some("desc"), Some("name"), &["tag".into()], &context).unwrap();
+        persist_vlm_results(&source.conn, 1, "model-a", AnalyzeMode::TagsOnly, Some("ignored"), Some("ignored"), &[], &context).unwrap();
+        assert_eq!(
+            stored(&source),
+            (some("desc"), some("name"), some("model-a"), some("model-a"), vec![]),
+            "a tags pass of the same model keeps the caption, name and completion and replaces only the tags"
+        );
+        persist_vlm_results(&source.conn, 1, "model-b", AnalyzeMode::TagsOnly, None, None, &["new".into()], &context).unwrap();
+        assert_eq!(
+            stored(&source),
+            (some("desc"), some("name"), None, None, tags(&[("vlm", "new")])),
+            "a tags pass of another model does not claim the full pass"
+        );
+    }
+
+    #[test]
+    fn a_reviewed_label_survives_a_full_pass_whose_model_proposed_nothing() {
+        let source = source("label-kept");
+        reviewed_chapter(&source, "Maya hits a home run");
+        let context = context(&source);
+        persist_vlm_results(&source.conn, 1, "m", AnalyzeMode::Both, Some(""), None, &[], &context).unwrap();
+        assert_eq!(stored_name(&source), context.proposed_name());
+        assert!(stored_name(&source).is_some());
     }
 
     struct Recorder<'a> {

@@ -234,7 +234,15 @@ pub fn ocr_ready() -> bool {
     unsafe { ffi::fileid_apple_ocr_ready() }
 }
 
-/// Like the Swift engine: after three seconds, and not while a scan is decoding.
+/// The accurate tier has compiled, whether or not repeated failures have paused it.
+pub fn ocr_warmed() -> bool {
+    // SAFETY: no arguments.
+    unsafe { ffi::fileid_apple_ocr_warmed() }
+}
+
+/// Compile the accurate text tier once the engine is idle, as the Swift engine
+/// does: after three seconds, and not while a scan is decoding. A scan that
+/// starts first keeps its fast reads until the compile finishes.
 pub fn start_ocr_warmup_when_idle() {
     let spawned = std::thread::Builder::new().name("fileid-ocr-warmup".into()).spawn(|| {
         std::thread::sleep(Duration::from_secs(3));
