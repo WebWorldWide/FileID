@@ -773,7 +773,7 @@ struct TrashCandidate {
 #[derive(Debug)]
 enum CheckedTrashOutcome {
     Trashed,
-    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
     TrashedAt(PathBuf),
     Rejected(String),
     Failed(String),
@@ -995,13 +995,28 @@ fn checked_trash_one_with(
     }
 }
 
-#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters"))))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     checked_trash_one_with(candidate, |staging, original, identity| {
         #[cfg(test)]
         before_trash_move(original);
         crate::shell::trash::trash_path_as(staging, original, identity)
     })
+}
+
+#[cfg(target_os = "linux")]
+fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
+    let landed = std::cell::RefCell::new(None);
+    let outcome = checked_trash_one_with(candidate, |staging, original, identity| {
+        #[cfg(test)]
+        before_trash_move(original);
+        *landed.borrow_mut() = crate::shell::trash::trash_path_landed(staging, original, identity)?;
+        Ok(())
+    });
+    match (outcome, landed.into_inner()) {
+        (CheckedTrashOutcome::Trashed, Some(path)) => CheckedTrashOutcome::TrashedAt(path),
+        (outcome, _) => outcome,
+    }
 }
 
 /// Test seam: closures called with a file's path just before the engine asks the
@@ -1034,8 +1049,16 @@ fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
 }
 
 /// Journals where each file landed before the catalog commit. Best effort: without it restore and startup recovery find the item by its inode.
-#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-fn bind_macos_trash_receipts(outcomes: &mut [CheckedTrashOutcome], entry: &mut TrashLogEntry) {
+#[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
+fn bind_landed_trash_receipts(outcomes: &mut [CheckedTrashOutcome], entry: &mut TrashLogEntry) {
+    if record_landings(outcomes, entry) && let Err(error) = trash_log::append(entry) {
+        tracing::warn!(?error, "could not journal Trash locations; restore will find items by inode");
+    }
+}
+
+/// Without a landing in the journal a second put back of a finished batch reads as an item the batch never reached, and succeeds.
+#[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
+fn record_landings(outcomes: &mut [CheckedTrashOutcome], entry: &mut TrashLogEntry) -> bool {
     let mut landed_any = false;
     for (index, outcome) in outcomes.iter_mut().enumerate() {
         if let CheckedTrashOutcome::TrashedAt(landed) = outcome {
@@ -1044,9 +1067,7 @@ fn bind_macos_trash_receipts(outcomes: &mut [CheckedTrashOutcome], entry: &mut T
             landed_any = true;
         }
     }
-    if landed_any && let Err(error) = trash_log::append(entry) {
-        tracing::warn!(?error, "could not journal Trash locations; restore will find items by inode");
-    }
+    landed_any
 }
 
 fn checked_trash_candidates(candidates: &[TrashCandidate]) -> Vec<CheckedTrashOutcome> {
@@ -1335,8 +1356,8 @@ pub(crate) async fn handle_trash_files(
 
         let mut outcomes = checked_trash_candidates(&candidates);
         bind_windows_trash_receipts(&candidates, &mut outcomes, &mut entry);
-        #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
-        bind_macos_trash_receipts(&mut outcomes, &mut entry);
+        #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
+        bind_landed_trash_receipts(&mut outcomes, &mut entry);
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         let mut trashed_persons: Vec<i64> = Vec::new();
@@ -1394,7 +1415,7 @@ pub(crate) async fn handle_trash_files(
                         }
                     }
                 }
-                #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+                #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
                 CheckedTrashOutcome::TrashedAt(_) => {
                     failed += 1;
                     messages.push(BulkActionItem {
@@ -3542,6 +3563,18 @@ mod tests {
         assert!(!copy.exists());
         assert_eq!(std::fs::read(&kept).unwrap(), b"same bytes");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "apple-adapters")))]
+    #[test]
+    fn a_trashed_file_gets_its_landing_journaled_so_a_second_put_back_is_refused() {
+        let item = |file_id| TrashLogItem { file_id, ..Default::default() };
+        let mut entry = TrashLogEntry { batch_id: "b".into(), timestamp: 0.0, items: vec![item(1), item(2)] };
+        let mut outcomes = vec![CheckedTrashOutcome::TrashedAt(PathBuf::from("/Trash/files/a.txt")), CheckedTrashOutcome::Failed("no".into())];
+        assert!(record_landings(&mut outcomes, &mut entry));
+        assert!(matches!(outcomes[0], CheckedTrashOutcome::Trashed));
+        assert_eq!(entry.items[0].trashed_path.as_deref(), Some("/Trash/files/a.txt"));
+        assert_eq!(entry.items[1].trashed_path, None);
     }
 
     #[test]

@@ -833,6 +833,15 @@ pub mod trash {
         original_path: &Path,
         expected: crate::platform::FileIdentity,
     ) -> Result<()> {
+        trash_path_landed(source, original_path, expected).map(|_| ())
+    }
+
+    /// Where the item landed in the Trash; `None` when the source was already gone.
+    pub(crate) fn trash_path_landed(
+        source: &Path,
+        original_path: &Path,
+        expected: crate::platform::FileIdentity,
+    ) -> Result<Option<PathBuf>> {
         let trash = home_trash_dir()?;
         trash_into_as(source, original_path, &trash, expected)
     }
@@ -1400,7 +1409,7 @@ pub mod trash {
         }
         let expected = crate::platform::file_identity(path)
             .context("capture volume-qualified Trash source identity")?;
-        trash_into_as(path, path, trash, expected)
+        trash_into_as(path, path, trash, expected).map(|_| ())
     }
 
     fn trash_into_as(
@@ -1408,9 +1417,9 @@ pub mod trash {
         original_path: &Path,
         trash: &Path,
         expected: crate::platform::FileIdentity,
-    ) -> Result<()> {
+    ) -> Result<Option<PathBuf>> {
         if std::fs::symlink_metadata(path).is_err() {
-            return Ok(());
+            return Ok(None);
         }
         crate::util::read_only::require_source_mutation(path)?;
         let files_dir = trash.join("files");
@@ -1468,7 +1477,7 @@ pub mod trash {
                         let _ = std::fs::remove_file(&info_path);
                         let _ = sync_dir(&info_dir);
                     }
-                    return result;
+                    return result.map(|()| Some(target));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     n += 1;
@@ -1582,6 +1591,21 @@ pub mod trash {
             assert!(!base.join("source").exists());
             assert!(renameat_no_replace_emulated(fd, &name("missing"), fd, &name("target")).is_err());
             assert!(!base.join("target").exists());
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn the_trash_reports_where_the_file_landed() {
+            let base = std::env::temp_dir().join(format!("fileid-trash-landed-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let trash = base.join("Trash");
+            std::fs::create_dir_all(&base).unwrap();
+            let file = base.join("hello.txt");
+            std::fs::write(&file, b"data").unwrap();
+            let expected = crate::platform::file_identity(&file).unwrap();
+            let landed = trash_into_as(&file, &file, &trash, expected).unwrap();
+            assert_eq!(landed, Some(trash.join("files/hello.txt")));
+            assert_eq!(trash_into_as(&file, &file, &trash, expected).unwrap(), None, "a vanished source lands nowhere");
             let _ = std::fs::remove_dir_all(&base);
         }
 
