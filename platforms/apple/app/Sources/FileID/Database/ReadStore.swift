@@ -746,11 +746,6 @@ public final class ReadStore: @unchecked Sendable {
         return min(20, max(0, v))
     }
 
-    /// Above this image-with-dHash count the O(N²) pairwise scan is skipped rather
-    /// than hang the UI. The user's libraries are ~1.6K images (instant); a 50K
-    /// library would be ~1.25B comparisons.
-    public static let nearDupImageCap = 20_000
-
     /// Display caps for similar-image grouping: at most 200 groups, 5,000 members in total, 500 per group.
     private static let cleanupMaxGroups = 200
     private static let cleanupMaxVisibleMembers = 5_000
@@ -761,26 +756,13 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return [] }
         let rows: [Row]
         do {
-            let candidateCount = try q.read { db in
-                try Int.fetchOne(db, sql: """
-                    SELECT COUNT(*) FROM files
-                    WHERE kind = 'image' AND failed = 0
-                      AND phash IS NOT NULL AND phash != 0
-                    """) ?? 0
-            }
-            guard candidateCount <= Self.nearDupImageCap else {
-                reportError(
-                    "Visually similar comparison is unavailable for \(Plural.noun(candidateCount, "image", "images")): " +
-                    "the exact Hamming matcher is capped at \(Self.nearDupImageCap.formatted()). " +
-                    "Exact duplicate cleanup remains available.")
-                return []
-            }
             // phash == 0 is the engine's "none / failed" sentinel (see DBWriter),
             // so exclude it alongside NULL — otherwise every blank-hash image would
-            // collapse into one giant false group.
+            // collapse into one giant false group. Only the columns grouping needs
+            // are read; full rows are fetched for the clustered members afterwards.
             rows = try q.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT * FROM files
+                    SELECT id, phash, content_hash, path_text FROM files
                     WHERE kind = 'image' AND failed = 0
                       AND phash IS NOT NULL AND phash != 0
                     ORDER BY id
@@ -792,27 +774,46 @@ public final class ReadStore: @unchecked Sendable {
         }
 
         guard rows.count > 1 else { return [] }
-        var fileByID: [Int64: FileRow] = [:]
-        fileByID.reserveCapacity(rows.count)
+        var pathByID: [Int64: String] = [:]
+        pathByID.reserveCapacity(rows.count)
         var contentHashByID: [Int64: Data] = [:]
         var items: [(id: Int64, phash: Int64)] = []
         items.reserveCapacity(rows.count)
         for r in rows {
-            guard let ph: Int64 = r["phash"] else { continue }
-            let fr = Self.toFileRow(r)
-            fileByID[fr.id] = fr
-            if let ch: Data = r["content_hash"] { contentHashByID[fr.id] = ch }
-            items.append((id: fr.id, phash: ph))
+            guard let ph: Int64 = r["phash"], let id: Int64 = r["id"] else { continue }
+            pathByID[id] = r["path_text"]
+            if let ch: Data = r["content_hash"] { contentHashByID[id] = ch }
+            items.append((id: id, phash: ph))
         }
-        let pathByID = fileByID.mapValues(\.pathText)
         let hashByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.phash) })
+
+        let clusters = PerceptualGrouping.droppingRawTwins(
+            PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming),
+            paths: pathByID, hashes: hashByID, maxHamming: maxHamming
+        ).filter { ids in
+            let hashes = ids.map { contentHashByID[$0] }
+            return !(!hashes.contains(nil) && Set(hashes.compactMap { $0 }).count == 1)
+        }
+        guard !clusters.isEmpty else { return [] }
+        var fileByID: [Int64: FileRow] = [:]
+        do {
+            let wanted = clusters.flatMap { $0 }
+            for start in stride(from: 0, to: wanted.count, by: 5_000) {
+                let chunk = Array(wanted[start..<min(start + 5_000, wanted.count)])
+                let encoded = String(decoding: try JSONEncoder().encode(chunk), as: UTF8.self)
+                let full = try q.read { db in
+                    try Row.fetchAll(db, sql: "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?))", arguments: [encoded])
+                }
+                for r in full { let fr = Self.toFileRow(r); fileByID[fr.id] = fr }
+            }
+        } catch {
+            reportError("Similar-image query failed: \(error)")
+            return []
+        }
 
         var groups: [DuplicateGroup] = []
         var remaining = Self.cleanupMaxVisibleMembers
-        for ids in PerceptualGrouping.droppingRawTwins(
-            PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming),
-            paths: pathByID, hashes: hashByID, maxHamming: maxHamming
-        ) {
+        for ids in clusters {
             var files = ids.compactMap { fileByID[$0] }
             guard files.count > 1 else { continue }
             // Drop pure byte-exact clusters — already shown under "Exact".
