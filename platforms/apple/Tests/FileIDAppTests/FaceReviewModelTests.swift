@@ -169,3 +169,12 @@ struct FaceQueueModelTests {
         #expect(model.line == "Install the face recognition model in Settings, then update faces again.")
     }
 }
+
+@Suite struct FaceReviewCropCancellationTests {
+    @Test func aCancelledEarlierLoadNeverReplacesTheNewerCrop() throws {
+        let source = try appSource("Views/FaceReviewViews.swift")
+        let task = try #require(source.range(of: ".task(id: key) {"))
+        let end = try #require(source.range(of: ".accessibilityElement()", range: task.upperBound..<source.endIndex))
+        #expect(source[task.upperBound..<end.lowerBound].contains("if !Task.isCancelled { image = loaded }"))
+    }
+}

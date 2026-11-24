@@ -156,7 +156,10 @@ struct FaceReviewCrop: View {
             .overlay(face)
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
-            .task(id: key) { image = await FaceReviewCropLoader.crop(path: path, bbox: bbox, revision: revision, key: key) }
+            .task(id: key) {
+                let loaded = await FaceReviewCropLoader.crop(path: path, bbox: bbox, revision: revision, key: key)
+                if !Task.isCancelled { image = loaded }
+            }
             .accessibilityElement()
             .accessibilityLabel(label)
             .accessibilityAddTraits(.isImage)
