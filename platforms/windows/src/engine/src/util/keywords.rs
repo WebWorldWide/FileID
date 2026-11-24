@@ -126,7 +126,7 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
             continue;
         }
         if !word.is_empty() {
-            let w = word.to_ascii_lowercase();
+            let w = word.to_lowercase();
             word.clear();
             // Digit-starting tokens (years, IDs, ISO chunks like "02t09") would chain into noise tags like "2026 03
             // 02t09 01 02 06 00" (seen on a syncthing marker .txt); a one-letter token is no keyword either. All are
@@ -153,6 +153,13 @@ fn starts_with_digit(w: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capitalised_non_ascii_words_fold_to_the_same_tag() {
+        let tags = extract("École primaire. école primaire.");
+        let labels: Vec<&str> = tags.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(labels, vec!["école primaire"]);
+    }
 
     #[test]
     fn punctuation_and_line_breaks_end_phrases() {
