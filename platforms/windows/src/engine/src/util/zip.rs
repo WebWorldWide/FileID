@@ -183,7 +183,10 @@ where
     files.sort();
 
     for relative in &files {
-        ensure_real_destination_dirs(parent, relative.parent().unwrap_or_else(|| Path::new("")))?;
+        if let Err(error) = ensure_real_destination_dirs(parent, relative.parent().unwrap_or_else(|| Path::new(""))) {
+            let _ = std::fs::remove_dir_all(&backup);
+            return Err(error);
+        }
         match std::fs::symlink_metadata(parent.join(relative)) {
             Ok(metadata) if metadata.is_dir() => {
                 let _ = std::fs::remove_dir_all(&backup);
@@ -362,6 +365,22 @@ mod tests {
         }
         w.finish().unwrap();
         zip_path
+    }
+
+    #[test]
+    fn a_blocked_destination_folder_leaves_no_backup_directory_behind() {
+        let temp = std::env::temp_dir().join(format!("fileid_zip_blocked_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("bin"), b"a file where a folder is needed").unwrap();
+        let zip = make_zip_with_entries(&temp, &[("bin/x.dll", b"x")]);
+        assert!(extract_into_parent(&zip).is_err());
+        let strays: Vec<String> = std::fs::read_dir(&temp)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".fileid-backup-"))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+        std::fs::remove_dir_all(&temp).ok();
     }
 
     #[test]

@@ -94,6 +94,8 @@ pub async fn handle(
     .await;
 }
 
+const POOLED_READS: [&str; 5] = ["search", "detail", "jobs", "proposeNames", "autoTakeGroups"];
+
 fn execute_with_index(
     database: Option<Arc<Mutex<Connection>>>,
     index: Option<Arc<crate::catalog_index::CatalogIndex>>,
@@ -118,8 +120,9 @@ fn execute_with_index(
             return Ok(result);
         }
     }
-    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
-    if ["search", "detail", "jobs"].contains(&request.action.as_str())
+    // Reads run on a pooled read-only connection so they never wait on a scan's writes. The name and take-group suggestions
+    // also list folders on the source drive, which must not happen while the shared writer is held.
+    if POOLED_READS.contains(&request.action.as_str())
         && let Some(mut reader) = crate::db::reader_for(&database)?
     {
         return execute(&mut reader, &request);
@@ -585,6 +588,28 @@ mod tests {
         conn.execute("UPDATE files SET modified_at=11 WHERE id=2", []).unwrap();
         assert_eq!(state(&conn, 2), (true, "stale".into(), true));
         assert!(execute(&mut conn, &query).unwrap().hits.is_empty(), "stale transcripts never answer a search");
+    }
+
+    #[test]
+    fn name_and_take_group_suggestions_run_on_the_pooled_reader_not_the_shared_writer() {
+        for action in ["proposeNames", "autoTakeGroups"] {
+            assert!(POOLED_READS.contains(&action), "{action}");
+        }
+        let dir = std::env::temp_dir().join(format!("fileid-catalog-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = crate::db::open_writer(&dir.join("fileid.sqlite")).unwrap();
+        crate::db::test_support::insert_file(&writer, 1, "/internal/IMG_0001.jpg", "image");
+        let database = Arc::new(Mutex::new(writer));
+        for value in [
+            serde_json::json!({"requestID":"names","action":"proposeNames","fileIDs":[1],"naming":{"style":"short","maxLength":40}}),
+            serde_json::json!({"requestID":"takes","action":"autoTakeGroups"}),
+        ] {
+            let request: CatalogRequest = serde_json::from_value(value).unwrap();
+            let reply = execute_with_index(Some(database.clone()), None, request).unwrap();
+            assert_eq!(reply.status, "ok");
+        }
+        drop(database);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

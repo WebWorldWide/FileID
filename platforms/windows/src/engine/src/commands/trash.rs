@@ -483,8 +483,7 @@ fn reconcile_restored_catalog_rows(
         Ok(())
     } else {
         anyhow::bail!(
-            "catalog row conflicts with recovered file id {} or path {}",
-            item.file_id,
+            "FileID's library already has a different entry for {}.",
             item.original_path
         )
     }
@@ -550,6 +549,31 @@ pub(crate) fn library_roots(conn: &rusqlite::Connection) -> rusqlite::Result<Vec
     Ok(rows.filter_map(|root| root.ok()).filter_map(|root| std::fs::canonicalize(root).ok()).collect())
 }
 
+/// The roots the catalog and this journal item recorded that are not reachable now, such as an unplugged drive. Used only to word a refusal; it never authorizes anything.
+fn unreachable_roots(mut raw: Vec<String>, item: &trash_log::TrashLogItem) -> Vec<std::path::PathBuf> {
+    raw.extend(item.library_root.clone());
+    raw.into_iter().map(std::path::PathBuf::from).filter(|root| std::fs::canonicalize(root).is_err()).collect()
+}
+
+/// Read under the lock; the reachability checks of these roots must run after it is released.
+fn recorded_scan_roots(conn: &rusqlite::Connection) -> Vec<String> {
+    conn.prepare("SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL")
+        .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>())
+        .unwrap_or_default()
+}
+
+fn refusal_text(unreachable: &[std::path::PathBuf], original: &std::path::Path) -> String {
+    if unreachable.iter().any(|root| original.starts_with(root)) {
+        "That drive isn't connected. Reconnect it, then try putting this back again.".into()
+    } else {
+        "This isn't inside a folder FileID manages, so it was left where it is.".into()
+    }
+}
+
+fn count_faces(count: u32) -> String {
+    format!("{count} {}", if count == 1 { "face" } else { "faces" })
+}
+
 pub(crate) fn containing_root(roots: &[std::path::PathBuf], path: &std::path::Path) -> Option<std::path::PathBuf> {
     let candidate = crate::util::path_safety::canonicalize_for_containment(path);
     roots.iter().filter(|root| candidate.starts_with(root)).max_by_key(|root| root.components().count()).cloned()
@@ -587,6 +611,7 @@ pub(crate) fn restore_batch(
         let mut entry = trash_log::read_batch(batch_id)?
             .ok_or_else(|| anyhow::anyhow!("trash log batch {batch_id} not found"))?;
         let library_roots = library_roots(&db.lock())?;
+        let scan_roots = recorded_scan_roots(&db.lock());
 
         let mut outcomes: Vec<Option<RestoreOutcome>> =
             std::iter::repeat_with(|| None).take(entry.items.len()).collect();
@@ -601,9 +626,7 @@ pub(crate) fn restore_batch(
             let occupied = original.symlink_metadata().is_ok();
             match restore_disposition(allowed, occupied) {
                 RestoreDisposition::Refused => {
-                    outcomes[index] = Some(RestoreOutcome::Refused(
-                        "path is outside every authorized library root".into(),
-                    ));
+                    outcomes[index] = Some(RestoreOutcome::Refused(refusal_text(&unreachable_roots(scan_roots.clone(), item), original)));
                 }
                 RestoreDisposition::Conflict => {
                     outcomes[index] = Some(occupied_outcome(&db.lock(), item, original));
@@ -637,7 +660,7 @@ pub(crate) fn restore_batch(
                                 RestoreOutcome::Conflict
                             } else {
                                 RestoreOutcome::Failed(format!(
-                                    "restore destination could not be securely pinned: {error}"
+                                    "Couldn't put this back safely, so it was left alone ({error})."
                                 ))
                             });
                         }
@@ -697,7 +720,7 @@ pub(crate) fn restore_batch(
                                 file_id: Some(item.file_id),
                                 ok: false,
                                 message: Some(format!(
-                                    "restored {}, but catalog reconciliation failed: {error}",
+                                    "Put {} back, but FileID couldn't update its library ({error}). A rescan will fix it.",
                                     item.original_path
                                 )),
                                 reason: None,
@@ -712,7 +735,7 @@ pub(crate) fn restore_batch(
                         file_id: Some(item.file_id),
                         ok: false,
                         message: Some(format!(
-                            "the restored object is no longer present at {}",
+                            "{} was put back but is gone again.",
                             item.original_path
                         )),
                         reason: None,
@@ -1261,14 +1284,15 @@ pub(crate) async fn handle_revert_merge(
         let restored = outcome.moved + outcome.already_restored;
         let target = outcome
             .person_id
-            .map(|person_id| format!("person #{person_id}"))
-            .unwrap_or_else(|| "a restored person".into());
+            .map(|_| "that person".to_owned())
+            .unwrap_or_else(|| "the restored person".into());
         let message = if complete {
-            format!("Restored {restored} face print(s) to {target}")
+            format!("Moved {} back to {target}", count_faces(restored))
         } else {
             format!(
-                "Restored {restored} face print(s) to {target}; skipped {} stale or missing face(s)",
-                outcome.stale
+                "Moved {} back to {target}; {} couldn't be moved because they changed or are gone.",
+                count_faces(restored),
+                count_faces(outcome.stale)
             )
         };
         Ok(BulkActionResult {
@@ -1809,6 +1833,25 @@ mod tests {
             library_root: library_root.map(|root| root.to_string_lossy().into_owned()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_refused_put_back_on_an_unplugged_drive_asks_to_reconnect_it() {
+        let base = std::env::temp_dir().join(format!("fileid-unplugged-{}", uuid::Uuid::new_v4()));
+        let present = base.join("present");
+        let missing = base.join("missing-drive");
+        std::fs::create_dir_all(&present).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for (id, root) in [("s1", &present), ("s2", &missing)] {
+            conn.execute("INSERT INTO scan_sessions(id,root_path,started_at,status) VALUES(?1,?2,0,'completed')", [id, root.to_string_lossy().as_ref()]).unwrap();
+        }
+        let item = journal_item(&missing.join("trip/a.jpg"), None);
+        let unreachable = unreachable_roots(recorded_scan_roots(&conn), &item);
+        assert_eq!(unreachable, vec![missing.clone()]);
+        assert!(refusal_text(&unreachable, &missing.join("trip/a.jpg")).contains("Reconnect"));
+        let elsewhere = refusal_text(&unreachable, &base.join("other/a.jpg"));
+        assert!(!elsewhere.contains("Reconnect") && !elsewhere.contains("authorized"), "{elsewhere}");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     fn contains(roots: &[std::path::PathBuf], path: &std::path::Path) -> bool {

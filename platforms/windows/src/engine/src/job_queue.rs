@@ -40,6 +40,21 @@ impl JobQueue {
         inner.on_change.push(Box::new(listener));
     }
 
+    /// Sends every queue change to the app without ever dropping the last one: a full channel makes the forwarder wait, and
+    /// bursts of changes collapse into the newest snapshot (each snapshot is the whole queue).
+    pub fn forward_to(&self, sink: crate::ipc::sink::Sink) {
+        let (latest, mut changes) = tokio::sync::watch::channel(None::<QueueState>);
+        self.on_change(move |state| {
+            latest.send_replace(Some(state));
+        });
+        tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                let Some(state) = changes.borrow_and_update().clone() else { continue };
+                sink.send(crate::ipc::IpcEvent::now(crate::ipc::EventPayload::QueueState(crate::ipc::Wrap::new(state)))).await;
+            }
+        });
+    }
+
     pub fn clear_listeners(&self) {
         self.inner.lock().on_change.clear();
     }
@@ -168,5 +183,26 @@ mod tests {
         queue.retitle(&id, "late", None);
         assert_eq!(seen.lock().len(), after_finish, "a finished job is not retitled or announced");
         assert!(after_finish > announced);
+    }
+
+    #[tokio::test]
+    async fn the_final_queue_state_survives_a_full_event_channel() {
+        use crate::ipc::{EventPayload, IpcEvent};
+        let queue = JobQueue::new();
+        let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(1);
+        queue.forward_to(sink.clone());
+        sink.try_send(IpcEvent::now(EventPayload::Log(crate::ipc::Wrap::new(crate::ipc::LogLine { level: crate::ipc::LogLevel::Info, message: "filler".into() })))).unwrap();
+        let id = queue.push(JobCategory::Scan, "Scan", None);
+        queue.promote_next();
+        queue.finish(&id);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut last = None;
+        while let Ok(Some(event)) = tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await {
+            if let EventPayload::QueueState(state) = event.payload {
+                last = Some(state.inner);
+            }
+        }
+        let last = last.expect("a queue state arrived once the channel had room");
+        assert!(last.running.is_none() && last.pending.is_empty());
     }
 }

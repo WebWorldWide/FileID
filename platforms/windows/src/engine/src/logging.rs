@@ -42,6 +42,8 @@ pub(crate) fn init() -> Result<()> {
     Ok(())
 }
 
+const LOG_DAYS_KEPT: usize = 14;
+
 fn open_log_writer() -> Result<tracing_appender::non_blocking::NonBlocking> {
     open_log_writer_in(&paths::logs_dir().context("resolving logs dir")?)
 }
@@ -54,6 +56,7 @@ fn open_log_writer_in(logs_dir: &std::path::Path) -> Result<tracing_appender::no
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("engine.jsonl")
+        .max_log_files(LOG_DAYS_KEPT)
         .build(logs_dir)
         .context("opening the log file")?;
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
@@ -104,6 +107,24 @@ mod tests {
         let blocker = dir.join("not-a-folder");
         std::fs::write(&blocker, b"file").unwrap();
         assert!(open_log_writer_in(&blocker.join("logs")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_daily_logs_are_pruned_to_the_retention_window() {
+        let dir = std::env::temp_dir().join(format!("fileid-log-prune-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for day in 1..=20 {
+            std::fs::write(dir.join(format!("engine.jsonl.2020-01-{day:02}")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("engine-stderr.log"), b"keep").unwrap();
+        assert!(open_log_writer_in(&dir).is_ok());
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let daily = names.iter().filter(|name| name.starts_with("engine.jsonl")).count();
+        assert!(daily <= LOG_DAYS_KEPT, "{daily} daily logs remain: {names:?}");
+        assert!(names.contains(&"engine-stderr.log".to_owned()));
+        assert!(names.contains(&"engine.jsonl.2020-01-20".to_owned()));
+        assert!(!names.contains(&"engine.jsonl.2020-01-01".to_owned()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

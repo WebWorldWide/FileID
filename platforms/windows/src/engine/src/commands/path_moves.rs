@@ -105,20 +105,26 @@ pub(crate) fn repair(journal: &Path, conn: &rusqlite::Connection) -> usize {
     };
     let mut intents = Vec::new();
     let mut done = std::collections::HashSet::new();
-    for line in raw.split(|byte| *byte == b'\n') {
-        let Ok(line) = serde_json::from_slice::<Line>(line) else {
+    for raw_line in raw.split(|byte| *byte == b'\n') {
+        let Ok(line) = serde_json::from_slice::<Line>(raw_line) else {
             continue;
         };
         if let Some(intent) = line.intent {
-            intents.push(intent);
+            intents.push((intent, raw_line));
         }
         if let Some(id) = line.done {
             done.insert(id);
         }
     }
     let mut repaired = 0;
-    for intent in intents.iter().filter(|intent| !done.contains(&intent.id)) {
-        let moved = std::fs::symlink_metadata(&intent.from).is_err()
+    let mut kept: Vec<&[u8]> = Vec::new();
+    for (intent, raw_line) in intents.iter().filter(|(intent, _)| !done.contains(&intent.id)) {
+        let source_gone = std::fs::symlink_metadata(&intent.from).is_err();
+        if source_gone && Path::new(&intent.to).parent().is_some_and(|parent| !parent.is_dir()) {
+            kept.push(raw_line);
+            continue;
+        }
+        let moved = source_gone
             && intent.file_ref.is_some_and(|inode| {
                 crate::platform::file_ref(Path::new(&intent.to)) == Some(inode as u64)
             });
@@ -141,12 +147,27 @@ pub(crate) fn repair(journal: &Path, conn: &rusqlite::Connection) -> usize {
                 intent.from,
             ],
         );
-        if let Ok(1) = updated {
-            repaired += 1;
+        match updated {
+            Ok(1) => repaired += 1,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) =>
+            {
+                kept.push(raw_line);
+            }
+            _ => {}
         }
     }
     let _guard = LOCK.lock();
-    let _ = std::fs::remove_file(journal);
+    if kept.is_empty() {
+        let _ = std::fs::remove_file(journal);
+    } else {
+        let mut text = Vec::new();
+        for line in &kept {
+            text.extend_from_slice(line);
+            text.push(b'\n');
+        }
+        let _ = std::fs::write(journal, text);
+    }
     repaired
 }
 
@@ -200,6 +221,52 @@ mod tests {
         assert_eq!(path, to.to_string_lossy());
         assert_eq!(other, stale.to_string_lossy());
         assert!(!journal.exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_intent_whose_destination_folder_is_unreachable_is_kept_for_the_next_start() {
+        let root = scratch("unplugged");
+        let from = root.join("a.jpg");
+        let to = root.join("gone-drive").join("b.jpg");
+        let conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 1, &from.to_string_lossy(), "photo");
+        let journal = root.join(FILE_NAME);
+        assert!(begin_at(&journal, 1, &from, &to, 7).is_some());
+        assert_eq!(repair(&journal, &conn), 0);
+        assert!(std::fs::read_to_string(&journal).unwrap().contains("gone-drive"), "the intent must survive");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::write(&to, b"moved").unwrap();
+        let inode = crate::platform::file_ref(&to).unwrap();
+        std::fs::remove_file(&journal).unwrap();
+        assert!(begin_at(&journal, 1, &from, &to, inode).is_some());
+        assert_eq!(repair(&journal, &conn), 1);
+        assert!(!journal.exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_intent_is_kept_when_the_catalog_is_busy_and_dropped_when_a_rescan_got_there_first() {
+        let root = scratch("busy");
+        let from = root.join("a.jpg");
+        let to = root.join("b.jpg");
+        std::fs::write(&to, b"moved").unwrap();
+        let inode = crate::platform::file_ref(&to).unwrap();
+        let db_path = root.join("catalog.sqlite");
+        let conn = crate::db::open_writer(&db_path).unwrap();
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        crate::db::test_support::insert_file(&conn, 1, &from.to_string_lossy(), "photo");
+        let journal = root.join(FILE_NAME);
+        assert!(begin_at(&journal, 1, &from, &to, inode).is_some());
+        let holder = rusqlite::Connection::open(&db_path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(repair(&journal, &conn), 0);
+        assert!(journal.exists(), "a busy catalog must not discard the intent");
+        holder.execute_batch("ROLLBACK").unwrap();
+        crate::db::test_support::insert_file(&conn, 2, &to.to_string_lossy(), "photo");
+        assert_eq!(repair(&journal, &conn), 0);
+        assert!(!journal.exists(), "a destination row a rescan already made settles the intent");
+        drop((conn, holder));
         std::fs::remove_dir_all(root).ok();
     }
 

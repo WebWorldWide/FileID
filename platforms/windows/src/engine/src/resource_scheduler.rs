@@ -271,7 +271,7 @@ impl ResourceScheduler {
             let stuck_on_residents = (!accelerator_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
                 || resident_blocks_budget
                 || (!memory_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0));
-            let busy = state.active.is_empty()
+            let busy = (first == Some(id) && state.active.is_empty())
                 || (!wait_background && priority == Priority::Background
                     && state
                         .active
@@ -417,6 +417,26 @@ mod tests {
             )
             .is_err());
     }
+    #[test]
+    fn a_queued_waiter_behind_another_keeps_waiting_when_nothing_is_running() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let scheduler = ResourceScheduler::new(|| (16384, 12000), 1, 1);
+        let demand = Demand { memory_mb: 0, cpu: 1, io: 1 };
+        scheduler.state.lock().waiting.insert(0, (demand, Priority::Interactive));
+        let cancel = AtomicBool::new(false);
+        let outcome = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                scheduler.reserve_queued(demand, AcceleratorDemand::default(), Priority::Interactive, || cancel.load(Ordering::SeqCst))
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!worker.is_finished(), "the waiter gave up while another waiter was ahead of it");
+            cancel.store(true, Ordering::SeqCst);
+            worker.join().unwrap()
+        });
+        let message = outcome.err().expect("cancelled").to_string();
+        assert!(message.contains("cancelled") && !message.contains("deferred"), "{message}");
+    }
+
     #[test]
     fn interactive_waiters_precede_background_and_cancel_cleanly() {
         let scheduler = ResourceScheduler::new(|| (16384, 12000), 1, 1);

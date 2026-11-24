@@ -43,6 +43,24 @@ pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
 
 const READ_THREADS: usize = 4;
 
+fn progress_path(state_dir: &Path, root: &Path) -> PathBuf {
+    let mut path = marker(state_dir, root).into_os_string();
+    path.push(".progress");
+    PathBuf::from(path)
+}
+
+/// The last photo id a pass checked, so a cancelled pass resumes there instead of reading every file again.
+fn saved_progress(path: &Path) -> i64 {
+    std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0)
+}
+
+fn save_progress(path: &Path, checked_to: i64) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, checked_to.to_string());
+}
+
 /// Files are read with no database lock held, a few at a time; the writer is taken per chunk, so a cancel keeps
 /// every fix already written and only the marker (written when the whole folder was checked) waits for the next scan.
 #[cfg(test)]
@@ -73,6 +91,8 @@ fn run_chunked(
     if marker(state_dir, root).exists() {
         return 0;
     }
+    let resume_file = progress_path(state_dir, root);
+    let resume = saved_progress(&resume_file);
     let photos = match photos_under(database, root) {
         Ok(photos) => photos,
         Err(error) => {
@@ -81,9 +101,13 @@ fn run_chunked(
         }
     };
     progress(Progress::Total(photos.len() as u64));
+    let skipped = photos.partition_point(|photo| photo.0 <= resume);
+    if skipped > 0 {
+        progress(Progress::Advance(skipped as u64));
+    }
     let pool = rayon::ThreadPoolBuilder::new().num_threads(READ_THREADS).thread_name(|index| format!("capture-dates-{index}")).build();
     let mut fixed = 0;
-    for chunk in photos.chunks(read_chunk) {
+    for chunk in photos[skipped..].chunks(read_chunk) {
         if cancelled() {
             return fixed;
         }
@@ -105,17 +129,19 @@ fn run_chunked(
             Ok(pool) => pool.install(|| chunk.par_iter().filter_map(check).collect()),
             Err(_) => chunk.iter().filter_map(check).collect(),
         };
-        if cancelled() {
-            return fixed;
-        }
         if let Err(error) = write_chunk(&mut database.lock(), &fixes) {
             tracing::warn!(%error, "capture-date backfill could not update the catalog; retrying next scan");
             return fixed;
         }
         fixed += fixes.len();
+        if cancelled() {
+            return fixed;
+        }
+        save_progress(&resume_file, chunk.last().map_or(resume, |photo| photo.0));
         progress(Progress::Advance(chunk.len() as u64));
     }
     mark_done(state_dir, root);
+    let _ = std::fs::remove_file(&resume_file);
     tracing::info!(checked = photos.len(), fixed, "capture dates backfilled");
     fixed
 }
@@ -133,7 +159,7 @@ fn query_photos(conn: &Connection, root: &Path) -> Result<Vec<(i64, String, Opti
     let hi = prefix_upper_bound(&lo).unwrap_or_else(|| char::MAX.to_string());
     let mut statement = conn.prepare(
         "SELECT id, path_text, created_at, kind FROM files \
-         WHERE kind IN ('image', 'video') AND failed = 0 AND path_text >= ?1 AND path_text < ?2",
+         WHERE kind IN ('image', 'video') AND failed = 0 AND path_text >= ?1 AND path_text < ?2 ORDER BY id",
     )?;
     let rows = statement
         .query_map(params![lo, hi], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
@@ -277,6 +303,7 @@ mod tests {
         assert_eq!(run_if_needed(&database, &state, &root, &|| true), 0, "a cancelled pass changes nothing");
         assert!(!marker(&state, &root).exists());
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 2);
+        assert!(!progress_path(&state, &root).exists(), "a finished pass leaves no progress file");
         let stored: Vec<f64> = {
             let conn = database.lock();
             let mut statement = conn.prepare("SELECT created_at FROM files ORDER BY id").unwrap();
@@ -290,6 +317,40 @@ mod tests {
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 0, "the marker keeps it to one pass per folder");
         mark_done(&state, &scratch);
         assert!(marker(&state, &scratch).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_pass_keeps_its_fixes_and_the_next_pass_resumes_after_them() {
+        let scratch = std::env::temp_dir().join(format!("fileid-capture-resume-{}", uuid::Uuid::new_v4()));
+        let (root, state) = (scratch.join("Library"), scratch.join("state"));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for id in 1..=3_i64 {
+            let path = root.join(format!("{id}.jpg"));
+            std::fs::write(&path, jpeg_taken_at("2019:07:04 12:00:00", "+00:00", "")).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(?1,?2,?1,1,0,'image','jpg',1700000000)",
+                params![id, path.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        let database = Mutex::new(conn);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let cancelled = || stop.load(std::sync::atomic::Ordering::SeqCst);
+        let after_first_photo = |step: super::super::catch_up::Progress| {
+            if matches!(step, super::super::catch_up::Progress::Advance(_)) {
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        assert_eq!(run_chunked(&database, &state, &root, &cancelled, &after_first_photo, 1), 1);
+        assert!(progress_path(&state, &root).exists());
+        assert!(!marker(&state, &root).exists());
+        let fixed: i64 = database.lock().query_row("SELECT COUNT(*) FROM files WHERE created_at < 1600000000", [], |row| row.get(0)).unwrap();
+        assert_eq!(fixed, 1, "the photo checked before the cancel keeps its corrected date");
+        std::fs::remove_file(root.join("1.jpg")).unwrap();
+        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 2, "the resumed pass starts after the checked photo");
+        assert!(marker(&state, &root).exists());
         std::fs::remove_dir_all(scratch).unwrap();
     }
 }

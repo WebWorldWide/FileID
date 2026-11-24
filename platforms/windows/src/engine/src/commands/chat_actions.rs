@@ -11,6 +11,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fmt::Write;
 use std::path::Path;
 
+const MAX_MERGE_SOURCES: usize = 50;
+const MAX_TITLE: usize = 200;
 pub(crate) const MAX_IDS: usize = 10_000;
 const DESCRIBE_BATCH: usize = 100;
 
@@ -358,9 +360,10 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             }
             let listed_bytes: i64 = found.copies.iter().map(|copy| copy.4).sum();
             let count = found.copies.len() as i64;
+            let kept = found.copies.iter().map(|copy| copy.1).collect::<std::collections::HashSet<_>>().len() as i64;
             let mut detail = format!(
                 "Keeps one copy of each of {}{qualifiers} and moves {} ({}) to the Trash. Each copy is checked byte by byte against the kept copy first; anything that changed is skipped.",
-                count_noun(found.groups, "file", "files"),
+                count_noun(kept, "file", "files"),
                 count_noun(count, "extra copy", "extra copies"),
                 bytes_label(listed_bytes)
             );
@@ -496,6 +499,10 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 proposed.page = Some("people".into());
                 return Ok(finish(proposed, vec![]));
             }
+            let title = format!("Name this person {name}");
+            if title.chars().count() > MAX_TITLE {
+                return Ok(Resolution::say(format!("That name is too long. Use at most {} characters.", MAX_TITLE - "Name this person ".len())));
+            }
             let person = selected[0];
             let Some(count) = conn.query_row("SELECT file_count FROM persons WHERE id=?1", [person], |row| row.get::<_, i64>(0)).optional()? else {
                 return Ok(Resolution::say("That person is no longer in People."));
@@ -504,7 +511,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let mut proposed = action(
                 context,
                 "namePerson",
-                format!("Name this person {name}"),
+                title,
                 format!("Names the selected person {name} ({}). Only the name in FileID changes; no files are touched.", count_noun(count, "file", "files")),
             );
             proposed.undo = Some("Rename them again in People.".into());
@@ -553,6 +560,12 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             };
             let destination = unique[0];
             let sources = unique[1..].to_vec();
+            if sources.len() > MAX_MERGE_SOURCES {
+                return Ok(Resolution::say(format!(
+                    "Merge at most {} people at a time (one to keep and {MAX_MERGE_SOURCES} to fold in); merge the rest in People afterwards.",
+                    MAX_MERGE_SOURCES + 1
+                )));
+            }
             let hits = person_files(conn, &sources)?;
             let files: i64 = conn.query_row(
                 "SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?1)) AND COALESCE(excluded,0)=0",
@@ -617,7 +630,7 @@ pub(crate) fn valid(action: &ChatAction) -> bool {
         && !action.id.is_empty()
         && action.id.chars().count() <= 300
         && !action.title.trim().is_empty()
-        && action.title.chars().count() <= 200
+        && action.title.chars().count() <= MAX_TITLE
         && action.detail.chars().count() <= 2000
         && ["parser", "model"].contains(&action.source.as_str())
         && action.requires_confirmation == requires_confirmation(&action.kind)
@@ -627,7 +640,7 @@ pub(crate) fn valid(action: &ChatAction) -> bool {
         && action.byte_count.is_none_or(|count| count >= 0)
         && ids_ok(&action.file_ids)
         && ids_ok(&action.keeper_file_ids)
-        && action.person_ids.as_ref().is_none_or(|ids| ids.len() <= 50 && ids.iter().all(|id| *id > 0))
+        && action.person_ids.as_ref().is_none_or(|ids| ids.len() <= MAX_MERGE_SOURCES && ids.iter().all(|id| *id > 0))
         && action.person_id.is_none_or(|id| id > 0)
         && action.page.as_ref().is_none_or(|page| CHAT_PAGES.contains(&page.as_str()))
         && action.job.as_ref().is_none_or(|job| CHAT_JOBS.contains(&job.as_str()))
@@ -917,5 +930,62 @@ mod tests {
         assert_eq!(proposed.file_count, Some(1));
         assert!(proposed.detail.contains("(1 file)"), "{}", proposed.detail);
         assert_eq!(merged.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![10]);
+    }
+
+    #[test]
+    fn a_merge_of_too_many_people_says_so_instead_of_promising_a_card() {
+        let conn = crate::db::test_support::memory_db();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let intent = super::super::chat_intent::parse_intent("merge these people").unwrap();
+        for (count, expect_card) in [(51_i64, true), (52, false)] {
+            let chat = ChatContext { person_ids: Some((1..=count).collect()), ..ChatContext::default() };
+            let ctx = context(Some(&chat), &people, &events, "merge these people");
+            let resolution = resolve(&conn, &intent, &ctx).unwrap();
+            assert_eq!(!resolution.actions.is_empty(), expect_card, "{count}");
+            if !expect_card {
+                assert!(resolution.message.contains("Merge at most 51 people"), "{}", resolution.message);
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_too_long_for_the_card_title_is_refused_in_words() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute("INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,NULL,NULL,0,2)", []).unwrap();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let chat = ChatContext { person_ids: Some(vec![1]), ..ChatContext::default() };
+        let ctx = context(Some(&chat), &people, &events, "name this person");
+        let make = |name: String| Intent { kind: "namePerson".into(), name: Some(name), ..Intent::default() };
+        let fits = resolve(&conn, &make("A".repeat(183)), &ctx).unwrap();
+        assert_eq!(fits.actions.len(), 1);
+        let too_long = resolve(&conn, &make("A".repeat(184)), &ctx).unwrap();
+        assert!(too_long.actions.is_empty());
+        assert!(too_long.message.contains("too long"), "{}", too_long.message);
+    }
+
+    #[test]
+    fn the_trash_card_counts_only_the_files_it_lists_when_the_list_is_cut() {
+        let mut conn = crate::db::test_support::memory_db();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,content_hash) VALUES(?1,?2,?1,?3,?1,0,'image','jpg',?4)")
+                .unwrap();
+            insert.execute(params![1, "/lib/big/0.jpg", 2000, vec![1_u8]]).unwrap();
+            for id in 2..=(MAX_IDS as i64 + 2) {
+                insert.execute(params![id, format!("/lib/big/{id}.jpg"), 2000, vec![1_u8]]).unwrap();
+            }
+            let last = MAX_IDS as i64 + 3;
+            insert.execute(params![last, "/lib/small/a.jpg", 1000, vec![2_u8]]).unwrap();
+            insert.execute(params![last + 1, "/lib/small/b.jpg", 1000, vec![2_u8]]).unwrap();
+        }
+        tx.commit().unwrap();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let ctx = context(None, &people, &events, "move extra copies to trash");
+        let intent = super::super::chat_intent::parse_intent("move extra copies to trash").unwrap();
+        let proposed = &resolve(&conn, &intent, &ctx).unwrap().actions[0];
+        assert_eq!(proposed.file_count, Some(MAX_IDS as i64));
+        assert!(proposed.detail.starts_with("Keeps one copy of each of 1 file and moves"), "{}", proposed.detail);
+        assert!(proposed.detail.contains("covers the largest"), "{}", proposed.detail);
     }
 }

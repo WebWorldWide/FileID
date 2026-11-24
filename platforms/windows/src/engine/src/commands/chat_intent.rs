@@ -182,6 +182,22 @@ const FOLDER_NAME_BOUNDARIES: [&str; 20] = [
     "named",
 ];
 
+fn known_folder(word: &str) -> String {
+    if word == "docs" { "documents".into() } else { word.to_owned() }
+}
+
+fn names_a_longer_folder(words: &[String], index: usize) -> bool {
+    for word in &words[index + 1..] {
+        if word == "folder" || word == "directory" {
+            return true;
+        }
+        if FOLDER_NAME_BOUNDARIES.contains(&word.as_str()) {
+            return false;
+        }
+    }
+    false
+}
+
 pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Option<String> {
     if let Some(quoted) = quoted_path(text) {
         return Some(quoted);
@@ -190,8 +206,8 @@ pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Optio
         return Some(path.clone());
     }
     for (index, word) in words.iter().enumerate() {
-        if KNOWN_FOLDERS.contains(&word.as_str()) {
-            return Some(if word == "docs" { "documents".into() } else { word.clone() });
+        if KNOWN_FOLDERS.contains(&word.as_str()) && !names_a_longer_folder(words, index) {
+            return Some(known_folder(word));
         }
         if (word == "folder" || word == "directory")
             && !words.get(index + 1).is_some_and(|next| ["layout", "structure", "plan", "organization"].contains(&next.as_str()))
@@ -204,6 +220,9 @@ pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Optio
                 let mut start = index - 1;
                 while start > 0 && !FOLDER_NAME_BOUNDARIES.contains(&words[start - 1].as_str()) {
                     start -= 1;
+                }
+                if index - start == 1 && KNOWN_FOLDERS.contains(&words[start].as_str()) {
+                    return Some(known_folder(&words[start]));
                 }
                 return Some(format!("named:{}", cased[start..index].join(" ")));
             }
@@ -976,6 +995,11 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             return Some((cased, index..at + 1));
         }
         let folder_after = words.get(at + 1).is_some_and(|word| word == "folder" || word == "directory");
+        if !folder_after && KNOWN_FOLDERS.contains(&target.as_str())
+            && let Some(close) = (at + 2..words.len()).take_while(|&k| !FOLDER_NAME_BOUNDARIES.contains(&words[k].as_str())).find(|&k| words[k] == "folder" || words[k] == "directory") {
+            let name = raw[at..close].iter().map(|part| original(part)).collect::<Vec<_>>().join(" ");
+            return Some((format!("named:{name}"), index..close + 1));
+        }
         if word == "of" && !folder_after && target != "folder" && target != "directory" {
             continue;
         }
@@ -985,10 +1009,12 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             let label = chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
             return Some((format!("named:{label}"), index..end));
         }
-        if (target == "folder" || target == "directory")
-            && let Some(name) = raw.get(at + 1) {
-                return Some((format!("named:{}", original(name)), index..at + 2));
+        if target == "folder" || target == "directory" {
+            let skip = usize::from(matches!(words.get(at + 1).map(String::as_str), Some("named" | "called")));
+            if let Some(name) = raw.get(at + 1 + skip) {
+                return Some((format!("named:{}", original(name)), index..at + 2 + skip));
             }
+        }
     }
     None
 }
@@ -1034,7 +1060,7 @@ fn exact(from: Vec<String>, to: Vec<String>, label: String) -> DateFilter {
 
 fn calendar(y: u32, m: u32, d: u32) -> Option<String> {
     let days = [31, if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    (d <= days[m as usize - 1]).then(|| format!("{y:04}-{m:02}-{d:02}"))
+    (d >= 1 && d <= days[m as usize - 1]).then(|| format!("{y:04}-{m:02}-{d:02}"))
 }
 
 fn date_at(words: &[String], index: usize) -> Option<Span> {
@@ -1611,5 +1637,42 @@ mod tests {
             assert!(!question.reduced.split_whitespace().any(|word| ["this", "our", "collection"].contains(&word)), "{text} → {}", question.reduced);
         }
         assert_eq!(parse_question("how many photos from this trip").reduced, "photos from this trip");
+    }
+
+    #[test]
+    fn multi_word_folder_names_are_not_cut_at_the_first_known_folder_word() {
+        for (text, want) in [
+            ("organize my Documents Backup folder", "named:Documents Backup"),
+            ("scan my home videos folder", "named:home videos"),
+            ("rescan the Music Videos folder", "named:Music Videos"),
+            ("organize my Pictures folder", "pictures"),
+            ("scan downloads", "downloads"),
+            ("scan the docs folder", "documents"),
+        ] {
+            let (words, cased) = imperative_words(text);
+            assert_eq!(folder_reference(&words, &cased, text).as_deref(), Some(want), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_question_about_a_multi_word_folder_keeps_the_whole_name() {
+        assert_eq!(parse_question("how many files in the Pictures Backup folder").folder.as_deref(), Some("named:Pictures Backup"));
+        assert_eq!(parse_question("how many files in the Pictures folder").folder.as_deref(), Some("named:Pictures"));
+        assert_eq!(parse_question("how many files in Downloads").folder.as_deref(), Some("named:Downloads"));
+    }
+
+    #[test]
+    fn a_folder_named_x_question_uses_x_not_the_word_named() {
+        assert_eq!(parse_question("how many files in the folder named Receipts").folder.as_deref(), Some("named:Receipts"));
+        assert_eq!(parse_question("how many files in the directory called Receipts").folder.as_deref(), Some("named:Receipts"));
+        assert_eq!(parse_question("how many files in the folder Receipts").folder.as_deref(), Some("named:Receipts"));
+    }
+
+    #[test]
+    fn an_iso_date_with_day_zero_is_not_a_date() {
+        let words = |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_owned).collect() };
+        assert!(date_at(&words("2024-05-00"), 0).is_none());
+        assert!(date_at(&words("2024-05-01"), 0).is_some());
+        assert!(parse_question("photos from 2024-05-00").date.is_none());
     }
 }
