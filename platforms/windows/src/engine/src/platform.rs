@@ -634,19 +634,33 @@ pub fn storage_type_for_path(_path: &Path) -> StorageType {
 /// macOS: classified from the mount, not the device, so an external APFS or HFS+ drive stays `Unknown`. Only network mounts and the FAT-family and NTFS volumes mounted under /Volumes (USB sticks and external drives) are narrowed.
 #[cfg(target_os = "macos")]
 pub fn storage_type_for_path(path: &Path) -> StorageType {
+    match mount_info(path) {
+        Some((fstype, mount_on, is_local)) => classify_mount(&fstype, &mount_on, is_local),
+        None => StorageType::Unknown,
+    }
+}
+
+/// Filesystem type, mount point and locality of the volume holding `path` (a missing leaf is resolved to its nearest existing parent).
+#[cfg(target_os = "macos")]
+pub(crate) fn mount_info(path: &Path) -> Option<(String, String, bool)> {
     use std::ffi::{CStr, CString};
     use std::os::unix::ffi::OsStrExt;
 
-    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
-        return StorageType::Unknown;
+    let mut probe = path;
+    let existing = loop {
+        if probe.exists() {
+            break probe;
+        }
+        probe = probe.parent()?;
     };
+    let c_path = CString::new(existing.as_os_str().as_bytes()).ok()?;
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statfs(c_path.as_ptr(), &mut fs) } != 0 {
-        return StorageType::Unknown;
+        return None;
     }
-    let fstype = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) }.to_string_lossy();
-    let mount_on = unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) }.to_string_lossy();
-    classify_mount(&fstype, &mount_on, fs.f_flags & MNT_LOCAL != 0)
+    let fstype = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) }.to_string_lossy().into_owned();
+    let mount_on = unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) }.to_string_lossy().into_owned();
+    Some((fstype, mount_on, fs.f_flags & MNT_LOCAL != 0))
 }
 
 #[cfg(target_os = "macos")]

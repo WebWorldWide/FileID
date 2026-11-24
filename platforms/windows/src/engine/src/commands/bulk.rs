@@ -523,6 +523,11 @@ fn plan_rename(
     if identity.file != expected_ref {
         return refuse("source was replaced after indexing; rescan before renaming");
     }
+    if !crate::util::path_safety::is_storable_on_windows_volume(&entry.new_name)
+        && crate::util::path_safety::volume_has_windows_name_rules(&dir)
+    {
+        return refuse(crate::util::path_safety::windows_volume_name_reason());
+    }
     let dest = dir.join(&entry.new_name);
     let original_extension = path
         .extension()

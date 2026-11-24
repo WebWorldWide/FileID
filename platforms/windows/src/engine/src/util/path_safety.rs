@@ -22,6 +22,30 @@ pub(crate) fn unsafe_filename_reason() -> &'static str {
     }
 }
 
+/// True when the volume holding `dir` is exFAT, FAT, NTFS or an SMB share, which cannot store the names `is_safe_posix_filename` allows. Only macOS reports the volume type; elsewhere the answer is false.
+pub(crate) fn volume_has_windows_name_rules(dir: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::mount_info(dir)
+            .is_some_and(|(fstype, _, _)| matches!(fstype.as_str(), "exfat" | "msdos" | "ntfs" | "smbfs"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// Names exFAT, FAT, NTFS and SMB refuse: the characters `: * ? " < > |` and a trailing space or dot.
+pub(crate) fn is_storable_on_windows_volume(name: &str) -> bool {
+    !name.contains([':', '*', '?', '"', '<', '>', '|']) && !name.ends_with([' ', '.'])
+}
+
+/// What to tell the user when `is_storable_on_windows_volume` refuses a name.
+pub(crate) fn windows_volume_name_reason() -> &'static str {
+    "This disk can’t store names with : * ? \" < > | or ending in a space or a dot. Choose a different name."
+}
+
 /// A single component with no separator of either kind and no control character (NUL included).
 fn is_safe_posix_filename(name: &str) -> bool {
     !name.is_empty()
@@ -523,6 +547,21 @@ mod tests {
         let typed = resolve_exclusions(Path::new("/Volumes/x"), &["/Volumes/X/Private/".to_string()]);
         assert_eq!(typed.len(), 1, "an exclusion typed in another case than the root is kept");
         assert_eq!(normalize_for_exclusion(Path::new("/Volumes/X/Private")), "/Volumes/X/Private", "the identity key stays case-preserving");
+    }
+
+    #[test]
+    fn names_a_windows_volume_cannot_store_are_recognised() {
+        for bad in ["Meeting 10:30.jpg", "a|b.jpg", "what?.jpg", "x.", "trailing ", "q\"uote.jpg"] {
+            assert!(!is_storable_on_windows_volume(bad), "{bad}");
+        }
+        assert!(is_storable_on_windows_volume("Meeting 10-30.jpg"));
+        assert!(!windows_volume_name_reason().contains("os error"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_boot_volume_keeps_posix_name_rules() {
+        assert!(!volume_has_windows_name_rules(&std::env::temp_dir()));
     }
 
     #[test]
