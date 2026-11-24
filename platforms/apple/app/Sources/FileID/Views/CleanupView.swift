@@ -82,6 +82,10 @@ struct CleanupView: View {
             }
             Hairline()
             if visible.isEmpty {
+                if status != nil {
+                    statusBanner
+                        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
+                }
                 empty
             } else {
                 list(visible: visible)
@@ -292,6 +296,42 @@ struct CleanupView: View {
         }
     }
 
+    /// The result of the last Move to Trash, with its Undo. Shown above the empty page too: trashing the last group leaves no list to carry it.
+    @ViewBuilder
+    private var statusBanner: some View {
+        if let s = status {
+            HStack(spacing: 10) {
+                Image(systemName: statusWarning
+                      ? "exclamationmark.triangle.fill" : "trash.fill")
+                    .foregroundStyle(statusWarning ? Theme.warning : Theme.delight)
+                Text(s)
+                    .font(Theme.Font.body(13.5))
+                Spacer()
+                if let batch = undoBatch {
+                    Button("Undo") { Task { await undoTrash(batch) } }
+                        .buttonStyle(.dsSecondary)
+                        .disabled(deleting)
+                }
+                Button("Open Trash") {
+                    NSWorkspace.shared.open(UserHome.trashURL)
+                }
+                .buttonStyle(.dsSecondary)
+                Button("Dismiss") {
+                    status = nil
+                    statusWarning = false
+                }
+                    .buttonStyle(.borderless)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
+                (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
+                (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
+                lineWidth: 1))
+            .help(undoBatch == nil ? "To put a file back, open Trash in Finder, right-click it and choose Put Back." : "Undo puts the moved copies back where they were.")
+        }
+    }
+
     @ViewBuilder
     private func list(visible: [DuplicateGroup]) -> some View {
         ScrollView {
@@ -344,37 +384,7 @@ struct CleanupView: View {
                         onDeleteGroup: { confirmGroup = group; confirmDelete = true }
                     )
                 }
-                if let s = status {
-                    HStack(spacing: 10) {
-                        Image(systemName: statusWarning
-                              ? "exclamationmark.triangle.fill" : "trash.fill")
-                            .foregroundStyle(statusWarning ? Theme.warning : Theme.delight)
-                        Text(s)
-                            .font(Theme.Font.body(13.5))
-                        Spacer()
-                        if let batch = undoBatch {
-                            Button("Undo") { Task { await undoTrash(batch) } }
-                                .buttonStyle(.dsSecondary)
-                                .disabled(deleting)
-                        }
-                        Button("Open Trash") {
-                            NSWorkspace.shared.open(UserHome.trashURL)
-                        }
-                        .buttonStyle(.dsSecondary)
-                        Button("Dismiss") {
-                            status = nil
-                            statusWarning = false
-                        }
-                            .buttonStyle(.borderless)
-                    }
-                    .padding(12)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
-                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
-                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
-                        lineWidth: 1))
-                    .help(undoBatch == nil ? "To put a file back, open Trash in Finder, right-click it and choose Put Back." : "Undo puts the moved copies back where they were.")
-                }
+                statusBanner
             }
             .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
         }

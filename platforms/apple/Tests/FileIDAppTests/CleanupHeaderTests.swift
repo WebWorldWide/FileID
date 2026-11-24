@@ -28,3 +28,12 @@ struct CleanupHeaderTests {
         #expect(CleanupView.unreadableNote(3, timedOut: 9) == "3 files couldn’t be read yet, so they’re not in these results")
     }
 }
+
+@Suite struct CleanupResultBannerTests {
+    @Test func theTrashResultAndUndoStayReachableWhenNoGroupsRemain() throws {
+        let source = try appSource("Views/CleanupView.swift")
+        let emptyBranch = try #require(source.range(of: "if visible.isEmpty {"))
+        let listBranch = try #require(source.range(of: "list(visible: visible)", range: emptyBranch.upperBound..<source.endIndex))
+        #expect(source[emptyBranch.upperBound..<listBranch.lowerBound].contains("statusBanner"))
+    }
+}
