@@ -69,6 +69,7 @@ struct LibraryScaleTests {
         let library = try appSource("Views/LibraryView.swift")
         #expect(library.contains("else if canLoadMore, similarSeed == nil, let note = Self.moreBelowNote("))
         #expect(library.contains("Button { jumpToEnd() } label: { Text(note) }"))
+        #expect(library.contains(".background(Theme.surfaceBase, in: RoundedRectangle(cornerRadius: Theme.Radius.s))"), "the pill sits over tile metadata, so its face is opaque")
     }
 
     @Test func rowsLoadedWithoutTagsGetTheirChipsFromTheBottomUp() throws {

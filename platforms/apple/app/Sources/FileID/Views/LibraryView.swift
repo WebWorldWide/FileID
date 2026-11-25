@@ -1103,6 +1103,7 @@ struct LibraryView: View {
             } else if canLoadMore, similarSeed == nil, let note = Self.moreBelowNote(loaded: rows.count, total: listingTotal) {
                 Button { jumpToEnd() } label: { Text(note) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .background(Theme.surfaceBase, in: RoundedRectangle(cornerRadius: Theme.Radius.s))
                     .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                     .padding(.bottom, 10)
                     .help("Load the rest of the listing and scroll to its last file (End).")
