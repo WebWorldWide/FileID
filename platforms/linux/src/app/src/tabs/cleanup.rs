@@ -1377,53 +1377,25 @@ impl Cleanup {
             if selected.is_empty() {
                 continue;
             }
-            let keeper = group
-                .members
-                .iter()
-                .find(|member| !requested.contains(&member.id))
-                .or_else(|| group.members.first())
+            let member_ids: Vec<i64> = group.members.iter().map(|member| member.id).collect();
+            let Some(keeper) = keeper_index(&member_ids, &requested)
+                .and_then(|index| group.members.get(index))
                 .and_then(|member| {
                     Some(ExactTrashCandidate {
                         id: member.id,
                         path: std::path::PathBuf::from(&member.path),
                         size: u64::try_from(member.size).ok()?,
                     })
-                });
-            let Some(keeper) = keeper else {
+                })
+            else {
                 rejected_without_keeper += selected.len();
                 continue;
             };
-            let mut selected = selected;
-            if let Some(index) = selected.iter().position(|member| member.id == keeper.id) {
-                let selected_keeper = selected.swap_remove(index);
-                if let Some(witness) = group
-                    .members
-                    .iter()
-                    .find(|member| member.id != keeper.id)
-                    .and_then(|member| {
-                        Some(ExactTrashCandidate {
-                            id: member.id,
-                            path: std::path::PathBuf::from(&member.path),
-                            size: u64::try_from(member.size).ok()?,
-                        })
-                    })
-                {
-                    checks.push(ExactTrashGroup {
-                        expected_hash,
-                        keeper: witness,
-                        selected: vec![selected_keeper],
-                    });
-                } else {
-                    rejected_without_keeper += 1;
-                }
-            }
-            if !selected.is_empty() {
-                checks.push(ExactTrashGroup {
-                    expected_hash,
-                    keeper,
-                    selected,
-                });
-            }
+            checks.push(ExactTrashGroup {
+                expected_hash,
+                keeper,
+                selected,
+            });
         }
         let unrepresented = requested
             .len()
@@ -1457,11 +1429,20 @@ impl Cleanup {
                 this.trash_generation.set(operation.wrapping_add(1));
                 this.deleting.set(false);
                 this.status_label.set_text(&format!(
-                    "Nothing was moved to Trash; {rejected} chosen file{} changed since the scan.",
-                    plural(rejected)
+                    "Nothing was moved to Trash. {rejected} chosen file{} changed since the scan, \
+                     or {} every copy in a group. Keep at least one copy of each.",
+                    plural(rejected),
+                    if rejected == 1 { "is" } else { "are" },
                 ));
                 this.reveal_status();
                 this.reload();
+                return;
+            }
+            if exact_trash_bytes(&valid) > EXACT_TRASH_BYTES_LIMIT {
+                this.fail_trash(
+                    "That is too much to check at once. Choose fewer copies, about 30 GB or \
+                     less, then try again. Nothing was moved.",
+                );
                 return;
             }
             let ids = valid.iter().map(|identity| identity.file_id).collect();
@@ -1757,6 +1738,26 @@ impl Cleanup {
             bar.set_opacity(value);
         });
     }
+}
+
+/// Every copy of a group must never be trashed together: the engine needs a kept copy outside the
+/// selection.
+fn keeper_index(member_ids: &[i64], requested: &HashSet<i64>) -> Option<usize> {
+    member_ids.iter().position(|id| !requested.contains(id))
+}
+
+/// Below the engine's 64 GiB cap on bytes read while verifying (it counts each copy and its keeper).
+const EXACT_TRASH_BYTES_LIMIT: u64 = 60 * 1024 * 1024 * 1024;
+
+fn exact_trash_bytes(identities: &[ExactTrashIdentity]) -> u64 {
+    identities
+        .iter()
+        .map(|identity| {
+            u64::try_from(identity.size_bytes)
+                .unwrap_or(0)
+                .saturating_add(u64::try_from(identity.keeper_size_bytes).unwrap_or(0))
+        })
+        .fold(0, u64::saturating_add)
 }
 
 fn revalidate_exact_trash(groups: Vec<ExactTrashGroup>) -> (Vec<ExactTrashIdentity>, usize) {
@@ -2624,6 +2625,28 @@ mod tests {
         assert_eq!(valid[0].keeper_path, keeper.to_string_lossy());
         assert_eq!(rejected, 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_group_with_every_copy_chosen_has_no_keeper() {
+        let all: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        assert_eq!(keeper_index(&[1, 2, 3], &all), None);
+        let most: HashSet<i64> = [1, 3].into_iter().collect();
+        assert_eq!(keeper_index(&[1, 2, 3], &most), Some(1));
+    }
+
+    #[test]
+    fn exact_trash_bytes_count_each_copy_and_its_keeper() {
+        let identity = |size_bytes| ExactTrashIdentity {
+            file_id: 1,
+            path: String::new(),
+            size_bytes,
+            sha256_hex: String::new(),
+            keeper_path: String::new(),
+            keeper_size_bytes: size_bytes,
+            keeper_sha256_hex: String::new(),
+        };
+        assert_eq!(exact_trash_bytes(&[identity(10), identity(5)]), 30);
     }
 
     #[test]
