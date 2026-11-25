@@ -65,3 +65,38 @@ struct PagePolishTests {
         #expect(TakeProposals.possibleGroupsOrder.contains("Bigger groups and more recent"))
     }
 }
+
+@Suite struct LargerTextLayoutTests {
+    @Test func chatChipsAndComposerWrapInsteadOfBreakingWords() throws {
+        let chat = try appSource("Views/ChatWorkbench.swift")
+        #expect(chat.contains("FlowLayout(spacing: 6) {\n                    ForEach(isPage ? Self.lookingIn"))
+        #expect(chat.contains("FlowLayout(spacing: 10) {\n                Toggle(isPage ? \"Summarize with local AI\""))
+        #expect(chat.contains("Label(\"AI model\", systemImage: \"cpu\").font(Theme.Font.body(12, .semibold)).lineLimit(1).fixedSize()"))
+    }
+
+    @Test func panelHeadersAndOptionRowsFallBackToStackedLayouts() throws {
+        let design = try appSource("Theme/DesignSystem.swift")
+        let header = try #require(design.range(of: "struct PanelHeader"))
+        #expect(design[header.lowerBound...].prefix(900).contains("ViewThatFits(in: .horizontal)"))
+        let tools = try appSource("Views/ToolsWorkbench.swift")
+        let row = try #require(tools.range(of: "private func optionRow"))
+        #expect(tools[row.lowerBound...].prefix(900).contains("ViewThatFits(in: .horizontal)"))
+        #expect(tools[row.lowerBound...].prefix(900).contains("VStack(alignment: .leading, spacing: 4)"))
+    }
+
+    @Test func bestTakesActionsAndPaneHeadersDoNotTruncate() throws {
+        let review = try appSource("Views/TakeReview.swift")
+        #expect(review.contains("FlowLayout(spacing: 8) {\n                Button(primaryTitle)"))
+        #expect(review.contains("SectionLabel(\"\\(title) · \\(index) of \\(qualities.count)\", color: tone).fixedSize()"))
+    }
+
+    @Test func pageHeaderAndLibraryToolbarKeepTheDesignedSize() throws {
+        let detail = try appSource("Views/Detail.swift")
+        let header = try #require(detail.range(of: "private var pageHeader"))
+        #expect(detail[header.lowerBound...].prefix(900).contains(".environment(\\.fixedTextSize, true)"))
+        let library = try appSource("Views/LibraryView.swift")
+        #expect(library.contains("TextField(\"Filter files\", text: $searchText)"))
+        #expect(library.contains(".font(Theme.Font.body(13.5, fixed: true))\n                .focused($searchFocused)"))
+        #expect(library.contains(".environment(\\.fixedTextSize, true)\n        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY)"))
+    }
+}
