@@ -174,8 +174,8 @@ struct ChatWorkbench: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 6) {
                 SectionLabel("Looking in")
-                HStack(spacing: 6) {
-                    ForEach(isPage ? Self.lookingIn : Array(Self.lookingIn.prefix(3)), id: \.self) { TagChip(text: $0) }
+                FlowLayout(spacing: 6) {
+                    ForEach(isPage ? Self.lookingIn : Array(Self.lookingIn.prefix(3)), id: \.self) { TagChip(text: $0).fixedSize() }
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Looking in names, tags, descriptions, chapters and text in files")
@@ -332,7 +332,7 @@ struct ChatWorkbench: View {
                         .help(!readiness.hasFiles ? (readiness.chatComposerPlaceholder ?? "") : input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type a question first" : input.count > 2000 ? "Shorten the question to 2,000 characters" : "Send (Return)")
                 }
             }
-            HStack(spacing: 10) {
+            FlowLayout(spacing: 10) {
                 Toggle(isPage ? "Summarize with local AI" : "Summarize with AI", isOn: $useModel)
                     .toggleStyle(DSToggleStyle())
                     .font(Theme.Font.body(12.5))
@@ -340,7 +340,7 @@ struct ChatWorkbench: View {
                     .lineLimit(1)
                     .fixedSize()
                 Button { modelsPresented = true } label: {
-                    Label("AI model", systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1)
+                    Label("AI model", systemImage: "cpu").font(Theme.Font.body(12, .semibold)).lineLimit(1).fixedSize()
                 }
                 .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
                 .disabled(!useModel)
@@ -349,16 +349,18 @@ struct ChatWorkbench: View {
                 if useModel {
                     if isPage {
                         MetaText(followsDescribe ? "Using the same AI as Describe Files" : "Using a different AI from Describe Files", size: 12)
+                            .fixedSize()
                             .help(modelName)
                     }
                     if !followsDescribe {
                         Button("Use the same one") { chatModelKind = "" }
                             .buttonStyle(.dsGhost)
+                            .fixedSize()
                             .help("Go back to the AI chosen in Describe Files")
                     }
                 }
-                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             if let note = readiness.readingNote {
                 MetaText(note, size: 12)
             }
