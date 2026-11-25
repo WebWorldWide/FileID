@@ -707,7 +707,7 @@ private struct AutoGroupRow: View {
                     Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
                         .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
                     Text("\(media) · " + TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
-                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.vertical, 6)

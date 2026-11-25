@@ -90,9 +90,10 @@ struct TakeReview: View {
             }
             MetaText(summary, size: 13)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
+            FlowLayout(spacing: 8) {
                 Button(primaryTitle) { confirmTrash = true }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
+                    .fixedSize()
                     .disabled(primaryDisabled || readOnlyReason != nil)
                     .keyboardShortcut(pageActive ? .defaultAction : nil)
                     .background {
@@ -209,19 +210,27 @@ struct TakeReview: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    private func paneHeader(_ q: CatalogTakeQuality, title: String, tone: Color, index: Int, kept: Bool, keepText: Bool) -> some View {
+        HStack(spacing: 8) {
+            SectionLabel("\(title) · \(index) of \(qualities.count)", color: tone).fixedSize()
+            if q.primaryFileID == bestID {
+                Image(systemName: "star.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.gold).accessibilityHidden(true)
+            }
+            Spacer(minLength: 4)
+            if kept {
+                Label("Keep", systemImage: "checkmark.circle.fill").font(Theme.Font.body(11.5, .semibold)).foregroundStyle(Theme.delight)
+                    .labelStyle(KeepLabelStyle(showsText: keepText))
+            }
+        }
+    }
+
     private func comparePane(_ q: CatalogTakeQuality, title: String, tone: Color) -> some View {
         let index = (qualities.firstIndex { $0.primaryFileID == q.primaryFileID } ?? 0) + 1
         let kept = keep.contains(q.primaryFileID)
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                SectionLabel("\(title) · \(index) of \(qualities.count)", color: tone)
-                if q.primaryFileID == bestID {
-                    Image(systemName: "star.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.gold).accessibilityHidden(true)
-                }
-                Spacer(minLength: 4)
-                if kept {
-                    Label("Keep", systemImage: "checkmark.circle.fill").font(Theme.Font.body(11.5, .semibold)).foregroundStyle(Theme.delight)
-                }
+            ViewThatFits(in: .horizontal) {
+                paneHeader(q, title: title, tone: tone, index: index, kept: kept, keepText: true)
+                paneHeader(q, title: title, tone: tone, index: index, kept: kept, keepText: false)
             }
             .padding(.horizontal, 12)
             .frame(height: 36)
@@ -698,4 +707,15 @@ private struct ZoomedTake: View {
 
 extension Array {
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
+}
+
+private struct KeepLabelStyle: LabelStyle {
+    let showsText: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        if showsText {
+            HStack(spacing: 4) { configuration.icon; configuration.title.fixedSize() }
+        } else {
+            configuration.icon.accessibilityLabel("Keep")
+        }
+    }
 }
