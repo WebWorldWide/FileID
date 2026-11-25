@@ -73,7 +73,10 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
 
     public var sizeMB: Double { Double(sizeBytes) / 1_048_576 }
 
-    public var displayDate: Date? { createdAt ?? modifiedAt }
+    public var displayDate: Date? {
+        let limit = Date().addingTimeInterval(86_400)
+        return [createdAt, modifiedAt].lazy.compactMap { $0 }.first { $0 <= limit }
+    }
 
     public var isImage: Bool { kind == "image" }
     public var isVideo: Bool { kind == "video" }

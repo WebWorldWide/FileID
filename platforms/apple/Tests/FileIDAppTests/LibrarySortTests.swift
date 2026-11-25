@@ -102,6 +102,24 @@ struct LibrarySortTests {
         }
     }
 
+    @Test func aDateInTheFutureIsNotACaptureDateAndSortsAmongTheUndated() async throws {
+        let fixture = try await makeCatalog()
+        defer { fixture.store.close(); try? FileManager.default.removeItem(at: fixture.directory) }
+        let future = Date().timeIntervalSince1970 + 15 * 365 * 86_400
+        let queue = try DatabaseQueue(path: fixture.directory.appending(component: "fileid.sqlite").path)
+        try await queue.write { try $0.execute(sql: "UPDATE files SET created_at = ? WHERE id IN (1, 2)", arguments: [future]) }
+        try queue.close()
+        for ascending in [true, false] {
+            let sort = LibrarySort(key: .dateTaken, ascending: ascending)
+            let firstPage = fixture.store.files(limit: 300, sort: sort)
+            #expect(firstPage.allSatisfy { $0.createdAt.map { $0.timeIntervalSince1970 < future } ?? true })
+            let all = everyPage(fixture, sort)
+            #expect(all.count == Self.rowCount)
+            #expect(Set(all.map(\.id)).count == Self.rowCount)
+            #expect(Set(all.suffix(2).map(\.id)) == [1, 2], "future-dated files list last")
+        }
+    }
+
     @Test func theDefaultListingStillShowsTheNewestScanFirst() async throws {
         let fixture = try await makeCatalog()
         defer { fixture.store.close(); try? FileManager.default.removeItem(at: fixture.directory) }
@@ -177,6 +195,12 @@ struct LibrarySortTests {
     private func row(id: Int64, path: String = "/a/x.jpg", taken: Date?, added: Date) -> FileRow {
         FileRow(id: id, pathText: path, sizeBytes: 1, createdAt: taken, modifiedAt: nil, scannedAt: added, kind: "image", extension: "jpg", phash: nil,
                 aesthetic: nil, hasFaces: false, hasText: false, cameraModel: nil, locationLat: nil, locationLon: nil, failed: false, errorMessage: nil)
+    }
+
+    @Test func aCaptureDateInTheFutureIsNotShown() {
+        let future = Date().addingTimeInterval(15 * 365 * 86_400)
+        #expect(row(id: 1, taken: future, added: Date()).displayDate == nil)
+        #expect(row(id: 2, taken: Date(timeIntervalSince1970: 1_000), added: Date()).displayDate == Date(timeIntervalSince1970: 1_000))
     }
 
     @Test func dateAddedShowsWhenItWasAddedAndOtherSortsShowTheCaptureDate() {
