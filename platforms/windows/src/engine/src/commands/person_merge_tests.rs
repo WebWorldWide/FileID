@@ -245,7 +245,7 @@ fn journal_rows_use_the_swift_field_names() {
     let keys = |text: &str| -> Vec<String> { serde_json::from_str::<Value>(text).unwrap().as_object().unwrap().keys().cloned().collect() };
     let mut before_keys = keys(&before);
     before_keys.sort();
-    assert_eq!(before_keys, ["candidates", "keepNames", "keepRepresentative", "keepUnknown", "other", "otherPersonID", "personID", "resolution", "runnerUpFaces", "verifications"]);
+    assert_eq!(before_keys, ["candidates", "keepNames", "keepRepresentative", "keepUnknown", "other", "otherPersonID", "personID", "resolution", "runnerUpFaces", "splits", "suggestions", "verifications"]);
     let mut after_keys = keys(&after);
     after_keys.sort();
     assert_eq!(after_keys, ["faceIDs", "otherPersonID", "personID", "resolution"]);
@@ -387,4 +387,34 @@ fn merging_clears_the_destination_centroid_so_suggestions_see_the_merged_faces()
         })
         .unwrap();
     assert_eq!(state, (None, None, None));
+}
+
+#[test]
+fn undo_brings_back_the_merge_suggestions_the_merge_removed() {
+    let conn = db();
+    let keep = person(&conn, None, None, true, 1);
+    let other = person(&conn, None, None, true, 1);
+    let third = person(&conn, None, None, true, 1);
+    conn.execute_batch(&format!(
+        "INSERT INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES({o},{t},0.6,'m|p',7.0),({t},{k},0.5,'m|p',8.0);
+         INSERT INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES({o},0.4,'[1]','[2]','m|p',9.0);",
+        k = keep.0,
+        o = other.0,
+        t = third.0
+    ))
+    .unwrap();
+    let pairs = |conn: &Connection| -> Vec<(i64, i64, f64, f64)> {
+        let mut statement = conn.prepare("SELECT person_id, other_person_id, score, created_at FROM face_merge_suggestions ORDER BY person_id, other_person_id").unwrap();
+        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    let splits = |conn: &Connection| -> i64 { conn.query_row("SELECT COUNT(*) FROM face_split_suggestions", [], |row| row.get(0)).unwrap() };
+    let before = pairs(&conn);
+    assert_eq!(before.len(), 2);
+
+    let operation = merge(&conn, other.0, keep.0);
+    assert_eq!((pairs(&conn).len(), splits(&conn)), (1, 0));
+
+    undo_op(&conn, &operation);
+    assert_eq!(pairs(&conn), before);
+    assert_eq!(splits(&conn), 1);
 }

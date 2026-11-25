@@ -197,6 +197,7 @@ pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
             let aligned = pixels.as_ref().and_then(|pixels| {
                 let stored = face_landmark_match::parse_normalized(bbox, image.width, image.height, image.orientation)?;
                 let index = face_landmark_match::index(&stored, &detected)?;
+                face_align::landmarks_upright(&image.landmarks[index].points).then_some(())?;
                 face_align::align_112_rgba(pixels, image.width, image.height, &image.landmarks[index].points)
             });
             if let Some(rgba) = aligned {

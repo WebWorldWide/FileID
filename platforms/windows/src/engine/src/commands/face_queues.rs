@@ -27,11 +27,13 @@ pub(crate) struct QueueSettings {
     pub split_max: f64,
     pub split_min_faces: usize,
     pub split_min_cohesion: f64,
+    pub oversized_min_faces: usize,
+    pub oversized_share: f64,
 }
 
 impl Default for QueueSettings {
     fn default() -> Self {
-        Self { merge_min: 0.55, split_max: 0.45, split_min_faces: 6, split_min_cohesion: 0.5 }
+        Self { merge_min: 0.55, split_max: 0.45, split_min_faces: 6, split_min_cohesion: 0.5, oversized_min_faces: 300, oversized_share: 0.2 }
     }
 }
 
@@ -53,6 +55,8 @@ impl QueueSettings {
                 .and_then(|value| value.trim().parse::<usize>().ok())
                 .map_or(defaults.split_min_faces, |value| value.clamp(4, 1000)),
             split_min_cohesion: read("FILEID_FACE_SPLIT_MIN_COHESION", defaults.split_min_cohesion),
+            oversized_min_faces: defaults.oversized_min_faces,
+            oversized_share: defaults.oversized_share,
         }
     }
 }
@@ -267,7 +271,15 @@ pub(crate) fn two_groups(vectors: &[&[f32]]) -> Option<(Vec<usize>, Vec<f32>, Ve
     Some((groups, centers.0, centers.1))
 }
 
-fn split_of(person: &Person, settings: &QueueSettings) -> Option<SplitRow> {
+/// A person holding this share of every assigned face (and at least the minimum) is a chained cluster whose centroid
+/// has drifted to the average face: its two halves stay close in embedding space, so the separation gates would never
+/// offer it, yet nothing else lets the user take it apart.
+fn oversized(person: &Person, total: usize, settings: &QueueSettings) -> bool {
+    let faces = person.members.len();
+    faces >= settings.oversized_min_faces && faces as f64 >= total as f64 * settings.oversized_share
+}
+
+fn split_of(person: &Person, big: bool, settings: &QueueSettings) -> Option<SplitRow> {
     let members: Vec<&Member> = person.members.iter().take(MAX_SPLIT_FACES).collect();
     let n = members.len();
     if n < settings.split_min_faces {
@@ -281,7 +293,7 @@ fn split_of(person: &Person, settings: &QueueSettings) -> Option<SplitRow> {
         return None;
     }
     let between = dot(&first, &second);
-    if between > settings.split_max {
+    if !big && between > settings.split_max {
         return None;
     }
     let cohesion = |group: usize, center: &[f32]| {
@@ -289,7 +301,7 @@ fn split_of(person: &Person, settings: &QueueSettings) -> Option<SplitRow> {
             vectors.iter().zip(&groups).filter(|(_, g)| **g == group).map(|(vector, _)| dot(vector, center)).collect();
         scores.iter().sum::<f64>() / scores.len() as f64
     };
-    if cohesion(0, &first).min(cohesion(1, &second)) < settings.split_min_cohesion {
+    if !big && cohesion(0, &first).min(cohesion(1, &second)) < settings.split_min_cohesion {
         return None;
     }
     let mut parts: [Vec<&Member>; 2] = [Vec::new(), Vec::new()];
@@ -379,11 +391,12 @@ pub(crate) fn refresh(conn: &Connection, model: &str, processing: &str, settings
             params![row.keep, row.other, row.score, namespace, created.get(&(row.keep, row.other)).copied().unwrap_or(at)],
         )?;
     }
+    let total_faces: usize = people.iter().map(|person| person.members.len()).sum();
     let (linked, dismissed) = split_blocks(conn)?;
     let mut splits: Vec<SplitRow> = people
         .iter()
         .filter(|person| !dismissed.contains(&person.id))
-        .filter_map(|person| split_of(person, settings))
+        .filter_map(|person| split_of(person, oversized(person, total_faces, settings), settings))
         .filter(|row| {
             let keep: HashSet<i64> = row.keep.iter().copied().collect();
             let split: HashSet<i64> = row.split.iter().copied().collect();

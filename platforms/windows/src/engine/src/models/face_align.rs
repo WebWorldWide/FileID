@@ -87,6 +87,22 @@ pub fn align_112_rgba(rgba: &[u8], width: u32, height: u32, landmarks: &[[f32; 2
     Some(out)
 }
 
+/// Vision's landmarks on a tiny face are sometimes upside down or sideways (mouth above the eyes), and aligning on them
+/// writes a flipped crop that then groups with other flipped crops. A set is usable only when its fit to the template
+/// turns the face by at most 60 degrees and puts the eyes above the nose above the mouth.
+pub fn landmarks_upright(points: &[[f32; 2]; 5]) -> bool {
+    let Some((a, b, _, ty)) = fit_similarity(points, &TEMPLATE) else { return false };
+    let angle = f64::from(b).atan2(f64::from(a)).abs();
+    if angle > std::f64::consts::FRAC_PI_3 {
+        return false;
+    }
+    let y = |p: &[f32; 2]| b * p[0] + a * p[1] + ty;
+    let eyes = (y(&points[0]) + y(&points[1])) / 2.0;
+    let mouth = (y(&points[3]) + y(&points[4])) / 2.0;
+    let nose = y(&points[2]);
+    eyes < nose && nose < mouth
+}
+
 pub fn fit_to_template(src: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
     fit_similarity(src, &TEMPLATE)
 }
@@ -190,6 +206,24 @@ fn bilinear_strided(pixels: &[u8], stride: usize, width: u32, height: u32, x: f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn placed(angle_degrees: f32, scale: f32) -> [[f32; 2]; 5] {
+        let (sin, cos) = angle_degrees.to_radians().sin_cos();
+        TEMPLATE.map(|[x, y]| [300.0 + scale * (cos * x - sin * y), 200.0 + scale * (sin * x + cos * y)])
+    }
+
+    #[test]
+    fn upside_down_or_sideways_landmarks_are_not_aligned_on() {
+        assert!(landmarks_upright(&placed(0.0, 1.0)));
+        assert!(landmarks_upright(&placed(35.0, 0.6)));
+        assert!(landmarks_upright(&placed(-35.0, 0.6)));
+        assert!(!landmarks_upright(&placed(90.0, 1.0)));
+        assert!(!landmarks_upright(&placed(180.0, 1.0)));
+        let flipped_by_vision = [[1038.777, 417.5533], [1018.9976, 418.2268], [1024.962, 403.8286], [1043.3632, 393.6493], [1022.975, 395.21118]];
+        assert!(!landmarks_upright(&flipped_by_vision));
+        let mirrored = TEMPLATE.map(|[x, y]| [x, 112.0 - y]);
+        assert!(!landmarks_upright(&mirrored));
+    }
 
     #[test]
     fn shared_alignment_fixtures() {
