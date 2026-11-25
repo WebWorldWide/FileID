@@ -114,6 +114,15 @@ public sealed class WinUiDrillFixContractTests
         Assert.DoesNotContain("FileName = target", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TakesGoalRanking_FlagIsClearedWhenARunEndsAndNotStartedWhileBusy()
+    {
+        var takes = App("Views", "Workbenches", "TakesWorkbench.cs");
+        var update = takes.IndexOf("protected override void UpdateControls()", StringComparison.Ordinal);
+        Assert.True(takes.IndexOf("if (!Busy && _goalRanking)", update, StringComparison.Ordinal) > update);
+        Assert.Contains("if (_goalRanking || Busy ||", App("Views", "Workbenches", "TakesWorkbench.Goal.cs"), StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);

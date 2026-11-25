@@ -359,6 +359,11 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     protected override void UpdateControls()
     {
+        if (!Busy && _goalRanking)
+        {
+            _goalRanking = false;
+            UpdateGoalControls();
+        }
         RunQueuedManual();
         RunStaleProposals();
         if (!_focusStripWhenReady || _filmstrip.Visibility != Visibility.Visible) return;
