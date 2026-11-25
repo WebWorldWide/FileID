@@ -266,6 +266,7 @@ pub struct Pending {
     pub modified_at: Option<f64>,
     pub created_at: Option<f64>,
     pub camera_model: Option<String>,
+    pub content_hash: Option<Vec<u8>>,
     pub stages: i64,
     pub vision: Option<String>,
     pub face_count: i64,
@@ -309,6 +310,8 @@ pub enum Outcome {
     Failed,
     Blocked,
     Done(Update),
+    /// A byte-identical copy already finished: take its tags and text instead of analysing again.
+    Twin(i64),
 }
 
 /// Decodes and analyses one owed file. The scan's own decoder and models
@@ -343,6 +346,8 @@ pub struct Summary {
     pub text_read: u64,
     pub left: u64,
     pub failed: u64,
+    /// Files that took a byte-identical copy's finished results instead of being analysed.
+    pub reused: u64,
     pub cancelled: bool,
     /// Careful reads are owed and the reader was still warming up, so the pass did not wait for it.
     pub careful_waiting: bool,
@@ -391,7 +396,7 @@ fn next_chunk(
     let scope = scope(root);
     let sql = format!(
         "SELECT c.file_id, c.stages, c.size_bytes, c.modified_at, c.vision, c.face_count, \
-                f.path_text, f.kind, f.size_bytes, f.modified_at, f.created_at, f.camera_model \
+                f.path_text, f.kind, f.size_bytes, f.modified_at, f.created_at, f.camera_model, f.content_hash \
          FROM scan_catchup c JOIN files f ON f.id = c.file_id \
          WHERE c.file_id > ?1 AND (c.stages & ?2) != 0 AND f.failed = 0{} \
          ORDER BY c.file_id LIMIT ?3",
@@ -412,6 +417,7 @@ fn next_chunk(
             modified_at: r.get(9)?,
             created_at: r.get(10)?,
             camera_model: r.get(11)?,
+            content_hash: r.get(12)?,
         })
     };
     let limit = limit as i64;
@@ -421,8 +427,12 @@ fn next_chunk(
     }
 }
 
+fn is_stale(file: &Pending) -> bool {
+    file.mark_size != file.size_bytes || !same_time(file.mark_modified, file.modified_at)
+}
+
 fn process(file: &Pending, phase: Phase, analyzer: &dyn Analyzer) -> Outcome {
-    if file.mark_size != file.size_bytes || !same_time(file.mark_modified, file.modified_at) {
+    if is_stale(file) {
         return Outcome::Stale;
     }
     let on_disk = std::fs::metadata(crate::util::path_safety::to_extended_length(&file.path)).ok().map(|meta| {
@@ -444,7 +454,53 @@ fn process(file: &Pending, phase: Phase, analyzer: &dyn Analyzer) -> Outcome {
     outcome
 }
 
-fn apply(tx: &rusqlite::Connection, file: &Pending, outcome: &Outcome, summary: &mut Summary) -> rusqlite::Result<()> {
+const SETTLED_TWIN_SQL: &str = "SELECT t.id FROM files t, files me WHERE me.id = ?1 AND t.id != me.id \
+     AND t.content_hash = me.content_hash AND length(t.content_hash) = 32 AND t.size_bytes = me.size_bytes \
+     AND t.kind = me.kind AND t.failed = 0 \
+     AND NOT EXISTS (SELECT 1 FROM scan_catchup c WHERE c.file_id = t.id AND (c.stages & 3) != 0) \
+     AND (t.kind != 'image' OR EXISTS (SELECT 1 FROM tags a WHERE a.file_id = t.id AND a.source = 'auto')) \
+     ORDER BY t.id LIMIT 1";
+
+/// A copy of this file's bytes whose catch-up is finished, so its tags and text are this file's too.
+fn settled_twin(conn: &rusqlite::Connection, file: &Pending) -> Option<i64> {
+    use rusqlite::OptionalExtension;
+    if !matches!(file.kind.as_str(), "image" | "pdf") || file.content_hash.as_ref().is_none_or(|hash| hash.len() != 32) {
+        return None;
+    }
+    conn.prepare_cached(SETTLED_TWIN_SQL).ok()?.query_row([file.file_id], |r| r.get(0)).optional().ok().flatten()
+}
+
+fn take_twin_results(tx: &rusqlite::Connection, file: &Pending, twin: i64, phase: Phase, summary: &mut Summary) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let still: Option<i64> = tx.prepare_cached(SETTLED_TWIN_SQL)?.query_row([file.file_id], |r| r.get(0)).optional()?;
+    if still != Some(twin) {
+        summary.left += 1;
+        return Ok(());
+    }
+    if file.kind == "image" && phase == Phase::Tags {
+        tx.prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'auto' AND tag NOT LIKE 'Year\\_%' ESCAPE '\\'")?
+            .execute([file.file_id])?;
+        tx.prepare_cached(
+            "INSERT OR REPLACE INTO tags (file_id, tag, source, score) SELECT ?1, tag, 'auto', score FROM tags \
+             WHERE file_id = ?2 AND source = 'auto' AND tag NOT LIKE 'Year\\_%' ESCAPE '\\'",
+        )?
+        .execute([file.file_id, twin])?;
+        summary.tagged += 1;
+    }
+    tx.prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1 AND source = 'ocr'")?.execute([file.file_id])?;
+    tx.prepare_cached(
+        "INSERT INTO ocr_text (file_id, text, source, handwritten) SELECT ?1, text, source, handwritten FROM ocr_text \
+         WHERE file_id = ?2 AND source = 'ocr' AND NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)",
+    )?
+    .execute([file.file_id, twin])?;
+    tx.prepare_cached("UPDATE files SET has_text = EXISTS(SELECT 1 FROM ocr_text WHERE file_id = ?1) WHERE id = ?1")?
+        .execute([file.file_id])?;
+    tx.prepare_cached("DELETE FROM scan_catchup WHERE file_id = ?1")?.execute([file.file_id])?;
+    summary.reused += 1;
+    Ok(())
+}
+
+fn apply(tx: &rusqlite::Connection, file: &Pending, phase: Phase, outcome: &Outcome, summary: &mut Summary) -> rusqlite::Result<()> {
     use rusqlite::OptionalExtension;
     // The row or the file changed while it was being analysed: this result
     // describes something else.
@@ -461,6 +517,7 @@ fn apply(tx: &rusqlite::Connection, file: &Pending, outcome: &Outcome, summary: 
         _ => return Ok(()),
     }
     match outcome {
+        Outcome::Twin(twin) => take_twin_results(tx, file, *twin, phase, summary)?,
         Outcome::Leave | Outcome::Blocked => summary.left += 1,
         Outcome::Stale => {
             tx.prepare_cached("DELETE FROM scan_catchup WHERE file_id = ?1")?.execute([file.file_id])?;
@@ -710,62 +767,88 @@ fn pass(
         let Some(last) = chunk.last() else { break };
         cursor = last.file_id;
 
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let slots: Vec<Mutex<Option<Outcome>>> = chunk.iter().map(|_| Mutex::new(None)).collect();
-        std::thread::scope(|threads| {
-            for _ in 0..workers.min(chunk.len()) {
-                threads.spawn(|| {
-                    loop {
-                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(file) = chunk.get(index) else { break };
-                        let outcome = if is_cancelled() {
-                            Outcome::Leave
-                        } else {
-                            let lease = scheduler.reserve_patient(
-                                crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 0 },
-                                crate::resource_scheduler::Priority::Background,
-                                is_cancelled,
-                                std::time::Duration::from_secs(600),
-                            );
-                            if lease.is_err() {
-                                Outcome::Leave
-                            } else {
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(file, phase, analyzer)))
-                                    .unwrap_or(Outcome::Failed)
-                            }
-                        };
-                        *slots[index].lock() = Some(outcome);
-                    }
-                });
-            }
+        // A copy waits for the first of its byte-identical files in this chunk, so it finds that file's results and
+        // takes them instead of running the models again.
+        let mut seen = std::collections::HashSet::new();
+        let (first, later): (Vec<&Pending>, Vec<&Pending>) = chunk.iter().partition(|file| match file.content_hash.as_deref() {
+            Some(hash) if hash.len() == 32 => seen.insert((hash, file.size_bytes)),
+            _ => true,
         });
-        let outcomes: Vec<Outcome> = slots.into_iter().map(|slot| slot.into_inner().unwrap_or(Outcome::Failed)).collect();
-
-        let cancelled_midway = is_cancelled();
-        let written = (|| -> rusqlite::Result<Summary> {
-            let conn = conn.lock();
-            let tx = conn.unchecked_transaction()?;
-            let mut counts = Summary::default();
-            for (file, outcome) in chunk.iter().zip(&outcomes) {
-                apply(&tx, file, outcome, &mut counts)?;
+        let mut outcomes: Vec<Outcome> = Vec::new();
+        let mut cancelled_midway = false;
+        let mut store_failed = false;
+        for round in [first, later] {
+            if round.is_empty() {
+                continue;
             }
-            tx.commit()?;
-            Ok(counts)
-        })();
-        match written {
-            Ok(counts) => {
-                summary.tagged += counts.tagged;
-                summary.text_read += counts.text_read;
-                summary.left += counts.left;
-                summary.failed += counts.failed;
+            let twins: Vec<Option<i64>> = {
+                let conn = conn.lock();
+                round.iter().map(|file| settled_twin(&conn, file)).collect()
+            };
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let slots: Vec<Mutex<Option<Outcome>>> = round.iter().map(|_| Mutex::new(None)).collect();
+            std::thread::scope(|threads| {
+                for _ in 0..workers.min(round.len()) {
+                    threads.spawn(|| {
+                        loop {
+                            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(file) = round.get(index) else { break };
+                            let outcome = if is_cancelled() {
+                                Outcome::Leave
+                            } else if let Some(twin) = twins[index].filter(|_| !is_stale(file)) {
+                                Outcome::Twin(twin)
+                            } else {
+                                let lease = scheduler.reserve_patient(
+                                    crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 0 },
+                                    crate::resource_scheduler::Priority::Background,
+                                    is_cancelled,
+                                    std::time::Duration::from_secs(600),
+                                );
+                                if lease.is_err() {
+                                    Outcome::Leave
+                                } else {
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(file, phase, analyzer)))
+                                        .unwrap_or(Outcome::Failed)
+                                }
+                            };
+                            *slots[index].lock() = Some(outcome);
+                        }
+                    });
+                }
+            });
+            let round_outcomes: Vec<Outcome> = slots.into_iter().map(|slot| slot.into_inner().unwrap_or(Outcome::Failed)).collect();
+            cancelled_midway |= is_cancelled();
+            let written = (|| -> rusqlite::Result<Summary> {
+                let conn = conn.lock();
+                let tx = conn.unchecked_transaction()?;
+                let mut counts = Summary::default();
+                for (file, outcome) in round.iter().zip(&round_outcomes) {
+                    apply(&tx, file, phase, outcome, &mut counts)?;
+                }
+                tx.commit()?;
+                Ok(counts)
+            })();
+            match written {
+                Ok(counts) => {
+                    summary.tagged += counts.tagged;
+                    summary.text_read += counts.text_read;
+                    summary.left += counts.left;
+                    summary.failed += counts.failed;
+                    summary.reused += counts.reused;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "[CATCH-UP] could not store results; the rest stays owed");
+                    summary.disk_full = crate::util::user_message::io_cause(&anyhow::Error::from(error))
+                        == Some(crate::util::user_message::IoCause::DiskFull);
+                    store_failed = true;
+                    break;
+                }
             }
-            Err(error) => {
-                tracing::warn!(%error, "[CATCH-UP] could not store results; the rest stays owed");
-                summary.disk_full = crate::util::user_message::io_cause(&anyhow::Error::from(error))
-                    == Some(crate::util::user_message::IoCause::DiskFull);
-                stopped_early = true;
-                break;
-            }
+            outcomes.extend(round_outcomes);
+        }
+        if store_failed {
+            stopped_early = true;
+            break;
         }
         if outcomes.iter().any(|outcome| matches!(outcome, Outcome::Blocked)) {
             tracing::info!("[CATCH-UP] paused: the reader stopped answering");
@@ -1303,6 +1386,7 @@ mod tests {
             modified_at: None,
             created_at: None,
             camera_model: None,
+            content_hash: None,
             stages: TAGS_OWED,
             vision: None,
             face_count: 0,
@@ -1316,6 +1400,34 @@ mod tests {
         let warm = |_: &[String]| TextRead { ran: true, text: Some("careful".into()), handwritten: false, careful_owed: false };
         let update = classifier_update(&Pending { stages: TAGS_OWED | CAREFUL_TEXT_OWED | TEXT_READ_AT_SCAN, ..file }, &context, Vec::new(), Vec::new(), warm);
         assert_eq!(update.stages, TEXT_READ_AT_SCAN);
+    }
+
+    #[tokio::test]
+    async fn byte_identical_files_run_the_models_once_and_keep_their_own_year_tag() {
+        let library = Library::new("twins");
+        let same = |name: &str, year: &str| {
+            let mut row = owing(&library, name);
+            row.content_hash = Some([7u8; 32]);
+            row.tags.push((year.to_string(), None));
+            row
+        };
+        let mut other = owing(&library, "d.png");
+        other.content_hash = Some([8u8; 32]);
+        library
+            .write(vec![same("a.png", "Year_2020"), same("b.png", "Year_2021"), same("c.png", "Year_2022"), other])
+            .await;
+        assert_eq!(owed(&library.conn.lock(), None), (4, 0));
+        let analyzer = Counting { calls: AtomicUsize::new(0), fail: false };
+        let summary = library.run(&analyzer);
+        assert_eq!(analyzer.calls.load(Ordering::SeqCst), 2, "one analysis per distinct content");
+        assert_eq!((summary.tagged, summary.reused), (4, 2));
+        assert_eq!(owed(&library.conn.lock(), None), (0, 0));
+        for (name, year) in [("b.png", "Year_2021"), ("c.png", "Year_2022")] {
+            let tags: Vec<String> = library.stored(name).0.into_iter().map(|(tag, _)| tag).collect();
+            assert!(tags.contains(&"tagged".to_string()), "{name} has the shared tags: {tags:?}");
+            assert!(tags.contains(&year.to_string()), "{name} keeps its own year: {tags:?}");
+            assert_eq!(tags.iter().filter(|tag| tag.starts_with("Year_")).count(), 1, "{name}: {tags:?}");
+        }
     }
 
     #[tokio::test]
@@ -1808,6 +1920,7 @@ mod tests {
             modified_at: modified,
             created_at: None,
             camera_model: None,
+            content_hash: None,
             stages: 0,
             vision: None,
             face_count: 0,
