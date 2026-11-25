@@ -704,11 +704,43 @@ public sealed partial class FilePreviewSheet : UserControl
                         new IpcSchema.RenameEntry(FileId, name!),
                     }),
                     TimeSpan.FromSeconds(30));
-                if (result.Failed > 0 || result.Succeeded == 0)
+                if (result.Failed > 0 || !Services.BulkActionResultTruth.ConfirmsExactSuccess(result, new[] { FileId }))
                 {
-                    // Keep the proposed-name card open so the user can see it didn't apply and retry, rather than silently vanishing.
+                    // Keep the proposed-name card open so the user can retry.
+                    var reason = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
                     Services.DebugLog.Warn("Apply rename reported failure; leaving card open");
+                    ShowTagStatus(string.IsNullOrWhiteSpace(reason) ? "Couldn't rename this file." : "Couldn't rename: " + reason);
                     return;
+                }
+                var oldPath = FilePath;
+                var oldName = Path.GetFileName(oldPath);
+                var newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? string.Empty, name!);
+                var fileId = FileId;
+                Services.UndoStack.Instance.Push(
+                    "rename 1 file",
+                    Services.ChangePage.Library,
+                    async () =>
+                    {
+                        try
+                        {
+                            return await BulkRenameSheet.ReverseConfirmedAsync(
+                                new[] { new IpcSchema.RenameEntry(fileId, oldName) },
+                                renames => ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                                    "renameFiles",
+                                    () => ViewModels.EngineClient.Instance.RenameFilesAsync(renames),
+                                    TimeSpan.FromSeconds(30)));
+                        }
+                        catch (Exception ex)
+                        {
+                            Services.DebugLog.Warn("Preview rename undo failed: " + ex.Message);
+                            return false;
+                        }
+                    });
+                FilePath = newPath;
+                FileNameText.Text = name!;
+                foreach (var child in MetadataGrid.Children)
+                {
+                    if (child is TextBlock tb && Grid.GetRow(tb) == 0 && Grid.GetColumn(tb) == 1) tb.Text = newPath;
                 }
                 ProposedRenameCard.Visibility = Visibility.Collapsed;
                 _pendingProposedName = null;
@@ -716,10 +748,12 @@ public sealed partial class FilePreviewSheet : UserControl
             catch (TimeoutException ex)
             {
                 Services.DebugLog.Warn("Apply rename timed out: " + ex.Message);
+                ShowTagStatus("FileID didn't confirm the rename in time. Check the file before trying again.");
             }
             catch (Exception ex)
             {
                 Services.DebugLog.Warn("Apply rename failed: " + ex.Message);
+                ShowTagStatus("Couldn't rename: " + ex.Message);
             }
         });
 

@@ -30,6 +30,20 @@ public sealed class WinUiDrillFixContractTests
         Assert.DoesNotContain("<TextBlock Text=\"Refresh\"", xaml, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void PreviewRename_PushesUndoRefreshesPathAndReportsFailure()
+    {
+        var sheet = App("Views", "Library", "FilePreviewSheet.xaml.cs");
+        var start = sheet.IndexOf("private async void OnApplyRenameClicked", StringComparison.Ordinal);
+        var end = sheet.IndexOf("private void OnDismissRenameClicked", start, StringComparison.Ordinal);
+        var body = sheet[start..end];
+        Assert.Contains("ConfirmsExactSuccess(result, new[] { FileId })", body, StringComparison.Ordinal);
+        Assert.Contains("UndoStack.Instance.Push(", body, StringComparison.Ordinal);
+        Assert.Contains("FilePath = newPath;", body, StringComparison.Ordinal);
+        Assert.Contains("FileNameText.Text = name!;", body, StringComparison.Ordinal);
+        Assert.Contains("ShowTagStatus(\"Couldn't rename", body, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
