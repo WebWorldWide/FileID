@@ -2816,7 +2816,10 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                     btn.set_label("Suggest merges");
                     return;
                 }
-                break Vec::new();
+                set_status(&ui, "Couldn't look for people to merge. FileID restarted. Try again.".to_owned());
+                btn.set_sensitive(true);
+                btn.set_label("Suggest merges");
+                return;
             };
             match &*event {
                 EngineEvent::MergeSuggestions(result) => {
@@ -2832,7 +2835,12 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                         })
                         .collect();
                 }
-                EngineEvent::Exited => break Vec::new(),
+                EngineEvent::Exited => {
+                    set_status(&ui, "Couldn't look for people to merge. FileID restarted. Try again.".to_owned());
+                    btn.set_sensitive(true);
+                    btn.set_label("Suggest merges");
+                    return;
+                }
                 EngineEvent::Error { kind, message, .. }
                     if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" =>
                 {
