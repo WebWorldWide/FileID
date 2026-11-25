@@ -184,6 +184,18 @@ public sealed class WinUiDrillFixContractTests
         Assert.True(build >= 0 && center > build && insert > center);
     }
 
+    [Fact]
+    public void ReadOnlyRefusal_IsShownWithTheEngineSentenceInOrganizeFoldersAndChat()
+    {
+        var view = App("Views", "Restructure", "RestructureView.xaml.cs");
+        Assert.Contains("err.Kind != \"location_read_only\"", view, StringComparison.Ordinal);
+        Assert.Contains("ShowAlertAsync(\"Nothing was moved\", sentence)", view, StringComparison.Ordinal);
+        Assert.Contains("_ = ShowFailedApplyAlertAsync(r);", view, StringComparison.Ordinal);
+        var chat = App("ViewModels", "EngineClient.ChatActions.cs");
+        Assert.Contains("\"db_unavailable\", \"location_read_only\"", chat, StringComparison.Ordinal);
+        Assert.Contains("deferResult: result => result.Applied == 0 && result.Failed > 0 && !result.Cancelled", chat, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
