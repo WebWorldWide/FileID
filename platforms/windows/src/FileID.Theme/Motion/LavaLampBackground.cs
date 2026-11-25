@@ -201,12 +201,19 @@ public sealed class LavaLampBackground : Control
             ResolveColor("LavaLampDarkEllipseColor", Color.FromArgb(0xFF, 0x0D, 0x0D, 0x0D)),
             centerOpacity: 0.55f);
 
+        CenterVisual(_goldVisual, _root.Size);
+        CenterVisual(_orangeVisual, _root.Size);
+        CenterVisual(_darkVisual, _root.Size);
+
         _root.Children.InsertAtTop(_goldVisual);
         _root.Children.InsertAtTop(_orangeVisual);
         _root.Children.InsertAtTop(_darkVisual);
 
         ElementCompositionPreview.SetElementChildVisual(this, _root);
     }
+
+    private static void CenterVisual(SpriteVisual visual, Vector2 parent)
+        => visual.Offset = new Vector3(parent.X * 0.5f - visual.Size.X * 0.5f, parent.Y * 0.5f - visual.Size.Y * 0.5f, 0f);
 
     private static SpriteVisual CreateEllipseVisual(Compositor c, float diameter, Color color, float centerOpacity)
     {

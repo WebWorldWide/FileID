@@ -174,6 +174,16 @@ public sealed class WinUiDrillFixContractTests
         Assert.DoesNotContain("_player?.Pause();", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void LavaLamp_StartsWithTheWaxCentredSoAnOffLampShowsTheStaticGlow()
+    {
+        var lamp = File.ReadAllText(Path.Combine(RepoRoot, "platforms", "windows", "src", "FileID.Theme", "Motion", "LavaLampBackground.cs"));
+        var build = lamp.IndexOf("private void BuildVisualTree()", StringComparison.Ordinal);
+        var center = lamp.IndexOf("CenterVisual(_goldVisual, _root.Size);", build, StringComparison.Ordinal);
+        var insert = lamp.IndexOf("_root.Children.InsertAtTop(_goldVisual);", build, StringComparison.Ordinal);
+        Assert.True(build >= 0 && center > build && insert > center);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
