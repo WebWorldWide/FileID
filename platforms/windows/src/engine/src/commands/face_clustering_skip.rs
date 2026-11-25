@@ -142,6 +142,31 @@ pub(super) fn remember(conn: &Connection, result: &FaceClusteringResult) {
     }
 }
 
+fn running_path(conn: &Connection) -> Option<PathBuf> {
+    let path = conn.path().filter(|path| !path.is_empty() && !path.starts_with(':'))?;
+    Some(PathBuf::from(path).with_extension("face-clustering.running"))
+}
+
+/// A pass that is under way leaves this file beside the catalog; it is removed when the pass ends in any way except being
+/// cut off (the app quit, the engine was stopped), so the next launch knows grouping was interrupted and finishes it.
+pub(super) fn mark_running(conn: &Connection) {
+    if let Some(path) = running_path(conn)
+        && crate::util::read_only::require_writable(&path).is_ok()
+    {
+        let _ = std::fs::write(path, b"");
+    }
+}
+
+pub(super) fn mark_finished(conn: &Connection) {
+    if let Some(path) = running_path(conn) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub(super) fn was_interrupted(conn: &Connection) -> bool {
+    running_path(conn).is_some_and(|path| path.is_file())
+}
+
 pub(super) fn forget(conn: &Connection) {
     if let Some(path) = state_path(conn) {
         let _ = std::fs::remove_file(path);
@@ -227,6 +252,19 @@ mod tests {
             fixture.conn.execute(change, []).unwrap();
             assert!(unchanged(&fixture.conn).is_none(), "{change}");
         }
+    }
+
+    #[test]
+    fn a_pass_that_was_cut_off_is_remembered_until_one_ends() {
+        let fixture = fixture();
+        assert!(!was_interrupted(&fixture.conn));
+        mark_running(&fixture.conn);
+        assert!(was_interrupted(&fixture.conn), "still marked when the engine stops mid-pass");
+        mark_finished(&fixture.conn);
+        assert!(!was_interrupted(&fixture.conn));
+        let memory = crate::db::test_support::memory_db();
+        mark_running(&memory);
+        assert!(!was_interrupted(&memory), "a catalog with no file keeps no marker");
     }
 
     #[test]

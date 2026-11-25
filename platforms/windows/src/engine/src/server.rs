@@ -257,6 +257,18 @@ async fn async_main() -> Result<()> {
         jobs: jobs.clone(),
         http_client,
     };
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    if let Some(db) = db_conn.clone() {
+        let after_scan = AfterScan { sink: sink.clone(), db: db.clone(), jobs: jobs.clone(), gate: mutation_gate.clone(), scan_state: scan_state.clone(), active: dispatcher.face_cluster_active.clone() };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if tokio::task::spawn_blocking(move || commands::face_clustering::interrupted_pass_to_resume(&db)).await.unwrap_or(false) {
+                tracing::info!("[CLUSTER] a grouping pass was cut off last time; finishing it");
+                after_scan.group_faces().await;
+            }
+        });
+    }
+
     let mut stdio_loop = tokio::spawn(async move {
         let d = dispatcher;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -711,6 +723,7 @@ impl AfterScan {
         let terminal_active = self.active.clone();
         let track = JobTrackGuard::start(&self.jobs, JobCategory::FaceCluster, "Group faces");
         tracing::info!("[CLUSTER] grouping faces after the scan");
+        commands::face_clustering::mark_pending(&self.db);
         let (sink, db) = (self.sink.clone(), self.db.clone());
         spawn_mutation_with_rejection(
             &self.gate,
@@ -1449,6 +1462,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let guard = FaceClusterActiveGuard(face_cluster_active.clone());
             let terminal_active = face_cluster_active.clone();
             let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Group faces");
+            commands::face_clustering::mark_pending(db);
             let sink_c = sink.clone();
             let db_c = db.clone();
             spawn_mutation_with_rejection(

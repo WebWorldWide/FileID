@@ -1342,6 +1342,30 @@ pub(crate) fn needed_after_scan(db: &parking_lot::Mutex<rusqlite::Connection>) -
     })
 }
 
+/// Written when a pass is accepted, before it waits behind a scan, so a quit while it waits still resumes it.
+pub(crate) fn mark_pending(db: &parking_lot::Mutex<rusqlite::Connection>) {
+    skip::with_reader(db, skip::mark_running);
+}
+
+/// A pass the app or engine cut off (quit mid-grouping) left its marker: faces still wait and nothing changed them
+/// since, so grouping resumes at launch, finishing only what is left. A marker with nothing waiting is cleared.
+#[cfg(any(test, all(target_os = "macos", feature = "apple-adapters")))]
+pub(crate) fn interrupted_pass_to_resume(db: &parking_lot::Mutex<rusqlite::Connection>) -> bool {
+    skip::with_reader(db, |conn| {
+        if !skip::was_interrupted(conn) {
+            return false;
+        }
+        let waiting: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM face_prints WHERE person_id IS NULL)", [], |row| row.get(0))
+            .unwrap_or(false);
+        let needed = waiting && skip::unchanged(conn).is_none();
+        if !needed {
+            skip::mark_finished(conn);
+        }
+        needed
+    })
+}
+
 /// The Swift engine's answer to a pass that cannot embed faces: the model is not installed or does not start. Only said
 /// while some face still has no vector (a fully embedded catalog clusters without the model).
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -1392,6 +1416,7 @@ pub(crate) async fn handle_run_face_clustering(
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(unused_variables))] finding: FindingFaces,
 ) {
     let _sleep = SleepGuard::acquire();
+    skip::with_reader(&db, skip::mark_running);
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         let problem_db = db.clone();
@@ -1411,6 +1436,7 @@ pub(crate) async fn handle_run_face_clustering(
     if let Ok(Some(mut remembered)) = tokio::task::spawn_blocking(move || skip::with_reader(&skip_db, skip::unchanged)).await {
         tracing::info!("[CLUSTER] nothing changed since the last pass; skipped");
         remembered.duration_seconds = started.elapsed().as_secs_f64();
+        skip::with_reader(&db, skip::mark_finished);
         release_active_before_terminal(&active);
         sink.send(IpcEvent::now(EventPayload::FaceClusteringComplete(Wrap::new(remembered)))).await;
         return;
@@ -1429,6 +1455,7 @@ pub(crate) async fn handle_run_face_clustering(
     match mac {
         Ok(None) => {}
         Ok(Some(outcome)) => {
+            skip::with_reader(&db, skip::mark_finished);
             release_active_before_terminal(&active);
             if let Some((kind, message)) = outcome.error {
                 sink.send(EngineError::event(kind, message)).await;
@@ -1437,11 +1464,15 @@ pub(crate) async fn handle_run_face_clustering(
             return;
         }
         Err(err) => {
+            if !err.is_cancelled() {
+                skip::with_reader(&db, skip::mark_finished);
+            }
             release_active_before_terminal(&active);
             sink.send(task_did_not_complete(&err)).await;
             return;
         }
     }
+    let finished_db = db.clone();
     let result = tokio::task::spawn_blocking(move || {
         let result = run_portable(&db);
         skip::with_reader(&db, |conn| match &result {
@@ -1452,6 +1483,9 @@ pub(crate) async fn handle_run_face_clustering(
     })
     .await;
 
+    if !matches!(&result, Err(err) if err.is_cancelled()) {
+        skip::with_reader(&finished_db, skip::mark_finished);
+    }
     release_active_before_terminal(&active);
     match result {
         Ok(Ok(r)) => {
@@ -1505,6 +1539,47 @@ mod tests {
             .execute("INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES (30,1,NULL,x'00','0.5,0.5,0.1,0.1')", [])
             .unwrap();
         assert!(needed_after_scan(&db), "a new face starts a pass");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    fn catalog_with_waiting_face() -> (std::path::PathBuf, parking_lot::Mutex<rusqlite::Connection>) {
+        let directory = std::env::temp_dir().join(format!("fileid-resume-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let db = parking_lot::Mutex::new(crate::db::open_writer(&directory.join("catalog.sqlite")).unwrap());
+        db.lock()
+            .execute_batch(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES (1,'/a.jpg',1,100,10,0,'image','jpg');
+                 INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES (20,1,NULL,x'00','0.3,0.3,0.2,0.2');",
+            )
+            .unwrap();
+        (directory, db)
+    }
+
+    #[test]
+    fn a_pass_cut_off_by_a_quit_resumes_at_the_next_launch_and_a_finished_one_does_not() {
+        let (directory, db) = catalog_with_waiting_face();
+        assert!(!interrupted_pass_to_resume(&db), "no pass was ever started");
+        mark_pending(&db);
+        assert!(interrupted_pass_to_resume(&db), "the engine stopped with the pass accepted and faces still waiting");
+        assert!(interrupted_pass_to_resume(&db), "asking does not use the marker up");
+        skip::with_reader(&db, skip::mark_finished);
+        assert!(!interrupted_pass_to_resume(&db), "a pass that ended leaves nothing to resume");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_marker_with_no_face_waiting_or_nothing_changed_is_cleared_instead_of_resuming() {
+        let (directory, db) = catalog_with_waiting_face();
+        mark_pending(&db);
+        db.lock().execute("UPDATE face_prints SET person_id=NULL WHERE id=20", []).unwrap();
+        let result = FaceClusteringResult { person_count: 0, face_count: 1, unmatched_faces: 1, duration_seconds: 1.0, deferred_faces: None, review_queued: Some(0) };
+        skip::remember(&db.lock(), &result);
+        assert!(!interrupted_pass_to_resume(&db), "the catalog is exactly as the last finished pass left it");
+        assert!(!skip::with_reader(&db, skip::was_interrupted), "the stale marker is cleared");
+        mark_pending(&db);
+        db.lock().execute_batch("INSERT INTO persons(id,name,created_at) VALUES(1,'Ann',1); UPDATE face_prints SET person_id=1").unwrap();
+        assert!(!interrupted_pass_to_resume(&db), "no face waits any more");
+        assert!(!skip::with_reader(&db, skip::was_interrupted));
         let _ = std::fs::remove_dir_all(&directory);
     }
 

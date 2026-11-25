@@ -532,12 +532,7 @@ struct PeopleView: View {
     }
 
     private var headerCountLine: String {
-        let p = persons.count
-        let unnamed = persons.filter { !$0.hasAnyName }.count
-        if p == 0 && totalFacePrints == 0 { return "" }
-        if p == 0 { return engine.faceClusteringInFlight ? "\(Plural.noun(totalFacePrints, "face", "faces")) · grouping…" : "\(Plural.noun(totalFacePrints, "face", "faces")) detected · not grouped yet" }
-        if unnamed > 0 { return "\(Plural.noun(p, "person", "people")) · \(unnamed) still unnamed" }
-        return "\(Plural.noun(p, "person", "people")) · all named"
+        PeopleHeaderText.countLine(people: persons.count, unnamed: persons.filter { !$0.hasAnyName }.count, faces: totalFacePrints, grouping: engine.faceClusteringInFlight)
     }
 
     private func bulkMarkUnknown() {
@@ -1978,5 +1973,14 @@ extension MergeSuggestionPair {
     /// A merge folds one card into another, so any other pair naming the folded card has no row left to draw and must not be counted.
     static func stillMergeable(_ pairs: [MergeSuggestionPair], alive: Set<Int64>) -> [MergeSuggestionPair] {
         pairs.filter { $0.involvesOnly(alive) }
+    }
+}
+
+enum PeopleHeaderText {
+    static func countLine(people: Int, unnamed: Int, faces: Int, grouping: Bool) -> String {
+        if people == 0 && faces == 0 { return "" }
+        if people == 0 { return grouping ? "\(Plural.noun(faces, "face", "faces")) · grouping…" : "\(Plural.noun(faces, "face", "faces")) detected · not grouped yet" }
+        let base = unnamed > 0 ? "\(Plural.noun(people, "person", "people")) · \(unnamed) still unnamed" : "\(Plural.noun(people, "person", "people")) · all named"
+        return grouping ? base + " · still grouping faces" : base
     }
 }
