@@ -123,6 +123,14 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("if (_goalRanking || Busy ||", App("Views", "Workbenches", "TakesWorkbench.Goal.cs"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void CatalogWorkbench_ReplaysAResultSelectionMadeWhileBusy()
+    {
+        var catalog = App("Views", "Workbenches", "CatalogWorkbench.cs");
+        Assert.Contains("if (Busy) _detailRefreshPending = true;", catalog, StringComparison.Ordinal);
+        Assert.Contains("if (_detailRefreshPending && !Busy)", catalog, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
