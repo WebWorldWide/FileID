@@ -196,6 +196,14 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("deferResult: result => result.Applied == 0 && result.Failed > 0 && !result.Cancelled", chat, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void WelcomeClipSize_ComesFromTheSharedSizeTable()
+    {
+        var installer = App("Services", "ModelInstallerService.cs");
+        Assert.Contains("ModelDisplaySize.GetDisplaySizeMB(\"mobileclip_s2\") + ModelDisplaySize.GetDisplaySizeMB(\"clip_text\")", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("approxBytes: 220UL", installer, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
