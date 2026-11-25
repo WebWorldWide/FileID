@@ -143,6 +143,20 @@ struct MediaAdapterTests {
         #expect(clip.path.withCString { source in pool.path.withCString { fileid_apple_video_pool(source, 0.01, 448, $0, nil) } } == 2)
     }
 
+    @Test func speechIsAskedOnlyWhenTheAppLaunchedTheEngine() throws {
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent("speech-\(UUID().uuidString)/FileID.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+        let info: [String: Any] = ["CFBundleIdentifier": "com.example.speech", "NSSpeechRecognitionUsageDescription": "Transcribes."]
+        try (info as NSDictionary).write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let bundle = try #require(Bundle(url: app))
+        let root = bundle.bundleURL.resolvingSymlinksInPath().path
+        #expect(MediaSpeech.canAsk(bundle: bundle, parentExecutable: root + "/Contents/MacOS/FileID"))
+        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: "/usr/bin/python3"))
+        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: nil))
+        #expect(!MediaSpeech.canAsk(bundle: Bundle(for: MediaSpeechProbe.self), parentExecutable: root + "/Contents/MacOS/FileID"))
+    }
+
     @Test func speechReportsStatusWithoutAsking() throws {
         let status = fileid_apple_speech_status(false)
         #expect([-1, 0, 1].contains(status))
@@ -177,3 +191,5 @@ struct MediaAdapterTests {
         try await MediaTestClip.write(to: URL(fileURLWithPath: path), width: 96, height: 54, seconds: 3, fps: 12, rotation: 90, fileType: .mov)
     }
 }
+
+private final class MediaSpeechProbe {}
