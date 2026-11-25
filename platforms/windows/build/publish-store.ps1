@@ -22,6 +22,7 @@ $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $stage = Join-Path $OutputDirectory ("stage-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
+try {
 
 function Invoke-Checked {
     param([string]$Executable, [string[]]$Arguments)
@@ -101,3 +102,6 @@ $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvar
 Write-Host "Store package: $package"
 Write-Host 'Unsigned upload artifact; Microsoft signs the distributed Store package.'
 Write-Host 'Complete the release blockers in shared/docs/WINDOWS_STORE.md before submission.'
+} finally {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+}
