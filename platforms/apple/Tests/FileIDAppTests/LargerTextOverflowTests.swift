@@ -61,4 +61,14 @@ import Testing
         let stacked = height(width: 250)
         #expect(stacked > beside + 8)
     }
+
+    @Test func theDescribeButtonLooksDisabledWhenAnOfflineFileDisablesIt() throws {
+        let deep = try appSource("Views/DeepAnalyzeViews.swift")
+        let button = try #require(deep.range(of: "struct DeepAnalyzeButton"))
+        let body = String(deep[button.lowerBound...].prefix(3200))
+        #expect(body.contains("@Environment(\\.isEnabled) private var enabled"))
+        #expect(body.contains("fits && enabled ? Theme.gold"))
+        let library = try appSource("Views/LibraryView.swift")
+        #expect(library.contains("descriptions are kept.\")\n                        .multilineTextAlignment(.center).padding(.horizontal, 28)"))
+    }
 }
