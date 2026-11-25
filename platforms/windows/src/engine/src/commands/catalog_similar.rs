@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 
 const DEFAULT_PAGE: usize = 50;
-const MAX_PAGE: usize = 100;
+const MAX_PAGE: usize = 200;
 const MAX_MEMBERS: usize = 2000;
 
 pub(crate) fn page(conn: &Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
@@ -120,6 +120,15 @@ mod tests {
     #[test]
     fn an_out_of_range_page_size_is_refused() {
         let conn = library();
-        assert!(page(&conn, &request(serde_json::json!({"limit": 101}))).is_err());
+        assert!(page(&conn, &request(serde_json::json!({"limit": 201}))).is_err());
+        assert!(page(&conn, &request(serde_json::json!({"limit": 0}))).is_err());
+    }
+
+    #[test]
+    fn one_request_can_carry_every_group_cleanup_displays() {
+        let conn = library();
+        add(&conn, "a", Some(b"x"), 0b1);
+        add(&conn, "b", Some(b"y"), 0b11);
+        assert!(page(&conn, &request(serde_json::json!({"limit": 200}))).is_ok(), "Cleanup shows at most 200 groups and asks for them in one request");
     }
 }

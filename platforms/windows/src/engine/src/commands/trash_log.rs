@@ -492,10 +492,20 @@ pub(crate) fn reconcile_trashed_rows(
     let (Ok(path), Ok(key)) = (paths::trash_log_path(), hmac::log_hmac_key()) else {
         return 0;
     };
-    let Ok(raw) = std::fs::read(&path) else {
+    reconcile_trashed_rows_in(&path, &key, db, locate)
+}
+
+#[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
+fn reconcile_trashed_rows_in(
+    path: &std::path::Path,
+    key: &[u8],
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    locate: impl Fn(&TrashLogItem) -> Option<std::path::PathBuf>,
+) -> usize {
+    let Ok(raw) = std::fs::read(path) else {
         return 0;
     };
-    let entries = latest_entries(&raw, &key);
+    let entries = latest_entries(&raw, key);
     let mut dropped = 0;
     for mut entry in entries.into_iter().rev().take(RECONCILE_BATCHES) {
         let mut found_new = false;
@@ -532,7 +542,7 @@ pub(crate) fn reconcile_trashed_rows(
                 }
             }
         }
-        if found_new && let Err(error) = append_at(&path, &key, &entry) {
+        if found_new && let Err(error) = append_at(path, key, &entry) {
             tracing::warn!(?error, "could not journal recovered Trash locations");
         }
     }
@@ -650,10 +660,11 @@ mod tests {
         let mut entry = make_entry(&format!("recount-{}", uuid::Uuid::new_v4()));
         entry.items[0].file_id = 9_001;
         entry.items[0].original_path = gone_path.clone();
-        append(&entry).unwrap();
+        let log = own_log();
+        append_at(&log, &log_hmac_key().unwrap(), &entry).unwrap();
         let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
 
-        let dropped = reconcile_trashed_rows(&db, |item| (item.original_path == gone_path).then(|| std::path::PathBuf::from("/Trash/face.jpg")));
+        let dropped = reconcile_trashed_rows_in(&log, &log_hmac_key().unwrap(), &db, |item| (item.original_path == gone_path).then(|| std::path::PathBuf::from("/Trash/face.jpg")));
 
         assert_eq!(dropped, 1);
         let conn = db.lock();
@@ -661,6 +672,27 @@ mod tests {
         let persons: Vec<(i64, i64, Option<i64>)> =
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
         assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+    }
+
+    #[test]
+    fn traffic_in_the_shared_log_cannot_push_a_batch_out_of_the_reconcile_window() {
+        let gone = std::env::temp_dir().join(format!("fileid-gone-{}", uuid::Uuid::new_v4())).join("a.jpg");
+        let gone_path = gone.to_string_lossy().into_owned();
+        let conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 9_101, &gone_path, "image");
+        let mut entry = make_entry(&format!("window-{}", uuid::Uuid::new_v4()));
+        entry.items[0].file_id = 9_101;
+        entry.items[0].original_path = gone_path;
+        let log = own_log();
+        append_at(&log, &log_hmac_key().unwrap(), &entry).unwrap();
+        for n in 0..=RECONCILE_BATCHES {
+            append(&make_entry(&format!("noise-{n}-{}", uuid::Uuid::new_v4()))).unwrap();
+        }
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+
+        let dropped = reconcile_trashed_rows_in(&log, &log_hmac_key().unwrap(), &db, |_| Some(std::path::PathBuf::from("/Trash/a.jpg")));
+
+        assert_eq!(dropped, 1);
     }
 
     fn interrupted_batch_fixture(
@@ -980,6 +1012,11 @@ mod tests {
 }
 
 #[cfg(test)]
+fn own_log() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("fileid-own-log-{}", uuid::Uuid::new_v4())).join("trash_log.json")
+}
+
+#[cfg(test)]
 mod reconcile_tests {
     use super::*;
     use crate::util::hmac::{hmac_sha256_hex, log_hmac_key};
@@ -1000,10 +1037,9 @@ mod reconcile_tests {
         }
     }
 
-    fn append_raw_signed_by(key: &[u8], entry: &TrashLogEntry) {
+    fn append_raw_signed_by(path: &std::path::Path, key: &[u8], entry: &TrashLogEntry) {
         let json = serde_json::to_string(entry).unwrap();
         let line = format!("{json}\t{}\n", hmac_sha256_hex(key, json.as_bytes()));
-        let path = paths::trash_log_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
         file.write_all(line.as_bytes()).unwrap();
@@ -1037,21 +1073,22 @@ mod reconcile_tests {
         let key = log_hmac_key().unwrap();
         let batch = uuid::Uuid::new_v4().to_string();
         let signed = entry(&format!("ok-{batch}"), &[(1, &gone), (3, &unfound), (4, &present)]);
-        append_at(&paths::trash_log_path().unwrap(), &key, &signed).unwrap();
-        append_raw_signed_by(b"another key entirely", &entry(&format!("forged-{batch}"), &[(2, &forged)]));
+        let log = own_log();
+        append_at(&log, &key, &signed).unwrap();
+        append_raw_signed_by(&log, b"another key entirely", &entry(&format!("forged-{batch}"), &[(2, &forged)]));
 
         let trashed = dir.join("in-the-trash.jpg");
         let found = {
             let (unfound, trashed) = (unfound.clone(), trashed.clone());
             move |item: &TrashLogItem| (item.original_path != unfound.to_string_lossy()).then(|| trashed.clone())
         };
-        assert_eq!(reconcile_trashed_rows(&db, found), 1);
+        assert_eq!(reconcile_trashed_rows_in(&log, &key, &db, found), 1);
 
         assert_eq!(rows(&db), vec![2, 3, 4], "only the signed, vanished, located file loses its row");
         let count: i64 = db.lock().query_row("SELECT file_count FROM persons WHERE id = 9", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 0, "the person's photo count follows");
 
-        let raw = std::fs::read(paths::trash_log_path().unwrap()).unwrap();
+        let raw = std::fs::read(&log).unwrap();
         let journaled = find_batch_in(&raw, &key, &format!("ok-{batch}")).unwrap();
         let first = journaled.items.iter().find(|item| item.file_id == 1).unwrap();
         assert_eq!(first.trashed_path.as_deref(), Some(trashed.to_string_lossy().as_ref()), "the found location is journaled");

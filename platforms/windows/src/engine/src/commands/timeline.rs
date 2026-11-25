@@ -751,14 +751,50 @@ fn model_keeps_failing(streak: &mut usize, error: &anyhow::Error) -> bool {
     *streak >= MODEL_FAILURE_LIMIT
 }
 
+/// An empty caption is a valid answer only for a dark or flat frame, where there is nothing to describe: the result is then an empty string and the scene gets no passage. On any other frame it means the model failed.
 async fn caption_frame<M: FrameModel>(model: &M, frame: &Path, prompt: &str, cancel: &Arc<AtomicBool>) -> Result<String> {
     let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
     let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable()).context(ModelFailed)))?;
     let caption = caption.trim();
-    if caption.is_empty() {
+    if caption.is_empty() && !frame_is_blank(frame) {
         return Err(unreadable().context(ModelFailed));
     }
     Ok(caption.to_owned())
+}
+
+/// Mean brightness at or below this (of 255) is a black frame; a spread below `BLANK_SPREAD` is a flat one.
+const BLANK_MEAN: f64 = 16.0;
+const BLANK_SPREAD: f64 = 6.0;
+
+fn frame_is_blank(frame: &Path) -> bool {
+    let Ok(image) = image::open(frame) else {
+        return false;
+    };
+    let luma = image.to_luma8();
+    let count = f64::from(luma.width()) * f64::from(luma.height());
+    if count == 0.0 {
+        return false;
+    }
+    let mean = luma.pixels().map(|p| f64::from(p.0[0])).sum::<f64>() / count;
+    let variance = luma.pixels().map(|p| (f64::from(p.0[0]) - mean).powi(2)).sum::<f64>() / count;
+    mean <= BLANK_MEAN || variance.sqrt() < BLANK_SPREAD
+}
+
+enum Failure {
+    Stop(anyhow::Error),
+    Interrupted(anyhow::Error),
+    Skip(anyhow::Error),
+}
+
+/// What the job does with a video's failure: interruptions pass through, a streak of model failures stops the job, anything else skips the video.
+fn judge_failure(error: anyhow::Error, cancelled: bool, streak: &mut usize) -> Failure {
+    if error.is::<Interrupted>() || cancelled {
+        return Failure::Interrupted(error);
+    }
+    if model_keeps_failing(streak, &error) {
+        return Failure::Stop(model_stopped(&error));
+    }
+    Failure::Skip(error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -780,11 +816,11 @@ async fn process<M: FrameModel>(
         attempted += 1;
         match process_video(id, job, model, frames, cancel, sink, database, share, (index, file_id, total), &mut next_pool).await {
             Ok(()) => model_failures = 0,
-            Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => return Err(error),
             Err(error) => {
-                if model_keeps_failing(&mut model_failures, &error) {
-                    return Err(model_stopped(&error));
-                }
+                let error = match judge_failure(error, cancel.load(Ordering::Acquire), &mut model_failures) {
+                    Failure::Interrupted(error) | Failure::Stop(error) => return Err(error),
+                    Failure::Skip(error) => error,
+                };
                 tracing::warn!(file_id, error = %format!("{error:#}"), "timeline skipped a video it could not analyse");
                 let _ = std::fs::remove_dir_all(frames.join(format!("pool-{file_id}")));
                 skipped += 1;
@@ -1022,6 +1058,9 @@ async fn scene_captions<M: FrameModel>(
         }
         let frame = &pool.frames.get(scene.representative).context("Missing scene frame")?.2;
         let caption = caption_frame(model, frame, prompt, cancel).await?;
+        if caption.is_empty() {
+            continue;
+        }
         let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
         while_running(database, id, move |conn| {
             checked.verify(conn, file_id)?;

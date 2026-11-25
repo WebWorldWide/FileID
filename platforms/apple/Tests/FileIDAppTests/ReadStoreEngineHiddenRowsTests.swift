@@ -185,17 +185,55 @@ struct ReadStoreEngineHiddenRowsTests {
         #expect(groups.count == 1)
     }
 
+    @Test("a page of everything Cleanup can show is asked for in one request, so the engine groups the library once")
+    func oneRequestCarriesEveryDisplayedGroup() async {
+        actor Seen { var asked: [(Int, Int)] = []; func note(_ o: Int, _ l: Int) { asked.append((o, l)) } }
+        let seen = Seen()
+        let collected = await ReadStore.collectSimilarClusters { offset, limit in
+            await seen.note(offset, limit)
+            let n = min(limit, 300 - offset)
+            return ReadStore.SimilarClusterPage(clusters: (0..<max(0, n)).map { [Int64(offset + $0), -1] }, total: 300)
+        }
+        #expect(collected?.clusters.count == 200)
+        let asked = await seen.asked
+        #expect(asked.count == 1 && asked[0].0 == 0 && asked[0].1 == 200)
+    }
+
     @Test("pages are requested until the engine's total or the display cap is reached")
     func pagesAreCollectedUpToTheTotal() async {
         actor Seen { var offsets: [Int] = []; func note(_ o: Int) { offsets.append(o) } }
         let seen = Seen()
-        let clusters = await ReadStore.collectSimilarClusters { offset, limit in
+        let collected = await ReadStore.collectSimilarClusters { offset, limit in
             await seen.note(offset)
-            let n = min(limit, 130 - offset)
+            let n = min(limit, 130 - offset, 60)
             return ReadStore.SimilarClusterPage(clusters: (0..<max(0, n)).map { [Int64(offset + $0), -1] }, total: 130)
         }
-        #expect(clusters?.count == 130)
+        #expect(collected?.clusters.count == 130)
         let offsets = await seen.offsets
-        #expect(offsets == [0, 100])
+        #expect(offsets == [0, 60, 120])
+    }
+
+    @Test("a look-alike group larger than the engine's id cap reports its true size, not the truncated count")
+    func aTruncatedGroupKeepsItsTrueFileCount() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-engine-true-size-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try seed(root)
+        try await DatabaseQueue(path: url.path).write { db in
+            for id in 30...33 {
+                try db.execute(sql: "INSERT INTO files(id,path_text,kind,size_bytes) VALUES (?,?,'image',?)",
+                               arguments: [id, "/lib/t\(id).jpg", 10])
+            }
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        let groups = await store.similarImageGroupsAsync { _, _ in
+            ReadStore.SimilarClusterPage(clusters: [[30, 31, 32, 33]], total: 1, sizes: [2_500])
+        }
+        #expect(groups.count == 1)
+        #expect(groups[0].files.count == 4)
+        #expect(groups[0].totalFileCount == 2_500)
     }
 }

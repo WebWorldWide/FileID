@@ -776,7 +776,7 @@ pub struct CatalogRequest {
     /// Cleanup look-alike groups: images whose perceptual hashes differ by at most similarThreshold
     /// bits (0 to 16, default 8), chained, with groups that are all byte-identical and a RAW beside
     /// its own rendered twin left out. Groups come largest first (ties by smallest file id); offset
-    /// (default 0) and limit (1 to 100, default 50) select a page. It replies with similarGroups
+    /// (default 0) and limit (1 to 200, default 50) select a page. It replies with similarGroups
     /// for the page and similarGroupTotal for all of them.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
