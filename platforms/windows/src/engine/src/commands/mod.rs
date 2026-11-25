@@ -63,7 +63,7 @@ mod timeline_media;
 pub(crate) mod video_export;
 mod media_recipes;
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(not(windows))]
 pub(crate) fn ffmpeg_runtime_available() -> bool {
     video_export::available()
 }
