@@ -663,6 +663,41 @@ pub(crate) fn mount_info(path: &Path) -> Option<(String, String, bool)> {
     Some((fstype, mount_on, fs.f_flags & MNT_LOCAL != 0))
 }
 
+/// True when the volume holding `path` reports a solid-state medium (`diskutil info -plist`). Any failure answers false, so a spinning disk is never mistaken for an SSD.
+#[cfg(target_os = "macos")]
+pub fn volume_is_solid_state(path: &Path) -> bool {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut fs) } != 0 {
+        return false;
+    }
+    let device = unsafe { CStr::from_ptr(fs.f_mntfromname.as_ptr()) }.to_string_lossy().into_owned();
+    if !device.starts_with("/dev/") {
+        return false;
+    }
+    std::process::Command::new("/usr/sbin/diskutil")
+        .args(["info", "-plist", &device])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| plist_says_solid_state(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn volume_is_solid_state(_path: &Path) -> bool {
+    false
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn plist_says_solid_state(plist: &str) -> bool {
+    let Some(at) = plist.find("<key>SolidState</key>") else { return false };
+    plist[at + "<key>SolidState</key>".len()..].trim_start().starts_with("<true/>")
+}
+
 #[cfg(target_os = "macos")]
 const MNT_LOCAL: u32 = 0x0000_1000;
 
@@ -1370,6 +1405,14 @@ pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;
+
+    #[test]
+    fn diskutil_output_marks_a_solid_state_volume_only_when_it_says_true() {
+        assert!(plist_says_solid_state("<dict>\n\t<key>SolidState</key>\n\t<true/>\n</dict>"));
+        assert!(!plist_says_solid_state("<dict>\n\t<key>SolidState</key>\n\t<false/>\n</dict>"));
+        assert!(!plist_says_solid_state("<dict><key>Removable</key><true/></dict>"));
+        assert!(!plist_says_solid_state(""));
+    }
 
     #[test]
     fn macos_available_memory_credits_the_kernel_level() {
