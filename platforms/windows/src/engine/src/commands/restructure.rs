@@ -2290,6 +2290,8 @@ mod tests {
     }
 
     /// One file with a name FileID can't use must not refuse the whole inline plan: the rest move, the odd one stays, and a plain notice says why.
+    // Windows cannot create a file whose name holds a newline, so the fixture exists only on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn apply_dispatch_skips_one_unusable_name_and_says_why() {
         use std::sync::atomic::AtomicBool;
