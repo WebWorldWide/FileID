@@ -294,6 +294,8 @@ struct Sidebar: View {
         case "scan_disk_full": return "Free some space on this Mac, then scan again. What FileID already saved is kept."
         case "face_clustering_failed", "face_clustering_aborted", "face_clustering_start_failed":
             return "Open People and press Refresh to try again."
+        case "face_cluster_no_model": return "Open Settings and download the face model."
+        case "face_cluster_embedder_load_failed": return "Quit and reopen FileID, or download the face model again in Settings."
         case "find_merge_suggestions_failed": return "Open People and try Suggested merges again in a moment."
         case "engine_output_error": return "FileID restarts it by itself. If it stays off, quit and reopen FileID."
         case "ipc_frame_too_large": return "That folder plan is too large to show. Try a smaller folder."

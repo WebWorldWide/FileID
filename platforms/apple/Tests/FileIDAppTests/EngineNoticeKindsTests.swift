@@ -35,6 +35,14 @@ struct EngineNoticeKindsTests {
         #expect(Sidebar.errorTitle("never_heard_of_it") == "Something went wrong")
     }
 
+    @Test("the missing face model notice is short enough for the sidebar card's three lines")
+    func faceModelNoticeFits() {
+        let engineMessage = "The face recognition model isn't installed. Open Settings to download it (39 MB)."
+        let text = Sidebar.errorText(kind: "face_cluster_no_model", message: engineMessage)
+        #expect(text == "Open Settings and download the face model.")
+        #expect(Sidebar.errorText(kind: "face_cluster_embedder_load_failed", message: "x").count <= 70)
+    }
+
     @Test("a folder move that stopped part way does not say nothing was moved")
     func undoJournalWording() {
         #expect(Sidebar.errorTitle("restructure_undo_journal") == "The folder move stopped")
