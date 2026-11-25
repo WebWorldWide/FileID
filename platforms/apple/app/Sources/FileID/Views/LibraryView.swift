@@ -201,6 +201,7 @@ struct LibraryView: View {
                 case "checks": selectMode = true; for row in rows.prefix(Int(parts.last ?? "") ?? 3) { checkedFiles[row.id] = row }
                 case "close": paneSelectedID = nil; selectMode = false; checkedFiles = [:]
                 case "end": jumpToEnd()
+                case "reload": SelfShot.jumpFinished = false; reload()
             case "reset": paneSelectedID = nil; selectMode = false; checkedFiles = [:]; similarSeed = nil; if !searchText.isEmpty { searchText = "" }
                 default: break
                 }
@@ -954,6 +955,12 @@ struct LibraryView: View {
         return short ? "\(rows.formatted())/\(shownOf.formatted())" : "\(rows.formatted()) of \(shownOf.formatted()) shown"
     }
 
+    /// The scroll bar only spans the rows loaded so far; this says how many more wait below and offers the jump to the last file.
+    static func moreBelowNote(loaded: Int, total: Int?) -> String? {
+        guard let total, total > loaded else { return total == nil ? "More files below · Load all" : nil }
+        return "\(loaded.formatted()) of \(total.formatted()) loaded · Load all"
+    }
+
     /// "3 of 472" once the listing's size is known; "3 of 300+" while more pages remain unloaded and the size isn't.
     static func previewPosition(index: Int, loaded: Int, moreToLoad: Bool, knownTotal: Int?) -> String {
         let position = (index + 1).formatted()
@@ -1091,7 +1098,16 @@ struct LibraryView: View {
     private var grid: some View {
         listing
         .overlay(alignment: .bottom) {
-            if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
+            if loadingMore {
+                ProgressView().controlSize(.small).padding(.bottom, 12)
+            } else if canLoadMore, similarSeed == nil, let note = Self.moreBelowNote(loaded: rows.count, total: listingTotal) {
+                Button { jumpToEnd() } label: { Text(note) }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .background(Theme.surfaceBase, in: RoundedRectangle(cornerRadius: Theme.Radius.s))
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                    .padding(.bottom, 10)
+                    .help("Load the rest of the listing and scroll to its last file (End).")
+            }
         }
         .overlay(alignment: .top) {
             if newFilesWaiting {
@@ -1201,18 +1217,27 @@ struct LibraryView: View {
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sort = self.sort
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind && $2 == sort } == true
-        let want = sameListing && !firstPageOnly ? max(Self.pageSize, rows.count) : Self.pageSize
+        let plan = LibraryReload.plan(loaded: rows.count, sameListing: sameListing, firstPageOnly: firstPageOnly,
+                                      searching: !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, complete: !canLoadMore)
+        let want = plan.want
+        let loadedRows = plan.keepsTail ? rows : []
+        let loadedCursor = pageCursor, couldLoadMore = canLoadMore
         newFilesWaiting = false
         reloadTask?.cancel()
         loadMoreTask?.cancel()
         loadingMore = false
         visualSearchPending = false
+        #if DEBUG
+        let reloadBegan = ContinuousClock.now
+        #endif
         reloadTask = Task { @MainActor in
             defer { if !Task.isCancelled { visualSearchPending = false } }
             var newRows: [FileRow]
             var newCursor: LibraryCursor?
             var pageable = false
             var summary: String?
+            var keptTail = false
+            var headCursor: LibraryCursor?
             var hidden = 0
             var problem: SearchProblem?
             if let seed {
@@ -1235,7 +1260,14 @@ struct LibraryView: View {
                 let first = await store.filesPageAsync(limit: want, search: query, kindFilter: kind, sort: sort)
                 newRows = first.rows
                 newCursor = first.cursor
+                headCursor = first.cursor
                 pageable = newRows.count == want
+                if plan.keepsTail, pageable, let spliced = LibraryReload.splice(head: newRows, onto: loadedRows) {
+                    keptTail = true
+                    pageable = couldLoadMore
+                    newCursor = loadedCursor
+                    newRows = spliced
+                }
                 if let visualTask {
                     guard !Task.isCancelled else { visualTask.cancel(); return }
                     rows = newRows
@@ -1279,8 +1311,9 @@ struct LibraryView: View {
             }
             guard !Task.isCancelled else { return }
             // One chip-tag query for every visible tile, off-main.
+            let headCount = keptTail ? want : newRows.count
             let ids = Array(newRows.prefix(Self.tagChunk).map { $0.id })
-            let laterIDs = newRows.dropFirst(Self.tagChunk).map { $0.id }
+            let laterIDs = newRows[min(Self.tagChunk, headCount)..<headCount].map { $0.id }
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
@@ -1289,7 +1322,7 @@ struct LibraryView: View {
             rows = newRows
             // The file counts lag the listing mid-scan: ask for them again so the page header agrees with the grid.
             if LibraryCounters.needsRefresh(isSimilaritySeed: seed != nil, kind: kind, query: query, listedRows: newRows.count, scopedTotalFiles: store.scopedTotalFiles) { store.refreshCounters() }
-            tagsByFile = tags
+            if keptTail { tagsByFile.merge(tags) { _, new in new } } else { tagsByFile = tags }
             rowsEpoch &+= 1
             canLoadMore = pageable
             pageCursor = newCursor
@@ -1298,7 +1331,42 @@ struct LibraryView: View {
             shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
             searchProblem = problem
             listedQuery = seed == nil ? (query, kind, sort) : nil
+            #if DEBUG
+            if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: reload showed \(rows.count) rows in \((ContinuousClock.now - reloadBegan).milliseconds) ms\n".utf8)) }
+            #endif
             if !laterIDs.isEmpty { await fillTags(for: laterIDs, query: query, kind: kind, sort: sort) }
+            if keptTail { await recheckTail(after: headCount, head: Array(newRows.prefix(headCount)), headCursor: headCursor, query: query, kind: kind, sort: sort) }
+            #if DEBUG
+            if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: reload settled with \(rows.count) rows after \((ContinuousClock.now - reloadBegan).milliseconds) ms\n".utf8)); SelfShot.jumpFinished = true }
+            #endif
+        }
+    }
+
+    /// The rows past a refreshed head were loaded before the refresh: check them against the catalog by id in the background, then swap the fresh copies in with one update. A listing whose size no longer matches took in rows somewhere in that tail, so it falls back to the head and pages on from there.
+    private func recheckTail(after headCount: Int, head: [FileRow], headCursor: LibraryCursor?, query: String, kind: String?, sort: LibrarySort) async {
+        let tail = Array(rows.dropFirst(headCount))
+        var fresh: [Int64: FileRow] = [:]
+        var start = 0
+        while start < tail.count {
+            let chunk = tail[start..<min(start + LibraryReload.recheckChunk, tail.count)].map(\.id)
+            start += chunk.count
+            fresh.merge(await store.listedRowsAsync(ids: chunk, kindFilter: kind)) { first, _ in first }
+            guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort else { return }
+        }
+        guard let size = await store.listingCountAsync(kindFilter: kind), !Task.isCancelled,
+              query == searchText, kind == kindFilter, sort == self.sort else { return }
+        #if DEBUG
+        if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: reload tail re-check of \(tail.count) rows done, listing \(size)\n".utf8)) }
+        #endif
+        let updated = LibraryReload.applying(fresh, checked: Set(tail.map(\.id)), to: rows)
+        if updated.count != size, !canLoadMore {
+            rows = head
+            canLoadMore = true
+            pageCursor = headCursor
+            rowsEpoch &+= 1
+        } else if updated != rows {
+            rows = updated
+            rowsEpoch &+= 1
         }
     }
 

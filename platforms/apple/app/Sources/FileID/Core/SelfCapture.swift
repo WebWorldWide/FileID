@@ -236,7 +236,7 @@ enum SelfShot {
                 } else if let action = view.action {
                     jumpFinished = false
                     NotificationCenter.default.post(name: .selfShotAction, object: action)
-                    if action == "end" {
+                    if action == "end" || action == "reload" {
                         await waitUntil(timeout: 180) { jumpFinished }
                         try? await Task.sleep(for: .seconds(0.6))
                         await waitForLibraryThumbnails()

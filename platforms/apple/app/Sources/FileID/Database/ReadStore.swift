@@ -264,10 +264,12 @@ public final class ReadStore: @unchecked Sendable {
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
                 let unreadableTimedOutFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(Self.timedOutSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
-                var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
+                let retryFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.retryPendingSQL)") ?? 0
+                var scoped = (total: totalFiles - retryFiles, unreadable: unreadableFiles, other: otherFiles)
                 if let scope {
                     let within = LibraryScope.sql("path_text")
-                    scoped = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0,
+                    let scopedRetry = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.retryPendingSQL) AND \(within)", arguments: [scope.param]) ?? 0
+                    scoped = ((try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0) - scopedRetry,
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(within)", arguments: [scope.param]) ?? 0,
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0 AND \(within)", arguments: [scope.param]) ?? 0)
                 }
@@ -356,6 +358,8 @@ public final class ReadStore: @unchecked Sendable {
     public static let unreadableFilter = "unreadable"
     /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
     static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%' AND \(notEngineHiddenSQL)"
+    /// Failed rows waiting for the next scan to retry: counted by the catalog, listed nowhere, so the Library's own total leaves them out.
+    nonisolated static let retryPendingSQL = "failed = 1 AND COALESCE(error_message, '') LIKE '%will retry%' AND \(notEngineHiddenSQL)"
     /// Stored `error_message` of a row that failed because the machine was too busy (`tagging.rs` `TIMEOUT_MESSAGES`, and the "ran out of time" wording that replaces them).
     nonisolated static let timedOutMessages = ["per-file timeout after 60s", "Vision pass timed out"]
     nonisolated static let timedOutSQL =
@@ -524,6 +528,34 @@ public final class ReadStore: @unchecked Sendable {
         } catch {
             if !(error is CancellationError), !Task.isCancelled { reportError("Library query failed: \(error)") }
             return LibraryPage(rows: [], cursor: nil)
+        }
+    }
+
+    /// The listing's rows for these ids as they are now; an id that left the listing is missing from the result.
+    public func listedRowsAsync(ids: [Int64], kindFilter: String? = nil) async -> [Int64: FileRow] {
+        guard !ids.isEmpty, let q = queue else { return [:] }
+        let scope = self.scope
+        return (try? await q.read { db in
+            let unreadable = kindFilter == Self.unreadableFilter
+            var sql = "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?)) AND " + (unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0")
+            var args: StatementArguments = [String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)]
+            if let kindFilter, !unreadable { sql += " AND kind = ?"; args += [kindFilter] }
+            if let scope { sql += " AND " + LibraryScope.sql("path_text"); args += [scope.param] }
+            return Dictionary(try Row.fetchAll(db, sql: sql, arguments: args).map { ($0["id"] as Int64, Self.toFileRow($0)) }, uniquingKeysWith: { first, _ in first })
+        }) ?? [:]
+    }
+
+    /// How many rows the unsearched listing has, nil when the query fails.
+    public func listingCountAsync(kindFilter: String? = nil) async -> Int? {
+        guard let q = queue else { return nil }
+        let scope = self.scope
+        return try? await q.read { db in
+            let unreadable = kindFilter == Self.unreadableFilter
+            var sql = "SELECT COUNT(*) FROM files WHERE " + (unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0")
+            var args: StatementArguments = []
+            if let kindFilter, !unreadable { sql += " AND kind = ?"; args += [kindFilter] }
+            if let scope { sql += " AND " + LibraryScope.sql("path_text"); args += [scope.param] }
+            return try Int.fetchOne(db, sql: sql, arguments: args) ?? 0
         }
     }
 
