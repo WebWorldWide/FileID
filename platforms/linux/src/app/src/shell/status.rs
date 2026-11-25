@@ -543,6 +543,8 @@ mod tests {
             eta_seconds: Some(125.0),
             resident_mb: 640,
             available_mb: 8000,
+            post_scan_owed: None,
+            post_scan_done: None,
         }
     }
 

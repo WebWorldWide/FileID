@@ -208,7 +208,9 @@ public sealed record ScanProgress(
     double FilesPerSecond,
     double? EtaSeconds,
     [property: JsonPropertyName("residentMB")] ulong ResidentMb,
-    [property: JsonPropertyName("availableMB")] ulong AvailableMb);
+    [property: JsonPropertyName("availableMB")] ulong AvailableMb,
+    ulong? PostScanOwed = null,
+    ulong? PostScanDone = null);
 
 public sealed record FileDoneEvent(
     string Path,

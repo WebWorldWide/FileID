@@ -556,6 +556,8 @@ impl ScanSession {
                     eta_seconds: None,
                     resident_mb: crate::platform::process_memory_mb(),
                     available_mb: 0,
+                    post_scan_owed: None,
+                    post_scan_done: None,
                 };
                 lift_for_tick.apply(&mut progress);
                 let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
@@ -1300,6 +1302,8 @@ impl CatchUpProgress {
             eta_seconds: (rate > 0.01).then(|| (owed - done) as f64 / rate),
             resident_mb: crate::platform::process_memory_mb(),
             available_mb: 0,
+            post_scan_owed: Some(owed),
+            post_scan_done: Some(done.min(owed)),
         };
         self.lift.apply(&mut progress);
         progress
@@ -1326,6 +1330,8 @@ fn terminal_progress(session_id: &str, phase: ScanPhase, total: u64, discovered:
         eta_seconds: None,
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
+        post_scan_owed: None,
+        post_scan_done: None,
     }
 }
 
@@ -2213,6 +2219,8 @@ fn maybe_emit_progress(
         eta_seconds,
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
+        post_scan_owed: None,
+        post_scan_done: None,
     };
     lift.apply(&mut progress);
     // Intentional try_send. Progress events are throttled to 10 Hz / 1k
@@ -2437,6 +2445,8 @@ mod tests {
             eta_seconds: None,
             resident_mb: 0,
             available_mb: 0,
+            post_scan_owed: None,
+            post_scan_done: None,
         }
     }
 
@@ -3516,6 +3526,28 @@ mod tests {
         let _ = heartbeat.await;
         let ran_for = report.state.lock().2.elapsed();
         assert!(ran_for < Duration::from_millis(80), "200 ms of pause counted as {ran_for:?} of work");
+    }
+
+    #[tokio::test]
+    async fn every_post_scan_snapshot_carries_the_work_owed_and_done_so_a_late_client_needs_no_baseline() {
+        let (sink, mut events) = Sink::channel_for_test(1 << 8);
+        let report = CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 500,
+            processed: 480,
+            failed: 0,
+            lift: ProgressLift::default(),
+            state: Mutex::new((0, 0, Instant::now())),
+            paused: Arc::new(|| false),
+        };
+        report.report(crate::pipeline::catch_up::Progress::Total(30));
+        report.report(crate::pipeline::catch_up::Progress::Advance(12));
+        let first = post_scan_progress(events.recv().await.unwrap());
+        assert_eq!((first.post_scan_owed, first.post_scan_done), (Some(30), Some(0)));
+        let second = post_scan_progress(events.recv().await.unwrap());
+        assert_eq!((second.post_scan_owed, second.post_scan_done), (Some(30), Some(12)));
+        assert_eq!((second.total, second.processed), (530, 492));
     }
 
     #[tokio::test]

@@ -531,6 +531,8 @@ fn event_exemplars() -> Vec<EventPayload> {
             eta_seconds: Some(3.5),
             resident_mb: 512,
             available_mb: 8192,
+            post_scan_owed: None,
+            post_scan_done: None,
         })),
         EventPayload::PhaseChanged(Wrap::new(ScanPhase::PostScan)),
         EventPayload::DiscoveryComplete(DiscoveryCompletePayload { total_files: 1000 }),
