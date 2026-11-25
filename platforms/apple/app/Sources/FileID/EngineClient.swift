@@ -15,6 +15,8 @@ public final class EngineClient {
 
     public private(set) var state: ConnectionState = .starting
     public private(set) var lastProgress: ScanProgress?
+    /// Files already read when the scan's post-scan work began. The engine counts that work on top of the files, so the work left is measured from here.
+    public private(set) var postScanBaseline: PostScanBaseline?
     public private(set) var lastError: EngineError? {
         didSet { lastErrorSignal &+= 1 }
     }
@@ -622,6 +624,9 @@ public final class EngineClient {
             // Events reach the main actor as unstructured Tasks the runtime may reorder, so a late "discovered: 100" must never overwrite the final "discovered: 4000": drop any snapshot that rolls a counter (or the phase) backwards within the same session.
             guard p.supersedes(lastProgress) else { break }
             lastProgress = p
+            if p.phase == .postScan, postScanBaseline?.sessionID != p.sessionID {
+                postScanBaseline = PostScanBaseline(sessionID: p.sessionID, filesRead: p.processed)
+            }
             // Release the App-Nap token on any terminal scan phase; cancel/fail arrive here as a phase change, not as .scanComplete.
             switch p.phase {
             case .completed, .cancelled, .failed:
@@ -1330,7 +1335,27 @@ public final class EngineClient {
     }
 }
 
+public struct PostScanBaseline: Equatable, Sendable {
+    public let sessionID: String
+    public let filesRead: Int
+}
+
+/// What the post-scan phase has left: the engine reports it as files found plus the work owed, so the work is the part above the files already read.
+struct PostScanWork: Equatable {
+    let owed: Int
+    let done: Int
+    var left: Int { owed - done }
+    var fraction: Double { owed > 0 ? Double(done) / Double(owed) : 0 }
+}
+
 extension ScanProgress {
+    func postScanWork(baseline: PostScanBaseline?) -> PostScanWork? {
+        let start = baseline.flatMap { $0.sessionID == sessionID ? $0.filesRead : nil } ?? discovered
+        let owed = total - start
+        guard owed > 0 else { return nil }
+        return PostScanWork(owed: owed, done: min(owed, max(0, processed - start)))
+    }
+
     func settled(by phase: ScanPhase) -> ScanProgress? {
         switch phase {
         case .completed, .cancelled, .failed: break

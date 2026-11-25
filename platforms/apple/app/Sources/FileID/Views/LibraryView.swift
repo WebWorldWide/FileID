@@ -483,27 +483,32 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func inFlightHeadline(_ p: ScanProgress) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let work = p.phase == .postScan ? p.postScanWork(baseline: engine.postScanBaseline) : nil
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: "doc.text.magnifyingglass")
                     .foregroundStyle(Theme.gold)
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.phase == .discovering ? "Finding files…"
-                         : p.phase == .tagging ? "Reading files…" : "Finishing up…")
+                         : p.phase == .tagging ? "Reading files…" : work != nil ? "Adding tags and reading text…" : "Finishing up…")
                         .font(Theme.Font.body(14, .semibold))
                     Text("Tagging photos and finding faces. You can browse while this runs.")
                         .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
-                Text(p.total > 0
-                     ? "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))"
-                     : "\(p.discovered.formatted()) found so far")
+                Text(work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, "file", "files"))" }
+                     ?? (p.total > 0
+                         ? "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))"
+                         : "\(p.discovered.formatted()) found so far"))
                     .font(Theme.Font.body(13.5).monospacedDigit())
                     .foregroundStyle(Theme.text3)
             }
-            if p.total > 0 {
+            if let work {
+                ProgressView(value: Double(work.done), total: Double(max(work.owed, 1)))
+                    .tint(Theme.gold)
+            } else if p.total > 0 {
                 ProgressView(value: Double(p.processed),
                              total: Double(max(p.total, 1)))
                     .tint(Theme.gold)

@@ -341,13 +341,14 @@ struct TitleBar: View {
     private var rows: [ActivityRow] {
         var out: [ActivityRow] = []
         if let p = engine.lastProgress, p.phase != .idle {
-            let frac = p.total > 0 ? Double(p.processed) / Double(p.total) : (p.phase == .completed ? 1 : 0)
+            let work = p.phase == .postScan ? p.postScanWork(baseline: engine.postScanBaseline) : nil
+            let frac = work?.fraction ?? (p.total > 0 ? Double(p.processed) / Double(p.total) : (p.phase == .completed ? 1 : 0))
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",
-                                   sub: running ? "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))" : "\(Plural.noun(p.processed, "file", "files"))",
-                                   state: p.phase == .completed ? "Done" : running ? Self.scanStateLabel(p.phase, paused: engine.isPaused, fraction: frac) : Self.phaseLabel(p.phase),
+                                   sub: running ? (work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, "file", "files")) tagged" } ?? "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))") : "\(Plural.noun(p.processed, "file", "files"))",
+                                   state: p.phase == .completed ? "Done" : running ? Self.scanStateLabel(p.phase, paused: engine.isPaused, fraction: frac, tagging: work != nil) : Self.phaseLabel(p.phase),
                                    color: p.phase == .completed ? Theme.delight : engine.isPaused ? Theme.text3 : Theme.gold,
-                                   progress: running && !engine.isPaused && p.phase != .tagging ? nil : frac,
+                                   progress: running && !engine.isPaused && p.phase != .tagging && work == nil ? nil : frac,
                                    tone: p.phase == .completed ? .done : engine.isPaused || !running ? .paused : .gold,
                                    button: running ? (engine.isPaused ? "Resume" : "Pause", { engine.isPaused ? engine.resume() : engine.pause() }) : nil,
                                    open: .library))
@@ -392,11 +393,11 @@ struct TitleBar: View {
         }
     }
 
-    private static func scanStateLabel(_ phase: ScanPhase, paused: Bool, fraction: Double) -> String {
+    private static func scanStateLabel(_ phase: ScanPhase, paused: Bool, fraction: Double, tagging: Bool = false) -> String {
         if paused { return "Paused" }
         switch phase {
         case .discovering: return "Counting files"
-        case .postScan: return "Finishing up"
+        case .postScan: return tagging ? "\(Int(fraction * 100))%" : "Finishing up"
         default: return "\(Int(fraction * 100))%"
         }
     }

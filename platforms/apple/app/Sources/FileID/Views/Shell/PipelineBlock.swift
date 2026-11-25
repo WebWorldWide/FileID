@@ -65,6 +65,15 @@ struct PipelineBlock: View {
             : "Press Scan again to read the rest."
     }
 
+    nonisolated static func postScanDetail(_ work: PostScanWork, etaSeconds: Double?) -> String {
+        let left = etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
+        return "\(work.done.formatted()) of \(Plural.noun(work.owed, "file", "files"))" + left
+    }
+
+    nonisolated static func stoppedDuringPostScanDetail(filesRead: Int, left: Int) -> String {
+        "\(Plural.noun(filesRead, "file", "files")) read and ready to browse. \(Plural.noun(left, "file", "files")) still need tags. Press Scan again to finish; finished files are skipped."
+    }
+
     static let cpuScanNotice = "Scanning on the CPU — slower than usual. Reinstall FileID if this persists."
 
     private struct Status {
@@ -86,13 +95,10 @@ struct PipelineBlock: View {
             case .discovering:
                 return Status(title: "Counting files", fraction: 0, tone: .gold, color: Theme.gold, sub: "\(Plural.noun(p.discovered, "file", "files")) found so far", indeterminate: true)
             case .postScan:
-                // After the files are read, FileID's helper adds detailed tags: the
-                // total then runs past the files found by the number of photos left.
-                let owed = p.total - p.discovered
-                if owed > 0 {
-                    let done = min(owed, max(0, p.processed + p.failed - p.discovered))
-                    let left = p.etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
-                    return Status(title: "Tagging photos", fraction: Double(done) / Double(owed), tone: .gold, color: Theme.gold, sub: "\(done.formatted()) of \(Plural.noun(owed, "photo", "photos"))" + left)
+                // After the files are read, FileID's helper adds detailed tags and reads text: the
+                // total then runs past the files found by the number of files left to do.
+                if let work = p.postScanWork(baseline: engine.postScanBaseline) {
+                    return Status(title: "Tagging photos", fraction: work.fraction, tone: .gold, color: Theme.gold, sub: Self.postScanDetail(work, etaSeconds: p.etaSeconds))
                 }
                 return Status(title: "Finishing up", fraction: 0, tone: .gold, color: Theme.gold, sub: "Saving what FileID found", indeterminate: true)
             default:
@@ -109,6 +115,14 @@ struct PipelineBlock: View {
         }
         if let done = engine.deepAnalyzeComplete, done.processed > 0 {
             return Status(title: "All done", fraction: 1, tone: .done, color: Theme.delight, sub: "\(Plural.noun(done.processed, "file", "files")) described")
+        }
+        if let p = progress, p.phase == .cancelled || p.phase == .failed,
+           let baseline = engine.postScanBaseline, baseline.sessionID == p.sessionID,
+           let work = p.postScanWork(baseline: baseline), work.left > 0 {
+            return Status(title: p.phase == .cancelled ? "Scan stopped" : Self.unfinishedScanTitle(filesRead: baseline.filesRead),
+                          fraction: work.fraction, tone: .paused,
+                          color: p.phase == .cancelled ? Theme.text3 : Theme.warning,
+                          sub: Self.stoppedDuringPostScanDetail(filesRead: baseline.filesRead, left: work.left))
         }
         if let p = progress, p.phase == .cancelled {
             return Status(title: "Scan stopped", fraction: p.total > 0 ? Double(p.processed) / Double(p.total) : 0, tone: .paused, color: Theme.text3, sub: "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files")) read. Scan again to finish; finished files are skipped.")
