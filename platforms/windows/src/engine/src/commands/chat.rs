@@ -2386,11 +2386,14 @@ mod tests {
             ("Rename the file Pulp Fiction to Pulp", "Chat can't rename a single file."),
             ("Copy my photos to my desktop", "Chat can't move or copy files to a place you name."),
             ("Tag my photos", "Chat doesn't tag files on request."),
+            ("Move my photos to the Trash", "Chat only moves extra copies of identical files to the Trash"),
         ] {
             let answer = ask(&mut conn, text);
             assert!(answer.message.starts_with(expected), "{text}: {}", answer.message);
             assert!(answer.hits.is_empty(), "{text}");
         }
+        assert!(super::super::chat_intent::unreadable_ask("Which files can't I open?"));
+        assert!(!super::super::chat_intent::unreadable_ask("Show photos that failed to upload"));
         let request = ChatRequest {
             request_id: "r".into(),
             conversation_id: "layout".into(),

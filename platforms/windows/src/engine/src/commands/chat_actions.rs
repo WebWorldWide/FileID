@@ -239,8 +239,13 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
     };
     Ok(match intent.kind.as_str() {
         "refuse" => {
-            let first = super::chat_intent::imperative_words(context.text).0.into_iter().next().unwrap_or_default();
+            let (words, _) = super::chat_intent::imperative_words(context.text);
+            let first = words.first().cloned().unwrap_or_default();
+            let to_trash = words.iter().any(|word| ["trash", "bin", "recycle", "garbage"].contains(&word.as_str()));
             Resolution::say(match first.as_str() {
+                "move" | "put" | "copy" if to_trash => {
+                    "Chat only moves extra copies of identical files to the Trash, and only after you confirm. To remove other files, choose them in Library or Duplicates."
+                }
                 "turn" | "switch" | "enable" | "disable" | "set" => {
                     "Chat can change only these settings: tagging kept copies, the background animation and written answers from local AI."
                 }

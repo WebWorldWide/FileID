@@ -1433,11 +1433,11 @@ pub fn off_topic(text: &str) -> bool {
 /// "How many files couldn't be read?", "Which files failed?": about the catalog's unreadable files, not words to search.
 pub fn unreadable_ask(text: &str) -> bool {
     let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).collect();
-    if has(&words, &["person", "people", "face", "faces", "named"]) {
+    if has(&words, &["person", "people", "face", "faces", "named", "upload", "uploading", "download", "sync", "backup", "send", "sending", "import"]) {
         return false;
     }
     has(&words, &["unreadable", "corrupt", "corrupted", "failed", "fail", "fails", "failing", "unopenable"])
-        || (has(&words, &["read", "readable", "opened"]) && has(&words, &["couldnt", "cant", "cannot", "unable", "wasnt", "werent", "didnt", "wont", "not"]))
+        || (has(&words, &["read", "readable", "opened", "open"]) && has(&words, &["couldnt", "cant", "cannot", "unable", "wasnt", "werent", "didnt", "wont", "not"]))
 }
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
