@@ -93,6 +93,15 @@ public sealed class WinUiDrillFixContractTests
         Assert.True(start >= 0 && cancel > start && clear > cancel);
     }
 
+    [Fact]
+    public void LocationsCard_RefreshesRowsWhenAScanEnds()
+    {
+        var card = App("Views", "Settings", "LocationsCard.cs");
+        Assert.Contains("_engine.PropertyChanged += OnEngineChanged;", card, StringComparison.Ordinal);
+        Assert.Contains("_engine.PropertyChanged -= OnEngineChanged;", card, StringComparison.Ordinal);
+        Assert.Contains("ScanPhase.Completed or ScanPhase.Cancelled or ScanPhase.Failed", card, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
