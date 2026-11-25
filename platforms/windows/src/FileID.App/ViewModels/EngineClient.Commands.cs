@@ -1,5 +1,4 @@
-﻿// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
-// Partial class split from EngineClient.cs: lifecycle code (spawn, stdout loop, event router) stays apart from the per-command surface.
+﻿// Outbound IPC command facade and AutoPilot orchestration; lifecycle code (spawn, stdout loop, event router) lives in EngineClient.cs.
 
 using System;
 using System.Collections.Generic;
@@ -173,7 +172,7 @@ internal sealed partial class EngineClient
 
         _scanStartedAt = DateTime.UtcNow;
         _shownPhaseRank = -1;
-        // Clear stale Deep Analyze latches so the pipeline strip doesn't jump a fresh (re)scan to "Done" off a prior session's DeepAnalyzeComplete; done here because it's the path for ALL scan starts (incl. "Force re-tag").
+        // Clear stale Deep Analyze latches so a fresh scan (including Force re-tag) does not jump the pipeline strip to "Done" off a prior DeepAnalyzeComplete.
         DeepAnalyzeComplete = null;
         DeepAnalyzeProgress = null;
         DeepAnalyzeStarting = null;
@@ -252,7 +251,7 @@ internal sealed partial class EngineClient
         // A grouping pass that a scan took over runs again after that scan, and a scan that fell back to the slower CPU path still completes: notices, not failures.
         "face_clustering_cancelled" => true,
         "scan_slower_path" => true,
-        // IPC parity: the engine reports undecodable command frames (as macOS always has). Diagnostic, not actionable.
+        // The engine reports undecodable command frames. Diagnostic, not actionable.
         "command_decode_failed" => true,
         _ => false,
     };
@@ -312,7 +311,7 @@ internal sealed partial class EngineClient
     }
     public async Task CancelScanAsync()
     {
-        // Clear the in-flight indicators only once the cancel has been handed to the engine: clearing first left the sidebar reading Idle over a still-running scan when the send failed. The engine follows with PhaseChanged(Cancelled) and possibly a final Progress, both no-ops on the cleared state. Without the clear, _scanStartedAt + LastProgress + LastBatch + IsPaused kept prior-scan values and the "Scan complete" panel showed stale numbers.
+        // Clear the in-flight indicators only after the engine has the cancel: clearing first left the sidebar Idle over a still-running scan when the send failed. The later PhaseChanged(Cancelled) and Progress events are no-ops on the cleared state.
         var generation = SpawnGeneration;
         await SendCommandAsync(new CancelScanCommand()).ConfigureAwait(false);
 
@@ -451,7 +450,7 @@ internal sealed partial class EngineClient
         }
     }
 
-    // A reply carrying commandID (IPC 1.28.0) goes only to the wait that sent that command (BulkResultMatcher); a reply without one (an older engine) is matched by `actionPrefix` against the single shared LastBulkAction slot (trashFiles carries an undo-batch suffix, which StartsWith ignores). A prefix match alone would let two concurrent same-prefix waits both resolve off the first reply, so the per-prefix gate stays: at most one same-prefix wait is live.
+    // A reply with a commandID goes only to the wait that sent it (BulkResultMatcher). An older engine's reply without one is matched by `actionPrefix` against the shared LastBulkAction slot (trashFiles carries an undo-batch suffix, which StartsWith ignores). Two concurrent same-prefix waits would both resolve off the first reply, so at most one same-prefix wait is live.
     private static readonly AsyncLocal<Action<string>?> _bulkCommandIdObserver = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _bulkWaitGates = new();
 
@@ -660,7 +659,7 @@ internal sealed partial class EngineClient
     /// <summary>Absolute backstop: a pathological engine could dribble a byte every 89 s forever, so the watch is capped well above any realistic pack download on a slow link.</summary>
     private static readonly TimeSpan PrewarmAbsoluteCeiling = TimeSpan.FromHours(2);
 
-    // Per-model-kind stall-guard cancellation (mirrors the engine's per-kind cancel registry): a single global flag would let a per-row Cancel kill the stall guards of every other concurrent download during Install All. `_prewarmCancelAll` is the legacy cancel-everything path (CancelPrewarmAsync(null)).
+    // Per-model-kind stall-guard cancellation: a single global flag would let a per-row Cancel kill the stall guards of every other concurrent download during Install All. `_prewarmCancelAll` cancels everything (CancelPrewarmAsync(null)).
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _prewarmCancelledKinds = new();
     private int _prewarmCancelAllRequested;
 
@@ -703,7 +702,7 @@ internal sealed partial class EngineClient
         // Each ModelDownloadProgress is a fresh record, so a reference change reliably means the engine emitted progress.
         var lastProgress = ModelDownloadProgress;
 
-        // Per-kind terminal latch. The shared ModelDownloadProgress slot is overwritten by OTHER concurrent installs, so polling it only at wake time can MISS this kind's terminal (fraction >= 1.0), after which the guard would false-fire "stopped responding" for a finished model (the clip_text symptom). Subscribing for the loop's lifetime and latching the first terminal event makes a completed install always stop the guard.
+        // Per-kind terminal latch. The shared ModelDownloadProgress slot is overwritten by OTHER concurrent installs, so polling it only at wake time can MISS this kind's terminal (fraction >= 1.0), after which the guard would false-fire "stopped responding" for a finished model. Subscribing for the loop's lifetime and latching the first terminal event makes a completed install always stop the guard.
         var reachedTerminal = 0;
         void OnProgress(object? _, PropertyChangedEventArgs e)
         {

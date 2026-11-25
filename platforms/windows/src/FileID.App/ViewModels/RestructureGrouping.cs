@@ -1,5 +1,5 @@
-﻿// Single source of truth for mapping an engine RestructureMove.Tier to a
-// Shared by RestructureView (card grouping) and DrillDownSheet (the "see all" filter) so the two can't drift apart.
+﻿// Maps an engine RestructureMove.Tier to a RestructureOutcome.
+// Shared by RestructureView (card grouping) and DrillDownSheet (the "see all" filter) so the two cannot drift apart.
 
 namespace FileID.ViewModels;
 

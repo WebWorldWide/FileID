@@ -1,5 +1,4 @@
-﻿// AppViewModel — the shell-level state the MainWindow + sidebar bind to.
-// One instance lives on the UI thread (created at App startup).
+﻿// Shell-level state bound by MainWindow and the sidebar; one instance, created on the UI thread at startup.
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;

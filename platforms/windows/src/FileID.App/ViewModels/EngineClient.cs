@@ -1,12 +1,7 @@
-﻿// EngineClient — owns the FileIDEngine.exe child process lifecycle.
-// Responsibilities:
-// 1. Spawn FileIDEngine.exe with stdin/stdout/stderr redirected, after verifying its Authenticode signature (warns on Unsigned, refuses on Untrusted).
-// 2. Read stdout line by line, decode each as IpcEvent, dispatch to the UI thread and raise INotifyPropertyChanged; expose an IObservable<IpcEvent> for non-UI subscribers.
-// 3. Send IpcCommand frames on stdin (JSON + newline).
-// 4. Auto-respawn on crash with bounded backoff (1s, 4s, 16s within 60s); after 3 strikes go to LifecycleState.Crashed and surface the last error.
-// 5. Bridge engine stderr to DebugLog (local-only).
-// 6. Throttle DeepAnalyzeFileDone to 2 Hz (matches macOS; fast VLM runs otherwise spam the UI ~50/s).
-// PRIVACY: every log call site that includes a path goes through PathRedactor.Redact. The engine never reaches the network on its own; only the user-initiated IPC `prewarmModel` / `deepAnalyzeAll` paths trigger downloads.
+﻿// Owns the FileIDEngine.exe child process: spawns it after verifying its Authenticode signature (warns on Unsigned, refuses on Untrusted), reads stdout as IpcEvent frames,
+// dispatches them to the UI thread (INotifyPropertyChanged plus an IObservable<IpcEvent> for non-UI subscribers), sends IpcCommand frames on stdin, bridges stderr to DebugLog,
+// throttles DeepAnalyzeFileDone to 2 Hz, and auto-respawns on crash with bounded backoff (1s, 4s, 16s within 60s) before settling in LifecycleState.Crashed after 3 strikes.
+// Privacy: every log call site that includes a path goes through PathRedactor.Redact. The engine never reaches the network on its own; only the user-initiated IPC `prewarmModel` / `deepAnalyzeAll` paths trigger downloads.
 
 using System.Collections.Concurrent;
 using System.ComponentModel;
@@ -39,7 +34,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly GenerationHealthWaiters _healthWaiters = new();
     private int _transportFailureGeneration = -1;
 
-    // Bounded engine-stdout framing: a wedged engine that never emits a newline can't grow an unbounded buffer and OOM the UI. A 1 MiB cap silently DROPPED restructurePlan (one move per file × ~300 B) above ~3.5k moves, leaving the Restructure tab empty on a real library. The engine caps OUTBOUND frames too (sink.rs MAX_FRAME_BYTES), substituting a structured ipc_frame_too_large error rather than a frame this reader would drop, so all four caps stay symmetric at 64 MiB (a ~200k-move plan). An oversize drop is surfaced as a visible error (see StdoutLoopAsync), never silent.
+    // Bounded stdout framing: a wedged engine that never emits a newline cannot grow an unbounded buffer. 64 MiB fits a ~200k-move restructurePlan; the engine caps outbound frames at the same size (sink.rs MAX_FRAME_BYTES) and sends a structured ipc_frame_too_large error instead, so all four caps stay symmetric. An oversize drop surfaces as a visible error (see StdoutLoopAsync).
     private const int MaxFrameBytes = 64 * 1024 * 1024;
 
     /// <summary>Per-loop stdout framing state, owned by one StdoutLoopAsync invocation so an overlapping loop from a respawn can't race another's buffer/resync flag.</summary>
@@ -82,7 +77,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private int _autoDeepAnalyzeInFlight;
 
-    // Re-entrancy gate for the auto-triggered face-clustering pass. A rescan emits a SECOND ScanComplete, and the engine spawns one clustering task per IPC with no dedup, so two passes would race the same persons / face_prints.person_id writes. Released on FaceClusteringComplete or a clustering error. Mirrors macOS faceClusteringInFlight.
+    // Re-entrancy gate for the auto-triggered face-clustering pass. A rescan emits a SECOND ScanComplete, and the engine spawns one clustering task per IPC with no dedup, so two passes would race the same persons / face_prints.person_id writes. Released on FaceClusteringComplete or a clustering error.
     private int _faceClusterAutoInFlight;
 
     // Throttle for scan FileDone events: a fast scan emits hundreds per second, so sample every Nth rather than inflate UI work for every subscriber.
@@ -371,7 +366,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Engine is already running. Don't touch _isStarting: another caller may hold the gate while completing a spawn we collided with.
             return;
         }
-        // Strict CAS gate: if we lose the CAS, return immediately. A formulation that declined to bail let a second StartAsync fall through to a parallel spawn on a shared stdin/stdout pair, occasionally double-spawning (the second engine crashed on bind or fed corrupt IPC).
+        // Strict CAS gate: losing the CAS returns immediately; otherwise a second StartAsync could spawn a parallel engine on a shared stdin/stdout pair (the second engine crashed on bind or fed corrupt IPC).
         if (Interlocked.CompareExchange(ref _isStarting, 1, 0) != 0)
         {
             DebugLog.Info("EngineClient.StartAsync: spawn already in flight; skipping.");
@@ -483,7 +478,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     break;
             }
 
-            // SEC: TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust returns, then re-hash and compare immediately before Process.Start; if an adversary swaps the binary in between, we abort. Skipped in dev (no thumbprint pinned) because rebuilds change the hash legitimately. Hashing runs off the UI thread (~95 MB).
+            // TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust returns, then re-hash and compare immediately before Process.Start; if an adversary swaps the binary in between, we abort. Skipped in dev (no thumbprint pinned) because rebuilds change the hash legitimately. Hashing runs off the UI thread (~95 MB).
             byte[]? preSpawnHash = null;
             if (!string.IsNullOrEmpty(expectedThumb))
             {
@@ -890,7 +885,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _spawnGeneration);
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
 
-        // Release the auto-advance gates on every engine teardown: a crash mid-clustering or mid-deep-analyze never emits the Complete/Failed event that clears them, so a respawned engine would skip auto face-clustering / deep analyze for the rest of the session. Cleanup() is the single teardown chokepoint. (Mirrors macOS handleEngineExit.)
+        // Release the auto-advance gates on every engine teardown: a crash mid-clustering or mid-deep-analyze never emits the Complete/Failed event that clears them, so a respawned engine would skip auto face-clustering / deep analyze for the rest of the session. Cleanup() is the single teardown chokepoint.
         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
         // Likewise the undo affordance: a crash mid-undo never emits the terminal restructureApplyResult, so the next apply's result would be mis-attributed as the dead undo's.
@@ -1182,14 +1177,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
                             _scanStartedAt = null;
                         }
-                        // The engine emits scanComplete for cancelled scans too (IPC parity with macOS, carrying final counts). Cancelled is the user's terminal phase: don't overwrite it with Completed or auto-advance to clustering (macOS gates its auto-cluster on !isCancelled likewise).
+                        // The engine emits scanComplete for cancelled scans too (carrying final counts). Cancelled is the user's terminal phase: do not overwrite it with Completed or auto-advance to clustering.
                         if (Phase == ScanPhase.Cancelled || Phase == ScanPhase.Failed)
                         {
                             break;
                         }
                         Phase = ScanPhase.Completed;
                         _shownPhaseRank = PhaseRank(ScanPhase.Completed);
-                        // Auto-advance to face clustering, matching macOS (whose engine auto-enqueues it via autoEnqueueFaceClusteringIfNeeded). The Rust engine has no such hook, so the app fires the IPC on ScanComplete; the handler is a no-op with zero face_prints, so it's safe on a library with no images. Deep Analyze stays manual (macOS gates it on the user naming ≥1 person).
+                        // Auto-advance to face clustering: the engine has no such hook, so the app fires the IPC on ScanComplete; the handler is a no-op with zero face_prints, so it is safe on a library with no images. Deep Analyze stays manual.
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
@@ -1218,7 +1213,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
-                        // PAR-111: a clustering FAILURE must release the auto gate, else auto-clustering stays suppressed for the session. Match the EXACT failure kind, not Contains("cluster"), which also matched the "face_clustering_busy" bounce (a pass still running, the opposite of a failure) and wrongly cleared the gate. The in-flight pass emits its own FaceClusteringComplete / face_clustering_failed.
+                        // A clustering FAILURE must release the auto gate, else auto-clustering stays suppressed for the session. Match the EXACT failure kind, not Contains("cluster"), which also matched the "face_clustering_busy" bounce (a pass still running, the opposite of a failure) and wrongly cleared the gate. The in-flight pass emits its own FaceClusteringComplete / face_clustering_failed.
                         if (e.Error.Kind == "face_clustering_failed" || (e.Error.Kind.StartsWith("face_clustering_", StringComparison.Ordinal) && e.Error.Kind != "face_clustering_busy"))
                         {
                             Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
@@ -1228,7 +1223,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case FaceClusteringCompleteEvent fc:
                         LastFaceClustering = fc.Result;
-                        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // PAR-111: release the auto gate
+                        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // release the auto gate
                         break;
                     case DeepAnalyzeStartingEvent das:
                         DeepAnalyzeStarting = das.Starting;

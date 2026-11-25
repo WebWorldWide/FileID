@@ -68,7 +68,7 @@ internal static class CatalogJobActions
     }
     public static CatalogRequest ControlRequest(string action, CatalogJob job)
     {
-        // The engine resumes only paused timeline jobs; a failed or cancelled one is retried as a fresh job over the same files, as on macOS.
+        // The engine resumes only paused timeline jobs; a failed or cancelled one is retried as a fresh job over the same files.
         if (action == "resumeJob" && job.Kind == "timelineSample" && job.State is "failed" or "cancelled")
             return TimelineRequest(job.FileIDs.Distinct().Order().ToArray(), null);
         if (action == "resumeJob" && job.Kind == TakeProposalPolicy.JobKind && job.State is "failed" or "cancelled")

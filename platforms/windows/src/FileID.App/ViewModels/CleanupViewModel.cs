@@ -59,7 +59,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _activeLoads);
         try
         {
-            // Linked token created inside the try: a Dispose() race after the _disposed check makes _disposalCts.Token throw ObjectDisposedException, caught below as a clean teardown no-op instead of escaping to the caller.
+            // Created inside the try so a Dispose() race becomes a clean teardown no-op instead of an ObjectDisposedException escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { if (Interlocked.Read(ref _refreshGen) == myGen) { IsLoading = true; ErrorMessage = null; } });
@@ -69,7 +69,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        // Surface DB/IO failures as an actionable message instead of the raw SQLite jargon ("database disk image is malformed") the user can't act on.
+        // Show an actionable message instead of raw SQLite errors the user cannot act on.
         catch (SqliteException ex) { ReportLoadError(SqliteErrorTranslator.Humanize(ex), myGen); }
         catch (IOException ex) { ReportLoadError(SqliteErrorTranslator.Humanize(ex), myGen); }
         catch (Exception ex) { ReportLoadError(ex.Message, myGen); }
@@ -184,7 +184,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     }
     private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen)
     {
-        // Drop results from a refresh a newer one has already superseded — checked on the UI thread right before the swap so it also catches a refresh that started during the dispatch gap.
+        // Drop results superseded by a newer refresh; checked on the UI thread right before the swap so a refresh started during the dispatch gap is caught too.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
@@ -211,7 +211,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         var existingByHash = new Dictionary<string, DuplicateGroup>(groups.Count);
         foreach (var g in groups) existingByHash[g.ContentHash] = g;
 
-        // Target sequence: reuse a surviving group instance only when its member set is identical (so the OneTime Members binding stays valid and the keeper/skip state is preserved); otherwise take the fresh instance.
+        // Reuse a surviving group instance only when its member set is identical, so the OneTime Members binding and keeper/skip state stay valid; otherwise take the fresh instance.
         var desired = new List<DuplicateGroup>(rows.Count);
         var nextHashes = new HashSet<string>(rows.Count);
         var reused = new HashSet<DuplicateGroup>();
