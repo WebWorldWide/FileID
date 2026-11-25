@@ -4403,6 +4403,23 @@ mod tests {
     }
 
     #[test]
+    fn undo_on_a_read_only_library_is_refused_even_when_there_is_nothing_to_undo() {
+        let root = undo_fixture_root("undo-read-only-empty");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false).with_undo_journal_path(journal.clone());
+        crate::util::read_only::mark_read_only_for_tests(&root, "Archive");
+
+        let error = apply.undo_last().unwrap_err();
+        assert_eq!(crate::util::read_only::location_in(&error).map(|l| l.name.as_str()), Some("Archive"));
+        std::fs::write(&journal, b"").unwrap();
+        apply.undo_last().unwrap_err();
+        assert!(journal.exists(), "an empty journal is not cleaned up on a library that cannot be written");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn undo_on_a_read_only_library_is_refused_before_the_journal_or_any_file_is_touched() {
         let root = undo_fixture_root("undo-read-only");
         std::fs::create_dir_all(&root).unwrap();
