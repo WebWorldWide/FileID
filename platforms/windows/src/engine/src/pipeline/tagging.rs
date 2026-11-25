@@ -2030,14 +2030,23 @@ fn decode_image_sync_imagecrate(
     }
 }
 
-/// macOS gets video frames only from AVFoundation in the Mac app's engine or FileID's optional FFmpeg runtime; Windows (Media Foundation) and Linux (system ffmpeg) always have a decoder.
+/// macOS gets video frames only from AVFoundation in the Mac app's engine or FileID's optional FFmpeg runtime; Windows (Media Foundation) always has a decoder.
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) fn video_frames_available() -> bool {
     cfg!(all(target_os = "macos", feature = "apple-adapters")) || crate::commands::ffmpeg_runtime_available()
 }
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(windows)]
 pub(crate) fn video_frames_available() -> bool {
     true
+}
+/// Linux decodes through the bundled FFmpeg runtime or a system `ffmpeg`; with neither, videos are catalogued without a frame instead of stored as failed rows.
+#[cfg(target_os = "linux")]
+pub(crate) fn video_frames_available() -> bool {
+    crate::commands::ffmpeg_runtime_available() || executable_on_path("ffmpeg")
+}
+#[cfg(target_os = "linux")]
+fn executable_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
 }
 
 fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {

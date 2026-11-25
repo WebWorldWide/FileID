@@ -852,7 +852,17 @@ pub fn is_noise_directory(name: &str) -> bool {
             | ".temporaryitems"
             | ".documentrevisions-v100"
             | ".pkinstallsandboxmanager"
+            | ".trash"
+            | "lost+found"
     ) || is_chkdsk_recovery_directory(&lower)
+        || is_per_volume_trash_directory(&lower)
+}
+
+/// freedesktop per-volume trash: `.Trash-<uid>` at a mount root.
+fn is_per_volume_trash_directory(lower: &str) -> bool {
+    lower
+        .strip_prefix(".trash-")
+        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// chkdsk's `FOUND.000`, `FOUND.001`, ... hold recovered `.CHK` fragments, not user files.
@@ -1274,6 +1284,32 @@ mod tests {
         }
         assert_eq!(files.len(), 1);
         assert_eq!(errors, 0, "an unreadable metadata folder must be skipped, not counted");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linux_volume_folders_are_not_walked_and_per_volume_trash_is_not_indexed() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        std::fs::write(root.join("a.jpg"), b"jpeg").unwrap();
+        let trash = root.join(".Trash-1000/files");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("gone.jpg"), b"jpeg").unwrap();
+        std::fs::create_dir_all(root.join(".Trash/1000")).unwrap();
+        std::fs::write(root.join(".Trash/1000/gone2.jpg"), b"jpeg").unwrap();
+        std::fs::create_dir_all(root.join(".Trash-keep")).unwrap();
+        std::fs::write(root.join(".Trash-keep/mine.jpg"), b"jpeg").unwrap();
+        let locked = root.join("lost+found");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&locked).is_ok();
+        let (files, errors) = walk(root);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(files.len(), 2, "only a.jpg and the non-uid folder's file are library files");
+        if !readable {
+            assert_eq!(errors, 0, "an unreadable lost+found must be skipped, not counted");
+        }
     }
 
     /// Symlink loops, unreadable directories, hard links and sparse files must neither hang, panic nor vanish silently from the walk.
