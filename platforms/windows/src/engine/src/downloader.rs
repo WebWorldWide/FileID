@@ -510,29 +510,41 @@ fn apply_part_progress(running: u64, msg: PartProgress) -> u64 {
     }
 }
 
-/// A retry after a partial install must not fetch again what already verified on disk.
-async fn destination_matches_pin(request: &DownloadRequest) -> bool {
-    let Some(expected) = request.expected_sha256.clone() else {
-        return false;
-    };
+/// A retry after a partial install must not fetch again what already verified on disk. The hash runs only when the file's size is plausible for the registry estimate (a truncated or foreign file is refetched without reading it) and stops at the next chunk once `cancel` is set. Returns the verified length.
+async fn destination_matches_pin(request: &DownloadRequest, cancel: &Arc<AtomicBool>) -> Option<u64> {
+    let expected = request.expected_sha256.clone()?;
     let path = request.destination.clone();
+    let length = tokio::fs::metadata(&path).await.ok().filter(|m| m.is_file())?.len();
+    if !size_fits_estimate(length, request.expected_bytes) {
+        return None;
+    }
+    let cancel = cancel.clone();
     tokio::task::spawn_blocking(move || {
-        let Ok(mut file) = std::fs::File::open(&path) else {
-            return false;
-        };
+        let mut file = std::fs::File::open(&path).ok()?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; 256 * 1024];
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             match std::io::Read::read(&mut file, &mut buffer) {
                 Ok(0) => break,
                 Ok(count) => hasher.update(&buffer[..count]),
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
-        hex::encode(hasher.finalize()).eq_ignore_ascii_case(&expected)
+        hex::encode(hasher.finalize()).eq_ignore_ascii_case(&expected).then_some(length)
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(None)
+}
+
+/// `approx_bytes` is an estimate, so only a size outside the 4x band that `check_size_plausible` and `stream_hard_limit` already use rules a file out.
+fn size_fits_estimate(actual: u64, expected: Option<u64>) -> bool {
+    match expected.filter(|n| *n > 0) {
+        Some(expected) => actual >= (expected / 4).max(1) && actual <= expected.saturating_mul(4),
+        None => true,
+    }
 }
 
 /// Downloads one file using up to PARALLEL_PARTS concurrent range-GETs, falling back to `download_simple` when the server lacks `Accept-Ranges: bytes`, the file is under MIN_BYTES_FOR_PARALLEL (5 MB), or the HEAD probe fails.
@@ -556,14 +568,17 @@ where
             .unwrap_or_else(|| "<unparseable>".to_string());
         anyhow::bail!("refusing to download: host '{host}' is not on the https egress allowlist");
     }
-    if destination_matches_pin(&request).await {
+    if let Some(length) = destination_matches_pin(&request, &cancel).await {
         progress(DownloadProgress {
             url: request.url.clone(),
-            bytes_done: tokio::fs::metadata(&request.destination).await.map_or(0, |m| m.len()),
-            bytes_total: None,
+            bytes_done: length,
+            bytes_total: Some(length),
             bytes_per_second: 0.0,
         });
         return Ok(());
+    }
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("download cancelled");
     }
     if let Some(parent) = request.destination.parent() {
         tokio::fs::create_dir_all(parent).await
@@ -1130,7 +1145,7 @@ mod tests {
         apply_part_progress, chain_has_disk_full, chain_has_pin_failure, check_size_plausible,
         classify_range_status, download_url_allowed, message_indicates_pin_failure,
         resume_seed_bytes, source_chain_indicates_pin_failure, stream_hard_limit, PartProgress,
-        RangeResumeAction, RetryBudget, MAX_UNSIZED_DOWNLOAD_BYTES, PINNED_ROOT_CERTS,
+        RangeResumeAction, RetryBudget, size_fits_estimate, MAX_UNSIZED_DOWNLOAD_BYTES, PINNED_ROOT_CERTS,
     };
     use std::time::Duration;
 
@@ -1438,6 +1453,65 @@ mod tests {
             .await
             .expect("a verified file on disk needs no network");
         assert_eq!(std::fs::read(&dest).unwrap(), b"already here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn offline_client() -> std::sync::Arc<reqwest::Client> {
+        std::sync::Arc::new(
+            reqwest::Client::builder().proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap()).build().unwrap(),
+        )
+    }
+
+    fn pinned_request(dir: &std::path::Path, bytes: &[u8], expected_bytes: Option<u64>) -> super::DownloadRequest {
+        use sha2::{Digest, Sha256};
+        let dest = dir.join("weights.bin");
+        std::fs::write(&dest, bytes).unwrap();
+        super::DownloadRequest {
+            url: "https://huggingface.co/x/y/resolve/main/weights.bin".into(),
+            destination: dest,
+            expected_sha256: Some(hex::encode(Sha256::digest(bytes))),
+            expected_bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_skip_reports_the_files_size_as_its_total() {
+        let dir = std::env::temp_dir().join(format!("fileid-pin-total-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = pinned_request(&dir, b"already here", Some(12));
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        super::download_parallel(offline_client(), request, cancel, move |p| sink.lock().push((p.bytes_done, p.bytes_total)))
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock(), vec![(12, Some(12))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_download_does_not_hash_the_existing_file() {
+        let dir = std::env::temp_dir().join(format!("fileid-pin-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = pinned_request(&dir, b"already here", Some(12));
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert_eq!(super::destination_matches_pin(&request, &cancel).await, None);
+        let error = super::download_parallel(offline_client(), request, cancel, |_| {}).await.unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_file_far_from_the_registry_size_is_not_hashed() {
+        let dir = std::env::temp_dir().join(format!("fileid-pin-size-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = pinned_request(&dir, b"already here", Some(12_000));
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert_eq!(super::destination_matches_pin(&request, &cancel).await, None, "12 bytes against a 12 KB estimate is a truncated file");
+        assert_eq!(super::destination_matches_pin(&pinned_request(&dir, b"already here", Some(12)), &cancel).await, Some(12));
+        assert!(size_fits_estimate(5, None));
+        assert!(size_fits_estimate(3, Some(12)) && !size_fits_estimate(2, Some(12)));
+        assert!(size_fits_estimate(48, Some(12)) && !size_fits_estimate(49, Some(12)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
