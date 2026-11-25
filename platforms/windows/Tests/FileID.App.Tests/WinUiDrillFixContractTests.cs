@@ -51,6 +51,14 @@ public sealed class WinUiDrillFixContractTests
         Assert.DoesNotContain("OnTagsKeyDown", App("Views", "Library", "BulkTagSheet.xaml"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ModelCatalogBrowser_RerunsARefreshRequestedWhileOneIsInFlight()
+    {
+        var browser = App("Views", "ModelBrowser", "ModelCatalogBrowser.cs");
+        Assert.Contains("Volatile.Write(ref _refreshQueued, 1);", browser, StringComparison.Ordinal);
+        Assert.Contains("Interlocked.Exchange(ref _refreshQueued, 0) != 0) Refresh();", browser, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
