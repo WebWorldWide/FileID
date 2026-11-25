@@ -439,8 +439,11 @@ pub(crate) fn evidence_details(conn: &Connection, ids: &[i64]) -> Result<HashMap
     }
     let list = serde_json::to_string(ids)?;
     let mut dates = conn.prepare(
-        "SELECT id, date(COALESCE(created_at,modified_at),'unixepoch','localtime') FROM files
-         WHERE id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) IS NOT NULL",
+        &format!(
+            "SELECT f.id, date({taken},'unixepoch','localtime') FROM files f
+             WHERE f.id IN (SELECT value FROM json_each(?1)) AND {taken} IS NOT NULL",
+            taken = crate::util::SQL_TAKEN_DATE
+        ),
     )?;
     for row in dates.query_map([&list], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))? {
         let (file, day) = row?;
