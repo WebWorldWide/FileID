@@ -1279,22 +1279,23 @@ pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)
     let name = mount.file_name().map_or_else(|| "this drive".to_owned(), |n| n.to_string_lossy().into_owned());
     let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
-    let read_only = {
+    let (read_only, device) = {
         let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statfs(raw.as_ptr(), &raw mut stats) } != 0 {
             return None;
         }
-        (stats.f_flags as u64 & libc::MNT_RDONLY as u64) != 0
+        let mounted_on = unsafe { std::ffi::CStr::from_ptr(stats.f_mntonname.as_ptr()) }.to_string_lossy().into_owned();
+        ((stats.f_flags as u64 & libc::MNT_RDONLY as u64) != 0, format!("{device}:{mounted_on}"))
     };
     #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
-    let read_only = {
+    let (read_only, device) = {
         let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(raw.as_ptr(), &raw mut stats) } != 0 {
             return None;
         }
-        (stats.f_flag as u64 & libc::ST_RDONLY as u64) != 0
+        ((stats.f_flag as u64 & libc::ST_RDONLY as u64) != 0, device.to_string())
     };
-    Some((device.to_string(), name, read_only))
+    Some((device, name, read_only))
 }
 
 #[cfg(windows)]
@@ -1455,6 +1456,14 @@ mod adaptive_tests {
         let cwd = std::env::current_dir().unwrap();
         let _ = storage_type_for_path(&cwd);
         let _ = walk_concurrency_for(&cwd);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_sealed_system_volume_and_the_data_volume_never_share_a_cache_key() {
+        let system = volume_of(std::path::Path::new("/")).unwrap();
+        let data = volume_of(&std::env::temp_dir()).unwrap();
+        assert_ne!(system.0, data.0, "both report the same device number, so the key must name the mount");
     }
 
     #[test]
