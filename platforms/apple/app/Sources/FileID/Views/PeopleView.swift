@@ -997,11 +997,12 @@ private struct PersonCard: View {
         guard !Task.isCancelled else { return }
         let box = UncheckedImage(full)
         let cropped = await Task.detached(priority: .userInitiated) {
-            ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation).map(UncheckedImage.init)
+            let face = ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation)
+            if let face { ThumbnailService.storeFaceCrop(face, identity: key) }
+            return face.map(UncheckedImage.init)
         }.value
         guard !Task.isCancelled else { return }
         let face = cropped?.image ?? full
-        if let real = cropped?.image { ThumbnailService.storeFaceCrop(real, identity: key) }
         FaceCropCache.store(face, for: key)
         thumbnail = face
     }

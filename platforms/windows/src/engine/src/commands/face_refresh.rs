@@ -166,7 +166,7 @@ pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) ->
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,reason,updated_at) \
-             SELECT fp.id, ?1, ?2, 'pending', 0, NULL, ?3 {OUTDATED}"
+             SELECT fp.id, ?1, ?2, 'pending', 0, NULL, ?3 {OUTDATED} {NOT_YET_EMBEDDED}"
         ),
         params![model, processing, at],
     )?;
@@ -178,7 +178,7 @@ pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) ->
     conn.execute(
         &format!(
             "UPDATE face_refresh_backlog SET state='pending',updated_at=?3 WHERE embedding_model=?1 AND processing_version=?2 \
-             AND state='done' AND face_id IN (SELECT fp.id {OUTDATED})"
+             AND state='done' AND face_id IN (SELECT fp.id {OUTDATED} {NOT_YET_EMBEDDED})"
         ),
         params![model, processing, at],
     )?;

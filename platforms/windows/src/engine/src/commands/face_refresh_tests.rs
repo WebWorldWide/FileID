@@ -257,6 +257,9 @@ fn faces_a_scan_has_not_embedded_yet_are_not_called_outdated() {
         .execute("INSERT INTO face_prints(id,file_id,print_data,bbox) VALUES(90,1,X'','0,0,1,1'),(91,1,X'','0,0,.5,.5')", [])
         .unwrap();
     assert_eq!(outdated(&library.conn, "m", "p").unwrap(), before);
+    seed(&library.conn, "m", "p", 1.0).unwrap();
+    let seeded: i64 = library.conn.query_row("SELECT COUNT(*) FROM face_refresh_backlog WHERE face_id IN (90,91)", [], |row| row.get(0)).unwrap();
+    assert_eq!(seeded, 0);
 }
 
 #[test]
