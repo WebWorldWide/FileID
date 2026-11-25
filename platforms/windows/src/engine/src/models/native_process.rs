@@ -338,6 +338,13 @@ pub(crate) mod self_worker {
         Ok(current)
     }
 
+    /// Whether a test can start a worker: `cargo test --lib` builds no engine binary, so the worker exists only after a
+    /// separate build or with `FILEID_TEST_ENGINE_PATH` set.
+    #[cfg(all(test, target_os = "macos", feature = "apple-adapters"))]
+    pub(crate) fn test_worker_present() -> bool {
+        executable().is_ok_and(|path| path.is_file())
+    }
+
     /// Runs `worker` to completion. Stdout (at most `limit` bytes) is returned
     /// with the exit status; the child is killed and an error returned when
     /// `cancel` is set or `timeout` passes.

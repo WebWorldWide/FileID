@@ -776,6 +776,10 @@ mod tests {
     fn a_video_is_scored_from_avfoundation_frames() {
         let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../../shared/test-corpus/conformance-media/clip-rotated.mov");
+        if !crate::models::native_process::self_worker::test_worker_present() {
+            eprintln!("skipped: frames come from a worker process and no engine binary is built (set FILEID_TEST_ENGINE_PATH)");
+            return;
+        }
         assert!(super::video_signals(&clip).is_some(), "the Mac engine has no FFmpeg runtime; frames come from AVFoundation");
     }
 
