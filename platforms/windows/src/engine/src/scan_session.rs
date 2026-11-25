@@ -905,6 +905,10 @@ impl ScanSession {
                             failed: failed + self.carried.1,
                             lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
                             state: Mutex::new((0, 0, Instant::now())),
+                            paused: {
+                                let coordinator = self.coordinator.clone();
+                                Arc::new(move || coordinator.is_paused())
+                            },
                         });
                         let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
                         let (database, coordinator, root, report_pass) =
@@ -971,6 +975,10 @@ impl ScanSession {
                             failed: failed + self.carried.1,
                             lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
                             state: Mutex::new((0, 0, Instant::now())),
+                            paused: {
+                                let coordinator = self.coordinator.clone();
+                                Arc::new(move || coordinator.is_paused())
+                            },
                         });
                         let heartbeat = report.clone().spawn_heartbeat(CATCH_UP_HEARTBEAT);
                         let report_pass = report.clone();
@@ -1233,8 +1241,9 @@ struct CatchUpProgress {
     processed: u64,
     failed: u64,
     lift: ProgressLift,
-    /// (owed, done, started)
+    /// (owed, done, started); `started` moves forward while paused, so a pause does not drag the rate down.
     state: Mutex<(u64, u64, Instant)>,
+    paused: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 /// How often the post-scan phase repeats its progress while a read is slow, so the app never sees a silent minute.
@@ -1255,9 +1264,16 @@ impl CatchUpProgress {
             let mut ticks = tokio::time::interval(every);
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticks.tick().await;
+            let mut last = Instant::now();
             loop {
                 ticks.tick().await;
-                self.send_snapshot(&self.state.lock());
+                let waited = last.elapsed();
+                last = Instant::now();
+                let mut state = self.state.lock();
+                if (self.paused)() {
+                    state.2 += waited;
+                }
+                self.send_snapshot(&state);
             }
         })
     }
@@ -3378,6 +3394,7 @@ mod tests {
             failed: 2,
             lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
+            paused: Arc::new(|| false),
         });
         let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(20));
         report.report(crate::pipeline::catch_up::Progress::Total(30));
@@ -3414,6 +3431,7 @@ mod tests {
             failed: 0,
             lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
+            paused: Arc::new(|| false),
         });
         let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
         report.report(crate::pipeline::catch_up::Progress::Total(2000));
@@ -3456,6 +3474,7 @@ mod tests {
             failed: 0,
             lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
+            paused: Arc::new(|| false),
         };
         report.report(crate::pipeline::catch_up::Progress::Total(76_220));
         report.report(crate::pipeline::catch_up::Progress::Advance(13_000));
@@ -3477,6 +3496,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_time_spent_paused_does_not_slow_the_post_scan_rate() {
+        let (sink, _events) = Sink::channel_for_test(1 << 12);
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag = paused.clone();
+        let report = Arc::new(CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            lift: ProgressLift::default(),
+            state: Mutex::new((100, 50, Instant::now())),
+            paused: Arc::new(move || flag.load(std::sync::atomic::Ordering::Relaxed)),
+        });
+        let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(5));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        heartbeat.abort();
+        let _ = heartbeat.await;
+        let ran_for = report.state.lock().2.elapsed();
+        assert!(ran_for < Duration::from_millis(80), "200 ms of pause counted as {ran_for:?} of work");
+    }
+
+    #[tokio::test]
     async fn no_catch_up_progress_follows_an_awaited_heartbeat_abort() {
         let (sink, mut events) = Sink::channel_for_test(1 << 12);
         let report = Arc::new(CatchUpProgress {
@@ -3487,6 +3529,7 @@ mod tests {
             failed: 0,
             lift: ProgressLift::default(),
             state: Mutex::new((0, 0, Instant::now())),
+            paused: Arc::new(|| false),
         });
         let heartbeat = report.clone().spawn_heartbeat(Duration::from_millis(1));
         tokio::time::sleep(Duration::from_millis(30)).await;
