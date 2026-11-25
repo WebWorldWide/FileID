@@ -287,8 +287,12 @@ mod tests {
     fn db_override_is_exact_and_empty_value_falls_back() {
         let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_DB");
+        let saved_app = std::env::var_os("FILEID_DATABASE_PATH");
         let default = {
-            unsafe { std::env::remove_var("FILEID_DB") };
+            unsafe {
+                std::env::remove_var("FILEID_DB");
+                std::env::remove_var("FILEID_DATABASE_PATH");
+            }
             db_path().unwrap()
         };
 
@@ -299,6 +303,7 @@ mod tests {
         unsafe { std::env::set_var("FILEID_DB", "") };
         assert_eq!(db_path().unwrap(), default);
         restore("FILEID_DB", saved);
+        restore("FILEID_DATABASE_PATH", saved_app);
     }
 
     #[test]
