@@ -27,6 +27,22 @@ enum ExactDuplicateVerifier {
     static let groupCap = 200
     static let memberCap = 500
 
+    struct Totals: Sendable, Equatable {
+        var groups: Int
+        var extra: Int
+        var bytes: Int64
+    }
+
+    /// The SQL totals cover every stored group; once the byte check drops or splits some of the groups already loaded, the totals move by what those groups lost, so the header, the per-group badges and the freed-space figure agree without another query.
+    static func adjustedTotals(base: Totals, stored: [DuplicateGroup], current: [DuplicateGroup]) -> Totals {
+        func extra(_ gs: [DuplicateGroup]) -> Int { gs.reduce(0) { $0 + max(0, $1.totalFileCount - 1) } }
+        func bytes(_ gs: [DuplicateGroup]) -> Int64 { gs.reduce(0) { $0 + $1.reclaimableBytes } }
+        return Totals(
+            groups: max(0, base.groups - stored.count + current.count),
+            extra: max(0, base.extra - extra(stored) + extra(current)),
+            bytes: max(0, base.bytes - bytes(stored) + bytes(current)))
+    }
+
     static func unshownNotice(classes: Int, bytes: Int64) -> String {
         guard classes > 0 else { return "" }
         let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)

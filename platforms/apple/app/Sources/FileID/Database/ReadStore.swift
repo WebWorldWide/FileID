@@ -830,7 +830,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     /// The Cleanup list straight from the stored hashes: one indexed query, no file reads. Groups are ranked by what they could free; `ExactDuplicateVerifier.verifyStored` then re-reads what is shown. Totals cover every group, not just the ones listed.
-    func exactStoredGroups() -> ExactStoredLoad {
+    func exactStoredGroups(offset: Int = 0, limit: Int = ExactDuplicateVerifier.groupCap) -> ExactStoredLoad {
         guard let q = queue else { return ExactStoredLoad(groups: [], totalGroups: 0, totalExtraCopies: 0, totalBytes: 0) }
         do {
             return try q.read { db in
@@ -847,8 +847,8 @@ public final class ReadStore: @unchecked Sendable {
                     WHERE failed = 0 AND content_hash IS NOT NULL AND \(ExactDuplicateVerifier.eligibleSQL)
                     GROUP BY content_hash, size_bytes HAVING COUNT(*) > 1
                     ORDER BY (COUNT(*) - 1) * size_bytes DESC, size_bytes DESC, content_hash
-                    LIMIT ?
-                    """, arguments: [ExactDuplicateVerifier.groupCap])
+                    LIMIT ? OFFSET ?
+                    """, arguments: [limit, offset])
                 var groups: [DuplicateGroup] = []
                 groups.reserveCapacity(top.count)
                 for key in top {
@@ -875,8 +875,8 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    func exactStoredGroupsAsync() async -> ExactStoredLoad {
-        await Task.detached(priority: .userInitiated) { [self] in exactStoredGroups() }.value
+    func exactStoredGroupsAsync(offset: Int = 0, limit: Int = ExactDuplicateVerifier.groupCap) async -> ExactStoredLoad {
+        await Task.detached(priority: .userInitiated) { [self] in exactStoredGroups(offset: offset, limit: limit) }.value
     }
 
     // MARK: - Perceptual near-duplicate queries
