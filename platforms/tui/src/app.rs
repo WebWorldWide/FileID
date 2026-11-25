@@ -73,7 +73,8 @@ pub struct App {
     /// the loader, then clears it.
     pub reload_requested: bool,
     pub db_label: String,
-    /// Running against the default scratch library (no `--db`): the TUI opens empty and only holds what the user scans here, never the desktop app's library.
+    /// Running against the default scratch library (no `--db`): the TUI opens
+    /// empty and only holds what the user scans here, never the desktop app's library.
     pub scratch: bool,
 
     /// The single-line path-input prompt is open (typing a folder to scan).
@@ -960,8 +961,9 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(input)
 }
 
-/// Where external / removable drives mount, for the browser's `d` jump: macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that
-/// exists); else the filesystem root `/`. Never panics.
+/// Where external / removable drives mount, for the browser's `d` jump: macOS
+/// `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that exists);
+/// else the filesystem root `/`. Never panics.
 fn drive_roots() -> Vec<PathBuf> {
     existing_drive_roots(&drives_candidates(), |path| path.is_dir())
 }

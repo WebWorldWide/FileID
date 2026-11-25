@@ -62,8 +62,9 @@ impl Ctx {
         })
     }
 
-    /// Interactive yes/no gate for destructive actions. Returns true only on an explicit `--yes` (`assume_yes`) or a typed
-    /// `y`/`yes` at a TTY; a non-interactive stdin without `--yes` returns false.
+    /// Interactive yes/no gate for destructive actions. Returns true only on an
+    /// explicit `--yes` (`assume_yes`) or a typed `y`/`yes` at a TTY; a
+    /// non-interactive stdin without `--yes` returns false.
     pub fn confirm(&self, prompt: &str, assume_yes: bool) -> bool {
         use std::io::Write as _;
         if assume_yes {
@@ -107,7 +108,8 @@ impl Ctx {
         }
     }
 
-    /// Brand gold (`#FFCC00` ≈ xterm 220). Pad text to its column width before wrapping, so the invisible escape bytes never throw off `{:<width}` alignment.
+    /// Brand gold (`#FFCC00` ≈ xterm 220). Pad text to its column width before
+    /// wrapping, so the invisible escape bytes never throw off `{:<width}` alignment.
     pub fn gold(&self, s: &str) -> String {
         let s = terminal_text(s);
         if self.color {

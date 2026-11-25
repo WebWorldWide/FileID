@@ -64,7 +64,7 @@ pub fn frame_chunks(area: Rect) -> Rc<[Rect]> {
 
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
-    // Later widgets patch only fg, so this bg shows through on light and dark terminals alike.
+    // Paint first: later widgets patch only fg, so this bg shows through on light and dark terminals alike.
     f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
 
     let chunks = frame_chunks(area);
