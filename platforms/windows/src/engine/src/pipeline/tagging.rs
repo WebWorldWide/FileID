@@ -732,6 +732,17 @@ fn decoder_count_for_storage(count: usize, storage: Option<crate::platform::Stor
     }
 }
 
+/// A solid-state USB volume has no seek penalty to thrash: 4 → 8 readers raised a JPEG-and-RAW scan of the owner's USB exFAT SSD from about 80 to 90 files/s on a 10-core Mac (4 JPEG-only decode threads read 55 files/s, 8 read 94).
+const SOLID_STATE_DECODERS: usize = 8;
+
+fn decoder_count_for_volume(count: usize, storage: Option<crate::platform::StorageType>, solid_state: impl FnOnce() -> bool) -> usize {
+    let narrowed = decoder_count_for_storage(count, storage);
+    if narrowed < count && matches!(storage, Some(crate::platform::StorageType::Removable)) && solid_state() {
+        return count.min(SOLID_STATE_DECODERS);
+    }
+    narrowed
+}
+
 impl Tagger {
     pub fn new(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelStack>) -> Self {
         Self::with_model_source(coordinator, worker_count, ModelSource::ready(models))
@@ -852,7 +863,7 @@ impl Tagger {
         // Seek-penalty media (USB HDD, network share): a 12-deep read pool thrashes and runs slower; 4 keeps the drive busy while threads overlap CPU decode (discovery's stat walk uses 2).
         let decoder_count = {
             let storage = self.scan_root.as_deref().map(crate::platform::storage_type_for_path);
-            let clamped = decoder_count_for_storage(decoder_count, storage);
+            let clamped = decoder_count_for_volume(decoder_count, storage, || self.scan_root.as_deref().is_some_and(crate::platform::volume_is_solid_state));
             if clamped != decoder_count {
                 tracing::info!(
                     storage = storage.map_or("unknown", crate::platform::StorageType::as_str),
@@ -860,7 +871,7 @@ impl Tagger {
                     "decode pool clamped for seek-penalty storage"
                 );
             }
-            clamped
+            std::env::var("FILEID_DECODE_THREADS").ok().and_then(|value| value.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(clamped)
         };
         // Slot bound only (floor = one frame per worker). The real memory bound is the byte-weighted budget below: MAX_DECODED_PIXELS admits ~150 MB frames, far above TYPICAL_FRAME_MB per slot.
         const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
@@ -3265,6 +3276,18 @@ mod tests {
         assert_eq!(decoder_count_for_storage(10, Some(Nvme)), 10);
         assert_eq!(decoder_count_for_storage(10, Some(Unknown)), 10);
         assert_eq!(decoder_count_for_storage(10, None), 10);
+    }
+
+    #[test]
+    fn a_solid_state_usb_volume_gets_eight_readers_and_a_spinning_one_four() {
+        use crate::platform::StorageType::{Hdd, Network, Removable, Unknown};
+        assert_eq!(decoder_count_for_volume(10, Some(Removable), || true), 8);
+        assert_eq!(decoder_count_for_volume(10, Some(Removable), || false), 4);
+        assert_eq!(decoder_count_for_volume(6, Some(Removable), || true), 6);
+        assert_eq!(decoder_count_for_volume(2, Some(Removable), || true), 2);
+        assert_eq!(decoder_count_for_volume(10, Some(Network), || panic!("a network share is never probed")), 4);
+        assert_eq!(decoder_count_for_volume(10, Some(Hdd), || panic!("a spinning disk is never probed")), 4);
+        assert_eq!(decoder_count_for_volume(10, Some(Unknown), || panic!("an unclassified volume is never probed")), 10);
     }
 
     use super::*;

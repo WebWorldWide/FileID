@@ -166,8 +166,10 @@ enum SelfShot {
             if let size = plan.windowSize { window()?.setContentSize(size) }
             noteMenuShortcuts()
             await waitUntil(timeout: 90) { if case .ready = engine.state { return true } else { return false } }
+            note("engine ready \(launchAgeMs()) ms after launch")
             if let folder = plan.folder {
                 await waitUntil(timeout: 3) { store.totalFiles > 0 }
+                note("files counter \(store.totalFiles) \(launchAgeMs()) ms after launch")
                 let needsScan = store.totalFiles == 0 && !plan.openOnly
                 openFolder(folder, needsScan)
                 if needsScan {
@@ -272,6 +274,15 @@ enum SelfShot {
 
     private static func env(_ key: String) -> String? {
         ProcessInfo.processInfo.environment[key].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func launchAgeMs() -> Int {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return -1 }
+        let started = info.kp_proc.p_un.__p_starttime
+        return Int((Date().timeIntervalSince1970 - (Double(started.tv_sec) + Double(started.tv_usec) / 1e6)) * 1000)
     }
 
     private static func note(_ text: String) {
