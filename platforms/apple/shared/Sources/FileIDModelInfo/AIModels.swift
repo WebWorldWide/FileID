@@ -250,10 +250,17 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
             .appendingPathComponent("FileID/Models", isDirectory: true)
     }
 
-    /// Has the user converted at least one ArcFace .mlpackage to disk?
-    public func isInstalled() -> Bool {
-        let url = Self.modelsDirectory.appendingPathComponent(modelFileName)
-        return FileManager.default.fileExists(atPath: url.path)
+    /// The engine keeps the weights under `sface/`; the app's own installer used the top level. Either counts.
+    public func installedFile(in root: URL = FaceEmbedderKind.modelsDirectory) -> URL? {
+        let candidates = [
+            root.appendingPathComponent(modelFileName),
+            root.appendingPathComponent("sface", isDirectory: true).appendingPathComponent(modelFileName),
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    public func isInstalled(in root: URL = FaceEmbedderKind.modelsDirectory) -> Bool {
+        installedFile(in: root) != nil
     }
 
     /// All variants the user has installed.

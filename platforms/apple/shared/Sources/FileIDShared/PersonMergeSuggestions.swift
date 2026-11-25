@@ -29,8 +29,8 @@ public enum PersonMergeSuggestions {
     /// The installed SFace weights' identity, or the manifest's when none are
     /// installed (installs are verified against the manifest digest).
     public static func installedFaceModel() -> String {
-        let url = FaceEmbedderKind.modelsDirectory.appendingPathComponent(FaceEmbedderKind.sface.modelFileName)
-        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > 0,
+        guard let url = FaceEmbedderKind.sface.installedFile(),
+              let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > 0,
               let digest = ExactFileDigest.computeWithIdentity(url: url, expectedSize: Int64(size))
         else { return manifestFaceModel }
         return "sface128-sha256:" + digest.digest.map { String(format: "%02x", $0) }.joined()
