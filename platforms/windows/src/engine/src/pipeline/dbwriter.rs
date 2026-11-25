@@ -407,7 +407,7 @@ impl DbWriter {
                 }
                 let mut healed = None;
                 if let Some(id) = healable {
-                    match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
+                    match heal_update_stmt.execute(params![path_text, path_hash, id, path_search, crate::db::name_sort::name_sort_key(&path_text)]) {
                         Ok(_) => {
                             healed = Some(id);
                             tracing::info!(
@@ -516,6 +516,7 @@ impl DbWriter {
                             f.faces_evaluated,
                             f.ocr_stage_ran || f.doc_stage_ran,
                             f.captured_from_exif,
+                            crate::db::name_sort::name_sort_key(&path_text),
                         ],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
@@ -910,12 +911,13 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         has_faces, has_text,
         camera_model, location_lat, location_lon,
         failed, error_message,
-        content_hash, file_ref, path_search
+        content_hash, file_ref, path_search, name_sort
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?24)
     ON CONFLICT(path_text) DO UPDATE SET
         path_hash    = excluded.path_hash,
         path_search  = excluded.path_search,
+        name_sort    = excluded.name_sort,
         size_bytes   = excluded.size_bytes,
         -- A time within a microsecond of the stored one is the same time, stored by an
         -- engine that rounded its last bit differently: keep the stored number so the
@@ -976,7 +978,7 @@ const HEAL_ONLY_CHECK_SQL: &str = "SELECT EXISTS(SELECT 1 FROM files WHERE id = 
 
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE OR ABORT files
-       SET path_text = ?1, path_hash = ?2, path_search = ?4
+       SET path_text = ?1, path_hash = ?2, path_search = ?4, name_sort = ?5
      WHERE id = ?3
 "#;
 
@@ -1163,7 +1165,7 @@ fn compose_canonical(base: char, mark: char) -> Option<char> {
 
 /// (base, combining-mark, precomposed) triples for Latin-1 Supplement + Latin Extended-A, sorted by (base, mark).
 #[rustfmt::skip]
-const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
+pub(crate) const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
     (0x0041, 0x0300, 0x00C0), (0x0041, 0x0301, 0x00C1), (0x0041, 0x0302, 0x00C2), (0x0041, 0x0303, 0x00C3),
     (0x0041, 0x0304, 0x0100), (0x0041, 0x0306, 0x0102), (0x0041, 0x0307, 0x0226), (0x0041, 0x0308, 0x00C4),
     (0x0041, 0x030A, 0x00C5), (0x0041, 0x030C, 0x01CD), (0x0041, 0x030F, 0x0200), (0x0041, 0x0311, 0x0202),
@@ -1258,6 +1260,7 @@ pub(crate) fn remove_face_crop(face_id: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::name_sort::name_sort_key;
     use crate::pipeline::discovery::FileKind;
     use crate::pipeline::tagging::DetectedFace;
     use rusqlite::OptionalExtension;
@@ -1312,6 +1315,7 @@ mod tests {
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
                 f.captured_from_exif,
+                crate::db::name_sort::name_sort_key(&path_text),
             ],
             |row| row.get::<_, i64>(0),
         )?;
@@ -1449,14 +1453,14 @@ mod tests {
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0, false, false, false],
+                    row.17, row.18, row.0, false, false, false, name_sort_key(&row.0)],
             |r| r.get(0),
         ).expect("first insert returns id");
         let id2: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0, false, false, false],
+                    row.17, row.18, row.0, false, false, false, name_sort_key(&row.0)],
             |r| r.get(0),
         ).expect("ON CONFLICT branch must also return id");
         assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");
@@ -1473,7 +1477,7 @@ mod tests {
                 INSERT_FILE_RETURNING_ID_SQL,
                 params![path, 7_i64, 1_i64, created, 1.0, 1.0, "image", "jpg", None::<i64>, None::<f64>,
                         0_i64, 0_i64, None::<String>, None::<f64>, None::<f64>, 0_i64, None::<String>,
-                        None::<Vec<u8>>, None::<i64>, path, false, false, from_exif],
+                        None::<Vec<u8>>, None::<i64>, path, false, false, from_exif, name_sort_key(path)],
                 |r| r.get::<_, i64>(0),
             ).unwrap();
             conn.query_row("SELECT CAST(created_at AS INTEGER) FROM files", [], |r| r.get::<_, i64>(0)).unwrap()
@@ -1733,7 +1737,7 @@ mod tests {
                 && heal_candidate_moved(&old_path) {
                     match conn.execute(
                         HEAL_UPDATE_SQL,
-                        params![path_text, path_hash, id, path_search],
+                        params![path_text, path_hash, id, path_search, crate::db::name_sort::name_sort_key(&path_text)],
                     ) {
                         Ok(_) => {}
                         Err(rusqlite::Error::SqliteFailure(e, _))
@@ -1768,6 +1772,7 @@ mod tests {
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
                 f.captured_from_exif,
+                crate::db::name_sort::name_sort_key(&path_text),
             ],
             |r| r.get(0),
         )
@@ -2211,13 +2216,35 @@ mod tests {
         let new_path = r"C:\lib\renamed.jpg";
         conn.execute(
             HEAL_UPDATE_SQL,
-            params![new_path, 42i64, id, nfc_path_search(new_path)],
+            params![new_path, 42i64, id, nfc_path_search(new_path), crate::db::name_sort::name_sort_key(new_path)],
         )
         .unwrap();
         let healed: String = conn
             .query_row("SELECT path_search FROM files WHERE id = ?1", params![id], |r| r.get(0))
             .unwrap();
         assert_eq!(healed, r"C:\lib\renamed.jpg", "heal must re-stamp path_search");
+    }
+
+    #[test]
+    fn writers_stamp_the_name_sort_key_on_insert_and_on_a_healed_rename() {
+        let conn = crate::db::test_support::memory_db();
+        let path = "/lib/Zoë 10.jpg";
+        let id: i64 = conn
+            .query_row(
+                INSERT_FILE_RETURNING_ID_SQL,
+                params![path, 7_i64, 1_i64, None::<f64>, 1.0, 1.0, "image", "jpg", None::<i64>, None::<f64>,
+                        0_i64, 0_i64, None::<String>, None::<f64>, None::<f64>, 0_i64, None::<String>,
+                        None::<Vec<u8>>, None::<i64>, path, false, false, false, name_sort_key(path)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let key = |conn: &Connection| -> String {
+            conn.query_row("SELECT name_sort FROM files WHERE id = ?1", params![id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(key(&conn), name_sort_key("/x/zoe 10.jpg"));
+        let renamed = "/lib/Apple 2.jpg";
+        conn.execute(HEAL_UPDATE_SQL, params![renamed, 9_i64, id, renamed, name_sort_key(renamed)]).unwrap();
+        assert_eq!(key(&conn), name_sort_key("apple 2.jpg"));
     }
 
     // An NFD filename (Mac/NAS/Dropbox-synced) must be stored as NFC in path_search so the app's NFC query finds it.

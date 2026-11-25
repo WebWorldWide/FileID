@@ -2,6 +2,7 @@
 //! connections (`open_read`).
 
 pub mod migrations;
+pub mod name_sort;
 pub mod person_counts;
 #[path = "../read/mod.rs"]
 pub mod read;

@@ -80,6 +80,7 @@ struct LibraryView: View {
     /// Keyword and plain listings page in from the database as the grid
     /// nears its end; similarity and semantic results are one ranked list.
     @State private var canLoadMore = false
+    @State private var pageCursor: LibraryCursor?
     @State private var loadingMore = false
     @State private var loadMoreTask: Task<Void, Never>?
     /// Query and kind of the rows on screen; a refresh with the same pair keeps
@@ -1161,6 +1162,7 @@ struct LibraryView: View {
         reloadTask = Task { @MainActor in
             defer { if !Task.isCancelled { visualSearchPending = false } }
             var newRows: [FileRow]
+            var newCursor: LibraryCursor?
             var pageable = false
             var summary: String?
             var hidden = 0
@@ -1176,7 +1178,9 @@ struct LibraryView: View {
                     problem = Self.searchProblem(response, similar: true)
                 }
             } else {
-                newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind, sort: sort)
+                let first = await store.filesPageAsync(limit: want, search: query, kindFilter: kind, sort: sort)
+                newRows = first.rows
+                newCursor = first.cursor
                 pageable = newRows.count == want
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
@@ -1227,6 +1231,7 @@ struct LibraryView: View {
             tagsByFile = tags
             rowsEpoch &+= 1
             canLoadMore = pageable
+            pageCursor = newCursor
             visualSummary = summary
             hiddenWeaker = hidden
             shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1252,11 +1257,13 @@ struct LibraryView: View {
     private func loadMore() {
         guard canLoadMore, !loadingMore, similarSeed == nil else { return }
         loadingMore = true
-        let offset = rows.count, query = searchText, kind = kindFilter, sort = self.sort
+        let offset = rows.count, query = searchText, kind = kindFilter, sort = self.sort, cursor = pageCursor
         loadMoreTask = Task { @MainActor in
             defer { if !Task.isCancelled { loadingMore = false } }
-            let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind, sort: sort)
+            let loaded = await store.filesPageAsync(offset: cursor == nil ? offset : 0, limit: Self.pageSize, after: cursor, search: query, kindFilter: kind, sort: sort)
+            let page = loaded.rows
             guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort, offset == rows.count else { return }
+            pageCursor = loaded.cursor ?? cursor
             let ids = page.map(\.id)
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)

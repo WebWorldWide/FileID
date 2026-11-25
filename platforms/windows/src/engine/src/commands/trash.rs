@@ -456,8 +456,8 @@ fn reconcile_restored_catalog_rows(
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO files \
          (id, path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, \
-          file_ref, has_faces, has_text, failed) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0)",
+          file_ref, has_faces, has_text, failed, name_sort) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, ?10)",
         rusqlite::params![
             item.file_id,
             item.original_path,
@@ -468,6 +468,7 @@ fn reconcile_restored_catalog_rows(
             kind.as_str(),
             extension,
             file_ref,
+            crate::db::name_sort::name_sort_key(&item.original_path),
         ],
     )?;
     if inserted == 1 {

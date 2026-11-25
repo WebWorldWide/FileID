@@ -24,15 +24,22 @@ use crate::pipeline::restructure_feedback;
 use crate::pipeline::restructure_semantic;
 
 const RESTRUCTURE_PREVIEW_CAP: usize = 5_000;
-const LARGE_PLAN_STREAM_THRESHOLD: i64 = 150_000;
 const LARGE_PLAN_CHUNK: usize = 4_096;
 
-/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path. A 50k default silently denied the semantic planner to real-sized libraries (the owner's 71,333-file corpus got the legacy date-tree cascade). Measured on that corpus (RTX 5080 box, 2026-07-14): the semantic path plans in 16 s / 668 MB peak and `embedding_load_cap` already bounds the CLIP map per memory tier, so 150k is a comfortable ceiling. Env-overridable for benchmarking.
+/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path, which also drops the respect-organized-folders stage. Measured on generated libraries (release, Balanced tier, load 15-20): 200,000 files plan in 34 s at 1.6 GB resident (the streaming path: 11 s, 0.5 GB) and 400,000 in 74 s at 2.6 GB, about 7 KB a file, so the ceiling follows the memory tier: Low keeps 150,000, Balanced covers 400,000, High 750,000. A 190,000-file library keeps the semantic planner and the respect stage on every tier but Low. `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it for benchmarking.
+fn large_plan_stream_threshold_for(tier: crate::platform::MemoryTier) -> i64 {
+    match tier {
+        crate::platform::MemoryTier::Low => 150_000,
+        crate::platform::MemoryTier::Balanced => 400_000,
+        crate::platform::MemoryTier::High => 750_000,
+    }
+}
+
 fn large_plan_stream_threshold() -> i64 {
     std::env::var("FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(LARGE_PLAN_STREAM_THRESHOLD)
+        .unwrap_or_else(|| large_plan_stream_threshold_for(crate::platform::memory_tier()))
 }
 const STORED_PLAN_VERSION: u8 = 2;
 
@@ -2090,6 +2097,19 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_190k_library_keeps_the_semantic_planner_and_respect_stage_except_on_low_memory() {
+        use crate::platform::MemoryTier;
+        let adlon = 188_881;
+        assert!(adlon <= large_plan_stream_threshold_for(MemoryTier::Balanced));
+        assert!(adlon <= large_plan_stream_threshold_for(MemoryTier::High));
+        assert_eq!(large_plan_stream_threshold_for(MemoryTier::Low), 150_000);
+        assert!(
+            large_plan_stream_threshold_for(MemoryTier::Balanced) < 1_000_000,
+            "a million files still stream through the disk-backed path"
+        );
     }
 
     #[test]

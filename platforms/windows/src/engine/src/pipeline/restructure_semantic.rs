@@ -662,6 +662,8 @@ fn top_k_neighbours(mut hits: Vec<Neighbor>, k: usize) -> Vec<Neighbor> {
         hits.truncate(k);
     }
     hits.sort_by(cmp);
+    // `truncate` keeps the capacity of every candidate scored, so a library of lists would each hold the whole candidate vector.
+    hits.shrink_to_fit();
     hits
 }
 
@@ -677,6 +679,12 @@ pub(crate) fn existing_group_names(library_root: &Path) -> std::collections::Has
 
 /// Multi-hot vectors up to this many files are searched against every other file; past it, only files that share a token are scored.
 const EXACT_ALL_PAIRS_MAX: usize = 10_000;
+
+#[cfg(test)]
+static SPARSE_SEARCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+static SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
 static BLOCKED_SEARCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -706,11 +714,19 @@ fn sparse_neighbours(fused: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
             || (vec![u32::MAX; n], Vec::<usize>::new()),
             |(stamp, candidates), i| {
                 candidates.clear();
-                let mut own: Vec<&Vec<u32>> =
-                    fused[i][..tokens].iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(dim, _)| &postings[dim]).collect();
+                let mut own: Vec<&[u32]> =
+                    fused[i][..tokens].iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(dim, _)| postings[dim].as_slice()).collect();
                 own.sort_by_key(|list| list.len());
                 let mut walked = 0usize;
                 for list in own {
+                    // A token most files carry would put every file in the candidates; take the files scanned next to this one, which are the ones in its folder.
+                    let list = if list.len() > POSTING_BUDGET {
+                        let at = list.partition_point(|&j| (j as usize) < i);
+                        let from = at.saturating_sub(POSTING_BUDGET / 2).min(list.len() - POSTING_BUDGET);
+                        &list[from..from + POSTING_BUDGET]
+                    } else {
+                        list
+                    };
                     walked += list.len();
                     if walked > POSTING_BUDGET && !candidates.is_empty() {
                         break;
@@ -723,6 +739,8 @@ fn sparse_neighbours(fused: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
                         }
                     }
                 }
+                #[cfg(test)]
+                SCORED.fetch_add(candidates.len(), std::sync::atomic::Ordering::Relaxed);
                 top_k_neighbours(
                     candidates.iter().map(|&j| Neighbor { idx: j, similarity: dot_lanes(&fused[i], &fused[j]) }).collect(),
                     k,
@@ -962,6 +980,7 @@ mod tests {
 
     #[test]
     fn token_blocking_gives_the_same_neighbours_as_all_pairs_when_files_share_tokens() {
+        let _serial = SPARSE_SEARCH.lock().unwrap_or_else(|e| e.into_inner());
         let fused = grouped_bag_of_words(400, 25);
         let k = 12;
         let sparse = sparse_neighbours(&fused, k);
@@ -976,7 +995,35 @@ mod tests {
     }
 
     #[test]
+    fn a_token_most_files_carry_scores_a_bounded_window_of_neighbouring_files_not_all_of_them() {
+        let _serial = SPARSE_SEARCH.lock().unwrap_or_else(|e| e.into_inner());
+        let n = 12_000usize;
+        let fused: Vec<Vec<f32>> = (0..n)
+            .map(|_| {
+                let mut v = vec![0f32; 4 + TIME_DIMS];
+                v[0] = 1.0;
+                unit(v)
+            })
+            .collect();
+        SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let found = sparse_neighbours(&fused, 12);
+        let scored = SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(scored <= n * POSTING_BUDGET, "{scored} candidates scored for {n} files");
+        assert!(found.iter().all(|list| list.len() == 12));
+        assert!(found[6_000].iter().all(|x| x.idx.abs_diff(6_000) <= POSTING_BUDGET), "neighbours come from the files scanned next to it");
+    }
+
+    #[test]
+    fn a_neighbour_list_holds_only_its_k_entries_not_the_candidates_it_was_picked_from() {
+        let hits: Vec<Neighbor> = (0..5_000).map(|idx| Neighbor { idx, similarity: idx as f32 }).collect();
+        let kept = top_k_neighbours(hits, 12);
+        assert_eq!(kept.len(), 12);
+        assert!(kept.capacity() <= 12, "capacity {} would be held for every file in the library", kept.capacity());
+    }
+
+    #[test]
     fn a_multi_hot_library_past_the_all_pairs_limit_still_groups_by_shared_tokens() {
+        let _serial = SPARSE_SEARCH.lock().unwrap_or_else(|e| e.into_inner());
         let n = EXACT_ALL_PAIRS_MAX + 400;
         let fused = grouped_bag_of_words(n, 40);
         let before = BLOCKED_SEARCHES.load(std::sync::atomic::Ordering::Relaxed);
@@ -1038,6 +1085,50 @@ mod tests {
         let graph = EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed);
         eprintln!("QUANTIZED graph evaluations {graph} for n={n} (n*n={})", (n * n));
         assert!(graph > (n * n) as u64 / 2, "this shape is the one that degenerates the graph ({graph} evaluations)");
+    }
+
+    fn rss_mb() -> u64 {
+        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+    }
+
+    #[test]
+    #[ignore = "scale probe: FILEID_PROBE_N files through the non-image pass, prints peak resident memory"]
+    fn probe_non_image_pass_memory() {
+        let n: usize = std::env::var("FILEID_PROBE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(150_000);
+        let words: Vec<String> = (0..150).map(|i| format!("word{i:03}")).collect();
+        let mut state = 7u64;
+        let files: Vec<SemanticFile> = (0..n)
+            .map(|i| {
+                let mut tags = Vec::new();
+                for _ in 0..(5 + (lcg(&mut state) * 4.0) as usize) {
+                    tags.push(words[((lcg(&mut state) + 0.5) * 150.0) as usize % 150].clone());
+                }
+                SemanticFile {
+                    file_id: i as i64,
+                    source: PathBuf::from(format!("/lib/Photos/{}/{}_{:06}.jpg", i % 40, words[i % 150], i)),
+                    clip: Vec::new(),
+                    tags,
+                    time_unix: 1.5e9 + (i as f64) * 100.0,
+                }
+            })
+            .collect();
+        let peak = std::sync::atomic::AtomicU64::new(0);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let before = rss_mb();
+        let moves = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    peak.fetch_max(rss_mb(), std::sync::atomic::Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+            let moves = classify_non_image(&files, Path::new("/lib"), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            moves
+        });
+        eprintln!("PROBE n={n} moves={} seconds={:.1} rss_before={before}MB peak={}MB", moves.len(), started.elapsed().as_secs_f64(), peak.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     fn unit(v: Vec<f32>) -> Vec<f32> {

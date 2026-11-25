@@ -383,7 +383,7 @@ public final class ReadStore: @unchecked Sendable {
         let scope = self.scope
         do {
             return try q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
+                try Self.fetchFiles(db, offset: offset, limit: limit, after: nil, search: search, kindFilter: kindFilter, scope: scope, sort: sort).rows
             }
         } catch {
             reportError("Library query failed: \(error)")
@@ -391,11 +391,12 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    private static func fetchFiles(_ db: Database, offset: Int, limit: Int, search: String,
-                                   kindFilter: String?, scope: LibraryScope?, sort: LibrarySort) throws -> [FileRow] {
+    /// Rows for the Library grid. Search and sort run over ids only, so a top-N sorter never carries whole rows; the page's rows are fetched by id after. `after` continues from the last row of the previous page by its sort key; without it `offset` skips rows. The cursor is nil when the catalog has no `name_sort` key yet and the sort is Name or Kind, so the caller falls back to `offset`.
+    private static func fetchFiles(_ db: Database, offset: Int, limit: Int, after: LibraryCursor?, search: String,
+                                   kindFilter: String?, scope: LibraryScope?, sort: LibrarySort) throws -> LibraryPage {
         let unreadable = kindFilter == Self.unreadableFilter
-        // The sort and filters run over ids only, so a top-N sorter never carries whole rows; the page's rows are fetched by id after.
-        var sql = unreadable ? "SELECT id FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT id FROM files WHERE failed = 0"
+        let keyed = try db.columns(in: "files").contains { $0.name == "name_sort" }
+        var base = unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0"
         var args: StatementArguments = []
         let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
         if !trimmedSearch.isEmpty {
@@ -407,21 +408,39 @@ public final class ReadStore: @unchecked Sendable {
             // NFC-normalize first: SQLite LIKE compares bytes, and
             // path_search stores the NFC form (v16) so an NFC query
             // matches names regardless of on-disk normalization.
-            let escapedSearch = trimmedSearch
-                .precomposedStringWithCanonicalMapping
+            let normalized = trimmedSearch.precomposedStringWithCanonicalMapping
+            let escapedSearch = normalized
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "%", with: "\\%")
                 .replacingOccurrences(of: "_", with: "\\_")
             let like = "%\(escapedSearch)%"
             let ftsQuery = FTSQuery.quoted(trimmedSearch)
-            sql += """
+            // The trigram index (v39) answers a substring of three or more characters from an index; shorter ones and older catalogs scan with LIKE, which matches the same rows.
+            let trigram = normalized.count >= 3 ? try db.tableExists("files_search_fts") : false
+            let nameMatch: String
+            let nameArgs: StatementArguments
+            if trigram {
+                nameMatch = "id IN (SELECT rowid FROM files_search_fts WHERE files_search_fts MATCH ?)"
+                let quote = "\u{22}"
+                nameArgs = [quote + normalized.replacingOccurrences(of: quote, with: quote + quote) + quote]
+            } else {
+                nameMatch = """
+                    path_search LIKE ? ESCAPE '\\'
+                          OR vlm_proposed_name LIKE ? ESCAPE '\\'
+                          OR vlm_description LIKE ? ESCAPE '\\'
+                    """
+                nameArgs = [like, like, like]
+            }
+            // The distinct tags (v27, kept by triggers) are scanned for the text, then the tags index finds the files.
+            let tagMatch = try db.tableExists("catalog_tag_vocab")
+                ? "id IN (SELECT file_id FROM tags WHERE tag IN (SELECT tag FROM catalog_tag_vocab WHERE tag LIKE ? ESCAPE '\\'))"
+                : "id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')"
+            base += """
                  AND (
                       id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
                       OR id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?)
-                      OR path_search LIKE ? ESCAPE '\\'
-                      OR vlm_proposed_name LIKE ? ESCAPE '\\'
-                      OR vlm_description LIKE ? ESCAPE '\\'
-                      OR id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')
+                      OR \(nameMatch)
+                      OR \(tagMatch)
                       OR id IN (
                           SELECT face_prints.file_id FROM face_prints
                           INNER JOIN persons ON persons.id = face_prints.person_id
@@ -434,24 +453,42 @@ public final class ReadStore: @unchecked Sendable {
                       )
                     )
                 """
-            args += [ftsQuery, ftsQuery, like, like, like, like, like, like, like, like, like, like]
+            args += [ftsQuery, ftsQuery]
+            args += nameArgs
+            args += [like, like, like, like, like, like, like]
         }
         if let k = kindFilter, !unreadable {
-            sql += " AND kind = ?"
+            base += " AND kind = ?"
             args += [k]
         }
         if let scope {
-            sql += " AND " + LibraryScope.sql("path_text")
+            base += " AND " + LibraryScope.sql("path_text")
             args += [scope.param]
         }
-        sql += " ORDER BY \(sort.orderSQL) LIMIT ? OFFSET ?"
-        args += [limit, offset]
-        let ids = try Int64.fetchAll(db, sql: sql, arguments: args)
-        guard !ids.isEmpty else { return [] }
+        var ids: [Int64] = []
+        var cursor: LibraryCursor?
+        if offset > 0 {
+            let sql = "SELECT id FROM files WHERE \(base) ORDER BY \(sort.orderSQL(keyed: keyed)) LIMIT ? OFFSET ?"
+            ids = try Int64.fetchAll(db, sql: sql, arguments: args + [limit, offset])
+        } else {
+            let columns = sort.cursorColumns(keyed: keyed)
+            var last: Row?
+            for segment in sort.segments(after: after, keyed: keyed) where ids.count < limit {
+                let select = (["id"] + (columns ?? [])).enumerated().map { "\($1) AS c\($0)" }.joined(separator: ", ")
+                let sql = "SELECT \(select) FROM files WHERE \(base) AND \(segment.condition) ORDER BY \(segment.order) LIMIT ?"
+                let rows = try Row.fetchAll(db, sql: sql, arguments: args + StatementArguments(segment.arguments) + [limit - ids.count])
+                ids += rows.map { $0["c0"] as Int64 }
+                if let row = rows.last { last = row }
+            }
+            if let last, columns != nil {
+                cursor = sort.cursor(id: last["c0"], values: (1..<(columns!.count + 1)).map { last["c\($0)"] as DatabaseValue })
+            }
+        }
+        guard !ids.isEmpty else { return LibraryPage(rows: [], cursor: nil) }
         let encoded = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
         let rows = try Row.fetchAll(db, sql: "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?))", arguments: [encoded])
         let byID = Dictionary(rows.map { ($0["id"] as Int64, Self.toFileRow($0)) }, uniquingKeysWith: { first, _ in first })
-        return ids.compactMap { byID[$0] }
+        return LibraryPage(rows: ids.compactMap { byID[$0] }, cursor: cursor)
     }
 
     /// Off-main twin of `files(...)`: the keyword search is a multi-table FTS + LIKE + face-join query that would stutter the UI on every throttled scan batch.
@@ -459,17 +496,25 @@ public final class ReadStore: @unchecked Sendable {
                            search: String = "",
                            kindFilter: String? = nil,
                            sort: LibrarySort = .standard) async -> [FileRow] {
-        guard let q = queue else { return [] }
+        await filesPageAsync(offset: offset, limit: limit, search: search, kindFilter: kindFilter, sort: sort).rows
+    }
+
+    /// The page plus the cursor the next page continues from.
+    public func filesPageAsync(offset: Int = 0, limit: Int = 200, after: LibraryCursor? = nil,
+                               search: String = "",
+                               kindFilter: String? = nil,
+                               sort: LibrarySort = .standard) async -> LibraryPage {
+        guard let q = queue else { return LibraryPage(rows: [], cursor: nil) }
         let scope = self.scope
         do {
             // GRDB's async read interrupts the query when the calling task is
             // cancelled, so a superseded search stops instead of running out.
             return try await q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
+                try Self.fetchFiles(db, offset: offset, limit: limit, after: after, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
             }
         } catch {
             if !(error is CancellationError), !Task.isCancelled { reportError("Library query failed: \(error)") }
-            return []
+            return LibraryPage(rows: [], cursor: nil)
         }
     }
 

@@ -629,7 +629,7 @@ fn commit_rename(
     let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
     let updated = db.lock().execute(
         // path_search is NFC-normalized so an NFD-accented renamed file stays findable by its accented name. OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE, so a PLAIN update colliding with a LIVE row at dest (a check→rename TOCTOU on non-Windows, or an external desync) would silently REPLACE-delete that row and cascade its user metadata; OR ABORT routes into the Err arm (record + report failed) instead. An applied suggestion is cleared only if it is still the one validated above, so a newer Deep Analyze proposal survives.
-        "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5, \
+        "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5, name_sort = ?7, \
          vlm_proposed_name = CASE WHEN ?6 IS NOT NULL AND vlm_proposed_name IS ?6 THEN NULL ELSE vlm_proposed_name END \
          WHERE id = ?3",
         rusqlite::params![
@@ -638,7 +638,8 @@ fn commit_rename(
             p.file_id,
             crate::pipeline::dbwriter::nfc_path_search(&dest_text),
             renamed_extension(&dest_text),
-            p.applied_suggestion
+            p.applied_suggestion,
+            crate::db::name_sort::name_sort_key(&dest_text)
         ],
     );
     let (ok, message) = match updated {

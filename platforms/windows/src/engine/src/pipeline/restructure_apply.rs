@@ -3455,8 +3455,8 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     let path_search = crate::pipeline::dbwriter::nfc_path_search(&path_text);
     // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE, so a PLAIN update colliding with a LIVE row at the new path (after a transient update failure left a file's DB path stale, or an external rename desynced a row) would silently REPLACE-delete that row and cascade its user tags/person assignments. OR ABORT raises instead, and record_path_update_failure reconciles it on the next scan.
     let changed = conn
-        .prepare_cached("UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3")?
-        .execute(params![path_text, path_hash, file_id, path_search])
+        .prepare_cached("UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, name_sort = ?5 WHERE id = ?3")?
+        .execute(params![path_text, path_hash, file_id, path_search, crate::db::name_sort::name_sort_key(&path_text)])
         .context("DB UPDATE files.path_text")?;
     if changed != 1 {
         anyhow::bail!("DB UPDATE files.path_text affected {changed} rows (expected 1)");

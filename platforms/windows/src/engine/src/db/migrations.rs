@@ -52,6 +52,8 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v35_foreign_key_indexes", include_str!("../../../../../../shared/catalog/v35.sql")),
         ("v36_scan_failures", include_str!("../../../../../../shared/catalog/v36.sql")),
         ("v37_files_size_index", include_str!("../../../../../../shared/catalog/v37.sql")),
+        ("v38_files_name_sort", include_str!("../../../../../../shared/catalog/v38.sql")),
+        ("v39_files_search_fts", include_str!("../../../../../../shared/catalog/v39.sql")),
     ]
 }
 
@@ -199,6 +201,7 @@ pub fn apply(conn: &Connection) -> Result<()> {
         )?;
         tx.commit().with_context(|| format!("committing migration {id}"))?;
     }
+    super::name_sort::fill_missing(conn).context("keying file names for sorting")?;
     Ok(())
 }
 
@@ -411,6 +414,74 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_written_before_the_name_sort_key_opens_and_every_row_gets_one() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
+        for (id, sql) in registry().into_iter().take_while(|(id, _)| *id != "v38_files_name_sort") {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO grdb_migrations (identifier) VALUES (?1)", [id]).unwrap();
+        }
+        for id in 1..=12_000_i64 {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1,0,'image','jpg')",
+                rusqlite::params![id, format!("/Photos/IMG_{id}.jpg")],
+            )
+            .unwrap();
+        }
+        apply(&conn).unwrap();
+        let unkeyed: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE name_sort = ''", [], |r| r.get(0)).unwrap();
+        assert_eq!(unkeyed, 0, "the migration keys every existing row");
+        let first: i64 = conn
+            .query_row("SELECT id FROM files ORDER BY name_sort, id LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(first, 1, "IMG_1 sorts before IMG_2 and IMG_10 sorts after IMG_9");
+        let plan: String = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT id FROM files WHERE failed = 0 ORDER BY name_sort, id LIMIT 200")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" | ");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn the_file_search_index_finds_substrings_and_follows_inserts_renames_and_deletes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
+        for (id, sql) in registry().into_iter().take_while(|(id, _)| *id != "v39_files_search_fts") {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO grdb_migrations (identifier) VALUES (?1)", [id]).unwrap();
+        }
+        let add = |id: i64, path: &str, description: Option<&str>| {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_search,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?2,?1,1,0,'image','jpg',?3)",
+                rusqlite::params![id, path, description],
+            )
+            .unwrap();
+        };
+        add(1, "/lib/SunsetBeach.jpg", None);
+        add(2, "/lib/other.jpg", Some("two dogs on the beach at dusk"));
+        apply(&conn).unwrap();
+        let hits = |needle: &str| -> Vec<i64> {
+            conn.prepare("SELECT rowid FROM files_search_fts WHERE files_search_fts MATCH ?1 ORDER BY rowid")
+                .unwrap()
+                .query_map([format!("\"{needle}\"")], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(hits("beach"), vec![1, 2], "a partial name and a description both match, whatever the case");
+        add(3, "/lib/Beachball.png", None);
+        assert_eq!(hits("each"), vec![1, 2, 3]);
+        conn.execute("UPDATE files SET path_search = '/lib/harbor.jpg', path_text = '/lib/harbor.jpg' WHERE id = 1", []).unwrap();
+        assert_eq!(hits("beach"), vec![2, 3]);
+        conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
+        assert_eq!(hits("beach"), vec![3]);
+    }
+
+    #[test]
     fn faces_already_in_a_catalog_are_marked_baseline_so_they_never_come_back_as_new() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
@@ -450,7 +521,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 37, "expected 37 applied migrations");
+        assert_eq!(n, 39, "expected 39 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -520,7 +591,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 37);
+        assert_eq!(n, 39);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -607,7 +678,7 @@ mod tests {
     /// `catalog_the_swift_engine_wrote_matches_the_migrations`).
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 37] = [
+        const CANONICAL: [&str; 39] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -645,6 +716,8 @@ mod tests {
             "v35_foreign_key_indexes",
             "v36_scan_failures",
             "v37_files_size_index",
+            "v38_files_name_sort",
+            "v39_files_search_fts",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
