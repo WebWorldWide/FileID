@@ -80,6 +80,7 @@ struct Ui {
     expanded: RefCell<Option<Outcome>>,
     operation: Cell<Option<Operation>>,
     stopping: Cell<bool>,
+    refused_apply: Cell<bool>,
     moved: Cell<bool>,
     /// Recent changes lines: the last move that can be put back, and the one being put back.
     apply_entry: Cell<Option<u64>>,
@@ -323,6 +324,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         expanded: RefCell::new(None),
         operation: Cell::new(None),
         stopping: Cell::new(false),
+        refused_apply: Cell::new(false),
         moved: Cell::new(false),
         apply_entry: Cell::new(None),
         undoing_entry: Cell::new(None),
@@ -772,10 +774,14 @@ impl Ui {
         let count = v3::meta(&format!("{} moving in", plural(all.len(), "file")));
         count.set_hexpand(true);
         head.append(&count);
+        let rows = v3::vbox(0);
+        rows.add_css_class("v3-guide");
         for (text, on) in [("Select all", true), ("Skip all", false)] {
             let button = v3::ghost(text);
             let weak = Rc::downgrade(self);
             let indices = all.to_vec();
+            let shown_indices = shown.to_vec();
+            let rows_weak = rows.downgrade();
             button.connect_clicked(move |_| {
                 let Some(ui) = weak.upgrade() else { return };
                 {
@@ -786,14 +792,23 @@ impl Ui {
                         }
                     }
                 }
+                if let Some(rows) = rows_weak.upgrade() {
+                    let selected = ui.selected.borrow();
+                    let mut child = rows.first_child();
+                    for index in &shown_indices {
+                        let Some(button) = child.and_then(|c| c.downcast::<gtk::Button>().ok()) else {
+                            break;
+                        };
+                        sync_proposal_row(&button, selected.get(*index).copied().unwrap_or(false));
+                        child = button.next_sibling();
+                    }
+                }
                 ui.render_plan();
                 ui.refresh();
             });
             head.append(&button);
         }
         section.append(&head);
-        let rows = v3::vbox(0);
-        rows.add_css_class("v3-guide");
         for index in shown {
             rows.append(&self.proposal_row(*index));
         }
@@ -863,14 +878,7 @@ impl Ui {
                 *slot = !*slot;
                 *slot
             };
-            if let Some(check) = button
-                .child()
-                .and_then(|c| c.first_child())
-                .and_downcast::<gtk::CheckButton>()
-            {
-                check.set_active(now);
-            }
-            button.update_state(&[gtk::accessible::State::Selected(Some(now))]);
+            sync_proposal_row(button, now);
             ui.refresh();
         });
         button
@@ -1055,6 +1063,7 @@ impl Ui {
     fn finish(self: &Rc<Self>, result: RestructureApplyResult) {
         let operation = self.operation.replace(None);
         self.stopping.set(false);
+        self.refused_apply.set(false);
         if let Some(message) = result.privilege_error.as_deref().filter(|m| !m.is_empty()) {
             self.set_notice(Tone::Warning, "Something went wrong", message);
         } else if operation == Some(Operation::Undoing) {
@@ -1084,6 +1093,12 @@ impl Ui {
                     "Stopped after {}. Undo puts them back.",
                     plural(result.applied as usize, "file")
                 )
+            } else if result.applied == 0 && result.failed > 0 {
+                self.refused_apply.set(true);
+                format!(
+                    "Nothing was moved; {} couldn't be moved.",
+                    plural(result.failed as usize, "file")
+                )
             } else if result.failed > 0 {
                 format!(
                     "{} moved; {} failed. Undo puts the moved ones back.",
@@ -1102,7 +1117,11 @@ impl Ui {
                 } else {
                     Tone::Done
                 },
-                "Done",
+                if result.applied == 0 && result.failed > 0 && !result.cancelled {
+                    "Nothing moved"
+                } else {
+                    "Done"
+                },
                 &body,
             );
             if result.applied > 0 {
@@ -1318,6 +1337,16 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                 EngineState::RestructurePlan(plan) => ui.show_plan(plan.clone()),
                 EngineState::RestructureApplyResult(result) => ui.finish(result.clone()),
                 EngineState::Error { kind, message, .. }
+                    if kind == "location_read_only" && ui.refused_apply.replace(false) =>
+                {
+                    ui.set_notice(
+                        Tone::Warning,
+                        crate::engine_errors::title(kind),
+                        &crate::engine_errors::text(kind, message),
+                    );
+                    ui.refresh();
+                }
+                EngineState::Error { kind, message, .. }
                     if ui.operation.get().is_some() && is_restructure_error(kind) =>
                 {
                     ui.operation.set(None);
@@ -1347,6 +1376,32 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
             }
         }
     });
+}
+
+/// Row layout: check, icon, text column whose first line starts with the file name.
+fn sync_proposal_row(button: &gtk::Button, selected: bool) {
+    let row = button.child();
+    if let Some(check) = row
+        .as_ref()
+        .and_then(|row| row.first_child())
+        .and_downcast::<gtk::CheckButton>()
+    {
+        check.set_active(selected);
+    }
+    let file = row
+        .and_then(|row| row.first_child())
+        .and_then(|check| check.next_sibling())
+        .and_then(|icon| icon.next_sibling())
+        .and_then(|text| text.first_child())
+        .and_then(|line| line.first_child());
+    if let Some(file) = file {
+        if selected {
+            file.remove_css_class("tone-muted");
+        } else {
+            file.add_css_class("tone-muted");
+        }
+    }
+    button.update_state(&[gtk::accessible::State::Selected(Some(selected))]);
 }
 
 /// Another page's failure (a model download, a trash) must not end a plan or
