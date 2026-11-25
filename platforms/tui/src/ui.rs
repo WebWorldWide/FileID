@@ -467,13 +467,13 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
                 ),
             ]
         };
-        let count = if app.search.is_empty() {
-            format!("{} files", app.data.total_files)
-        } else if app.data.files_truncated {
-            format!("{}+ matches", visible.len())
-        } else {
-            plural(visible.len(), "match", "matches")
-        };
+        let count = library_count_label(
+            app.search.is_empty(),
+            app.data.files_truncated,
+            app.data.total_files,
+            app.data.files.len(),
+            visible.len(),
+        );
         render_context(f, rows[0], left, Some(count));
     }
 
@@ -1801,6 +1801,26 @@ fn hrow(key: &str, desc: &str) -> Line<'static> {
 }
 
 /// `N word` with singular/plural agreement.
+fn library_count_label(
+    search_empty: bool,
+    truncated: bool,
+    total_files: i64,
+    loaded: usize,
+    visible: usize,
+) -> String {
+    if search_empty {
+        if truncated {
+            format!("newest {loaded} of {total_files} files")
+        } else {
+            format!("{total_files} files")
+        }
+    } else if truncated {
+        format!("{visible}+ matches")
+    } else {
+        plural(visible, "match", "matches")
+    }
+}
+
 fn plural(n: usize, singular: &str, plural: &str) -> String {
     format!("{n} {}", if n == 1 { singular } else { plural })
 }
@@ -1850,6 +1870,20 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_header_marks_a_capped_list_as_partial() {
+        assert_eq!(
+            library_count_label(true, true, 40_000, 5_000, 5_000),
+            "newest 5000 of 40000 files"
+        );
+        assert_eq!(library_count_label(true, false, 120, 120, 120), "120 files");
+        assert_eq!(
+            library_count_label(false, true, 40_000, 5_000, 300),
+            "300+ matches"
+        );
+        assert_eq!(library_count_label(false, false, 120, 120, 1), "1 match");
+    }
+
     use super::*;
 
     #[test]
