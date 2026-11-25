@@ -77,8 +77,6 @@ pub fn is_group(members: &[Member]) -> bool {
     members.len() >= 2 && members.iter().any(|member| member.role != Role::Sidecar)
 }
 
-/// The first `_N` bump (1 = none, up to 99) at which every member's new name is free in the folder and batch, or is its
-/// own name in another case.
 /// The first `_N` bump (1 = none, up to 99) at which every member's new name is free in its own folder, or is its own
 /// name in another case. `free(index, lowercase name)` says whether member `index`'s folder has the name free.
 pub fn shared_names(
