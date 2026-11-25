@@ -80,3 +80,24 @@ struct PersonCountsTests {
         #expect(PersonDragPayload.decode("hello") == nil)
     }
 }
+
+@Suite struct NamingSessionTests {
+    private func person(_ id: Int64, first: String?) -> ReadStore.PersonRow {
+        ReadStore.PersonRow(id: id, name: nil, title: nil, firstName: first, middleName: nil, lastName: nil, suffix: nil,
+                            isUnknown: false, representativeFaceID: nil, representativeFileID: nil, representativeBBox: nil,
+                            representativePath: nil, representativeCacheRevision: nil, fileCount: 1, faceCount: 1)
+    }
+
+    @Test func namesAlreadyInTheCatalogAtOpenDoNotCountAsSaved() {
+        let opened = [person(1, first: "Alex"), person(2, first: nil)]
+        let baseline = NamingSession.snapshot(opened)
+        #expect(!NamingSession.namedSinceOpen(baseline: baseline, persons: opened))
+        #expect(!NamingSession.namedSinceOpen(baseline: nil, persons: opened))
+    }
+
+    @Test func aNameSavedAfterOpenCountsEvenWhenItRenamesSomeoneAlreadyNamed() {
+        let baseline = NamingSession.snapshot([person(1, first: "Alex"), person(2, first: nil)])
+        #expect(NamingSession.namedSinceOpen(baseline: baseline, persons: [person(1, first: "Alex"), person(2, first: "Sam")]))
+        #expect(NamingSession.namedSinceOpen(baseline: baseline, persons: [person(1, first: "Alexander"), person(2, first: nil)]))
+    }
+}

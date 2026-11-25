@@ -12,6 +12,7 @@ struct PeopleView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var persons: [ReadStore.PersonRow] = []
+    @State private var namesAtOpen: Set<String>?
     @State private var personByID: [Int64: ReadStore.PersonRow] = [:]
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
@@ -440,7 +441,7 @@ struct PeopleView: View {
     private var canContinueToDeepAnalyze: Bool {
         guard !persons.isEmpty else { return false }
         guard !engine.deepAnalyzeInFlight else { return false }
-        return persons.contains { $0.hasAnyName }
+        return NamingSession.namedSinceOpen(baseline: namesAtOpen, persons: persons)
     }
 
     @ViewBuilder
@@ -789,6 +790,7 @@ struct PeopleView: View {
             }.value
             guard !Task.isCancelled else { return }
             totalFacePrints = loaded.faces
+            if namesAtOpen == nil { namesAtOpen = NamingSession.snapshot(loaded.rows) }
             persons = loaded.rows
             hiddenUnknownCount = loaded.hidden
             // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
@@ -828,6 +830,18 @@ enum PersonDragPayload {
 }
 
 /// Drag-merge drop target for a PersonCard, applied conditionally: off in merge and mark-unknown modes.
+enum NamingSession {
+    static func snapshot(_ persons: [ReadStore.PersonRow]) -> Set<String> {
+        Set(persons.filter { !$0.tagName.isEmpty }.map { "\($0.id)|\($0.tagName)" })
+    }
+
+    /// True only when a name was saved after the page opened, so a catalog that already had names does not greet every launch with "Names saved".
+    static func namedSinceOpen(baseline: Set<String>?, persons: [ReadStore.PersonRow]) -> Bool {
+        guard let baseline else { return false }
+        return !snapshot(persons).isSubset(of: baseline)
+    }
+}
+
 private struct PersonCardDragMergeModifier: ViewModifier {
     let enabled: Bool
     let personID: Int64
