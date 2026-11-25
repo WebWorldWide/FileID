@@ -26,7 +26,7 @@ use crate::pipeline::restructure_semantic;
 const RESTRUCTURE_PREVIEW_CAP: usize = 5_000;
 const LARGE_PLAN_CHUNK: usize = 4_096;
 
-/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path, which also drops the respect-organized-folders stage. The in-memory path costs about 7.5 KB of resident memory per file (a generated 200,000-file library peaked at 1.7 GB, 62 s at load 20-45; the streaming path took 0.5 GB, 11 s) because the non-image pass holds a vocabulary vector per unclaimed file, so the ceiling follows the memory tier: Low keeps the old 150,000, Balanced covers 400,000 files (about 3 GB), High 750,000. A 190,000-file library therefore keeps the semantic planner and the respect stage on every tier but Low. `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it for benchmarking.
+/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path, which also drops the respect-organized-folders stage. Measured on generated libraries (release, Balanced tier, load 15-20): 200,000 files plan in 34 s at 1.6 GB resident (the streaming path: 11 s, 0.5 GB) and 400,000 in 74 s at 2.6 GB, about 7 KB a file, so the ceiling follows the memory tier: Low keeps 150,000, Balanced covers 400,000, High 750,000. A 190,000-file library keeps the semantic planner and the respect stage on every tier but Low. `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it for benchmarking.
 fn large_plan_stream_threshold_for(tier: crate::platform::MemoryTier) -> i64 {
     match tier {
         crate::platform::MemoryTier::Low => 150_000,
