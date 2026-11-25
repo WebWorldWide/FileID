@@ -613,9 +613,9 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         println!("  Duration:     {secs:.2}s{rate}");
         if failed > 0 {
             println!("  Failed:       {failed}");
-            for warning in &warnings {
-                println!("    {}", terminal_text(warning));
-            }
+        }
+        for warning in &warnings {
+            println!("  Note:         {}", terminal_text(warning));
         }
         if indexed > 0 {
             println!("  Search it:    {}", ctx.bold("fileid search \"<words>\""));
