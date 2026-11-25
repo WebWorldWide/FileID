@@ -1840,6 +1840,18 @@
    ]
   },
   {
+   "name": "form_urlencoded",
+   "version": "1.2.3",
+   "license": "MIT OR Apache-2.0",
+   "elected": [
+    "MIT"
+   ],
+   "repository": "https://github.com/servo/rust-url",
+   "copyright": [
+    "Copyright (c) 2013-2016 The rust-url developers"
+   ]
+  },
+  {
    "name": "futures-channel",
    "version": "0.3.32",
    "license": "MIT OR Apache-2.0",
@@ -6888,6 +6900,18 @@
   {
    "name": "url",
    "version": "2.5.8",
+   "license": "MIT OR Apache-2.0",
+   "elected": [
+    "MIT"
+   ],
+   "repository": "https://github.com/servo/rust-url",
+   "copyright": [
+    "Copyright (c) 2013-2025 The rust-url developers"
+   ]
+  },
+  {
+   "name": "url",
+   "version": "2.5.9",
    "license": "MIT OR Apache-2.0",
    "elected": [
     "MIT"

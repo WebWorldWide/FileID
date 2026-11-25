@@ -1341,7 +1341,7 @@ pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)
         if unsafe { libc::statvfs(raw.as_ptr(), &raw mut stats) } != 0 {
             return None;
         }
-        ((stats.f_flag as u64 & libc::ST_RDONLY as u64) != 0, device.to_string())
+        ((stats.f_flag & libc::ST_RDONLY) != 0, device.to_string())
     };
     Some((device, name, read_only))
 }
@@ -1349,19 +1349,21 @@ pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)
 #[cfg(windows)]
 pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{FILE_READ_ONLY_VOLUME, GetVolumeInformationW, GetVolumePathNameW};
+    use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    // FILE_READ_ONLY_VOLUME (winnt.h); windows 0.62 exposes it only under System::SystemServices, a feature this crate does not enable.
+    const FILE_READ_ONLY_VOLUME: u32 = 0x0008_0000;
     use windows::core::PCWSTR;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let mut root = [0u16; 261];
     unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root).ok()? };
     let mut label = [0u16; 261];
     let mut flags = 0u32;
-    unsafe { GetVolumeInformationW(PCWSTR(root.as_ptr()), Some(&mut label), None, None, Some(&mut flags), None).ok()? };
+    unsafe { GetVolumeInformationW(PCWSTR(root.as_ptr()), Some(&mut label), None, None, Some(&raw mut flags), None).ok()? };
     let end = |buffer: &[u16]| buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
     let root_text = String::from_utf16_lossy(&root[..end(&root)]);
     let label_text = String::from_utf16_lossy(&label[..end(&label)]);
     let name = if label_text.is_empty() { root_text.clone() } else { label_text };
-    Some((root_text, name, flags & FILE_READ_ONLY_VOLUME.0 != 0))
+    Some((root_text, name, flags & FILE_READ_ONLY_VOLUME != 0))
 }
 
 
