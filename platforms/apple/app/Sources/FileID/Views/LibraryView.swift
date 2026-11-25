@@ -656,6 +656,28 @@ struct LibraryView: View {
                         viewControls
                     }
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterField
+                        Spacer(minLength: 8)
+                        if !selectMode { modeControls }
+                    }
+                    if selectMode {
+                        HStack(alignment: .center, spacing: 10) {
+                            Spacer(minLength: 8)
+                            modeControls
+                        }
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        kindPicker
+                        ScrollView(.horizontal, showsIndicators: false) { kindPicker }
+                    }
+                    HStack(alignment: .center, spacing: 10) {
+                        summaryControls(wrapped: true)
+                        Spacer(minLength: 8)
+                        viewControls
+                    }
+                }
             }
         }
         .environment(\.fixedTextSize, true)
@@ -676,6 +698,11 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var filterControls: some View {
+        filterField
+        kindPicker
+    }
+
+    private var filterField: some View {
         HStack(spacing: 8) {
             Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
             TextField("Filter files", text: $searchText)
@@ -697,8 +724,6 @@ struct LibraryView: View {
         .layoutPriority(1)
         .background(Theme.well, ignoresSafeAreaEdges: [])
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
-
-        kindPicker
     }
 
     private var orderIsRanked: Bool { similarSeed != nil || visualSummary != nil }

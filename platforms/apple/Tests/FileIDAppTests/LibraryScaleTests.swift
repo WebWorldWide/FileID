@@ -65,4 +65,12 @@ struct LibraryScaleTests {
             #expect(try appSource(file).contains("tileThumbnail(for: row.url, size: 224, onMiss: { show(nil) })"), "\(file)")
         }
     }
+
+    @Test func theLibraryToolbarHasARowLayoutForEveryKindChipAtLargerText() throws {
+        let library = try appSource("Views/LibraryView.swift")
+        let header = try #require(library.range(of: "private var header: some View"))
+        let body = String(library[header.lowerBound...].prefix(4_000))
+        #expect(body.contains("filterField\n                        Spacer(minLength: 8)"), "a last layout puts the kind chips on their own row")
+        #expect(body.contains("ScrollView(.horizontal, showsIndicators: false) { kindPicker }"), "and scrolls them when even that row is too wide")
+    }
 }
