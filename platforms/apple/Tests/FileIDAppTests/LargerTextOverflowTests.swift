@@ -39,4 +39,11 @@ import Testing
         let rule = try #require(body.range(of: ".overlay(alignment: .bottom) { Hairline() }"))
         #expect(frame.lowerBound < rule.lowerBound)
     }
+
+    @Test func chatSourcesHeaderFollowsTheConversationHeaderHeight() throws {
+        let chat = try appSource("Views/ChatWorkbench.swift")
+        #expect(chat.contains("ChatPaneHeaderHeightKey"))
+        #expect(chat.contains(".frame(height: max(Theme.Metrics.paneHeaderHeight, pageHeaderHeight), alignment: .top)"))
+        #expect(!chat.contains("TagChip(text: \"Names\").hidden()"))
+    }
 }
