@@ -1594,7 +1594,21 @@ pub(crate) async fn handle_apply_restructure(
         send_read_only_apply_refusal(&sink, &anyhow::Error::from(error), requested).await;
         return;
     }
-    if let Some(refusal) = read_only_moves(&payload.moves) {
+    let (payload, refusal) = match tokio::task::spawn_blocking(move || {
+        let refusal = read_only_moves(&payload.moves);
+        (payload, refusal)
+    })
+    .await
+    {
+        Ok(checked) => checked,
+        Err(error) => {
+            tracing::warn!(?error, "applyRestructure read-only check failed");
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+            sink.send(EngineError::event("apply_restructure", "Organize Folders couldn't move the files. Check that the folder is still connected and try again.")).await;
+            return;
+        }
+    };
+    if let Some(refusal) = refusal {
         sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
         sink.send(EngineError::event("location_read_only", format!("{} Nothing was moved.", refusal.sentence()))).await;
         return;
