@@ -804,7 +804,7 @@ pub mod thumbnail {
 
 // Inside a Flatpak sandbox XDG_DATA_HOME is the app's private data dir, which the
 // desktop never reads as a Trash; the host's data home is what the file manager shows.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod trash_home {
     use anyhow::{Context, Result};
     use std::ffi::OsString;
