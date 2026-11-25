@@ -176,6 +176,7 @@ impl SearchPlan {
                 "document" | "documents" => &["doc", "pdf"],
                 "pdf" | "pdfs" => &["pdf"],
                 "audio" => &["audio"],
+                "3d" => &["model"],
                 _ => &[],
             }
         };
@@ -196,6 +197,9 @@ impl SearchPlan {
                 ]
                 .contains(&word.as_str())
             });
+        let model_nouns: Vec<usize> = (1..normalized.len())
+            .filter(|&index| normalized[index - 1] == "3d" && ["model", "models", "object", "objects", "asset", "assets"].contains(&normalized[index].as_str()))
+            .collect();
         let mut kinds: Vec<String> = if negative {
             vec![]
         } else {
@@ -215,6 +219,7 @@ impl SearchPlan {
                     && !event_indices.contains(index)
                     && !time_indices.contains(index)
                     && !excluded_indices.contains(index)
+                    && !model_nouns.contains(index)
                     && !fillers.contains(&word.as_str())
                     && (negative || aliases(word).is_empty())
             })

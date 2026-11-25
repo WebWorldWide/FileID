@@ -239,11 +239,23 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
     };
     Ok(match intent.kind.as_str() {
         "refuse" => {
-            let first = context.text.split_whitespace().next().map(clean).unwrap_or_default();
-            Resolution::say(if ["turn", "switch", "enable", "disable", "set"].contains(&first.as_str()) {
-                "Chat can change only these settings: tagging kept copies, the background animation and written answers from local AI."
-            } else {
-                "Chat only moves extra copies of identical files to the Trash, and only after you confirm. To remove other files, choose them in Library or Duplicates."
+            let (words, _) = super::chat_intent::imperative_words(context.text);
+            let first = words.first().cloned().unwrap_or_default();
+            let to_trash = words.iter().any(|word| ["trash", "bin", "recycle", "garbage"].contains(&word.as_str()));
+            Resolution::say(match first.as_str() {
+                "move" | "put" | "copy" if to_trash => {
+                    "Chat only moves extra copies of identical files to the Trash, and only after you confirm. To remove other files, choose them in Library or Duplicates."
+                }
+                "turn" | "switch" | "enable" | "disable" | "set" => {
+                    "Chat can change only these settings: tagging kept copies, the background animation and written answers from local AI."
+                }
+                "undo" | "revert" | "reverse" => "Renames can't be undone from Chat. Rename the files again in Library to change their names back.",
+                "rename" => "Chat can't rename a single file. Rename it in Library, or ask me to “rename files to the suggested names” after Describe Files has run.",
+                "move" | "copy" | "put" => {
+                    "Chat can't move or copy files to a place you name. Ask me to organize a folder and I'll show a layout to review, or choose files in Library."
+                }
+                "tag" | "retag" => "Chat doesn't tag files on request. FileID tags files as it scans them, and “describe my files” adds descriptions to the ones that lack them.",
+                _ => "Chat only moves extra copies of identical files to the Trash, and only after you confirm. To remove other files, choose them in Library or Duplicates.",
             })
         }
         "scanFolder" => {
