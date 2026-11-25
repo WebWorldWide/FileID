@@ -21,6 +21,15 @@ public sealed class WinUiDrillFixContractTests
         Assert.True(body.IndexOf("SetApplyBusy(false, \"Couldn't add tags", caught, StringComparison.Ordinal) > caught);
     }
 
+    [Fact]
+    public void CleanupRefreshButton_VisibleLabelMatchesItsAccessibleNameAndTheAlerts()
+    {
+        var xaml = App("Views", "Cleanup", "CleanupView.xaml");
+        Assert.Contains("AutomationProperties.Name=\"Check again\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<TextBlock Text=\"Check again\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<TextBlock Text=\"Refresh\"", xaml, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
