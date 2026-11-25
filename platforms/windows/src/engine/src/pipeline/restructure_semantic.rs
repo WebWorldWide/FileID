@@ -681,6 +681,9 @@ pub(crate) fn existing_group_names(library_root: &Path) -> std::collections::Has
 const EXACT_ALL_PAIRS_MAX: usize = 10_000;
 
 #[cfg(test)]
+static SPARSE_SEARCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 static SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
@@ -977,6 +980,7 @@ mod tests {
 
     #[test]
     fn token_blocking_gives_the_same_neighbours_as_all_pairs_when_files_share_tokens() {
+        let _serial = SPARSE_SEARCH.lock().unwrap_or_else(|e| e.into_inner());
         let fused = grouped_bag_of_words(400, 25);
         let k = 12;
         let sparse = sparse_neighbours(&fused, k);
@@ -992,6 +996,7 @@ mod tests {
 
     #[test]
     fn a_token_most_files_carry_scores_a_bounded_window_of_neighbouring_files_not_all_of_them() {
+        let _serial = SPARSE_SEARCH.lock().unwrap_or_else(|e| e.into_inner());
         let n = 12_000usize;
         let fused: Vec<Vec<f32>> = (0..n)
             .map(|_| {
@@ -1018,6 +1023,7 @@ mod tests {
 
     #[test]
     fn a_multi_hot_library_past_the_all_pairs_limit_still_groups_by_shared_tokens() {
+        let _serial = SPARSE_SEARCH.lock().unwrap_or_else(|e| e.into_inner());
         let n = EXACT_ALL_PAIRS_MAX + 400;
         let fused = grouped_bag_of_words(n, 40);
         let before = BLOCKED_SEARCHES.load(std::sync::atomic::Ordering::Relaxed);
