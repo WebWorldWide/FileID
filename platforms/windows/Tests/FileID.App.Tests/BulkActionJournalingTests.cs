@@ -59,6 +59,18 @@ public sealed class BulkActionJournalingTests
     }
 
     [Fact]
+    public void BulkRenameSkipsRowsWhoseNameIsUnchanged()
+    {
+        var unchanged = new RenamePlan { FileId = 1, CurrentPath = @"C:\Photos\same.jpg", ProposedName = " same.jpg " };
+        var changed = new RenamePlan { FileId = 2, CurrentPath = @"C:\Photos\old.jpg", ProposedName = "new.jpg" };
+        var caseOnly = new RenamePlan { FileId = 3, CurrentPath = @"C:\Photos\case.jpg", ProposedName = "Case.jpg" };
+
+        Assert.False(BulkRenameSheet.IsRequestedRename(unchanged));
+        Assert.True(BulkRenameSheet.IsRequestedRename(changed));
+        Assert.True(BulkRenameSheet.IsRequestedRename(caseOnly));
+    }
+
+    [Fact]
     public void RenameInverseContainsOnlyTerminalConfirmedSuccesses()
     {
         RenamePlan[] plans =
