@@ -376,7 +376,16 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             }
             let (mut left_out, mut drive) = (0, None);
             if intent.kind == "moveDuplicatesToTrash" {
-                let (copies, count, name) = writable_only(std::mem::take(&mut found.copies), |copy| copy.2.as_str());
+                let loaded = found.copies.len() as i64;
+                let (mut copies, mut count, mut name) = writable_only(std::mem::take(&mut found.copies), |copy| copy.2.as_str());
+                if copies.is_empty() && found.count > loaded {
+                    let everything = extras(conn, &filter, found.count as usize)?;
+                    (copies, count, name) = writable_only(everything.copies, |copy| copy.2.as_str());
+                    found.count = everything.count;
+                    found.groups = everything.groups;
+                    found.bytes = everything.bytes;
+                    copies.truncate(MAX_IDS);
+                }
                 if copies.is_empty() && let Some(name) = &name {
                     return Ok(Resolution::say(crate::util::read_only::location_sentence(name)));
                 }
@@ -1090,6 +1099,34 @@ mod tests {
         assert!(card.file_ids.unwrap().iter().all(|id| *id > 2), "a read-only copy was proposed");
         assert!(card.detail.contains("1 file on \u{201c}Vault\u{201d}, a read-only drive, was left out."), "{}", card.detail);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_drive_holding_the_largest_copies_does_not_hide_the_writable_ones() {
+        let mut conn = crate::db::test_support::memory_db();
+        let locked = read_only_dir("trash-cut", "Vault");
+        let open = std::env::temp_dir().join(format!("fileid-chat-open-cut-{}", std::process::id()));
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,content_hash) VALUES(?1,?2,?1,?3,?1,0,'image','jpg',?4)")
+                .unwrap();
+            for id in 1..=(MAX_IDS as i64 + 2) {
+                insert.execute(params![id, locked.join(format!("{id}.jpg")).to_string_lossy(), 2000, vec![1_u8]]).unwrap();
+            }
+            let last = MAX_IDS as i64 + 3;
+            insert.execute(params![last, open.join("a.jpg").to_string_lossy(), 1000, vec![2_u8]]).unwrap();
+            insert.execute(params![last + 1, open.join("b.jpg").to_string_lossy(), 1000, vec![2_u8]]).unwrap();
+        }
+        tx.commit().unwrap();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let ctx = context(None, &people, &events, "move extra copies to trash");
+        let intent = Intent { kind: "moveDuplicatesToTrash".into(), ..Intent::default() };
+        let mut resolved = resolve(&conn, &intent, &ctx).unwrap();
+        assert!(!resolved.actions.is_empty(), "{}", resolved.message);
+        let card = resolved.actions.remove(0);
+        assert_eq!(card.file_count, Some(1));
+        std::fs::remove_dir_all(locked).unwrap();
     }
 
     #[test]
