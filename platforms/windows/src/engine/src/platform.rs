@@ -677,14 +677,30 @@ pub fn volume_is_solid_state(path: &Path) -> bool {
     if !device.starts_with("/dev/") {
         return false;
     }
-    std::process::Command::new("/usr/sbin/diskutil")
+    let Ok(mut child) = std::process::Command::new("/usr/sbin/diskutil")
         .args(["info", "-plist", &device])
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .is_some_and(|output| plist_says_solid_state(&String::from_utf8_lossy(&output.stdout)))
+        .spawn()
+    else {
+        return false;
+    };
+    // A failing drive can stall diskutil; the scan must not wait on it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+    let mut plist = String::new();
+    child.stdout.take().is_some_and(|mut out| std::io::Read::read_to_string(&mut out, &mut plist).is_ok()) && plist_says_solid_state(&plist)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1405,6 +1421,15 @@ pub(crate) fn volume_of(path: &std::path::Path) -> Option<(String, String, bool)
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn asking_about_the_system_volume_answers_within_the_deadline() {
+        let started = std::time::Instant::now();
+        let _ = volume_is_solid_state(&std::env::temp_dir());
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(!volume_is_solid_state(Path::new("/no/such/volume/here")));
+    }
 
     #[test]
     fn diskutil_output_marks_a_solid_state_volume_only_when_it_says_true() {
