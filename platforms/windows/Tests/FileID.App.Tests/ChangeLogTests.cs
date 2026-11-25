@@ -14,6 +14,17 @@ public class ChangeLogTests
     private static ChangeLog Log => ChangeLog.Instance;
 
     [Fact]
+    public void UndoableOnlyLog_DoesNotBlockClose_ButStaysPending()
+    {
+        Log.Clear();
+        Log.Push("rename 2 files", ChangeKind.Rename, () => Task.FromResult(true));
+
+        Assert.Equal(1, Log.PendingCount);
+        Assert.Equal(0, Log.ActiveUndoCount);
+        Log.Clear();
+    }
+
+    [Fact]
     public async Task Undo_MarksEntryUndone_AndKeepsItInHistory()
     {
         Log.Clear();
@@ -201,6 +212,7 @@ public class ChangeLogTests
         Assert.Equal(ChangeStatus.Undoing, current.Status);
         Assert.True(Log.IsUndoInFlight);
         Assert.Equal(2, Log.PendingCount);
+        Assert.Equal(1, Log.ActiveUndoCount);
         Assert.False(UndoStack.Instance.CanUndo);
         Assert.False(await Log.UndoAsync(older));
 
@@ -208,6 +220,7 @@ public class ChangeLogTests
         Assert.True(await undo);
         Assert.Equal(ChangeStatus.Undone, current.Status);
         Assert.False(Log.IsUndoInFlight);
+        Assert.Equal(0, Log.ActiveUndoCount);
         Assert.Equal(1, Log.PendingCount);
         Assert.True(UndoStack.Instance.CanUndo);
         Log.Clear();

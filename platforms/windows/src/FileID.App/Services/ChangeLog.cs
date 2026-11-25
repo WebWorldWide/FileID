@@ -170,6 +170,23 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Entries whose undo is running right now; only these block closing the window.</summary>
+    public int ActiveUndoCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var n = 0;
+                foreach (var e in _entries)
+                {
+                    if (e.Status == ChangeStatus.Undoing) n++;
+                }
+                return n;
+            }
+        }
+    }
+
     public bool IsUndoInFlight
     {
         get { lock (_gate) { return _undoInFlight; } }
@@ -357,6 +374,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
     {
         RaisePropertyChanged(nameof(UndoableCount));
         RaisePropertyChanged(nameof(PendingCount));
+        RaisePropertyChanged(nameof(ActiveUndoCount));
         RaisePropertyChanged(nameof(IsUndoInFlight));
         RaisePropertyChanged(nameof(Count));
 
