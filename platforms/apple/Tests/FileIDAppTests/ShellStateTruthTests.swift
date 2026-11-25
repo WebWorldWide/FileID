@@ -49,3 +49,10 @@ struct ShellStateTruthTests {
         #expect(library.contains("Button { NSWorkspace.shared.open(file.url) } label: { Label(\"Open\", systemImage: \"arrow.up.right.square\") }\n                .buttonStyle(DSSecondaryButtonStyle(height: 28)).disabled(offline)"))
     }
 }
+
+@Suite struct LibraryTileThumbnailRetryTests {
+    @Test func theGridAndTheListLoadTilesThroughTheOneRetryForEmptyVideos() throws {
+        #expect(try appSource("Views/LibraryCollectionGrid.swift").contains("ThumbnailService.shared.tileThumbnail("))
+        #expect(try appSource("Views/LibraryListTable.swift").contains("ThumbnailService.shared.tileThumbnail("))
+    }
+}

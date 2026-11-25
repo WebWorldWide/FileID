@@ -42,7 +42,7 @@ struct UnfinishedScanTests {
 
     @Test("a library with files in it says tags are being added, not that the scan failed")
     func titleForReadFiles() {
-        #expect(PipelineBlock.unfinishedScanTitle(filesRead: 130_108) == "Tags are still being added")
+        #expect(PipelineBlock.unfinishedScanTitle(filesRead: 130_108) == "Tags aren’t finished yet")
         #expect(PipelineBlock.unfinishedScanTitle(filesRead: 0) == "The scan didn’t finish")
     }
 }

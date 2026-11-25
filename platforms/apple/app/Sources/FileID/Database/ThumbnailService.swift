@@ -107,6 +107,13 @@ public final class ThumbnailService {
         return nil
     }
 
+    /// A busy engine can miss its reply window for a large video, so a video tile that comes back empty asks once more before it settles for its icon.
+    public func tileThumbnail(for url: URL, size: CGFloat) async -> NSImage? {
+        if let image = await thumbnail(for: url, size: size) { return image }
+        guard Self.isVideo(url), !Task.isCancelled, (try? await Task.sleep(for: .seconds(5))) != nil else { return nil }
+        return await thumbnail(for: url, size: size)
+    }
+
     nonisolated static func enginePixelSize(size: CGFloat, scale: CGFloat) -> Int {
         min(max(Int((size * scale).rounded()), 64), 2048)
     }

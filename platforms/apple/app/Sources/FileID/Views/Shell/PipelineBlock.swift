@@ -56,7 +56,7 @@ struct PipelineBlock: View {
     }
 
     nonisolated static func unfinishedScanTitle(filesRead: Int) -> String {
-        filesRead > 0 ? "Tags are still being added" : "The scan didn’t finish"
+        filesRead > 0 ? "Tags aren’t finished yet" : "The scan didn’t finish"
     }
 
     nonisolated static func unfinishedScanDetail(filesRead: Int) -> String {

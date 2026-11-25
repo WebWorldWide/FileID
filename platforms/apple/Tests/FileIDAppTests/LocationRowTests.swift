@@ -27,7 +27,7 @@ struct LocationRowTests {
     }
 
     @Test func filesWithoutAScanStampSayTagsAreStillBeingAdded() {
-        #expect(LocationText.summary(root(files: 130_108, scanned: nil)).hasSuffix("tags still being added"))
+        #expect(LocationText.summary(root(files: 130_108, scanned: nil)).hasSuffix("tags not finished"))
     }
 }
 
