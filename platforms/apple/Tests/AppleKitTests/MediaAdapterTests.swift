@@ -150,7 +150,7 @@ struct MediaAdapterTests {
         let info: [String: Any] = ["CFBundleIdentifier": "com.example.speech", "NSSpeechRecognitionUsageDescription": "Transcribes."]
         try (info as NSDictionary).write(to: app.appendingPathComponent("Contents/Info.plist"))
         let bundle = try #require(Bundle(url: app))
-        let root = bundle.bundleURL.standardizedFileURL.path
+        let root = bundle.bundleURL.resolvingSymlinksInPath().path
         #expect(MediaSpeech.canAsk(bundle: bundle, parentExecutable: root + "/Contents/MacOS/FileID"))
         #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: "/usr/bin/python3"))
         #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: nil))

@@ -28,8 +28,8 @@ enum MediaSpeech {
     static func canAsk(bundle: Bundle = .main, parentExecutable: String? = parentExecutablePath()) -> Bool {
         guard (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false,
               let parentExecutable else { return false }
-        let root = bundle.bundleURL.standardizedFileURL.path
-        return root.hasSuffix(".app") && parentExecutable.hasPrefix(root + "/")
+        let root = bundle.bundleURL.resolvingSymlinksInPath().path
+        return root.hasSuffix(".app") && URL(fileURLWithPath: parentExecutable).resolvingSymlinksInPath().path.hasPrefix(root + "/")
     }
 
     static func parentExecutablePath() -> String? {

@@ -9,7 +9,7 @@ use sha2::Digest;
 
 use crate::scan_session::{prefix_upper_bound, root_descendant_prefix};
 
-const VERSION: &str = "v2";
+const VERSION: &str = "v3";
 const READ_CHUNK: usize = 200;
 
 pub(crate) fn marker(state_dir: &Path, root: &Path) -> PathBuf {
@@ -261,6 +261,27 @@ mod tests {
         assert_eq!(run_chunked(&database, &state, &root, &|| false, &progress, 2), 2);
         assert_eq!(advanced.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert!(marker(&state, &root).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn a_folder_checked_by_an_older_backfill_version_is_checked_again() {
+        let scratch = std::env::temp_dir().join(format!("fileid-capture-dates-{}", uuid::Uuid::new_v4()));
+        let (root, state) = (scratch.join("Library"), scratch.join("state"));
+        std::fs::create_dir_all(&root).unwrap();
+        let clip = root.join("clip.mp4");
+        std::fs::write(&clip, crate::util::video_creation_date::tests::synthetic_mp4(1_791_128_655)).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(1,?1,1,1,0,'video','mp4',1700000000)",
+            params![clip.to_str().unwrap()],
+        )
+        .unwrap();
+        let database = Mutex::new(conn);
+        let old = state.join("capture-dates-v2").join(marker(&state, &root).file_name().unwrap());
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"").unwrap();
+        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 1);
         std::fs::remove_dir_all(scratch).unwrap();
     }
 
