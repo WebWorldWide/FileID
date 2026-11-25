@@ -338,11 +338,12 @@ pub(crate) mod self_worker {
         Ok(current)
     }
 
-    /// Whether a test can start a worker: `cargo test --lib` builds no engine binary, so the worker exists only after a
-    /// separate build or with `FILEID_TEST_ENGINE_PATH` set.
+    /// Whether a test can start a worker. `cargo test` also builds a plain `FileIDEngine` beside the test binary, one
+    /// without the Apple adapters that does not know the worker flags, so only a binary named by
+    /// `FILEID_TEST_ENGINE_PATH` counts.
     #[cfg(all(test, target_os = "macos", feature = "apple-adapters"))]
     pub(crate) fn test_worker_present() -> bool {
-        executable().is_ok_and(|path| path.is_file())
+        std::env::var_os("FILEID_TEST_ENGINE_PATH").is_some_and(|path| std::path::Path::new(&path).is_file())
     }
 
     /// Runs `worker` to completion. Stdout (at most `limit` bytes) is returned
