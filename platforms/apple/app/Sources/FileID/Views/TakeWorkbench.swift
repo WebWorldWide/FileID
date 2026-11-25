@@ -165,7 +165,7 @@ struct TakeWorkbench: View {
                             .disabled(autoLoading)
                     }
                     .padding(.leading, Theme.Metrics.railInset).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
-                    MetaText("Photo bursts and repeated video takes from your scans. Biggest and newest first.", size: 11.5)
+                    MetaText(TakeProposals.possibleGroupsOrder, size: 11.5)
                         .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
                         .fixedSize(horizontal: false, vertical: true)
                     if autoLoaded && autoGroups.isEmpty {
@@ -176,6 +176,11 @@ struct TakeWorkbench: View {
                     ForEach(autoGroups) { group in
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
                             .id(group.groupKey)
+                    }
+                    if let note = TakeProposals.listLimitNote(shown: autoGroups.count) {
+                        MetaText(note, size: 11.5)
+                            .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
@@ -524,7 +529,7 @@ struct TakeWorkbench: View {
         autoLoading = true
         let position = resolved.flatMap { key in autoGroups.firstIndex { $0.groupKey == key } }
         Task {
-            let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups", limit: 100), timeout: 60)
+            let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups", limit: TakeProposals.listLimit), timeout: 60)
             autoLoading = false
             autoLoaded = true
             guard let response, response.status == "ok" else { return }

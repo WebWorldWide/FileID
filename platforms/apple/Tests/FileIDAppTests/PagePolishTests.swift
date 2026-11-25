@@ -52,3 +52,16 @@ struct PagePolishTests {
         #expect(source[shimmer.upperBound...].contains(".clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))"))
     }
 }
+
+@Suite struct TakeListLimitTests {
+    @Test func aFullListSaysItMayHideMoreAndAShortOneStaysQuiet() {
+        #expect(TakeProposals.listLimitNote(shown: 100)?.contains("first 100") == true)
+        #expect(TakeProposals.listLimitNote(shown: 99) == nil)
+        #expect(TakeProposals.listLimit == 100)
+    }
+
+    @Test func theOrderTextMatchesTheBlendedRanking() {
+        #expect(!TakeProposals.possibleGroupsOrder.contains("Biggest and newest"))
+        #expect(TakeProposals.possibleGroupsOrder.contains("Bigger groups and more recent"))
+    }
+}
