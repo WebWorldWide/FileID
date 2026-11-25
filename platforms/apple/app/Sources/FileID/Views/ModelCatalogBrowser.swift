@@ -62,7 +62,7 @@ struct ModelCatalogBrowser: View {
             .toggleStyle(DSCheckboxToggleStyle())
             .font(Theme.Font.body(12))
             ScrollViewReader { proxy in
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
                 ForEach(filtered, id: \.rawValue) { kind in
                     Button { selection = kind.rawValue } label: {

@@ -29,6 +29,7 @@ struct ChatWorkbench: View {
     /// Empty means "follow the Describe Files model"; set only when the user picks one in Chat.
     @AppStorage("chatModelKind") private var chatModelKind = ""
     @State private var modelsPresented = false
+    @State private var pageHeaderHeight: CGFloat = 0
     @State private var confirmClear = false
     @State private var messages: [ChatMessage] = []
     @State private var hits: [CatalogHit] = []
@@ -122,7 +123,7 @@ struct ChatWorkbench: View {
             header
             Hairline()
             ScrollViewReader { scroll in
-                ScrollView {
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if messages.isEmpty {
                             if readiness.hasFiles { emptyState } else { needsScanState }
@@ -200,8 +201,14 @@ struct ChatWorkbench: View {
                     .keyboardShortcut(.cancelAction)
             }
         }
-        .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, isPage ? 0 : 10)
+        .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, isPage ? 8 : 10)
         .frame(minHeight: isPage ? Theme.Metrics.paneHeaderHeight : nil)
+        .background {
+            if isPage {
+                GeometryReader { proxy in Color.clear.preference(key: ChatPaneHeaderHeightKey.self, value: proxy.size.height) }
+            }
+        }
+        .onPreferenceChange(ChatPaneHeaderHeightKey.self) { pageHeaderHeight = $0 }
     }
 
     private func putBackLastTrash() {
@@ -379,17 +386,13 @@ struct ChatWorkbench: View {
 
     private var sourcesPane: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    SectionLabel("Sources")
-                    Spacer()
-                    MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
-                }
-                // Same height as the chip row beside it, so both section labels sit on one line.
-                TagChip(text: "Names").hidden()
+            HStack {
+                SectionLabel("Sources")
+                Spacer()
+                MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
             }
-            .padding(.horizontal, 14)
-            .frame(height: Theme.Metrics.paneHeaderHeight)
+            .padding(.horizontal, 14).padding(.top, 8)
+            .frame(height: max(Theme.Metrics.paneHeaderHeight, pageHeaderHeight), alignment: .top)
             Hairline()
             if let player {
                 NativeVideoPlayer(player: player)
@@ -400,7 +403,7 @@ struct ChatWorkbench: View {
                     .accessibilityLabel("Source player")
                 Hairline()
             }
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
                         SourceRow(index: index + 1, hit: hit, selected: openedSource == index) { open(hit, index: index) }
@@ -440,7 +443,7 @@ struct ChatWorkbench: View {
                         .padding(.horizontal, 12).padding(.bottom, 8)
                         .accessibilityLabel("Source player")
                 }
-                ScrollView {
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
                             SourceRow(index: index + 1, hit: hit, selected: openedSource == index) { open(hit, index: index) }
@@ -606,4 +609,10 @@ private struct SourceRow: View {
         .accessibilityLabel("Source \(index): \(name)\(meta.isEmpty ? "" : ", " + meta)")
         .accessibilityHint("Opens the file. \(hit.text)")
     }
+}
+
+/// The conversation header grows when the "Looking in" chips wrap; the Sources header beside it follows so the two hairlines stay level.
+private struct ChatPaneHeaderHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }

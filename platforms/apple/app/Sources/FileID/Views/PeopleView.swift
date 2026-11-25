@@ -638,7 +638,7 @@ struct PeopleView: View {
         } else if persons.isEmpty {
             noClustersYet
         } else {
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 14)], spacing: 14) {
                     ForEach(persons) { person in
                         let inMode = mergeMode || unknownMode
@@ -1165,7 +1165,7 @@ private struct PersonDetailSheet: View {
                     .foregroundStyle(Theme.text3)
                     .padding(.horizontal, 16).padding(.vertical, 4)
             }
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 8)], spacing: 8) {
                     ForEach(files) { f in
                         Button {
@@ -1527,7 +1527,7 @@ private struct MovePhotosTargetPicker: View {
             }
             .padding(16)
             Hairline()
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)],
                           spacing: 12) {
                     ForEach(candidates) { p in
@@ -1676,7 +1676,7 @@ private struct SuggestedMergesSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(40)
             } else {
-                ScrollView {
+                ScrollView(.vertical) {
                     // LazyVStack: a few hundred candidates in a plain
                     // VStack overflows SwiftUI's AttributeGraph.
                     LazyVStack(spacing: 10) {
@@ -1811,7 +1811,7 @@ private struct MergeTargetPickerSheet: View {
                 .foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
             Hairline(color: Theme.hairlineSoft)
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(spacing: 8) {
                     ForEach(sortedCandidates) { person in
                         Button { pendingTarget = person } label: {

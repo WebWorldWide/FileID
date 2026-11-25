@@ -1542,6 +1542,7 @@ struct FilePreviewSheet: View {
                     }
                     Label("This file is offline", systemImage: "externaldrive.badge.xmark").font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text2)
                     MetaText("Reconnect the drive to see the full preview. Its tags, faces and descriptions are kept.")
+                        .multilineTextAlignment(.center).padding(.horizontal, 28)
                 }
             } else {
             switch file.kind {

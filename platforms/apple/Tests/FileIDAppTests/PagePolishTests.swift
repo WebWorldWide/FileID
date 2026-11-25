@@ -80,8 +80,7 @@ struct PagePolishTests {
         #expect(design[header.lowerBound...].prefix(900).contains("ViewThatFits(in: .horizontal)"))
         let tools = try appSource("Views/ToolsWorkbench.swift")
         let row = try #require(tools.range(of: "private func optionRow"))
-        #expect(tools[row.lowerBound...].prefix(900).contains("ViewThatFits(in: .horizontal)"))
-        #expect(tools[row.lowerBound...].prefix(900).contains("VStack(alignment: .leading, spacing: 4)"))
+        #expect(tools[row.lowerBound...].prefix(1200).contains("OptionRowLayout("))
     }
 
     @Test func bestTakesActionsAndPaneHeadersDoNotTruncate() throws {

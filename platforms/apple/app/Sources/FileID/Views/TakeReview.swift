@@ -46,7 +46,7 @@ struct TakeReview: View {
     private var victims: [CatalogTakeQuality] { qualities.filter { !keep.contains($0.primaryFileID) } }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 if loading {

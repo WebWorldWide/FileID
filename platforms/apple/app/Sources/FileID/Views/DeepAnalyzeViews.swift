@@ -385,7 +385,7 @@ struct DeepAnalyzeView: View {
     }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 if !hideExplainer {
@@ -873,7 +873,7 @@ struct DeepAnalyzeView: View {
                     }
                     GridRow {
                         Text("AI model").foregroundStyle(Theme.text3)
-                        HStack(spacing: 8) {
+                        FlowLayout(spacing: 8) {
                             Text(settings.activeKind.displayName).font(Theme.Font.body(13, .medium))
                             MetaText(modelInstalled ? "Downloaded" : "Not downloaded yet · about \(DescriptionModelStore.downloadSizeText(settings.activeKind))",
                                      color: modelInstalled ? Theme.delight : Theme.text2, size: 11.5)
@@ -1165,6 +1165,7 @@ struct DeepAnalyzeButton: View {
     @State private var settings = DeepAnalyzeSettings.shared
     @State private var confirmDownload = false
     @State private var blocked: String?
+    @Environment(\.isEnabled) private var enabled
 
     private func describe() {
         guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
@@ -1191,9 +1192,9 @@ struct DeepAnalyzeButton: View {
             .font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
-                fits ? Theme.gold.opacity(alreadyDone ? 0.18 : 0.85) : Color.gray.opacity(0.4)
+                fits && enabled ? Theme.gold.opacity(alreadyDone ? 0.18 : 0.85) : Color.gray.opacity(0.4)
             ))
-            .foregroundStyle(alreadyDone ? Theme.gold : .black)
+            .foregroundStyle(!enabled ? Theme.text3 : alreadyDone ? Theme.gold : .black)
         }
         .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .disabled(engine.deepAnalyzeInFlight || !fits)

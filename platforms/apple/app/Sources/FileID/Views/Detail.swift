@@ -165,7 +165,7 @@ private struct EmptyState: View {
 
     var body: some View {
         GeometryReader { geometry in
-            ScrollView {
+            ScrollView(.vertical) {
                 content
                     .frame(maxWidth: 720, alignment: .leading)
                     .padding(.horizontal, Theme.Metrics.pageInsetX)

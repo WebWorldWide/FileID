@@ -167,7 +167,6 @@ struct CleanupView: View {
         let controls = Group {
             SegmentedBar(selection: $mode, options: [("exact", "Exact copies"), ("similar", "Look-alikes")])
             .help("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
-            Spacer()
             if let batch = undoBatch, status == nil {
                 Button { Task { await undoTrash(batch) } } label: { Label("Put back last move", systemImage: "arrow.uturn.backward") }
                     .buttonStyle(.dsSecondary)
@@ -224,10 +223,10 @@ struct CleanupView: View {
             }
         }
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 12) { subtitle.fixedSize(); controls }
+            HStack(alignment: .center, spacing: 12) { subtitle.fixedSize(); Spacer(); controls }
             VStack(alignment: .leading, spacing: 8) {
                 subtitle.fixedSize(horizontal: false, vertical: true)
-                HStack(alignment: .center, spacing: 12) { controls }
+                FlowLayout(spacing: 8) { controls }
             }
         }
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
@@ -378,7 +377,7 @@ struct CleanupView: View {
 
     @ViewBuilder
     private func list(visible: [DuplicateGroup]) -> some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 16) {
                 // First-timer explainer above the groups. Inline (not a
                 // tooltip) so the keeper concept is impossible to miss.

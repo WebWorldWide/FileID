@@ -142,7 +142,7 @@ struct TreeDiffView: View {
                 Text(subtitle).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
             .padding(.horizontal, 10).padding(.top, 8)
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(rows) { item in
                         row(item)

@@ -252,7 +252,7 @@ struct ToolsWorkbench: View {
                 .overlay(alignment: .bottom) { Hairline() }
             }
             HStack(spacing: 0) {
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 16) {
                         recipePanel
                         outputPanel
@@ -417,31 +417,28 @@ struct ToolsWorkbench: View {
                     optionRow("Resolution") {
                         SegmentedBar(selection: $session.maxDimension, options: [(1280, "720p"), (1920, "1080p"), (3840, "4K")])
                     }
-                    optionRow("Frame", alignment: .top) {
+                    let framingNote = session.videoFraming == "auto" && session.videoAspectRatio != "source"
+                        ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group can’t fit. Clips up to ten minutes. Review the exported framing."
+                        : "Fits the full picture inside the frame and pads the empty space."
+                    optionRow("Frame", alignment: .top, note: session.videoAspectRatio == "source" ? framingNote : nil) {
                         AspectTiles(selection: $session.videoAspectRatio)
                     }
                     if session.videoAspectRatio != "source" {
-                        optionRow("Framing") {
+                        optionRow("Framing", note: framingNote) {
                             SegmentedBar(selection: $session.videoFraming, options: [("fit", "Fit full picture"), ("auto", "Follow people")])
                         }
                     }
-                    note(session.videoFraming == "auto" && session.videoAspectRatio != "source"
-                         ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group can’t fit. Clips up to ten minutes. Review the exported framing."
-                         : "Fits the full picture inside the frame and pads the empty space.")
-                    optionRow("") {
+                    optionRow("", note: session.videoStabilization
+                              ? "Corrects estimated shake with up to 12% zoom to cover the edges. Clips up to ten minutes and 60 fps. Review the result." : nil) {
                         Toggle("Stabilize shaky video", isOn: $session.videoStabilization).toggleStyle(DSToggleStyle())
                             .font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
                     }
-                    if session.videoStabilization {
-                        note("Corrects estimated shake with up to 12% zoom to cover the edges. Clips up to ten minutes and 60 fps. Review the result.")
-                    }
                 }
                 if session.kind == "photo" || session.exportsVideo {
-                    optionRow("") {
+                    optionRow("", note: "Enlarging adds pixels, not detail.") {
                         Toggle("Enlarge smaller media to this size", isOn: $session.allowUpscale).toggleStyle(DSToggleStyle())
                             .font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
                     }
-                    note("Enlarging adds pixels, not detail.")
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
@@ -466,27 +463,24 @@ struct ToolsWorkbench: View {
         case "trim":
             trimRow("Start", value: $session.media.trimStart)
             trimRow("End", value: $session.media.trimEnd)
-            optionRow("Cut") {
+            optionRow("Cut", note: session.media.trimMode == "exact"
+                      ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren’t supported yet."
+                      : "Copies the video without re-compressing it. The new file may start a little before your start time.") {
                 SegmentedBar(selection: $session.media.trimMode, options: [("keyframe", "Fast cut"), ("exact", "Exact cut")])
                     .help("Fast cut copies the video and starts at the nearest keyframe. Exact cut re-encodes to H.264.")
             }
-            note(session.media.trimMode == "exact"
-                 ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren’t supported yet."
-                 : "Copies the video without re-compressing it. The new file may start a little before your start time.")
         case "remux":
-            note("Saves the same video and sound as the other kind of file (MP4 or MOV) without re-compressing, so quality is unchanged. The kind a file already is is greyed out.")
+            optionRow("", note: "Saves the same video and sound as the other kind of file (MP4 or MOV) without re-compressing, so quality is unchanged. The kind a file already is is greyed out.") { EmptyView() }
         case "audio":
-            note("Saves the soundtrack as an M4A audio file. Videos without sound can’t be used.")
+            optionRow("", note: "Saves the soundtrack as an M4A audio file. Videos without sound can’t be used.") { EmptyView() }
         case "proxy":
-            optionRow("Size") {
+            optionRow("Size", note: "A small MP4 copy for quick previews, linked to its original. Smaller videos aren’t enlarged.") {
                 SegmentedBar(selection: $session.media.proxySide, options: [(640, "640 pixels"), (960, "960 pixels")])
             }
-            note("A small MP4 copy for quick previews, linked to its original. Smaller videos aren’t enlarged.")
         default:
-            optionRow("Turn") {
+            optionRow("Turn", note: "Changes which way up the picture is shown, without re-compressing it.") {
                 SegmentedBar(selection: $session.media.rotation, options: MediaToolChoice.rotations)
             }
-            note("Changes which way up the picture is shown, without re-compressing it.")
         }
     }
 
@@ -521,29 +515,16 @@ struct ToolsWorkbench: View {
         }
     }
 
-    private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, @ViewBuilder content: () -> Content) -> some View {
+    /// A note rides inside its row, so it lines up with the row's controls whether the label sits beside them or above.
+    private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, note: String? = nil, @ViewBuilder content: () -> Content) -> some View {
         let row = HStack(alignment: alignment, spacing: 12) { content() }
-        let title = Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-        return ViewThatFits(in: .horizontal) {
-            HStack(alignment: alignment, spacing: 12) {
-                title
-                    .frame(width: Theme.Font.scaled(92), alignment: .leading)
-                    .padding(.top, alignment == .top ? 6 : 0)
-                    .accessibilityHidden(label.isEmpty)
-                row
-                Spacer(minLength: 0)
+        return OptionRowLayout(labelColumn: Theme.Font.scaled(92), topAligned: alignment == .top, hasLabel: !label.isEmpty) {
+            Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
+                .accessibilityHidden(label.isEmpty)
+            ScrollView(.horizontal, showsIndicators: false) { row }
+            if let note {
+                Text(note).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                if !label.isEmpty { title }
-                ScrollView(.horizontal, showsIndicators: false) { row }
-            }
-        }
-    }
-
-    private func note(_ text: String) -> some View {
-        HStack(spacing: 12) {
-            Color.clear.frame(width: 92, height: 1)
-            Text(text).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -578,7 +559,7 @@ struct ToolsWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             .padding(.top, Theme.Metrics.pageInsetY)
             Hairline()
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     ZStack {
                         Color.black.opacity(0.35)
@@ -858,5 +839,69 @@ private struct ToolOutputRow: View {
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
         .help(output.outputPath)
         .accessibilityElement(children: .combine)
+    }
+}
+
+
+/// Label, controls and an optional note. The label sits beside the controls when both fit and above them otherwise;
+/// the subviews are the label, the controls in a horizontal scroller, and the note.
+struct OptionRowLayout: Layout {
+    var labelColumn: CGFloat
+    var topAligned = false
+    var hasLabel = true
+    var spacing: CGFloat = 12
+    var noteSpacing: CGFloat = 4
+
+    private func isBeside(width: CGFloat, subviews: Subviews) -> Bool {
+        width >= labelColumn + spacing + subviews[1].sizeThatFits(.unspecified).width
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideal = labelColumn + spacing + subviews[1].sizeThatFits(.unspecified).width
+        let width = proposal.width ?? ideal
+        let note = subviews.count > 2 ? subviews[2] : nil
+        if isBeside(width: width, subviews: subviews) {
+            let rowHeight = subviews[1].sizeThatFits(.unspecified).height
+            let titleHeight = subviews[0].sizeThatFits(.unspecified).height + (topAligned ? 6 : 0)
+            let noteHeight = note.map { $0.sizeThatFits(ProposedViewSize(width: width - labelColumn - spacing, height: nil)).height + noteSpacing } ?? 0
+            return CGSize(width: width, height: max(rowHeight, titleHeight) + noteHeight)
+        }
+        var height: CGFloat = 0
+        if hasLabel { height += subviews[0].sizeThatFits(.unspecified).height + noteSpacing }
+        height += subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+        if let note { height += note.sizeThatFits(ProposedViewSize(width: width, height: nil)).height + noteSpacing }
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let note = subviews.count > 2 ? subviews[2] : nil
+        if isBeside(width: bounds.width, subviews: subviews) {
+            let row = subviews[1].sizeThatFits(.unspecified)
+            let title = subviews[0].sizeThatFits(.unspecified)
+            let titleBlock = title.height + (topAligned ? 6 : 0)
+            let top = bounds.minY
+            let rowY = top + (topAligned ? 0 : max(0, (titleBlock - row.height) / 2))
+            let titleY = top + (topAligned ? 6 : max(0, (row.height - title.height) / 2))
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: titleY), proposal: ProposedViewSize(width: labelColumn, height: nil))
+            subviews[1].place(at: CGPoint(x: bounds.minX + labelColumn + spacing, y: rowY), proposal: ProposedViewSize(row))
+            if let note {
+                let x = bounds.minX + labelColumn + spacing
+                note.place(at: CGPoint(x: x, y: top + max(row.height, titleBlock) + noteSpacing),
+                           proposal: ProposedViewSize(width: bounds.width - labelColumn - spacing, height: nil))
+            }
+            return
+        }
+        var y = bounds.minY
+        if hasLabel {
+            let title = subviews[0].sizeThatFits(.unspecified)
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(title))
+            y += title.height + noteSpacing
+        }
+        let scroller = subviews[1].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        subviews[1].place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(width: bounds.width, height: scroller.height))
+        y += scroller.height
+        if let note {
+            note.place(at: CGPoint(x: bounds.minX, y: y + noteSpacing), proposal: ProposedViewSize(width: bounds.width, height: nil))
+        }
     }
 }
