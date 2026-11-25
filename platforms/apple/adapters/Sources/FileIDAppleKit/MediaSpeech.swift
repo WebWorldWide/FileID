@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Speech
+import Darwin
 
 /// On-device Apple Speech for timeline transcripts; the Swift engine's
 /// `TimelineSpeechTranscription` and `SpeechPermission`. Passage grouping and
@@ -21,8 +22,20 @@ enum MediaSpeech {
         case cannotAsk = -1
     }
 
-    static func canAsk(bundle: Bundle = .main) -> Bool {
-        (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false
+    /// TCC attributes the request to the responsible process, which is the app only
+    /// when the app launched the engine; started from a terminal or script, the
+    /// responsible process is that host, has no usage string, and macOS aborts us.
+    static func canAsk(bundle: Bundle = .main, parentExecutable: String? = parentExecutablePath()) -> Bool {
+        guard (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false,
+              let parentExecutable else { return false }
+        let root = bundle.bundleURL.standardizedFileURL.path
+        return root.hasSuffix(".app") && parentExecutable.hasPrefix(root + "/")
+    }
+
+    static func parentExecutablePath() -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(getppid(), &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
     }
 
     /// Asks once when the user has not decided and `ask` is set; the system shows
