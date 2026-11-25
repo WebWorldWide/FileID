@@ -606,20 +606,27 @@ final class ListRowView: NSTableRowView {
         if !keepCurrent { thumbLayer.contents = nil; thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1); kindGlyph.isHidden = true }
         let id = row.id
         thumbTask = Task { @MainActor [weak self] in
-            let image = await ThumbnailService.shared.tileThumbnail(for: row.url, size: 224)
-            guard let self, !Task.isCancelled, self.rowID == id else { return }
-            let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            let isPage = row.kind == "doc" || row.kind == "pdf"
-            let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) } : nil
-            let blank = cgImage == nil || (isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true)
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))
-            self.thumbLayer.contents = blank ? nil : cgImage
-            self.kindGlyph.image = blank ? NSImage(systemSymbolName: FileKind.symbolName(forKind: row.kind), accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 16, weight: .light)) : nil
-            self.kindGlyph.isHidden = !blank
-            CATransaction.commit()
+            func show(_ image: NSImage?) {
+                guard let self, !Task.isCancelled, self.rowID == id else { return }
+                self.showThumbnail(image, for: row)
+            }
+            let image = await ThumbnailService.shared.tileThumbnail(for: row.url, size: 224, onMiss: { show(nil) })
+            show(image)
         }
+    }
+
+    private func showThumbnail(_ image: NSImage?, for row: FileRow) {
+        let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        let isPage = row.kind == "doc" || row.kind == "pdf"
+        let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) } : nil
+        let blank = cgImage == nil || (isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))
+        self.thumbLayer.contents = blank ? nil : cgImage
+        self.kindGlyph.image = blank ? NSImage(systemSymbolName: FileKind.symbolName(forKind: row.kind), accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 16, weight: .light)) : nil
+        self.kindGlyph.isHidden = !blank
+        CATransaction.commit()
     }
 
     override func prepareForReuse() {
