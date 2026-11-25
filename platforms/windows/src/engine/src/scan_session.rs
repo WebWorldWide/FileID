@@ -124,6 +124,24 @@ pub struct ScanSession {
     progress_floor: ProgressFloor,
 }
 
+fn library_root_kind(root: &Path) -> &'static str {
+    let text = root.to_string_lossy();
+    if text.starts_with("\\\\") {
+        return "network";
+    }
+    #[cfg(windows)]
+    match crate::platform::storage_type_for_path(root) {
+        crate::platform::StorageType::Network => return "network",
+        crate::platform::StorageType::Removable => return "external",
+        _ => {}
+    }
+    if external_mount_prefix(&text) { "external" } else { "internal" }
+}
+
+fn external_mount_prefix(text: &str) -> bool {
+    ["/Volumes/", "/media/", "/run/media/"].iter().any(|prefix| text.starts_with(prefix))
+}
+
 /// True when a directory the walk read was modified after `since` or is gone.
 /// Creating, deleting or renaming a file changes its parent directory's mtime on
 /// APFS, NTFS, ext4 and the other volumes FileID supports.
@@ -268,7 +286,7 @@ impl ScanSession {
                 ],
             );
             let root_text = root.to_string_lossy();
-            let kind = if root_text.starts_with("\\\\") { "network" } else if root_text.starts_with("/Volumes/") { "external" } else { "internal" };
+            let kind = library_root_kind(root);
             let _ = conn.execute(
                 "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,COALESCE(?4,?1),?2,?3,'running') \
                  ON CONFLICT(path) DO UPDATE SET last_status='running', display=COALESCE(?4,display)",
@@ -2207,6 +2225,15 @@ fn maybe_emit_progress(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn removable_mount_roots_are_filed_as_external() {
+        assert!(external_mount_prefix("/media/me/USB"));
+        assert!(external_mount_prefix("/run/media/me/USB"));
+        assert!(external_mount_prefix("/Volumes/Photos"));
+        assert!(!external_mount_prefix("/home/me/Pictures"));
+        assert!(!external_mount_prefix("/mnt/c/Users"));
+    }
+
     use super::*;
 
     struct NeverWarm;
