@@ -401,6 +401,7 @@ struct CleanupView: View {
         ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 16) {
                 if isSimilar {
+                    // Similar groups are not byte-identical, so the user must be told to check before trashing.
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(Theme.warning)
