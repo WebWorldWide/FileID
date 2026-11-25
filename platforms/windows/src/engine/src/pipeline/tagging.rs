@@ -652,6 +652,10 @@ fn twin_reuse_enabled() -> bool {
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 /// What a row says when a read timed out: the file is fine, the machine was too busy, and the engine reads it again.
 pub(crate) const TIMED_OUT_MESSAGE: &str = "FileID ran out of time reading this file; it will try again";
+/// What a row says when the scheduler refused the file for lack of time or memory; the row is transient, so the next scan reads it again.
+pub(crate) const BUSY_MESSAGE: &str = "FileID was too busy or low on memory to read this file; it will try again";
+/// What a row says when a decoder rejected the image; the codec's own text goes to the log only.
+pub(crate) const UNDECODABLE_IMAGE_MESSAGE: &str = "FileID couldn't read this image; the file may be damaged or in a format it doesn't support";
 /// The wording earlier builds stored for the same failure; catalogs written by them still hold it.
 const LEGACY_TIMEOUT_MESSAGES: [&str; 2] = ["per-file timeout after 60s", "Vision pass timed out"];
 /// Stored `error_message` of a row that failed only because the machine was too busy, so a retry may succeed.
@@ -702,6 +706,18 @@ fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
         .map(|(rgb, _, _)| (rgb.len() as u64).saturating_mul(4).div_ceil(1_048_576))
         .unwrap_or(0)
         + 32
+}
+
+/// A USB or network volume gets 4 readers: on the owner's USB exFAT SSD, 1/2/4/10 threads read 101/136/151/135 files/s, so more than 4 only adds contention (and thrashes a spinning disk).
+fn decoder_count_for_storage(count: usize, storage: Option<crate::platform::StorageType>) -> usize {
+    match storage {
+        Some(
+            crate::platform::StorageType::Hdd
+            | crate::platform::StorageType::Removable
+            | crate::platform::StorageType::Network,
+        ) => count.min(4),
+        _ => count,
+    }
 }
 
 impl Tagger {
@@ -822,25 +838,17 @@ impl Tagger {
             _ => decoder_count,
         };
         // Seek-penalty media (USB HDD, network share): a 12-deep read pool thrashes and runs slower; 4 keeps the drive busy while threads overlap CPU decode (discovery's stat walk uses 2).
-        let decoder_count = match self
-            .scan_root
-            .as_deref()
-            .map(crate::platform::storage_type_for_path)
-        {
-            Some(
-                st @ (crate::platform::StorageType::Hdd
-                | crate::platform::StorageType::Removable
-                | crate::platform::StorageType::Network),
-            ) => {
-                let clamped = decoder_count.min(4);
+        let decoder_count = {
+            let storage = self.scan_root.as_deref().map(crate::platform::storage_type_for_path);
+            let clamped = decoder_count_for_storage(decoder_count, storage);
+            if clamped != decoder_count {
                 tracing::info!(
-                    storage = st.as_str(),
+                    storage = storage.map_or("unknown", crate::platform::StorageType::as_str),
                     decoders = clamped,
                     "decode pool clamped for seek-penalty storage"
                 );
-                clamped
             }
-            _ => decoder_count,
+            clamped
         };
         // Slot bound only (floor = one frame per worker). The real memory bound is the byte-weighted budget below: MAX_DECODED_PIXELS admits ~150 MB frames, far above TYPICAL_FRAME_MB per slot.
         const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
@@ -958,7 +966,10 @@ impl Tagger {
                     let (_lease, refused) = match admission {
                         Ok(lease) => (Some(lease), None),
                         Err(_) if coord.is_cancelled() => break,
-                        Err(error) => (None, Some(error.to_string())),
+                        Err(error) => {
+                            tracing::warn!(%error, "scan admission refused a file");
+                            (None, Some(BUSY_MESSAGE.to_string()))
+                        }
                     };
                     // Bounds async inference after decoding (platform decoders enforce their own limits). A panic on one file becomes that file's failure so the worker keeps draining.
                     let transient = refused.is_some();
@@ -1631,6 +1642,48 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
     Err(last_err.unwrap_or_else(|| std::io::Error::other("open failed")))
 }
 
+/// Largest file `read_image_bytes` will buffer; RAW and TIFF files above it are refused as an ordinary per-file error.
+const MAX_IMAGE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Reads an image file into memory. A mapped file raises SIGBUS (killing the engine) when the drive is pulled or the file is truncated mid-decode; a read turns the same event into an `Err` for that one file.
+pub(crate) fn read_image_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let file = open_image_file(path)?;
+    read_capped(file, MAX_IMAGE_FILE_BYTES)
+}
+
+/// First bytes of an image file, enough for a JPEG's headers (APP segments are 64 KB each); reading the whole file only to size a reservation would double the I/O of every large image.
+fn read_image_head(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    const HEAD_BYTES: u64 = 4 * 1024 * 1024;
+    let file = open_image_file(path)?;
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, HEAD_BYTES), &mut buf)?;
+    Ok(buf)
+}
+
+fn read_capped(mut file: impl std::io::Read + Len, cap: u64) -> std::io::Result<Vec<u8>> {
+    let len = file.len()?;
+    if len > cap {
+        return Err(std::io::Error::other(format!("image file is {len} bytes, over the {cap}-byte read cap")));
+    }
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len as usize).map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, cap + 1), &mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(std::io::Error::other("image file grew past the read cap while reading"));
+    }
+    Ok(buf)
+}
+
+trait Len {
+    fn len(&self) -> std::io::Result<u64>;
+}
+
+impl Len for std::fs::File {
+    fn len(&self) -> std::io::Result<u64> {
+        self.metadata().map(|m| m.len())
+    }
+}
+
 /// Decodes an image to RGB8 on the calling thread, rejecting images over `MAX_DECODED_PIXELS` before commit; `catch_unwind` turns a panicking codec into Err.
 /// On Windows it falls back to the WinRT BitmapDecoder (HEIF, camera RAW, system codecs) when image-rs fails; a missing codec only marks that file undecodable.
 pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
@@ -1693,13 +1746,12 @@ pub(crate) fn decode_raw_preview_at_least(
     scale_floor: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mmap;
+        let owned;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
             pre_read
         } else {
-            let file = open_image_file(path).ok()?;
-            mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
-            &mmap
+            owned = read_image_bytes(path).ok()?;
+            &owned
         };
         let jpeg = super::raw_preview::largest_embedded_jpeg(bytes)?;
         let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg)
@@ -1770,10 +1822,8 @@ fn scaled_jpeg_reservation_for(path: &std::path::Path, bytes: Option<&[u8]>) -> 
     if !jpeg_scaled_decode_enabled() {
         return None;
     }
-    let file = open_image_file(path).ok()?;
-    // SAFETY: read-only map of a file opened for reading, dropped before returning.
-    let map = unsafe { memmap2::Mmap::map(&file).ok()? };
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&map))).ok().flatten()
+    let bytes = read_image_head(path).ok()?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&bytes))).ok().flatten()
 }
 
 fn jpeg_scaled_decode_enabled() -> bool {
@@ -1901,17 +1951,12 @@ fn decode_image_sync_imagecrate(
 ) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
-        let mmap;
+        let owned;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
             pre_read
         } else {
-            let file = open_image_file(path)
-                .map_err(|e| anyhow::anyhow!("open: {e}"))?;
-            mmap = unsafe {
-                memmap2::Mmap::map(&file)
-                    .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
-            };
-            &mmap
+            owned = read_image_bytes(path).map_err(|e| anyhow::anyhow!("read: {e}"))?;
+            &owned
         };
 
         let peek = image::ImageReader::new(Cursor::new(bytes))
@@ -2101,7 +2146,7 @@ async fn process_file_predecoded(
         Some(Err(err)) => {
             tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
             tagged.failed = true;
-            tagged.error_message = Some(format!("image decode: {err:#}"));
+            tagged.error_message = Some(UNDECODABLE_IMAGE_MESSAGE.to_string());
             None
         }
         None => None,
@@ -3149,6 +3194,56 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_failure_messages_never_carry_scheduler_or_codec_wording() {
+        let production = include_str!("tagging.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(!production.contains("Some(error.to_string())"), "a scheduler refusal is stored verbatim");
+        assert!(!production.contains("format!(\"image decode: {err"), "a codec error is stored verbatim");
+        for message in [BUSY_MESSAGE, UNDECODABLE_IMAGE_MESSAGE] {
+            assert!(!message.contains("Resource") && !message.contains("decode:"));
+        }
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("tagging.rs").split("#[cfg(test)]\nmod tests").next().unwrap()
+    }
+
+    #[test]
+    fn image_files_are_read_into_memory_never_mapped() {
+        for (name, source) in [
+            ("tagging.rs", include_str!("tagging.rs")),
+            ("shell/mod.rs", include_str!("../shell/mod.rs")),
+        ] {
+            let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+            assert!(!production.contains("Mmap::map"), "{name} maps a file; a pulled drive would SIGBUS the engine");
+        }
+    }
+
+    #[test]
+    fn reading_an_image_refuses_a_file_over_the_cap_and_a_missing_file_as_plain_errors() {
+        let dir = std::env::temp_dir().join(format!("fileid-read-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.tif");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        assert_eq!(read_capped(std::fs::File::open(&path).unwrap(), 8192).unwrap().len(), 4096);
+        assert!(read_capped(std::fs::File::open(&path).unwrap(), 1024).is_err());
+        assert!(read_image_bytes(&dir.join("gone.jpg")).is_err());
+        assert!(decode_image_sync(&dir.join("gone.jpg"), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_usb_or_network_volume_narrows_the_decode_pool_to_four() {
+        use crate::platform::StorageType::{Hdd, Network, Nvme, Removable, Unknown};
+        assert_eq!(decoder_count_for_storage(10, Some(Removable)), 4);
+        assert_eq!(decoder_count_for_storage(10, Some(Network)), 4);
+        assert_eq!(decoder_count_for_storage(10, Some(Hdd)), 4);
+        assert_eq!(decoder_count_for_storage(2, Some(Removable)), 2);
+        assert_eq!(decoder_count_for_storage(10, Some(Nvme)), 10);
+        assert_eq!(decoder_count_for_storage(10, Some(Unknown)), 10);
+        assert_eq!(decoder_count_for_storage(10, None), 10);
+    }
+
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -4059,6 +4154,11 @@ mod tests {
         assert_eq!(scaled_jpeg_reservation_for(&path, None), Some(reserved));
         assert_eq!(scaled_jpeg_reservation_for(&path, Some(&big)), Some(reserved));
         std::fs::write(dir.join("not.jpg"), b"not a jpeg at all").unwrap();
+        let mut padded = big.clone();
+        padded.resize(40 * 1024 * 1024, 0);
+        std::fs::write(dir.join("padded.jpg"), &padded).unwrap();
+        assert_eq!(scaled_jpeg_reservation_for(&dir.join("padded.jpg"), None), Some(reserved), "only the head of a large file is needed");
+        assert!(production_source().contains("read_image_head(path).ok()?"), "the reservation must not read the whole file");
         assert_eq!(scaled_jpeg_reservation_for(&dir.join("not.jpg"), None), None);
         assert_eq!(scaled_jpeg_reservation_for(&dir.join("missing.jpg"), None), None);
         let _ = std::fs::remove_dir_all(&dir);

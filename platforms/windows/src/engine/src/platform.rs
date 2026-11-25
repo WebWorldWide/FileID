@@ -626,8 +626,56 @@ pub fn storage_type_for_path(path: &Path) -> StorageType {
     result
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn storage_type_for_path(_path: &Path) -> StorageType {
+    StorageType::Unknown
+}
+
+/// macOS: classified from the mount, not the device, so an external APFS or HFS+ drive stays `Unknown`. Only network mounts and the FAT-family and NTFS volumes mounted under /Volumes (USB sticks and external drives) are narrowed.
+#[cfg(target_os = "macos")]
+pub fn storage_type_for_path(path: &Path) -> StorageType {
+    match mount_info(path) {
+        Some((fstype, mount_on, is_local)) => classify_mount(&fstype, &mount_on, is_local),
+        None => StorageType::Unknown,
+    }
+}
+
+/// Filesystem type, mount point and locality of the volume holding `path` (a missing leaf is resolved to its nearest existing parent).
+#[cfg(target_os = "macos")]
+pub(crate) fn mount_info(path: &Path) -> Option<(String, String, bool)> {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut probe = path;
+    let existing = loop {
+        if probe.exists() {
+            break probe;
+        }
+        probe = probe.parent()?;
+    };
+    let c_path = CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut fs) } != 0 {
+        return None;
+    }
+    let fstype = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) }.to_string_lossy().into_owned();
+    let mount_on = unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) }.to_string_lossy().into_owned();
+    Some((fstype, mount_on, fs.f_flags & MNT_LOCAL != 0))
+}
+
+#[cfg(target_os = "macos")]
+const MNT_LOCAL: u32 = 0x0000_1000;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn classify_mount(fstype: &str, mount_on: &str, is_local: bool) -> StorageType {
+    let fstype = fstype.to_ascii_lowercase();
+    if !is_local || matches!(fstype.as_str(), "smbfs" | "nfs" | "afpfs" | "webdav" | "cifs" | "ftp") {
+        return StorageType::Network;
+    }
+    let external = mount_on.starts_with("/Volumes/") && mount_on != "/Volumes/";
+    if external && matches!(fstype.as_str(), "exfat" | "msdos" | "ntfs" | "fuse-t" | "macfuse") {
+        return StorageType::Removable;
+    }
     StorageType::Unknown
 }
 
@@ -1449,6 +1497,24 @@ mod adaptive_tests {
         ] {
             assert!(!s.as_str().is_empty());
         }
+    }
+
+    #[test]
+    fn classify_mount_narrows_network_and_external_fat_family_volumes_only() {
+        assert_eq!(classify_mount("exfat", "/Volumes/Adlon", true), StorageType::Removable);
+        assert_eq!(classify_mount("msdos", "/Volumes/STICK", true), StorageType::Removable);
+        assert_eq!(classify_mount("smbfs", "/Volumes/share", false), StorageType::Network);
+        assert_eq!(classify_mount("nfs", "/Users/x/Adlon Server", false), StorageType::Network);
+        assert_eq!(classify_mount("apfs", "/System/Volumes/Data", true), StorageType::Unknown);
+        assert_eq!(classify_mount("apfs", "/Volumes/External", true), StorageType::Unknown);
+        assert_eq!(classify_mount("exfat", "/", true), StorageType::Unknown);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_boot_volume_is_not_narrowed() {
+        assert_eq!(storage_type_for_path(&std::env::temp_dir()), StorageType::Unknown);
+        assert_eq!(storage_type_for_path(Path::new("/nonexistent-volume-xyz")), StorageType::Unknown);
     }
 
     #[test]

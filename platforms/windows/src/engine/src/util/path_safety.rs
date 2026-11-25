@@ -22,6 +22,30 @@ pub(crate) fn unsafe_filename_reason() -> &'static str {
     }
 }
 
+/// True when the volume holding `dir` is exFAT, FAT, NTFS or an SMB share, which cannot store the names `is_safe_posix_filename` allows. Only macOS reports the volume type; elsewhere the answer is false.
+pub(crate) fn volume_has_windows_name_rules(dir: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::mount_info(dir)
+            .is_some_and(|(fstype, _, _)| matches!(fstype.as_str(), "exfat" | "msdos" | "ntfs" | "smbfs"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// Names exFAT, FAT, NTFS and SMB refuse: the characters `: * ? " < > |` and a trailing space or dot.
+pub(crate) fn is_storable_on_windows_volume(name: &str) -> bool {
+    !name.contains([':', '*', '?', '"', '<', '>', '|']) && !name.ends_with([' ', '.'])
+}
+
+/// What to tell the user when `is_storable_on_windows_volume` refuses a name.
+pub(crate) fn windows_volume_name_reason() -> &'static str {
+    "This disk can’t store names with : * ? \" < > | or ending in a space or a dot. Choose a different name."
+}
+
 /// A single component with no separator of either kind and no control character (NUL included).
 fn is_safe_posix_filename(name: &str) -> bool {
     !name.is_empty()
@@ -213,6 +237,12 @@ pub(crate) fn normalize_for_exclusion(p: &Path) -> String {
     }
 }
 
+/// `normalize_for_exclusion` folded for matching a walked folder against a saved exclusion. macOS volumes (APFS, exFAT, HFS+) are case-insensitive, so a folder renamed `private` to `Private` in Finder must still match the exclusion saved earlier; the fold is kept out of `normalize_for_exclusion` itself because other callers use it as an identity key.
+pub(crate) fn normalize_for_exclusion_match(p: &Path) -> String {
+    let normalized = normalize_for_exclusion(p);
+    if cfg!(target_os = "macos") { normalized.to_lowercase() } else { normalized }
+}
+
 /// A user exclusion validated against a scan root. `original` keeps the
 /// caller's casing (verbatim-stripped, separators unified, trailing
 /// separators trimmed) for BINARY-collating `path_text` range scans;
@@ -228,7 +258,7 @@ pub(crate) fn resolve_exclusion_unrooted(p: &Path) -> Option<ResolvedExclusion> 
     if !p.is_absolute() {
         return None;
     }
-    let normalized = normalize_for_exclusion(p);
+    let normalized = normalize_for_exclusion_match(p);
     let stripped = strip_extended_length(p);
     let s = stripped.as_os_str().to_string_lossy();
     let original = if cfg!(windows) {
@@ -244,7 +274,7 @@ pub(crate) fn resolve_exclusion_unrooted(p: &Path) -> Option<ResolvedExclusion> 
 /// relative paths, paths not strictly under the root, duplicates, and the
 /// root itself (excluding the root would exclude everything — warn instead).
 pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExclusion> {
-    let norm_root = normalize_for_exclusion(root);
+    let norm_root = normalize_for_exclusion_match(root);
     let sep = if cfg!(windows) { '\\' } else { '/' };
     let mut child_prefix = norm_root.clone();
     if !child_prefix.ends_with(sep) {
@@ -261,6 +291,7 @@ pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExc
             continue;
         }
         if !res.normalized.starts_with(&child_prefix) {
+            tracing::warn!("exclusion outside the scan root ignored");
             continue;
         }
         if seen.insert(res.normalized.clone()) {
@@ -508,6 +539,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn a_folder_renamed_by_case_only_still_matches_its_saved_exclusion_on_macos() {
+        let saved = resolve_exclusions(Path::new("/Volumes/X"), &["/Volumes/X/private".to_string()]);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(normalize_for_exclusion_match(Path::new("/Volumes/X/Private")), saved[0].normalized);
+        let typed = resolve_exclusions(Path::new("/Volumes/x"), &["/Volumes/X/Private/".to_string()]);
+        assert_eq!(typed.len(), 1, "an exclusion typed in another case than the root is kept");
+        assert_eq!(normalize_for_exclusion(Path::new("/Volumes/X/Private")), "/Volumes/X/Private", "the identity key stays case-preserving");
+    }
+
+    #[test]
+    fn names_a_windows_volume_cannot_store_are_recognised() {
+        for bad in ["Meeting 10:30.jpg", "a|b.jpg", "what?.jpg", "x.", "trailing ", "q\"uote.jpg"] {
+            assert!(!is_storable_on_windows_volume(bad), "{bad}");
+        }
+        assert!(is_storable_on_windows_volume("Meeting 10-30.jpg"));
+        assert!(!windows_volume_name_reason().contains("os error"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_boot_volume_keeps_posix_name_rules() {
+        assert!(!volume_has_windows_name_rules(&std::env::temp_dir()));
+    }
+
+    #[test]
     fn resolve_exclusions_containment() {
         let (root, inside, inside_dup, outside) = if cfg!(windows) {
             (r"C:\Pics", r"C:\Pics\Raw\", r"c:\pics\RAW", r"D:\Other")
@@ -522,8 +579,8 @@ mod tests {
             "relative/x".to_string(), // relative → dropped
         ];
         let resolved = resolve_exclusions(Path::new(root), &raw);
-        // On Unix the "dup" differs by case and is a genuinely distinct dir.
-        let expected = if cfg!(windows) { 1 } else { 2 };
+        // On Linux the "dup" differs by case and is a genuinely distinct dir.
+        let expected = if cfg!(any(windows, target_os = "macos")) { 1 } else { 2 };
         assert_eq!(resolved.len(), expected);
         assert_eq!(
             resolved[0].original,

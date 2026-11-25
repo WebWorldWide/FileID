@@ -1017,25 +1017,19 @@ async fn rasterize_pdf_page(_path: &std::path::Path) -> anyhow::Result<std::path
     )
 }
 
-/// Deterministically prefixes the named people onto the VLM proposed filename so they ALWAYS land (the model treats the prompt hint as optional). Each person's first-name token (lowercase ASCII-alphanumeric, ≥2 chars, deduped against the name and each other, capped at 3 sorted alphabetically) is prefixed, then the whole name is re-sanitized. Byte-faithful with the Swift engine's `applyPersonPrefix`.
+/// Deterministically prefixes the named people onto the VLM proposed filename so they ALWAYS land (the model treats the prompt hint as optional). Each person's first-name token (lowercase ASCII-alphanumeric after folding Latin-1 and Latin Extended-A accents, ≥2 chars, deduped against the name and each other, capped at 3 sorted alphabetically) is prefixed, then the whole name is re-sanitized. Byte-faithful with the Swift `applyPersonPrefix`.
 pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String {
     if name.is_empty() {
         return name.to_string();
     }
-    let existing: std::collections::HashSet<String> = name
-        .to_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_string())
+    let existing: std::collections::HashSet<String> = fold_prefix_text(&name.to_lowercase(), true)
+        .split_whitespace()
+        .map(str::to_string)
         .collect();
     let mut tokens: Vec<String> = Vec::new();
     for display in person_names {
         let first_word = display.split_whitespace().next().unwrap_or("");
-        let token: String = first_word
-            .to_lowercase()
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
+        let token = fold_prefix_text(&first_word.to_lowercase(), false);
         if token.chars().count() < 2 || existing.contains(&token) || tokens.contains(&token) {
             continue;
         }
@@ -1047,6 +1041,50 @@ pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String
     tokens.sort();
     tokens.truncate(3);
     sanitize_proposed_name(&format!("{} {}", tokens.join(" "), name))
+}
+
+fn fold_prefix_text(lowered: &str, other_is_separator: bool) -> String {
+    let mut out = String::with_capacity(lowered.len());
+    for c in lowered.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if let Some(folded) = fold_latin_letter(c) {
+            out.push_str(folded);
+        } else if ('\u{300}'..='\u{36f}').contains(&c) {
+        } else if other_is_separator {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+fn fold_latin_letter(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'ð' | 'ď' | 'đ' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+        'ĥ' | 'ħ' => "h",
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+        'ĵ' => "j",
+        'ķ' => "k",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'ś' | 'ŝ' | 'ş' | 'š' => "s",
+        'ţ' | 'ť' | 'ŧ' => "t",
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ŵ' => "w",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        'æ' => "ae",
+        'œ' => "oe",
+        'ß' => "ss",
+        'þ' => "th",
+        _ => return None,
+    })
 }
 
 pub(crate) fn sanitize_proposed_name(raw: &str) -> String {
@@ -1134,6 +1172,17 @@ pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
 mod tests {
     use super::sanitize_proposed_name;
     use super::*;
+
+    #[test]
+    fn a_person_name_with_accents_is_prefixed_folded_not_dropped() {
+        let people = |names: &[&str]| names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        assert_eq!(apply_person_prefix("beach-sunset", &people(&["José García"])), "jose-beach-sunset");
+        assert_eq!(apply_person_prefix("beach-sunset", &people(&["Zoe\u{308} Lund"])), "zoe-beach-sunset");
+        assert_eq!(apply_person_prefix("beach-sunset", &people(&["Łukasz", "Søren", "Ærin"])), "aerin-lukasz-soren-beach-sunset");
+        assert_eq!(apply_person_prefix("jose-at-beach", &people(&["José"])), "jose-at-beach");
+        assert_eq!(apply_person_prefix("beach", &people(&["Müller", "Muller"])), "muller-beach");
+        assert_eq!(apply_person_prefix("beach", &people(&["東京"])), "beach");
+    }
 
     struct Source {
         conn: rusqlite::Connection,

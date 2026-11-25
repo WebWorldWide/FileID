@@ -91,9 +91,6 @@ kamadak-exif     = "0.6"
 # parallelism.
 jpeg-decoder     = { version = "0.3", default-features = false }
 
-# Memory mapping for large image reads.
-memmap2 = "0.9"
-
 # PDF rendering — PDF previews route through the C# side's Windows.Data.Pdf
 # (bundled in Windows 10+). pdfium-render is gated behind the `pdf-analyze`
 # feature for engine-side rasterization (Deep Analyze input).

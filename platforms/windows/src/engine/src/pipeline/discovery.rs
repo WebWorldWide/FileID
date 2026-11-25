@@ -484,7 +484,7 @@ impl Discovery {
                             // User exclusions: normalized equality on the child's full path. dir_path carries the walk root's "\\?\" prefix when present; normalize strips it so verbatim and plain roots match the same stored exclusion.
                             if !excl_for_dir.is_empty() {
                                 let full = dir_path.join(entry.file_name());
-                                let norm = crate::util::path_safety::normalize_for_exclusion(&full);
+                                let norm = crate::util::path_safety::normalize_for_exclusion_match(&full);
                                 if excl_for_dir.contains(&norm) {
                                     return false;
                                 }
