@@ -8,8 +8,6 @@ using FileID.IpcSchema;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
-using Windows.System;
 
 namespace FileID.Views.Library;
 
@@ -156,23 +154,6 @@ public sealed partial class BulkTagSheet : UserControl
         }
         catch
         {
-        }
-    }
-
-    private void OnTagsKeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key == VirtualKey.Enter
-            && Microsoft.UI.Input.InputKeyboardSource
-                .GetKeyStateForCurrentThread(VirtualKey.Control)
-                .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
-        {
-            e.Handled = true;
-            var root = XamlRoot;
-            if (root?.Content is FrameworkElement fe)
-            {
-                var btn = fe.FindName("BulkTagPrimaryButton") as Button;
-                btn?.Focus(FocusState.Programmatic);
-            }
         }
     }
 }

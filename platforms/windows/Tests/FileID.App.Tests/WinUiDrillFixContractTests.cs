@@ -44,6 +44,13 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("ShowTagStatus(\"Couldn't rename", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void BulkTagSheet_HasNoDeadCtrlEnterHandler()
+    {
+        Assert.DoesNotContain("BulkTagPrimaryButton", App("Views", "Library", "BulkTagSheet.xaml.cs"), StringComparison.Ordinal);
+        Assert.DoesNotContain("OnTagsKeyDown", App("Views", "Library", "BulkTagSheet.xaml"), StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
