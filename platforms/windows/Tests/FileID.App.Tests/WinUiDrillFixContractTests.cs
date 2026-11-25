@@ -67,6 +67,14 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("FormatUndoCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutUndo)", App("Views", "Restructure", "RestructureView.xaml.cs"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void PersonDetail_NamingAnAlreadyUnknownPersonRenamesThemInsteadOfMarkingUnknown()
+    {
+        var sheet = App("Views", "People", "PersonDetailSheet.xaml.cs");
+        Assert.Contains("_loadedUnknown = result.IsUnknown;", sheet, StringComparison.Ordinal);
+        Assert.Contains("IsUnknownCheckBox.IsChecked == true && !(_loadedUnknown && HasTypedName())", sheet, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
