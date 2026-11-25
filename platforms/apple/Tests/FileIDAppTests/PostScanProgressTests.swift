@@ -5,9 +5,10 @@ import Testing
 
 @Suite("Post-scan progress in plain words")
 struct PostScanProgressTests {
-    private func progress(total: Int, discovered: Int, processed: Int, eta: Double? = nil, phase: ScanPhase = .postScan) -> ScanProgress {
+    private func progress(total: Int, discovered: Int, processed: Int, eta: Double? = nil, phase: ScanPhase = .postScan,
+                          owed: Int? = nil, done: Int? = nil) -> ScanProgress {
         ScanProgress(sessionID: "s", phase: phase, total: total, discovered: discovered, processed: processed, failed: 0,
-                     filesPerSecond: 8, etaSeconds: eta, residentMB: 0, availableMB: 0)
+                     filesPerSecond: 8, etaSeconds: eta, residentMB: 0, availableMB: 0, postScanOwed: owed, postScanDone: done)
     }
 
     @Test("the shared engine counts post-scan work on top of the files, so the work left is measured from the files already read")
@@ -44,5 +45,23 @@ struct PostScanProgressTests {
         #expect(text.contains("58,539 files still need tags"))
         #expect(!text.localizedCaseInsensitiveContains("didn’t finish"))
         #expect(!text.localizedCaseInsensitiveContains("not scanned"))
+    }
+
+    @Test("an app that joins mid post-scan reads the owed and done counts the engine sends, not a baseline from the snapshot it happened to see first")
+    func lateJoinerUsesTheEnginesCounts() {
+        let late = progress(total: 209_257, discovered: 209_257, processed: 130_718 + 20_000, owed: 78_539, done: 20_000)
+        let wrongBaseline = PostScanBaseline(sessionID: "s", filesRead: 150_718)
+        #expect(late.postScanWork(baseline: wrongBaseline) == PostScanWork(owed: 78_539, done: 20_000))
+        #expect(late.postScanWork(baseline: nil) == PostScanWork(owed: 78_539, done: 20_000))
+    }
+
+    @Test("the baseline follows the engine's counts on every snapshot, and falls back to the first snapshot seen for an engine that sends none")
+    func baselineFromCounts() {
+        let late = progress(total: 209_257, discovered: 209_257, processed: 150_718, owed: 78_539, done: 20_000)
+        let seen = PostScanBaseline.observing(late, current: PostScanBaseline(sessionID: "s", filesRead: 150_718))
+        #expect(seen == PostScanBaseline(sessionID: "s", filesRead: 130_718))
+        let plain = progress(total: 150, discovered: 100, processed: 120)
+        #expect(PostScanBaseline.observing(plain, current: nil) == PostScanBaseline(sessionID: "s", filesRead: 120))
+        #expect(PostScanBaseline.observing(plain, current: PostScanBaseline(sessionID: "s", filesRead: 100))?.filesRead == 100)
     }
 }

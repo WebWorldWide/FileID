@@ -519,6 +519,8 @@ public struct ScanProgress: Codable, Sendable {
     public let etaSeconds: Double?
     public let residentMB: Int
     public let availableMB: Int
+    public let postScanOwed: Int?    // postScan only: files the pass has to finish in all
+    public let postScanDone: Int?    // postScan only: how many of those are finished
 
     public init(
         sessionID: String,
@@ -530,7 +532,9 @@ public struct ScanProgress: Codable, Sendable {
         filesPerSecond: Double,
         etaSeconds: Double?,
         residentMB: Int,
-        availableMB: Int
+        availableMB: Int,
+        postScanOwed: Int? = nil,
+        postScanDone: Int? = nil
     ) {
         self.sessionID = sessionID
         self.phase = phase
@@ -542,6 +546,8 @@ public struct ScanProgress: Codable, Sendable {
         self.etaSeconds = etaSeconds
         self.residentMB = residentMB
         self.availableMB = availableMB
+        self.postScanOwed = postScanOwed
+        self.postScanDone = postScanDone
     }
 }
 

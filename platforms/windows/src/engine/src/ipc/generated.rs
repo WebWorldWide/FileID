@@ -1331,6 +1331,16 @@ pub struct ScanProgress {
     pub resident_mb: u64,
     #[serde(rename = "availableMB")]
     pub available_mb: u64,
+    /// Schema 1.30.0. postScan snapshots only: how many files the post-scan pass has to finish in
+    /// all (tags and careful text reads left over from the scan). Left out in other phases and by
+    /// older engines; then total - discovered is not it, so a client that joins mid post-scan has
+    /// no baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scan_owed: Option<u64>,
+    /// Schema 1.30.0. postScan snapshots only: how many of postScanOwed are finished; never above
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scan_done: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

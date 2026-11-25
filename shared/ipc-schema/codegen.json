@@ -391,6 +391,12 @@
           },
           "availableMB": {
             "type": "u64"
+          },
+          "postScanOwed": {
+            "type": "u64"
+          },
+          "postScanDone": {
+            "type": "u64"
           }
         }
       },
