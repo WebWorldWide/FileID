@@ -1563,6 +1563,20 @@ fn unusable_names_notice(unusable: &UnusableNames) -> Option<String> {
     ))
 }
 
+/// A move leaving or entering a read-only drive refuses the whole plan, counted per move.
+fn read_only_moves(moves: &[ipc::RestructureMove]) -> Option<crate::util::read_only::BatchRefusal> {
+    let on_drive = |path: &str| crate::util::read_only::read_only_location(std::path::Path::new(path));
+    let mut first = None;
+    let mut count = 0;
+    for planned in moves {
+        if let Some(name) = on_drive(&planned.source).or_else(|| on_drive(&planned.destination)) {
+            count += 1;
+            first.get_or_insert(name);
+        }
+    }
+    first.map(|name| crate::util::read_only::BatchRefusal { name, read_only: count, total: moves.len() })
+}
+
 async fn send_read_only_apply_refusal(sink: &Sink, error: &anyhow::Error, requested: usize) {
     let sentence = crate::util::user_message::read_only_sentence(error).unwrap_or_default();
     sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
@@ -1578,6 +1592,11 @@ pub(crate) async fn handle_apply_restructure(
     let requested = payload.moves.len();
     if let Err(error) = crate::util::read_only::require_writable(std::path::Path::new(&payload.library_root)) {
         send_read_only_apply_refusal(&sink, &anyhow::Error::from(error), requested).await;
+        return;
+    }
+    if let Some(refusal) = read_only_moves(&payload.moves) {
+        sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+        sink.send(EngineError::event("location_read_only", format!("{} Nothing was moved.", refusal.sentence()))).await;
         return;
     }
     let result = tokio::task::spawn_blocking(
@@ -2287,6 +2306,60 @@ mod tests {
             "no move performed under a pre-set cancel"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_the_whole_plan_when_a_move_leaves_a_read_only_drive() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let base = std::env::temp_dir().join(format!("fileid-apply-ro-{}", uuid::Uuid::new_v4()));
+        let (library, vault) = (base.join("library"), base.join("vault"));
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&vault).unwrap();
+        crate::util::read_only::mark_read_only_for_tests(&vault, "Vault");
+        let conn = crate::db::test_support::memory_db();
+        let mut moves = Vec::new();
+        for (id, folder) in [(1, &library), (2, &vault)] {
+            let source = folder.join(format!("{id}.jpg"));
+            std::fs::write(&source, b"data").unwrap();
+            conn.execute(
+                "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) VALUES (?1, ?2, 0, 4, 0.0, 'image', 'jpg', 0)",
+                rusqlite::params![id, source.to_string_lossy()],
+            )
+            .unwrap();
+            moves.push(ipc::RestructureMove {
+                file_id: id,
+                source: source.to_string_lossy().into_owned(),
+                destination: library.join("Sorted").join(format!("{id}.jpg")).to_string_lossy().into_owned(),
+                category: "Sorted".into(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+                content_hash: None,
+                size_bytes: None,
+                file_ref: None,
+                modified_at: None,
+            });
+        }
+        let payload = ipc::ApplyRestructurePayload { library_root: library.to_string_lossy().into_owned(), plan_id: None, moves, use_symlinks: false };
+        let (sink, mut rx) = Sink::channel_for_test(8);
+        handle_apply_restructure(sink, Arc::new(parking_lot::Mutex::new(conn)), payload, Arc::new(AtomicBool::new(false))).await;
+
+        let (mut counts, mut refusal) = (None, None);
+        while let Ok(event) = rx.try_recv() {
+            match event.payload {
+                EventPayload::RestructureApplyResult(result) => counts = Some((result.inner.applied, result.inner.failed)),
+                EventPayload::Error(error) => refusal = Some((error.inner.kind, error.inner.message)),
+                _ => {}
+            }
+        }
+        assert_eq!(counts, Some((0, 2)));
+        let (kind, message) = refusal.expect("a refusal");
+        assert_eq!(kind, "location_read_only");
+        assert!(message.contains("\u{201c}Vault\u{201d} is a read-only drive") && message.contains("1 of 2 files are on it") && message.ends_with("Nothing was moved."), "{message}");
+        assert!(library.join("1.jpg").exists() && vault.join("2.jpg").exists(), "nothing moved");
+        assert!(!library.join("Sorted").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// One file with a name FileID can't use must not refuse the whole inline plan: the rest move, the odd one stays, and a plain notice says why.
