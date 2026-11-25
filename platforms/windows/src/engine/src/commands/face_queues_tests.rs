@@ -196,6 +196,28 @@ fn split_flags_two_separated_groups_and_keeps_the_representative_face() {
 }
 
 #[test]
+fn a_person_holding_most_faces_is_offered_for_splitting_even_when_its_halves_look_alike() {
+    let conn = db();
+    person(&conn, 1, None, false);
+    person(&conn, 2, Some("Sam"), false);
+    let arc = [(1.0, 0.0), (0.99, 0.1), (0.98, 0.2), (0.95, 0.3), (0.9, 0.4), (0.85, 0.5), (0.8, 0.6), (0.75, 0.66)];
+    for (index, xy) in arc.into_iter().enumerate() {
+        let id = index as i64 + 1;
+        face(&conn, id, id, 1, xy);
+    }
+    face(&conn, 20, 20, 2, (0.0, 1.0));
+    assert_eq!(refresh_all(&conn).1, 0, "an ordinary person with close halves is left alone");
+    let big = QueueSettings { oversized_min_faces: 6, oversized_share: 0.6, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &big, 10.0).unwrap().1, 1);
+    let page = listed(&conn, "splits");
+    let split = &page.splits.as_ref().unwrap()[0];
+    assert_eq!(split.person_id, 1);
+    assert_eq!(split.keep_count + split.split_count, 8);
+    let few = QueueSettings { oversized_min_faces: 6, oversized_share: 0.95, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &few, 10.0).unwrap().1, 0, "a share below the bar is not oversized");
+}
+
+#[test]
 fn split_moves_the_group_to_a_new_person_and_undo_restores_it() {
     let conn = mixed();
     refresh_all(&conn);
