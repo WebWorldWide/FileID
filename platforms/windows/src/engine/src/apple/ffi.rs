@@ -155,6 +155,8 @@ unsafe extern "C" {
     pub fn fileid_apple_ocr_ready() -> bool;
     /// Whether the accurate text tier is compiled.
     pub fn fileid_apple_ocr_warmed() -> bool;
+    /// Whether repeated failures have paused the accurate text tier.
+    pub fn fileid_apple_ocr_paused() -> bool;
     /// Document text as the Swift engine extracts it; `out_handled` false for
     /// types the caller extracts itself.
     pub fn fileid_apple_document_text(path: *const c_char, max_chars: usize, out_handled: *mut bool) -> *mut c_char;

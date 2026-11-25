@@ -247,7 +247,7 @@ fn aesthetic(width: u32, height: u32, size_bytes: u64) -> f64 {
 /// camera family.
 fn extra_tags(created: Option<f64>, camera: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(year) = created.and_then(local_unix_seconds_to_year)
+    if let Some(year) = created.and_then(|t| crate::util::not_in_the_future(t, crate::util::unix_now())).and_then(local_unix_seconds_to_year)
         && year > 1990
         && year < 2100
     {
@@ -547,7 +547,11 @@ impl catch_up::Analyzer for CatchUp {
     }
 
     fn parallelism(&self) -> usize {
-        4
+        std::env::var("FILEID_CATCHUP_WORKERS").ok().and_then(|value| value.parse().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(4)
+    }
+
+    fn batch(&self) -> usize {
+        self.parallelism() * 6
     }
 
     fn ready_wait(&self, phase: catch_up::Phase) -> Duration {

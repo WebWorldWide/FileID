@@ -490,13 +490,15 @@ impl DbWriter {
                     _ => false,
                 };
 
+                let created_unix = f.created_unix.and_then(|t| crate::util::not_in_the_future(t, f.scanned_unix));
+                let captured_from_exif = f.captured_from_exif && created_unix.is_some();
                 let (file_id, stored_modified): (i64, Option<f64>) = file_stmt
                     .query_row(
                         params![
                             path_text,
                             path_hash,
                             f.size_bytes as i64,
-                            f.created_unix,
+                            created_unix,
                             f.modified_unix,
                             f.scanned_unix,
                             f.kind.as_str(),
@@ -515,7 +517,7 @@ impl DbWriter {
                             path_search,
                             f.faces_evaluated,
                             f.ocr_stage_ran || f.doc_stage_ran,
-                            f.captured_from_exif,
+                            captured_from_exif,
                             crate::db::name_sort::name_sort_key(&path_text),
                         ],
                         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1485,6 +1487,24 @@ mod tests {
         assert_eq!(upsert(1_800_000_000.0, false), 1_800_000_000);
         assert_eq!(upsert(1_900_000_000.0, false), 1_800_000_000, "a copy's birth time must not replace the recorded date");
         assert_eq!(upsert(1_200_000_000.0, true), 1_200_000_000, "EXIF capture time corrects a copy date");
+    }
+
+    #[test]
+    fn a_capture_date_in_the_future_is_not_stored() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let mut future = fixture(r"C:\lib\IMG_FUTURE.jpg");
+        future.created_unix = Some(2_212_000_000.0);
+        future.captured_from_exif = true;
+        let mut real = fixture(r"C:\lib\IMG_PAST.jpg");
+        real.created_unix = Some(1_600_000_000.0);
+        real.captured_from_exif = true;
+        let mut buffer = vec![future, real];
+        DbWriter::new(conn.clone(), ScanCoordinator::new()).flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let stored = |path: &str| -> Option<f64> {
+            conn.lock().query_row("SELECT created_at FROM files WHERE path_text = ?1", params![path], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(stored(r"C:\lib\IMG_FUTURE.jpg"), None, "a 2040 date must not become the photo's date");
+        assert_eq!(stored(r"C:\lib\IMG_PAST.jpg"), Some(1_600_000_000.0));
     }
 
     /// A re-scan whose vision/EXIF stage produced nothing (decode failed, placeholder, GPU dead) must not null out phash/camera/GPS or flip has_faces/has_text off while child rows exist: COALESCE guards the nullable scalars, the ?21/?22 stage-ran gates the NOT NULL booleans.

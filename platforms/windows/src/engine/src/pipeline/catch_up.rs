@@ -316,6 +316,11 @@ pub enum Outcome {
 pub trait Analyzer: Sync {
     fn ready(&self, phase: Phase) -> bool;
     fn parallelism(&self) -> usize;
+    /// How many owed files are read from the catalog and stored together. Workers pull from the batch as they free up, so a
+    /// batch larger than `parallelism` keeps them busy while one slow file (a RAW, a big scan) finishes.
+    fn batch(&self) -> usize {
+        self.parallelism()
+    }
     fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome;
     /// How long a reader that is still warming up may be waited on after the scan ended
     /// (`Readers.carefulWaitSeconds`); a scan itself never waits for it.
@@ -680,7 +685,8 @@ fn pass(
     summary: &mut Summary,
 ) -> PassEnd {
     let scheduler = crate::resource_scheduler::ResourceScheduler::shared();
-    let chunk_size = analyzer.parallelism().clamp(1, 16);
+    let workers = analyzer.parallelism().clamp(1, 16);
+    let chunk_size = analyzer.batch().clamp(workers, 128);
     let mut cursor = 0;
     let mut blocked = false;
     let mut stopped_early = false;
@@ -704,31 +710,36 @@ fn pass(
         let Some(last) = chunk.last() else { break };
         cursor = last.file_id;
 
-        let outcomes: Vec<Outcome> = std::thread::scope(|threads| {
-            let workers: Vec<_> = chunk
-                .iter()
-                .map(|file| {
-                    let scheduler = &scheduler;
-                    threads.spawn(move || {
-                        if is_cancelled() {
-                            return Outcome::Leave;
-                        }
-                        let lease = scheduler.reserve_patient(
-                            crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 0 },
-                            crate::resource_scheduler::Priority::Background,
-                            is_cancelled,
-                            std::time::Duration::from_secs(600),
-                        );
-                        if lease.is_err() {
-                            return Outcome::Leave;
-                        }
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(file, phase, analyzer)))
-                            .unwrap_or(Outcome::Failed)
-                    })
-                })
-                .collect();
-            workers.into_iter().map(|worker| worker.join().unwrap_or(Outcome::Failed)).collect()
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<Mutex<Option<Outcome>>> = chunk.iter().map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|threads| {
+            for _ in 0..workers.min(chunk.len()) {
+                threads.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(file) = chunk.get(index) else { break };
+                        let outcome = if is_cancelled() {
+                            Outcome::Leave
+                        } else {
+                            let lease = scheduler.reserve_patient(
+                                crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 0 },
+                                crate::resource_scheduler::Priority::Background,
+                                is_cancelled,
+                                std::time::Duration::from_secs(600),
+                            );
+                            if lease.is_err() {
+                                Outcome::Leave
+                            } else {
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(file, phase, analyzer)))
+                                    .unwrap_or(Outcome::Failed)
+                            }
+                        };
+                        *slots[index].lock() = Some(outcome);
+                    }
+                });
+            }
         });
+        let outcomes: Vec<Outcome> = slots.into_iter().map(|slot| slot.into_inner().unwrap_or(Outcome::Failed)).collect();
 
         let cancelled_midway = is_cancelled();
         let written = (|| -> rusqlite::Result<Summary> {
@@ -1351,6 +1362,44 @@ mod tests {
         row.tags = vec![("scene".to_string(), Some(0.5))];
         row.catch_up = marker(TAGS_OWED, Context { k: vec!["scene".into()], ..Context::default() }, 0);
         row
+    }
+
+    struct OneSlowFile {
+        calls: AtomicUsize,
+        batch: usize,
+    }
+
+    impl Analyzer for OneSlowFile {
+        fn ready(&self, phase: Phase) -> bool {
+            phase == Phase::Tags
+        }
+        fn parallelism(&self) -> usize {
+            2
+        }
+        fn batch(&self) -> usize {
+            self.batch
+        }
+        fn analyse(&self, file: &Pending, _phase: Phase, context: Option<&Context>) -> Outcome {
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                let patience = std::time::Instant::now() + Duration::from_secs(5);
+                while self.calls.load(Ordering::SeqCst) < 8 && std::time::Instant::now() < patience {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            Outcome::Done(portable_update(file, context.unwrap(), scored(&[("tagged", 0.9)]), Vec::new(), 16, |_| false, || None))
+        }
+    }
+
+    #[tokio::test]
+    async fn one_slow_file_does_not_hold_back_the_workers_that_are_free() {
+        let library = Library::new("one-slow");
+        library.write((0..8).map(|i| owing(&library, &format!("photo{i}.png"))).collect()).await;
+        let analyzer = OneSlowFile { calls: AtomicUsize::new(0), batch: 8 };
+        let started = std::time::Instant::now();
+        let summary = library.run(&analyzer);
+        assert_eq!(summary.tagged, 8);
+        assert!(started.elapsed() < Duration::from_secs(4), "the free worker took the other files while the first one was slow: {:?}", started.elapsed());
     }
 
     #[tokio::test]
