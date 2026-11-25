@@ -467,7 +467,16 @@ public final class ReadStore: @unchecked Sendable {
         }
         var ids: [Int64] = []
         var cursor: LibraryCursor?
-        if offset > 0 {
+        if offset > 0, sort.key == .dateTaken {
+            var skip = offset
+            for segment in sort.segments(after: nil, keyed: keyed) where ids.count < limit {
+                let counted = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(base) AND \(segment.condition)", arguments: args + StatementArguments(segment.arguments)) ?? 0
+                if skip >= counted { skip -= counted; continue }
+                let sql = "SELECT id FROM files WHERE \(base) AND \(segment.condition) ORDER BY \(segment.order) LIMIT ? OFFSET ?"
+                ids += try Int64.fetchAll(db, sql: sql, arguments: args + StatementArguments(segment.arguments) + [limit - ids.count, skip])
+                skip = 0
+            }
+        } else if offset > 0 {
             let sql = "SELECT id FROM files WHERE \(base) ORDER BY \(sort.orderSQL(keyed: keyed)) LIMIT ? OFFSET ?"
             ids = try Int64.fetchAll(db, sql: sql, arguments: args + [limit, offset])
         } else {

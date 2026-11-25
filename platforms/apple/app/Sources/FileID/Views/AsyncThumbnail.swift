@@ -23,7 +23,17 @@ struct AsyncThumbnail<Placeholder: View>: View {
                 placeholder
             }
         }
-        .task(id: url) { image = await ThumbnailService.shared.thumbnail(for: url, size: size) }
+        .task(id: url) {
+            let (url, size) = (url, size)
+            image = await Self.load(retryAfter: .seconds(5)) { await ThumbnailService.shared.thumbnail(for: url, size: size) }
+        }
         .onDisappear { image = nil }
+    }
+
+    /// A busy engine can miss its reply window for a large video, so a tile that comes back empty asks once more before it settles for the placeholder.
+    static func load(retryAfter delay: Duration, fetch: () async -> NSImage?) async -> NSImage? {
+        if let image = await fetch() { return image }
+        guard !Task.isCancelled, (try? await Task.sleep(for: delay)) != nil else { return nil }
+        return await fetch()
     }
 }

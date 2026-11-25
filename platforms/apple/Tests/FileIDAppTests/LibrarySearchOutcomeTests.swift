@@ -1,4 +1,6 @@
+import Foundation
 import Testing
+import FileIDShared
 @testable import FileID
 
 @Suite("Library search outcome")
@@ -72,5 +74,23 @@ struct LibrarySearchOutcomeTests {
         let limit = LibrarySearchOutcome.resultLimit
         let cut = LibrarySearchOutcome.Strength(message: "10 matches (4 strong visual), \(limit - 10) weaker.")
         #expect(cut?.weakerLabel == "\(limit - 10)+")
+    }
+}
+
+@Suite struct LibrarySearchNameFirstTests {
+    private func row(_ id: Int64, _ path: String) -> FileRow {
+        FileRow(id: id, pathText: path, sizeBytes: 1, createdAt: nil, modifiedAt: nil, scannedAt: Date(timeIntervalSince1970: 0), kind: "image", extension: "jpg", phash: nil,
+                aesthetic: nil, hasFaces: false, hasText: false, cameraModel: nil, locationLat: nil, locationLon: nil, failed: false, errorMessage: nil)
+    }
+
+    @Test func filesNamedLikeTheQueryListBeforeVisualLookAlikes() {
+        let rows = [row(1, "/a/church.jpg"), row(2, "/a/people.jpg"), row(3, "/b/dsc02096.JPG"), row(4, "/b/x.jpg"), row(5, "/c/DSC02096 copy.jpg")]
+        let ordered = LibrarySearchOutcome.promotingNameMatches(rows, query: " DSC02096 ")
+        #expect(ordered.map(\.id) == [3, 5, 1, 2, 4])
+    }
+
+    @Test func aQueryNoNameHoldsKeepsTheEngineOrder() {
+        let rows = [row(1, "/a/church.jpg"), row(2, "/a/people.jpg")]
+        #expect(LibrarySearchOutcome.promotingNameMatches(rows, query: "sunset").map(\.id) == [1, 2])
     }
 }

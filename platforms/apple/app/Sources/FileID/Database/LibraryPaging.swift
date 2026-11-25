@@ -25,6 +25,9 @@ struct LibrarySegment {
 extension LibrarySort {
     static let takenSQL = "COALESCE(created_at, modified_at)"
 
+    /// A date past this is a clock or metadata fault, not a capture date: those files list after the undated ones.
+    static func futureLimit(_ now: Date) -> Double { now.timeIntervalSince1970 + 86_400 }
+
     /// `ORDER BY` for a catalog whose engine writes `files.name_sort`: names and kinds then sort by an indexed key, not the app's collation.
     func orderSQL(keyed: Bool) -> String {
         guard keyed, key == .name || key == .kind else { return orderSQL }
@@ -57,7 +60,7 @@ extension LibrarySort {
     }
 
     /// The queries that, run in order until the page is full, list the rows after `cursor`. Each one reads a contiguous range of an index, so a page far down the library costs what the first page does.
-    func segments(after cursor: LibraryCursor?, keyed: Bool) -> [LibrarySegment] {
+    func segments(after cursor: LibraryCursor?, keyed: Bool, now: Date = Date()) -> [LibrarySegment] {
         let direction = ascending ? "ASC" : "DESC"
         let beyond = ascending ? ">" : "<"
         switch key {
@@ -86,20 +89,20 @@ extension LibrarySort {
         case .dateTaken:
             let taken = Self.takenSQL
             let dated = "(\(taken) IS NULL) = 0"
-            let undated = "\(taken) IS NULL"
-            guard let cursor else {
-                return [
-                    LibrarySegment(condition: dated, arguments: [], order: "\(taken) \(direction), id \(direction)"),
-                    LibrarySegment(condition: undated, arguments: [], order: "id \(direction)"),
-                ]
+            let ordered = "\(taken) \(direction), id \(direction)"
+            let limit = Self.futureLimit(now)
+            let sane = LibrarySegment(condition: "\(dated) AND \(taken) <= ?", arguments: [limit], order: ordered)
+            let undated = LibrarySegment(condition: "\(taken) IS NULL", arguments: [], order: "id \(direction)")
+            let future = LibrarySegment(condition: "\(dated) AND \(taken) > ?", arguments: [limit], order: ordered)
+            guard let cursor else { return [sane, undated, future] }
+            guard let number = cursor.number else {
+                return [LibrarySegment(condition: "\(taken) IS NULL AND id \(beyond) ?", arguments: [cursor.id], order: "id \(direction)"), future]
             }
-            if let number = cursor.number {
-                return [
-                    LibrarySegment(condition: "\(dated) AND (\(taken), id) \(beyond) (?, ?)", arguments: [number, cursor.id], order: "\(taken) \(direction), id \(direction)"),
-                    LibrarySegment(condition: undated, arguments: [], order: "id \(direction)"),
-                ]
+            let after = "(\(taken), id) \(beyond) (?, ?)"
+            if number > limit {
+                return [LibrarySegment(condition: "\(dated) AND \(after)", arguments: [number, cursor.id], order: ordered)]
             }
-            return [LibrarySegment(condition: "\(undated) AND id \(beyond) ?", arguments: [cursor.id], order: "id \(direction)")]
+            return [LibrarySegment(condition: "\(dated) AND \(taken) <= ? AND \(after)", arguments: [limit, number, cursor.id], order: ordered), undated, future]
         }
     }
 }

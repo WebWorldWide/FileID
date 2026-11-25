@@ -34,3 +34,25 @@ struct ShellStateTruthTests {
         #expect(!HelperGate.folderMenuRescanDisabled(scanRunning: false, captionsRunning: false, faceClusteringInFlight: false, helperDown: false))
     }
 }
+
+@Suite struct OfflineLocationActionTests {
+    @Test func rescanIsDisabledForAnOfflineLocationInTheSidebarAndTheFolderMenu() {
+        #expect(HelperGate.rescanDisabled(startRequested: false, captionsRunning: false, faceClusteringInFlight: false, helperDown: false, locationOffline: true))
+        #expect(HelperGate.folderMenuRescanDisabled(scanRunning: false, captionsRunning: false, faceClusteringInFlight: false, helperDown: false, locationOffline: true))
+        #expect(!HelperGate.rescanDisabled(startRequested: false, captionsRunning: false, faceClusteringInFlight: false, helperDown: false, locationOffline: false))
+    }
+
+    @Test func theSidebarAndTheFileSheetAskWhetherTheLocationIsOffline() throws {
+        #expect(try appSource("Views/Shell/PipelineBlock.swift").contains("locationOffline: locationOffline"))
+        let library = try appSource("Views/LibraryView.swift")
+        #expect(library.contains("This file is offline"))
+        #expect(library.contains("Button { NSWorkspace.shared.open(file.url) } label: { Label(\"Open\", systemImage: \"arrow.up.right.square\") }\n                .buttonStyle(DSSecondaryButtonStyle(height: 28)).disabled(offline)"))
+    }
+}
+
+@Suite struct LibraryTileThumbnailRetryTests {
+    @Test func theGridAndTheListLoadTilesThroughTheOneRetryForEmptyVideos() throws {
+        #expect(try appSource("Views/LibraryCollectionGrid.swift").contains("ThumbnailService.shared.tileThumbnail("))
+        #expect(try appSource("Views/LibraryListTable.swift").contains("ThumbnailService.shared.tileThumbnail("))
+    }
+}

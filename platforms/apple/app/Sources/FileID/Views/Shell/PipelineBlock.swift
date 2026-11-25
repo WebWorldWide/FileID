@@ -40,6 +40,8 @@ struct PipelineBlock: View {
         return .scan
     }
 
+    private var locationOffline: Bool { OfflineRoots(engine.libraryRoots).isOffline(pickedURL.path) }
+
     private var showsUnfinishedScan: Bool {
         unfinishedScan != nil && !scanRunning && progress?.phase != .completed
     }
@@ -53,9 +55,13 @@ struct PipelineBlock: View {
         return newest.status == "cancelled" || newest.status == "failed" ? newest : nil
     }
 
+    nonisolated static func unfinishedScanTitle(filesRead: Int) -> String {
+        filesRead > 0 ? "Tags aren’t finished yet" : "The scan didn’t finish"
+    }
+
     nonisolated static func unfinishedScanDetail(filesRead: Int) -> String {
         filesRead > 0
-            ? "\(filesRead.formatted()) file\(filesRead == 1 ? "" : "s") read so far. Press Scan again to read the rest."
+            ? "\(filesRead.formatted()) file\(filesRead == 1 ? "" : "s") read and ready to browse. Press Scan again to finish adding tags."
             : "Press Scan again to read the rest."
     }
 
@@ -111,7 +117,7 @@ struct PipelineBlock: View {
             return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.danger, sub: "Press Scan again. Files already read are skipped.")
         }
         if showsUnfinishedScan {
-            return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
+            return Status(title: Self.unfinishedScanTitle(filesRead: store.totalFiles), fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
         }
         if store.totalFiles > 0 || progress?.phase == .completed {
             return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(Plural.noun(store.totalFiles, "file", "files")) ready to browse")
@@ -256,8 +262,8 @@ struct PipelineBlock: View {
                 Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed || showsUnfinishedScan ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
-                    .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown))
-                    .help(helperDown ? "FileID’s helper isn’t running. Restart it, then scan again." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
+                    .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown, locationOffline: locationOffline))
+                    .help(helperDown ? "FileID’s helper isn’t running. Restart it, then scan again." : locationOffline ? "This location is offline. Reconnect the drive to rescan." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
                 Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))

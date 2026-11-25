@@ -1204,7 +1204,7 @@ struct LibraryView: View {
                             switch decision.source {
                             case .engine:
                                 let known = Set(engineRows.map(\.id))
-                                newRows = engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : [])
+                                newRows = LibrarySearchOutcome.promotingNameMatches(engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : []), query: trimmed)
                             case .keyword:
                                 newRows = keywordRows
                             }
@@ -1298,6 +1298,7 @@ struct FilePreviewSheet: View {
     let knownTotal: Int?
     let store: ReadStore
     let engine: EngineClient
+    private var offlineRoots: OfflineRoots { OfflineRoots(engine.libraryRoots) }
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
     /// made in this sheet refreshes the underlying grid tile even mid-scan.
     var onEdit: () -> Void = {}
@@ -1459,8 +1460,10 @@ struct FilePreviewSheet: View {
             let loadedPeople = await Task.detached { [store] in store.personNames(forFileID: fileID) }.value
             guard !Task.isCancelled else { return }
             people = loadedPeople
-            var image = file.kind == "image" ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
+            let offline = offlineRoots.isOffline(file.pathText)
+            var image = file.kind == "image" && !offline ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
             if image == nil { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 1600) }
+            if image == nil, offline { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 256) }
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
             // drop it once `.task(id:)` superseded us, else it overwrites the current
@@ -1489,11 +1492,14 @@ struct FilePreviewSheet: View {
                     iconButton("chevron.right", "Next file (→)") { step(1) }.disabled(index >= siblings.count - 1)
                 }
             }
-            if file.kind == "image" { DeepAnalyzeButton(engine: engine, file: file) }
+            let offline = offlineRoots.isOffline(file.pathText)
+            if file.kind == "image" { DeepAnalyzeButton(engine: engine, file: file).disabled(offline) }
             Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Label("Finder", systemImage: "folder") }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28)).help("Show in Finder")
+                .buttonStyle(DSSecondaryButtonStyle(height: 28)).disabled(offline)
+                .help(offline ? "Reconnect the drive to show this file in Finder" : "Show in Finder")
             Button { NSWorkspace.shared.open(file.url) } label: { Label("Open", systemImage: "arrow.up.right.square") }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28)).help("Open in the default app")
+                .buttonStyle(DSSecondaryButtonStyle(height: 28)).disabled(offline)
+                .help(offline ? "Reconnect the drive to open this file" : "Open in the default app")
             iconButton("sidebar.right", showInfo ? "Hide info (⌘I)" : "Show info (⌘I)") { showInfo.toggle() }
                 .keyboardShortcut("i", modifiers: .command)
             iconButton("xmark", "Close preview (Esc)") { dismiss() }
@@ -1518,6 +1524,16 @@ struct FilePreviewSheet: View {
     @ViewBuilder
     private func canvas(_ file: FileRow) -> some View {
         Group {
+            if offlineRoots.isOffline(file.pathText) {
+                VStack(spacing: 14) {
+                    if let preview {
+                        Image(nsImage: preview).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)).padding(.horizontal, 28).opacity(0.7)
+                    }
+                    Label("This file is offline", systemImage: "externaldrive.badge.xmark").font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text2)
+                    MetaText("Reconnect the drive to see the full preview. Its tags, faces and descriptions are kept.")
+                }
+            } else {
             switch file.kind {
             case "video": VideoPreview(url: file.url)
             case "audio": AudioPreview(url: file.url)
@@ -1540,6 +1556,7 @@ struct FilePreviewSheet: View {
                 }
                 .animation(Theme.quick, value: preview == nil)
             default: UniversalPreview(url: file.url)
+            }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

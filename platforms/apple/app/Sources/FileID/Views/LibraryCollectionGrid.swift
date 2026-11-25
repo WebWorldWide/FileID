@@ -615,7 +615,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         if !keepCurrent { thumbLayer.contents = nil; thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1); kindGlyph.isHidden = true }
         let id = row.id
         thumbTask = Task { @MainActor [weak self] in
-            let image = await ThumbnailService.shared.thumbnail(for: row.url, size: 224)
+            let image = await ThumbnailService.shared.tileThumbnail(for: row.url, size: 224)
             guard let self, !Task.isCancelled, self.rowID == id else { return }
             let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
             let isPage = row.kind == "doc" || row.kind == "pdf"

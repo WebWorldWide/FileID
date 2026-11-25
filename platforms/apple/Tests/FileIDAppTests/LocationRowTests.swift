@@ -20,9 +20,14 @@ struct LocationRowTests {
     }
 
     @Test func singularFileAndNeverScannedRead() {
-        let text = LocationText.summary(root(files: 1, bytes: 2_048, scanned: nil))
-        #expect(text.hasPrefix("1 file · "))
+        #expect(LocationText.summary(root(files: 1, bytes: 2_048, scanned: 1_700_000_000)).hasPrefix("1 file · "))
+        let text = LocationText.summary(root(files: 0, bytes: 0, scanned: nil))
+        #expect(text.hasPrefix("0 files · "))
         #expect(text.hasSuffix("not scanned yet"))
+    }
+
+    @Test func filesWithoutAScanStampSayTagsAreStillBeingAdded() {
+        #expect(LocationText.summary(root(files: 130_108, scanned: nil)).hasSuffix("tags not finished"))
     }
 }
 
