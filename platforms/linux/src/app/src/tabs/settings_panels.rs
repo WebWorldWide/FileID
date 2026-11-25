@@ -250,6 +250,12 @@ fn add_excluded_folder(path: &Path) -> (&'static str, bool) {
     }
     let mut folders = app_settings::deep_analyze_excluded_folders();
     let normalized = text.trim_end_matches('/').to_owned();
+    if normalized.is_empty() {
+        return (
+            "Couldn't skip that folder. Choose a folder inside your library, not the whole computer.",
+            true,
+        );
+    }
     if folders.iter().any(|known| known == &normalized) {
         return ("That folder is already skipped.", false);
     }
