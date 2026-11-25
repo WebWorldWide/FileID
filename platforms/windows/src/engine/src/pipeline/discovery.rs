@@ -856,7 +856,6 @@ fn is_noise_directory(name: &str) -> bool {
             | "lost+found"
     ) || is_chkdsk_recovery_directory(&lower)
         || is_per_volume_trash_directory(&lower)
-
 }
 
 /// freedesktop per-volume trash: `.Trash-<uid>` at a mount root.
