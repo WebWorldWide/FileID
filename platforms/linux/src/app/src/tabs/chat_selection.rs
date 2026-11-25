@@ -241,6 +241,10 @@ pub(super) fn strip(
         }
     });
     strip.refresh();
+    let keep = strip.clone();
+    root.connect_destroy(move |_| {
+        let _alive = &keep;
+    });
     root
 }
 
