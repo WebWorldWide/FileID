@@ -464,7 +464,63 @@ fn l2_cosine(a: &[f32], b: &[f32]) -> f32 {
     1.0 - distance * distance / 2.0
 }
 
-/// Through the shared identity pipeline with the Swift calibration (exact kNN up to 5,000 faces, HNSW above).
+/// The `k` nearest faces of every face, best first, itself included. Exact, so a large library groups the way a small one
+/// does; rows are split over a few threads yet each depends only on its own query, so the lists never vary with
+/// scheduling. (A graph index would build on one thread here: its layout depends on insertion order, and that took
+/// minutes at 78,000 faces.)
+fn nearest_lists(vectors: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
+    const BLOCK: usize = 4;
+    const CHUNK: usize = 32;
+    let n = vectors.len();
+    let dim = vectors.first().map_or(0, Vec::len);
+    if n == 0 || dim == 0 || vectors.iter().any(|vector| vector.len() != dim) {
+        return vec![Vec::new(); n];
+    }
+    let flat: Vec<f32> = vectors.iter().flatten().copied().collect();
+    let norms: Vec<f32> = vectors.iter().map(|vector| crate::util::vector_math::dot(vector, vector)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let lists: Mutex<Vec<(usize, Vec<Vec<Neighbor>>)>> = Mutex::new(Vec::new());
+    let threads = crate::platform::performance_core_count().clamp(1, 8).min(n.div_ceil(CHUNK));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let start = next.fetch_add(CHUNK, std::sync::atomic::Ordering::Relaxed);
+                    if start >= n {
+                        return;
+                    }
+                    let end = (start + CHUNK).min(n);
+                    let mut done: Vec<Vec<Neighbor>> = Vec::with_capacity(end - start);
+                    for first in (start..end).step_by(BLOCK) {
+                        let rows: Vec<usize> = (first..(first + BLOCK).min(end)).collect();
+                        let mut best: Vec<Vec<Neighbor>> = rows.iter().map(|_| Vec::with_capacity(k + 1)).collect();
+                        for candidate in 0..n {
+                            let theirs = &flat[candidate * dim..(candidate + 1) * dim];
+                            for (slot, &row) in rows.iter().enumerate() {
+                                let dot = crate::util::vector_math::dot(&flat[row * dim..(row + 1) * dim], theirs);
+                                let similarity = 1.0 - (norms[row] + norms[candidate] - 2.0 * dot) / 2.0;
+                                let list = &mut best[slot];
+                                if list.len() == k && compare(&Neighbor { idx: candidate, similarity }, &list[k - 1]) != std::cmp::Ordering::Less {
+                                    continue;
+                                }
+                                let at = list.partition_point(|held| compare(held, &Neighbor { idx: candidate, similarity }) == std::cmp::Ordering::Less);
+                                list.insert(at, Neighbor { idx: candidate, similarity });
+                                list.truncate(k);
+                            }
+                        }
+                        done.extend(best);
+                    }
+                    lists.lock().push((start, done));
+                }
+            });
+        }
+    });
+    let mut ordered = lists.into_inner();
+    ordered.sort_by_key(|(start, _)| *start);
+    ordered.into_iter().flat_map(|(_, rows)| rows).collect()
+}
+
+/// Through the shared identity pipeline with the Swift calibration (exact nearest neighbours at every size).
 fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     let (params, mutual) = hyperparameters();
     let k = params.k_nn + 1;
@@ -480,19 +536,12 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
             }
         }
     }
-    let index = (vectors.len() > BRUTE_FORCE_MAX).then(|| {
-        crate::util::hnsw_index::build_with_search_limit(vectors.iter().cloned().enumerate().map(|(i, v)| (v, i)).collect(), 50)
-    });
-    let mut search = crate::util::hnsw_index::Searcher::default();
+    let nearest = (vectors.len() > BRUTE_FORCE_MAX).then(|| nearest_lists(vectors, k));
     let result = identity_clustering::cluster_with_options(
         vectors,
         |i| {
-            let mut hits: Vec<Neighbor> = match &index {
-                Some(index) => search
-                    .top_k(index, &vectors[i], k)
-                    .into_iter()
-                    .map(|(j, squared)| Neighbor { idx: j, similarity: 1.0 - squared / 2.0 })
-                    .collect(),
+            let mut hits: Vec<Neighbor> = match &nearest {
+                Some(lists) => lists[i].clone(),
                 None => (0..vectors.len()).map(|j| Neighbor { idx: j, similarity: l2_cosine(&vectors[i], &vectors[j]) }).collect(),
             };
             if hits.len() > k {
@@ -1828,11 +1877,13 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
         crate::resource_scheduler::Priority::Background,
         || false,
     );
+    let loaded_at = started.elapsed().as_secs_f64();
     let mut raw: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (cluster, members) in cluster(&vectors, &files) {
         let rows: Vec<usize> = members.iter().filter_map(|dense| row_by_face.get(&decoded[*dense]).copied()).collect();
         raw.insert(cluster, rows);
     }
+    let clustered_at = started.elapsed().as_secs_f64();
     let min_size = env_int("FILEID_FACE_MIN_CLUSTER_SIZE", 3, 1..=10_000);
     let solo_floor = env_double("FILEID_FACE_SOLO_QUALITY", 0.50, 0.0..=1.0);
     let mut conn = database.lock();
@@ -1851,13 +1902,25 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
             return Outcome { result: summary, error: Some(("face_cluster_persist_failed", PERSIST_ERROR)) };
         }
     };
+    let persisted_at = started.elapsed().as_secs_f64();
     let merged = auto_merge(&mut conn, space, &presence).unwrap_or_else(|error| {
         tracing::warn!(?error, "face auto-merge skipped");
         0
     });
+    let merged_at = started.elapsed().as_secs_f64();
     let pool: Vec<i64> = partition.rows.iter().map(|row| row.id).collect();
     let queued = finish(&mut conn, &pool, &held, space).map_err(|error| tracing::warn!(?error, "face review failed")).ok();
-    tracing::info!(persons = stats.person_count, merged, faces = decoded.len(), "[CLUSTER] macOS face space clustered");
+    tracing::info!(
+        persons = stats.person_count,
+        merged,
+        faces = decoded.len(),
+        loaded_seconds = loaded_at,
+        neighbours_and_passes_seconds = clustered_at - loaded_at,
+        persist_seconds = persisted_at - clustered_at,
+        merge_seconds = merged_at - persisted_at,
+        review_seconds = started.elapsed().as_secs_f64() - merged_at,
+        "[CLUSTER] macOS face space clustered"
+    );
     let mut summary = result(person_count(&conn), decoded.len(), stats.suppressed_faces + stats.truncated_faces, started);
     summary.deferred_faces = Some(stats.deferred);
     summary.review_queued = queued;

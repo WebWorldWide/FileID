@@ -716,3 +716,69 @@ fn one_bridge_face_between_two_look_alike_groups_does_not_join_them() {
         assert_eq!(group_of(20), group_of(20 + member));
     }
 }
+
+fn scattered_faces(count: usize, identities: usize) -> Vec<Vec<f32>> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    };
+    let centres: Vec<Vec<f32>> = (0..identities).map(|_| (0..DIM).map(|_| next()).collect()).collect();
+    (0..count)
+        .map(|face| {
+            let centre = &centres[face % identities];
+            let raw: Vec<f32> = centre.iter().map(|value| value * 2.0 + next()).collect();
+            let norm = raw.iter().map(|value| value * value).sum::<f32>().sqrt();
+            raw.iter().map(|value| value / norm).collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_large_library_gets_the_exact_nearest_faces_not_an_approximate_set() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX + 200, 90);
+    let k = 17;
+    let lists = nearest_lists(&vectors, k);
+    assert_eq!(lists.len(), vectors.len());
+    for row in (0..vectors.len()).step_by(23) {
+        let mut every: Vec<Neighbor> =
+            (0..vectors.len()).map(|other| Neighbor { idx: other, similarity: l2_cosine(&vectors[row], &vectors[other]) }).collect();
+        every.sort_by(compare);
+        every.truncate(k);
+        let found: Vec<usize> = lists[row].iter().map(|hit| hit.idx).collect();
+        let exact: Vec<usize> = every.iter().map(|hit| hit.idx).collect();
+        assert_eq!(found, exact, "face {row}: the nearest faces, best first");
+    }
+}
+
+#[test]
+fn people_found_among_more_faces_than_the_exact_limit_match_a_full_comparison() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX + 200, 90);
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let large = cluster(&vectors, &files);
+    let (params, mutual) = hyperparameters();
+    let k = params.k_nn + 1;
+    let full = identity_clustering::cluster_with_options(
+        &vectors,
+        |i| {
+            let mut hits: Vec<Neighbor> =
+                (0..vectors.len()).map(|j| Neighbor { idx: j, similarity: l2_cosine(&vectors[i], &vectors[j]) }).collect();
+            hits.select_nth_unstable_by(k, compare);
+            hits.truncate(k);
+            hits.sort_by(compare);
+            hits.retain(|hit| hit.idx != i);
+            hits
+        },
+        params,
+        &[],
+        mutual,
+    );
+    let mut expected: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (face, group) in full.cluster_ids.iter().enumerate() {
+        expected.entry(*group).or_default().push(face);
+    }
+    let groups = |map: &BTreeMap<usize, Vec<usize>>| -> BTreeSet<Vec<usize>> { map.values().cloned().collect() };
+    assert_eq!(groups(&large), groups(&expected));
+}
