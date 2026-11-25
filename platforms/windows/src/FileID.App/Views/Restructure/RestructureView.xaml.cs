@@ -1202,7 +1202,7 @@ public sealed partial class RestructureView : UserControl
             return;
         }
         ApplyStatusText.Text = wasUndo
-            ? FormatUndoCompletion(r)
+            ? FormatUndoCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutUndo)
             : FormatApplyCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutApply);
         SyncUndoAffordance();
         if (r.Failed == 0 && r.Applied > 0)

@@ -1285,6 +1285,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         {
                             LastRestructureResultWasUndo = UndoRestructureInFlight;
                             LastRestructureResultWasShortcutApply = !UndoRestructureInFlight && _restructureApplyUsesSymlinks;
+                            LastRestructureResultWasShortcutUndo = UndoRestructureInFlight && UndoRestructureShortcutToken is not null;
                             if (UndoRestructureInFlight)
                             {
                                 UndoRestructureInFlight = false;

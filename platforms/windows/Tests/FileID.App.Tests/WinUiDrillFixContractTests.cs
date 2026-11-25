@@ -59,6 +59,14 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("Interlocked.Exchange(ref _refreshQueued, 0) != 0) Refresh();", browser, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RestructureUndoStatus_KnowsWhenTheUndoWasOfShortcuts()
+    {
+        var client = App("ViewModels", "EngineClient.cs");
+        Assert.Contains("LastRestructureResultWasShortcutUndo = UndoRestructureInFlight && UndoRestructureShortcutToken is not null;", client, StringComparison.Ordinal);
+        Assert.Contains("FormatUndoCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutUndo)", App("Views", "Restructure", "RestructureView.xaml.cs"), StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
