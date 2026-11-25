@@ -3,6 +3,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::OnceLock;
 
 const BATCH: usize = 5_000;
@@ -57,7 +58,7 @@ pub fn name_sort_key(path: &str) -> String {
             let trimmed = digits.trim_start_matches('0');
             let value = if trimmed.is_empty() { "0" } else { trimmed };
             let value = &value[..value.len().min(99)];
-            out.push_str(&format!("{:02}{value}", value.len()));
+            let _ = write!(out, "{:02}{value}", value.len());
         } else {
             push_folded(&mut out, c);
         }

@@ -8,3 +8,4 @@ WHEN new.name_sort = old.name_sort AND new.path_text <> old.path_text
 BEGIN
     UPDATE files SET name_sort = '' WHERE id = new.id;
 END;
+CREATE INDEX IF NOT EXISTS files_taken_missing ON files(id) WHERE COALESCE(created_at, modified_at) IS NULL;
