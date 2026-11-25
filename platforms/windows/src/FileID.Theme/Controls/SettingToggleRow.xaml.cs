@@ -1,6 +1,5 @@
 ﻿// SettingToggleRow code-behind — three DPs: Title, Subtitle (optional),
-// IsOn (TwoWay-bindable). Mirrors the macOS UX exactly: tapping anywhere
-// in the row OR on the toggle flips the value.
+// IsOn (TwoWay-bindable). Tapping anywhere in the row or on the toggle flips the value.
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -32,8 +31,6 @@ public sealed partial class SettingToggleRow : UserControl
     public SettingToggleRow()
     {
         InitializeComponent();
-        // Whole-row tap target → toggle. Keeps macOS UX where the row label
-        // area is also a tap target, not just the switch.
         Tapped += OnRowTapped;
     }
 
@@ -63,7 +60,7 @@ public sealed partial class SettingToggleRow : UserControl
 
     private void OnRowTapped(object sender, TappedRoutedEventArgs e)
     {
-        // Don't double-fire if the tap landed on the switch itself.
+        // The switch handles its own taps.
         if (e.OriginalSource is FrameworkElement fe && IsDescendantOf(fe, Switch))
         {
             return;
@@ -73,7 +70,6 @@ public sealed partial class SettingToggleRow : UserControl
 
     private void OnSwitchToggled(object sender, RoutedEventArgs e)
     {
-        // Push the toggle's value out to bindings.
         if (IsOn != Switch.IsOn)
         {
             IsOn = Switch.IsOn;

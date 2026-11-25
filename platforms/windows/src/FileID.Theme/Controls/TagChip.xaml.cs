@@ -1,15 +1,9 @@
-﻿// TagChip — code-behind for the small auto-tag chip Library cards show
-// below the filename. Visual spec mirrors macOS LibraryView.swift:729-744
-// (`Color.secondary.opacity(0.10)` fill + secondary foreground, 11 pt
-// Medium, 5×2 padding, 4 px corner radius). One DependencyProperty —
-// `Tag` — and a static `FormatTag` helper the control invokes itself so
-// callers bind raw classifier output without a value converter.
+﻿// TagChip — the small tag chip Library cards show below the filename. The
+// static `FormatTag` helper is applied by the control itself, so callers bind
+// raw classifier output without a value converter.
 //
-// Brushes are resolved once at construction time per CLAUDE.md line 91:
-// SidebarPipelineProgress used to allocate four SolidColorBrush instances
-// per LastProgress event (~10 Hz) until that hot-path lesson landed. The
-// same rule applies here — a virtualized Library showing 200+ cards on a
-// fast scroll would otherwise allocate brushes per visible chip per row.
+// Brushes are resolved once at construction: a virtualized Library scrolling
+// 200+ cards would otherwise allocate brushes per visible chip.
 
 using System;
 using Microsoft.UI.Xaml;
@@ -30,10 +24,7 @@ public enum ChipVariant
 
 public sealed partial class TagChip : UserControl
 {
-    // Property name is TagText (not Tag) because FrameworkElement already
-    // defines a `Tag` object property of its own — naming our DP `Tag`
-    // would hide the inherited one (CS0108) and force callers to fully
-    // qualify it. `TagText` is unambiguous and names the type clearly.
+    // Named TagText because FrameworkElement already defines `Tag`; a DP named `Tag` would hide it (CS0108).
     public static readonly DependencyProperty TagTextProperty =
         DependencyProperty.Register(
             nameof(TagText),
@@ -53,9 +44,7 @@ public sealed partial class TagChip : UserControl
     private static readonly SolidColorBrush FallbackBackground =
         new(Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF));
 
-    // Kind variant — slightly more opaque background than the AI chip so
-    // the structured file-type label reads as primary metadata, foreground
-    // at full white to differentiate from the gold-tinted Auto chip.
+    // Kind variant: a more opaque background and full-white foreground set it apart from the gold-tinted Auto chip.
     private static readonly SolidColorBrush FallbackKindForeground =
         new(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
     private static readonly SolidColorBrush FallbackKindBackground =
@@ -126,8 +115,7 @@ public sealed partial class TagChip : UserControl
     }
 
     /// <summary>
-    /// 1:1 port of macOS <c>LibraryView.swift:646</c> <c>formatTag(_:)</c>.
-    /// Tags that already contain a space ("Has Faces") render as-is. Tags
+    /// Formats a raw tag for display. Tags that already contain a space ("Has Faces") render as-is. Tags
     /// with underscores strip the hierarchical prefix and uppercase the
     /// first character of the final segment ("animal_dog" → "Dog"). Dashes
     /// become spaces, and ONLY the leading character is uppercased — internal
@@ -137,25 +125,18 @@ public sealed partial class TagChip : UserControl
     public static string FormatTag(string tag)
     {
         if (string.IsNullOrEmpty(tag)) return tag;
-        // Pre-formatted multi-word labels ("Has Faces", "Has TEXT") render
-        // as-is — must come before the underscore / dash transforms so we
-        // don't accidentally re-case an already-curated string.
+        // Pre-formatted labels ("Has Faces") render as-is, before the underscore/dash transforms.
         if (tag.Contains(' ')) return tag;
 
-        // Take the last segment after '_' (hierarchical labels like
-        // "animal_dog" become "dog"). Matches macOS split(separator: "_").last.
+        // Hierarchical labels ("animal_dog") keep the last segment.
         var segment = tag.Contains('_')
             ? tag[(tag.LastIndexOf('_') + 1)..]
             : tag;
 
-        // Dashes become spaces ("iPhone-14" → "iPhone 14").
         segment = segment.Replace('-', ' ');
 
         if (segment.Length == 0) return segment;
-        // Uppercase only the first character, preserve everything else
-        // exactly. Matches macOS `first.uppercased() + withSpaces.dropFirst()`.
-        // We deliberately don't `ToTitleCase(ToLowerInvariant(...))` — that
-        // would mangle "iPhone 14" → "Iphone 14" and lose model-number casing.
+        // Not ToTitleCase(ToLowerInvariant(...)): that would turn "iPhone 14" into "Iphone 14".
         return char.ToUpperInvariant(segment[0]) + segment[1..];
     }
 }

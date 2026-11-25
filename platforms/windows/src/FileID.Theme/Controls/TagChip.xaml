@@ -1,12 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    TagChip — small auto-tag chip rendered below Library card filenames.
-    Mirror of macOS LibraryView.swift:729-744 styling:
-      - .caption2.weight(.medium) ≈ 11px Segoe UI Medium
-      - .foregroundStyle(.secondary)
-      - RoundedRectangle cornerRadius 4 fill .secondary.opacity(0.10)
-      - .padding(.horizontal, 5).padding(.vertical, 2)
-      - .lineLimit(1)
+    TagChip — small tag chip rendered below Library card filenames: 11 px
+    Medium text, secondary foreground, 10% secondary fill, 5x2 padding, 4 px
+    corner radius, one line.
 
     Usage:
         <theme:TagChip Tag="{Binding}" />

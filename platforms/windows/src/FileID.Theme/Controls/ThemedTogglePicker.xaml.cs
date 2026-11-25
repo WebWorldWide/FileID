@@ -1,9 +1,8 @@
 ﻿// ThemedTogglePicker code-behind. Three DPs (FalseLabel, TrueLabel,
 // Selection) plus pill-fill state mirroring on click.
 //
-// Why not a stock ToggleSwitch with custom labels: ToggleSwitch's chrome
-// is a sliding thumb, fundamentally different from the segmented-pill
-// look macOS uses for these binary mode toggles. Visual fidelity wins.
+// Not a stock ToggleSwitch: its sliding-thumb chrome differs from the
+// segmented-pill look used for binary mode toggles.
 
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -64,8 +63,7 @@ public sealed partial class ThemedTogglePicker : UserControl
     {
         if (isActive)
         {
-            // Resolve the GoldColor at runtime so we don't capture a stale
-            // reference if the theme dictionary is hot-swapped (future).
+            // Resolved on each call so a hot-swapped theme dictionary is picked up.
             if (Application.Current?.Resources["GoldColor"] is Color gold)
             {
                 btn.Background = new SolidColorBrush(gold);

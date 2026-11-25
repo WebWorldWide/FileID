@@ -1,16 +1,6 @@
-﻿// GlassCard — translucent acrylic card with a 1px white-8% stroke and
-// rounded corners.
-//
-// Templated control (not UserControl) so callers can drop arbitrary content
-// inside without going through ContentTemplate ceremony:
-//
-//     <theme:GlassCard>
-//         <StackPanel> ... </StackPanel>
-//     </theme:GlassCard>
-//
-// The acrylic surface is rendered by an AcrylicBrush in the template; on
-// Win10 22H2 (no Mica) the AcrylicBrush gracefully falls back to a flat
-// FallbackColor.
+﻿// GlassCard — translucent acrylic card with a 1px white-8% stroke and rounded
+// corners. A templated control so callers can place content directly inside it.
+// Where acrylic is unavailable (Win10 22H2) the AcrylicBrush falls back to a flat FallbackColor.
 
 using Microsoft.UI.Xaml.Controls;
 

@@ -1,12 +1,9 @@
 ﻿// IridescentBorder — rotating angular gradient border. 14s linear loop.
 // Frozen to gold under reduced-motion.
 //
-// 5-stop angular gradient: gold → delight → ai → info → gold, rotated
-// 360° over 14s.
-//
-// WinUI 3 doesn't have a stock conic/angular gradient brush. We render the
-// stroke via Win2D's CanvasSweepGradient, which is hardware-accelerated
-// and the visual closest match to SwiftUI's AngularGradient.
+// 5-stop gradient: gold → delight → ai → info → gold, rotated 360° over 14s.
+// WinUI 3 has no angular gradient brush, so the stroke is drawn with a Win2D
+// CanvasRadialGradientBrush that approximates a sweep.
 //
 // Usage:
 //   <Border CornerRadius="12">
@@ -14,9 +11,7 @@
 //       <ContentControl Content="..." />
 //   </Border>
 //
-// The control sizes itself to the parent and renders only the stroke;
-// place it inside any Grid/Border layer where you want the iridescent
-// outline.
+// The control sizes itself to the parent and renders only the stroke.
 
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Brushes;
@@ -39,10 +34,8 @@ public sealed class IridescentBorder : Control
             new PropertyMetadata(2.0));
 
     /// <summary>
-    /// Corner radius of the rendered ring. Renamed from `CornerRadius` to
-    /// avoid shadowing <see cref="Control.CornerRadius"/>, which uses the
-    /// `CornerRadius` struct (not double). Bindings address us as
-    /// `motion:IridescentBorder Radius="12"`.
+    /// Corner radius of the rendered ring. Named Radius to avoid shadowing
+    /// <see cref="Control.CornerRadius"/>, which is a `CornerRadius` struct.
     /// </summary>
     public static readonly DependencyProperty RadiusProperty =
         DependencyProperty.Register(nameof(Radius), typeof(double), typeof(IridescentBorder),
@@ -84,8 +77,7 @@ public sealed class IridescentBorder : Control
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _animationStart = DateTime.UtcNow;
-        // Drive at vsync via CompositionTarget.Rendering. Cheap; we draw a
-        // single ring per frame.
+        // Driven at vsync via CompositionTarget.Rendering.
         CompositionTarget.Rendering += OnRendering;
         ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
     }
@@ -103,8 +95,7 @@ public sealed class IridescentBorder : Control
 
     private void OnReducedMotionChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        // Static gold under reduced motion; one redraw catches up to the
-        // new state without the per-frame loop fighting us.
+        // One redraw switches to or from the static gold ring.
         DispatcherQueue.TryEnqueue(() => _canvas?.Invalidate());
     }
 
@@ -112,8 +103,7 @@ public sealed class IridescentBorder : Control
     {
         if (ReducedMotion.Instance.IsReduced)
         {
-            return; // single static draw on Loaded; CompositionTarget.Rendering
-                    // is a no-op when we don't invalidate.
+            return;
         }
         _canvas?.Invalidate();
     }
@@ -130,8 +120,7 @@ public sealed class IridescentBorder : Control
         var stroke = (float)StrokeThickness;
         var radius = (float)Radius;
 
-        // Inset the rectangle by half the stroke so the line sits inside the
-        // logical bounds (matches CSS / SwiftUI border behavior).
+        // Inset by half the stroke so the line sits inside the bounds.
         var rect = new Windows.Foundation.Rect(
             stroke / 2, stroke / 2,
             Math.Max(width - stroke, 0),
@@ -156,19 +145,11 @@ public sealed class IridescentBorder : Control
 
     private CanvasRadialGradientBrush CreateRotatingSweepBrush(CanvasControl device, float width, float height)
     {
-        // Rotation phase ∈ [0, 1) over a 14s period.
         double elapsed = (DateTime.UtcNow - _animationStart).TotalSeconds;
         const double period = 14.0;
         float phase = (float)((elapsed % period) / period);
 
-        // CanvasRadialGradientBrush approximates a sweep when given enough
-        // stops along a center-anchored gradient. Win2D ships an actual
-        // Sweep gradient via a custom shader, but for fidelity-vs-cost the
-        // approximation reads as iridescent without going to a custom
-        // shader.
-        //
-        // If the visual delta vs. a true angular gradient is ever
-        // unacceptable, upgrade to a custom Win2D SVG-shader path.
+        // A center-anchored radial brush with several stops approximates a sweep without a custom shader.
         var center = new Vector2(width / 2, height / 2);
 
         var gold = ResolveColor("GoldColor", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
@@ -184,7 +165,7 @@ public sealed class IridescentBorder : Control
             new CanvasGradientStop { Position = (phase + 0.75f) % 1f, Color = info },
             new CanvasGradientStop { Position = (phase + 1.0f) % 1f, Color = gold },
         };
-        // Sort by position (CanvasRadialGradientBrush requires monotonic).
+        // The brush requires monotonic stop positions.
         Array.Sort(stops, (a, b) => a.Position.CompareTo(b.Position));
 
         return new CanvasRadialGradientBrush(device, stops)
