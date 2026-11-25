@@ -131,6 +131,16 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("if (_detailRefreshPending && !Busy)", catalog, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ChatSend_UnchecksResultTilesBeforeClearingTheChosenSet()
+    {
+        var selection = App("Views", "Workbenches", "ChatWorkbench.Selection.cs");
+        var start = selection.IndexOf("private void BeginScopedSend", StringComparison.Ordinal);
+        var uncheck = selection.IndexOf("tile.IsChecked = false;", start, StringComparison.Ordinal);
+        var clear = selection.IndexOf("_chosen.Clear();", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && uncheck > start && clear > uncheck);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);

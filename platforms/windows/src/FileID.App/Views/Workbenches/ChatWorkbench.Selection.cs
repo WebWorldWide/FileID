@@ -65,6 +65,7 @@ internal sealed partial class ChatWorkbench
     {
         _scopedRequestID = request.ScopeFileIDs is null ? null : request.RequestID;
         _lastQuestion = request.Text ?? "";
+        foreach (var tile in _selectionTiles) tile.IsChecked = false;
         _chosen.Clear();
         _selectionNote.Text = "";
     }
