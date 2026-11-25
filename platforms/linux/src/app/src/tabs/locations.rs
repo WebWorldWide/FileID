@@ -135,6 +135,11 @@ impl Locations {
         if !root.online {
             title.append(&v3::pill("OFFLINE", Tone::Warning));
         }
+        let read_only = root.read_only == Some(true);
+        if read_only {
+            title.append(&v3::pill("READ-ONLY", Tone::Warning));
+            title.set_tooltip_text(Some("FileID can search these files but won't change them."));
+        }
         text.append(&title);
         let line = summary(root, now);
         text.append(&v3::label(&line, &["dim-label"]));
@@ -164,9 +169,10 @@ impl Locations {
         });
         row.append(&rescan);
         let spoken = format!(
-            "{}, {}, {line}",
+            "{}, {}{}, {line}",
             root.display,
-            if root.online { "online" } else { "offline" }
+            if root.online { "online" } else { "offline" },
+            if read_only { ", read-only" } else { "" }
         );
         row.update_property(&[gtk::accessible::Property::Label(&spoken)]);
         row
