@@ -83,11 +83,12 @@ struct LibraryView: View {
     @State private var pageCursor: LibraryCursor?
     @State private var loadingMore = false
     @State private var loadMoreTask: Task<Void, Never>?
+    @State private var scrollToEndToken = 0
     /// Query and kind of the rows on screen; a refresh with the same pair keeps
     /// every loaded page instead of dropping back to the first.
     @State private var listedQuery: (String, String?, LibrarySort)? = nil
-    private static let pageSize = 300
-    private static let refreshCap = 3_000
+    private static let pageSize = LibraryPageSizes.first
+    private static let tagChunk = LibraryPageSizes.tagChunk
     private static let liveReloadInterval: TimeInterval = 5
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
@@ -199,6 +200,7 @@ struct LibraryView: View {
                 case "select": if parts.count == 2, let row = rows.first(where: { $0.url.lastPathComponent == parts[1] }) { paneSelectedID = row.id }
                 case "checks": selectMode = true; for row in rows.prefix(Int(parts.last ?? "") ?? 3) { checkedFiles[row.id] = row }
                 case "close": paneSelectedID = nil; selectMode = false; checkedFiles = [:]
+                case "end": jumpToEnd()
             case "reset": paneSelectedID = nil; selectMode = false; checkedFiles = [:]; similarSeed = nil; if !searchText.isEmpty { searchText = "" }
                 default: break
                 }
@@ -1007,6 +1009,7 @@ struct LibraryView: View {
                 refreshToken: pageActive ? tileRefreshToken : shownTileToken,
                 contentVersion: rowsEpoch,
                 scrollToTopToken: scrollToTopToken,
+                scrollToEndToken: scrollToEndToken,
                 textSize: ContentTextScale.shared.size,
                 offline: offlineRoots,
                 sort: sort,
@@ -1020,6 +1023,8 @@ struct LibraryView: View {
                 onToggleCheck: toggleCheck,
                 onFindSimilar: { similarSeed = $0 },
                 onNearEnd: { loadMore() },
+                onJumpToEnd: { jumpToEnd() },
+                onJumpToStart: { scrollToTopToken += 1 },
                 onClearSelection: { paneSelectedID = nil },
                 onRangeCheck: checkRange,
                 onCommandCheck: { row in selectMode = true; toggleCheck(row) },
@@ -1034,6 +1039,7 @@ struct LibraryView: View {
                 refreshToken: pageActive ? tileRefreshToken : shownTileToken,
                 contentVersion: rowsEpoch,
                 scrollToTopToken: scrollToTopToken,
+                scrollToEndToken: scrollToEndToken,
                 textSize: ContentTextScale.shared.size,
                 offline: offlineRoots,
                 sort: sort,
@@ -1042,6 +1048,8 @@ struct LibraryView: View {
                 onToggleCheck: toggleCheck,
                 onFindSimilar: { similarSeed = $0 },
                 onNearEnd: { loadMore() },
+                onJumpToEnd: { jumpToEnd() },
+                onJumpToStart: { scrollToTopToken += 1 },
                 onClearSelection: { paneSelectedID = nil },
                 onRangeCheck: checkRange,
                 onCommandCheck: { row in selectMode = true; toggleCheck(row) },
@@ -1163,7 +1171,7 @@ struct LibraryView: View {
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
         let sort = self.sort
         let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind && $2 == sort } == true
-        let want = sameListing && !firstPageOnly ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
+        let want = sameListing && !firstPageOnly ? max(Self.pageSize, rows.count) : Self.pageSize
         newFilesWaiting = false
         reloadTask?.cancel()
         loadMoreTask?.cancel()
@@ -1241,7 +1249,8 @@ struct LibraryView: View {
             }
             guard !Task.isCancelled else { return }
             // One chip-tag query for every visible tile, off-main.
-            let ids = newRows.map { $0.id }
+            let ids = Array(newRows.prefix(Self.tagChunk).map { $0.id })
+            let laterIDs = newRows.dropFirst(Self.tagChunk).map { $0.id }
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
@@ -1259,6 +1268,7 @@ struct LibraryView: View {
             shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
             searchProblem = problem
             listedQuery = seed == nil ? (query, kind, sort) : nil
+            if !laterIDs.isEmpty { await fillTags(for: laterIDs, query: query, kind: kind, sort: sort) }
         }
     }
 
@@ -1285,30 +1295,92 @@ struct LibraryView: View {
         return (response, (embedded - began).milliseconds, (clock.now - embedded).milliseconds)
     }
 
-    private func loadMore() {
+    private func loadMore() { loadPages(untilEnd: false) }
+
+    /// End and Command-Down: the rest of the listing loads in big pages, tags afterwards, and the view lands on the last row.
+    private func jumpToEnd() {
+        guard canLoadMore, similarSeed == nil else {
+            scrollToEndToken &+= 1
+            #if DEBUG
+            SelfShot.jumpFinished = true
+            #endif
+            return
+        }
+        loadMoreTask?.cancel()
+        loadingMore = false
+        loadPages(untilEnd: true)
+    }
+
+    private func loadPages(untilEnd: Bool) {
         guard canLoadMore, !loadingMore, similarSeed == nil else { return }
         loadingMore = true
-        let offset = rows.count, query = searchText, kind = kindFilter, sort = self.sort, cursor = pageCursor
+        let query = searchText, kind = kindFilter, sort = self.sort
         loadMoreTask = Task { @MainActor in
             defer { if !Task.isCancelled { loadingMore = false } }
-            let loaded = await store.filesPageAsync(offset: cursor == nil ? offset : 0, limit: Self.pageSize, after: cursor, search: query, kindFilter: kind, sort: sort)
-            let page = loaded.rows
-            guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort, offset == rows.count else { return }
-            pageCursor = loaded.cursor ?? cursor
-            let ids = page.map(\.id)
-            let tags = await Task.detached(priority: .userInitiated) { [store] in
-                store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
+            #if DEBUG
+            let clock = ContinuousClock(), began = clock.now, startRows = rows.count
+            #endif
+            var untagged: [Int64] = []
+            repeat {
+                let offset = rows.count, cursor = pageCursor
+                let limit = untilEnd ? LibraryPageSizes.jump : LibraryPageSizes.scroll(loaded: offset)
+                #if DEBUG
+                let pageStart = clock.now
+                #endif
+                let loaded = await store.filesPageAsync(offset: cursor == nil ? offset : 0, limit: limit, after: cursor, search: query, kindFilter: kind, sort: sort)
+                let page = loaded.rows
+                #if DEBUG
+                let queried = clock.now
+                #endif
+                guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort, offset == rows.count else { return }
+                pageCursor = loaded.cursor ?? cursor
+                var tags: [Int64: [String]] = [:]
+                if untilEnd {
+                    untagged += page.map(\.id)
+                } else {
+                    let ids = page.map(\.id)
+                    tags = await Task.detached(priority: .userInitiated) { [store] in
+                        store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
+                    }.value
+                    guard !Task.isCancelled, offset == rows.count else { return }
+                }
+                let known = Set(rows.map(\.id))
+                let fresh = page.filter { !known.contains($0.id) }
+                rows.append(contentsOf: fresh)
+                tagsByFile.merge(tags) { _, new in new }
+                rowsEpoch &+= 1
+                if previewSelectedID != nil {
+                    setPreviewSiblings(previewSiblings + fresh.filter { previewIndex[$0.id] == nil })
+                }
+                canLoadMore = page.count == limit
+                #if DEBUG
+                if SelfShot.isActive, untilEnd { FileHandle.standardError.write(Data("self-shot: page of \(page.count) at \(offset): query \((queried - pageStart).milliseconds) ms, append \((clock.now - queried).milliseconds) ms\n".utf8)) }
+                #endif
+            } while untilEnd && canLoadMore
+            if untilEnd {
+                scrollToEndToken &+= 1
+                #if DEBUG
+                SelfShot.jumpFinished = true
+                if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: jump to end loaded \(rows.count - startRows) more rows, \(rows.count) in all, in \((clock.now - began).milliseconds) ms\n".utf8)) }
+                #endif
+                await fillTags(for: untagged, query: query, kind: kind, sort: sort)
+            }
+        }
+    }
+
+    /// Chips for rows that arrived without their tags, from the bottom of the list up so the rows on screen fill first.
+    private func fillTags(for ids: [Int64], query: String, kind: String?, sort: LibrarySort) async {
+        var end = ids.count
+        while end > 0 {
+            let start = max(0, end - Self.tagChunk)
+            let chunk = Array(ids[start..<end])
+            end = start
+            let tags = await Task.detached(priority: .utility) { [store] in
+                store.topVisionTagsBulk(forFileIDs: chunk, limit: 4)
             }.value
-            guard !Task.isCancelled, offset == rows.count else { return }
-            let known = Set(rows.map(\.id))
-            let fresh = page.filter { !known.contains($0.id) }
-            rows.append(contentsOf: fresh)
+            guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort else { return }
             tagsByFile.merge(tags) { _, new in new }
             rowsEpoch &+= 1
-            if previewSelectedID != nil {
-                setPreviewSiblings(previewSiblings + fresh.filter { previewIndex[$0.id] == nil })
-            }
-            canLoadMore = page.count == Self.pageSize
         }
     }
 }

@@ -4,6 +4,41 @@ import Testing
 
 @Suite("Library at whole-drive scale")
 struct LibraryScaleTests {
+    @Test func endAndCommandDownJumpToTheEndOfTheListingInGridAndList() throws {
+        let grid = try appSource("Views/LibraryCollectionGrid.swift")
+        let list = try appSource("Views/LibraryListTable.swift")
+        for (name, text) in [("grid", grid), ("list", list)] {
+            #expect(text.contains("case 119: .end"), "\(name) maps the End key")
+            #expect(text.contains("case 115: .home"), "\(name) maps the Home key")
+            #expect(text.contains("command ? .end : .down") || text.contains("contains(.command) ? .end : .down"), "\(name) maps Command-Down")
+            #expect(text.contains("model.onJumpToEnd()"), "\(name) asks the library to load the rest")
+            #expect(text.contains("scrollToEndToken"), "\(name) scrolls to the last row once it is loaded")
+        }
+    }
+
+    @Test func jumpingToTheEndLoadsEveryRemainingPageBeforeScrolling() throws {
+        let library = try appSource("Views/LibraryView.swift")
+        let jump = try #require(library.range(of: "private func loadPages(untilEnd: Bool)"))
+        let body = String(library[jump.lowerBound...].prefix(4_800))
+        #expect(body.contains("} while untilEnd && canLoadMore"))
+        #expect(body.contains("LibraryPageSizes.jump"))
+        let loop = try #require(body.range(of: "} while untilEnd && canLoadMore"))
+        let scroll = try #require(body.range(of: "scrollToEndToken &+= 1"))
+        #expect(loop.lowerBound < scroll.lowerBound, "the view lands on the last row only after the last page arrived")
+    }
+
+    @Test func aRefreshKeepsEveryLoadedPageInsteadOfCuttingBackToThreeThousandRows() throws {
+        let library = try appSource("Views/LibraryView.swift")
+        #expect(!library.contains("refreshCap"))
+        #expect(library.contains("let want = sameListing && !firstPageOnly ? max(Self.pageSize, rows.count) : Self.pageSize"))
+    }
+
+    @Test func rowsLoadedWithoutTagsGetTheirChipsFromTheBottomUp() throws {
+        let library = try appSource("Views/LibraryView.swift")
+        #expect(library.contains("private func fillTags(for ids: [Int64]"))
+        #expect(library.contains("let laterIDs = newRows.dropFirst(Self.tagChunk)"))
+    }
+
     @Test func theVisualHalfOfASearchStartsBesideTheKeywordListing() throws {
         let library = try appSource("Views/LibraryView.swift")
         let start = try #require(library.range(of: "Task { @MainActor in await visualHalf(of: trimmed) }"))

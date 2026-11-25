@@ -14,6 +14,7 @@ struct LibraryListTable: NSViewRepresentable {
     let refreshToken: String
     var contentVersion: Int = 0
     var scrollToTopToken: Int = 0
+    var scrollToEndToken: Int = 0
     var textSize: TextSize = .standard
     var offline: OfflineRoots = .none
     var sort: LibrarySort = .standard
@@ -23,6 +24,8 @@ struct LibraryListTable: NSViewRepresentable {
     var onToggleCheck: (FileRow) -> Void
     var onFindSimilar: (FileRow) -> Void
     var onNearEnd: () -> Void
+    var onJumpToEnd: () -> Void = {}
+    var onJumpToStart: () -> Void = {}
     var onClearSelection: () -> Void = {}
     var onRangeCheck: (FileRow) -> Void = { _ in }
     var onCommandCheck: (FileRow) -> Void = { _ in }
@@ -114,6 +117,7 @@ struct LibraryListTable: NSViewRepresentable {
         private var lastRows: [FileRow] = []
         private var lastContentVersion = Int.min
         private var lastScrollToTopToken = 0
+        private var lastScrollToEndToken = 0
         private var lastSort: LibrarySort?
         private var atTop = true
         private var lastClickRowID: Int64?
@@ -182,6 +186,10 @@ struct LibraryListTable: NSViewRepresentable {
             lastRows = list.rows
             lastContentVersion = list.contentVersion
             lastSort = list.sort
+            if list.scrollToEndToken != lastScrollToEndToken {
+                lastScrollToEndToken = list.scrollToEndToken
+                if !ids.isEmpty { table.scrollRowToVisible(ids.count - 1) }
+            }
             if list.scrollToTopToken != lastScrollToTopToken {
                 lastScrollToTopToken = list.scrollToTopToken
                 if let scroll = table.enclosingScrollView {
@@ -298,6 +306,8 @@ struct LibraryListTable: NSViewRepresentable {
             guard let model, let table, !model.rows.isEmpty else { return false }
             let focusID = model.selectMode ? cursorID : model.selectedID
             let current = focusID.flatMap { id in model.rows.firstIndex { $0.id == id } }
+            if key == .home { model.onJumpToStart(); return true }
+            if key == .end { model.onJumpToEnd(); return true }
             if key == .clear {
                 guard current != nil else { return false }
                 if model.selectMode { moveCursor(to: nil) } else { model.onClearSelection() }
@@ -391,7 +401,7 @@ final class ListHeaderView: NSTableHeaderView {
 }
 
 final class ListTableView: NSTableView {
-    enum Key { case up, down, open, clear }
+    enum Key { case up, down, open, clear, home, end }
     var onKey: ((Key) -> Bool)?
     var onClick: ((Int, Int) -> Void)?
     var onMenu: ((Int) -> NSMenu?)?
@@ -400,8 +410,10 @@ final class ListTableView: NSTableView {
 
     override func keyDown(with event: NSEvent) {
         let key: Key? = switch event.keyCode {
-        case 125: .down
-        case 126: .up
+        case 125: event.modifierFlags.contains(.command) ? .end : .down
+        case 126: event.modifierFlags.contains(.command) ? .home : .up
+        case 115: .home
+        case 119: .end
         case 36, 76, 49: .open
         case 53: .clear
         default: nil

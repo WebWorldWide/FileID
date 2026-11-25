@@ -12,7 +12,7 @@
 //   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
 //   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>&act=<action>[:<argument>]];...   extra captures after the pages
-//        actions: select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested (Suggest merges sheet), review[:faces|merges|splits] (People review sheet on that tab),
+//        actions: end (Library jumps to its last row, as the End key does), select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested (Suggest merges sheet), review[:faces|merges|splits] (People review sheet on that tab),
 //        models (Chat/Describe model sheets), welcome, welcome-download (Welcome with the description model mid-download); each is closed again after the capture
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
 //   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded
@@ -154,6 +154,8 @@ enum SelfShot {
     static var welcomeDemoDownload = false
     private static weak var engineRef: EngineClient?
     private static var started = false
+    /// Set by the Library when a jump to the end of its listing has loaded every row and scrolled there.
+    static var jumpFinished = false
 
     static func run(engine: EngineClient, store: ReadStore, navigate: @escaping (String) -> Void,
                     openFolder: @escaping (URL, Bool) -> Void) {
@@ -232,7 +234,13 @@ enum SelfShot {
                     if let main = window(), let sheet = main.attachedSheet { main.endSheet(sheet) }
                     try? await Task.sleep(for: .seconds(0.5))
                 } else if let action = view.action {
+                    jumpFinished = false
                     NotificationCenter.default.post(name: .selfShotAction, object: action)
+                    if action == "end" {
+                        await waitUntil(timeout: 180) { jumpFinished }
+                        try? await Task.sleep(for: .seconds(0.6))
+                        await waitForLibraryThumbnails()
+                    }
                     try? await Task.sleep(for: .seconds(plan.settle))
                     let sheet = window()?.attachedSheet != nil
                     write(name: view.name, plan: plan, sheet: sheet)
@@ -451,7 +459,8 @@ enum SelfShot {
     private static func waitForLibraryThumbnails() async {
         guard let root = window()?.contentView, let collection = firstCollectionView(in: root) else { return }
         let started = Date()
-        while Date().timeIntervalSince(started) < 8 {
+        let limit = env("FILEID_SELF_SHOT_THUMB_WAIT").flatMap(Double.init) ?? 8
+        while Date().timeIntervalSince(started) < limit {
             let tiles = collection.visibleItems().compactMap { $0 as? LibraryTileItem }
             if !tiles.isEmpty, tiles.allSatisfy(\.isFinishedLoading) {
                 FileHandle.standardError.write(Data("self-shot: \(tiles.count) tiles on screen showed their thumbnails \(Int(Date().timeIntervalSince(started) * 1000)) ms after the scroll settled\n".utf8))
@@ -459,7 +468,7 @@ enum SelfShot {
             }
             try? await Task.sleep(for: .milliseconds(100))
         }
-        FileHandle.standardError.write(Data("self-shot: thumbnails still loading after 8 s\n".utf8))
+        FileHandle.standardError.write(Data("self-shot: thumbnails still loading after \(Int(limit)) s\n".utf8))
     }
 
     private static func firstCollectionView(in view: NSView) -> NSCollectionView? {

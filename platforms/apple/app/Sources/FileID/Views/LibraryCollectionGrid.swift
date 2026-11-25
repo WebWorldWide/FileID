@@ -15,6 +15,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     /// Changes whenever `rows` or `tagsByFile` is replaced.
     var contentVersion: Int = 0
     var scrollToTopToken: Int = 0
+    var scrollToEndToken: Int = 0
     var textSize: TextSize = .standard
     var offline: OfflineRoots = .none
     var sort: LibrarySort = .standard
@@ -23,6 +24,8 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     var onToggleCheck: (FileRow) -> Void
     var onFindSimilar: (FileRow) -> Void
     var onNearEnd: () -> Void
+    var onJumpToEnd: () -> Void = {}
+    var onJumpToStart: () -> Void = {}
     var onClearSelection: () -> Void = {}
     var onRangeCheck: (FileRow) -> Void = { _ in }
     var onCommandCheck: (FileRow) -> Void = { _ in }
@@ -75,6 +78,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastRows: [FileRow] = []
         private var lastContentVersion = Int.min
         private var lastScrollToTopToken = 0
+        private var lastScrollToEndToken = 0
         private var atTop = true
         private var lastClickRowID: Int64?
         private var showsChipRow = true
@@ -132,6 +136,10 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastSort = grid.sort
             lastRows = grid.rows
             lastContentVersion = grid.contentVersion
+            if grid.scrollToEndToken != lastScrollToEndToken {
+                lastScrollToEndToken = grid.scrollToEndToken
+                if !ids.isEmpty { collection.scrollToItems(at: [IndexPath(item: ids.count - 1, section: 0)], scrollPosition: .bottom) }
+            }
             if grid.scrollToTopToken != lastScrollToTopToken {
                 lastScrollToTopToken = grid.scrollToTopToken
                 if let scroll = collection.enclosingScrollView {
@@ -158,6 +166,8 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             guard let model, let collection, !model.rows.isEmpty else { return false }
             let focusID = model.selectMode ? cursorID : model.selectedID
             let current = focusID.flatMap { id in model.rows.firstIndex { $0.id == id } }
+            if key == .home { model.onJumpToStart(); return true }
+            if key == .end { model.onJumpToEnd(); return true }
             if key == .clear {
                 guard current != nil else { return false }
                 if model.selectMode { moveCursor(to: nil) } else { model.onClearSelection() }
@@ -305,14 +315,17 @@ final class TileCollectionView: NSCollectionView {
         CATransaction.commit()
     }
 
-    enum TileKey { case left, right, up, down, open, clear }
+    enum TileKey { case left, right, up, down, open, clear, home, end }
 
     override func keyDown(with event: NSEvent) {
+        let command = event.modifierFlags.contains(.command)
         let key: TileKey? = switch event.keyCode {
         case 123: .left
         case 124: .right
-        case 125: .down
-        case 126: .up
+        case 125: command ? .end : .down
+        case 126: command ? .home : .up
+        case 115: .home
+        case 119: .end
         case 36, 76, 49: .open
         case 53: .clear
         default: nil
