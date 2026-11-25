@@ -3168,11 +3168,9 @@ fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<PersonFace>>
     rx
 }
 
-// The representative face: the persisted pick when it is still active, else
-// the lowest-id active face. Two correlated WHERE-clause lookups — SQLite
-// rejects an outer reference (`p.representative_face_id`) inside a scalar
-// subquery's ORDER BY with "no such column", which silently emptied the whole
-// People tab (the error was swallowed into a default snapshot).
+// The representative face: the persisted pick when it is still active, else the lowest-id active
+// face. Two correlated WHERE lookups, because SQLite rejects an outer reference inside a scalar
+// subquery's ORDER BY.
 const PERSON_SNAPSHOT_SQL: &str = "\
     SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
            COALESCE(p.is_unknown, 0), \
