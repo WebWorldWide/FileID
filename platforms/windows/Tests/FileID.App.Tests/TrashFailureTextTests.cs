@@ -64,6 +64,20 @@ public sealed class TrashFailureTextTests
             TrashFailureText.Summary(result));
     }
 
+    private const string ReadOnlySentence =
+        "\u201cD:\\\u201d is a read-only drive. FileID can show and search these files but can\u2019t change them.";
+
+    [Fact]
+    public void ARefusalFromAReadOnlyDriveKeepsTheEnginesSentence()
+    {
+        var one = Result(0, 1, Refused(1, "protected", ReadOnlySentence));
+        Assert.Equal(TrashFailureText.ReadOnly, TrashFailureText.Kind(one.Messages![0]));
+        Assert.Equal(ReadOnlySentence, TrashFailureText.Summary(one));
+
+        var three = Result(0, 3, Refused(1, "protected", ReadOnlySentence), Refused(2, "protected", ReadOnlySentence), Refused(3, "protected", ReadOnlySentence));
+        Assert.Equal(ReadOnlySentence + " (3 files)", TrashFailureText.Summary(three));
+    }
+
     [Fact]
     public void SummaryFallsBackToTheMessageWhenThereIsNoReason()
     {
