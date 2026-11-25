@@ -116,12 +116,14 @@ struct CleanupView: View {
             if pageActive { scanBatchArrived() } else { staleWhileHidden = true }
         }
         .onDisappear { reloadTask?.cancel(); verifyTask?.cancel(); exactVerify = nil }
+        #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
             guard let action = note.object as? String, action.hasPrefix("more:"), let pages = Int(action.dropFirst(5)) else { return }
             Task { @MainActor in
                 for _ in 0..<pages { await loadMoreExactPage() }
             }
         }
+        #endif
         // Exact mode skips its per-batch reload during a live scan, so the final
         // verified set — and the last batch the scan-active skip drops — is computed
         // once here when the scan reaches a terminal phase. Mirrors LibraryView's
