@@ -848,7 +848,7 @@ mod trash_home {
                 resolve_home_trash(None, None, os("/home/u"), false).unwrap(),
                 PathBuf::from("/home/u/.local/share/Trash")
             );
-    }
+        }
     }
 }
 
