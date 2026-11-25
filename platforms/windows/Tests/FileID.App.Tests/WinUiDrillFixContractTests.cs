@@ -75,6 +75,14 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("IsUnknownCheckBox.IsChecked == true && !(_loadedUnknown && HasTypedName())", sheet, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SettingsRecentScans_DisposesItsSqliteConnection()
+    {
+        var settings = App("Views", "Settings", "SettingsView.xaml.cs");
+        var start = settings.IndexOf("PopulateRecentScansAsync()", StringComparison.Ordinal);
+        Assert.True(settings.IndexOf("using var conn = new Microsoft.Data.Sqlite.SqliteConnection(", start, StringComparison.Ordinal) > start);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
