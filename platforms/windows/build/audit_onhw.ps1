@@ -5,7 +5,7 @@
   -> merge suggestions) against a real corpus, capturing throughput, peak RSS,
   the bound execution provider, per-stage timings, and any panics/errors.
 
-  SAFETY: the engine is pointed at an ISOLATED temp state dir via LOCALAPPDATA,
+  The engine is pointed at an ISOLATED temp state dir via LOCALAPPDATA,
   with the real Models/ folder junctioned in. The user's real library DB
   (%LOCALAPPDATA%\FileID\fileid.sqlite, ~24k files) is NEVER touched. No
   destructive command (applyRestructure / renameFiles / trash / applyTags) is
@@ -79,8 +79,7 @@ $psi.CreateNoWindow = $true
 $psi.Environment["LOCALAPPDATA"]   = $Temp
 $psi.Environment["FILEID_LOG"]     = "info"
 $psi.Environment["FILEID_PERF_TRACE"] = "1"
-# Forward the RAM++ batch-size toggle so a measurement run can A/B single
-# (unset/0) vs batched (>1) without editing this script.
+# Forward the RAM++ batch-size toggle so a run can compare single (unset/0) and batched (>1).
 if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }
 
 $proc = New-Object System.Diagnostics.Process

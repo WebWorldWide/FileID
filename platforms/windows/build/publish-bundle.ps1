@@ -1,7 +1,6 @@
 ﻿# FileID Windows — release publish + WiX Burn bundle.
 #
-# This is the canonical "I'm cutting a release" command. Produces ONE
-# downloadable artifact for end users: dist/installer/FileIDSetup.exe.
+# Cuts a release. Produces one downloadable artifact for end users: dist/installer/FileIDSetup.exe.
 #
 # What it chains:
 #   1. Toolchain probes (cargo, dotnet, MSVC ARM64 cl.exe, WiX v4 SDK)
@@ -48,12 +47,8 @@ if (-not $SigningAdapter) { $SigningAdapter = $env:FILEID_SIGNING_ADAPTER }
 if (-not $SignerSubject) { $SignerSubject = $env:FILEID_SIGNER_SUBJECT }
 if (-not $SignerPublicKeySha256) { $SignerPublicKeySha256 = $env:FILEID_SIGNER_PUBLIC_KEY_SHA256 }
 
-# A release build must never bypass signing or the privacy gate. release.yml
-# sets CI_RELEASE=true on the actual signing path; if -SkipSign / -SkipPrivacyGate
-# slipped through there it would ship unsigned/unverified binaries to users —
-# exactly the failure these gates exist to prevent. Local dev builds (CI_RELEASE
-# unset) may still -SkipSign for cert-less iteration; a cert-less CI dry-run must
-# NOT set CI_RELEASE.
+# A release build must never bypass signing or the privacy gate. release.yml sets CI_RELEASE=true
+# on the real signing path; local builds and cert-less CI dry-runs leave it unset and may -SkipSign.
 if ($env:CI_RELEASE -eq 'true') {
     if ($SkipSign) {
         Write-Host "ERROR: -SkipSign is forbidden on a release build (would ship unsigned binaries)." -ForegroundColor Red
@@ -653,10 +648,8 @@ if (-not $SkipSign) {
     }
     Write-Host "  Authenticode          OK (signed by $($sig.SignerCertificate.Subject))" -ForegroundColor Green
 
-    # The bundle being Valid doesn't prove the inner MSIs are signed — a
-    # half-signed set still trips SmartScreen + WinVerifyTrust after install.
-    # Verify every shipped MSI too (the publish-dir exes are signed via
-    # Sign-PublishDir above; the MSIs are the user-facing secondary artifacts).
+    # A valid bundle does not prove the inner MSIs are signed, and a half-signed set still trips
+    # SmartScreen and WinVerifyTrust after install, so verify every shipped MSI too.
     $msis = @($MsiX64)
     if (-not $SkipArm64) { $msis += $MsiArm64 }
     foreach ($msi in $msis) {

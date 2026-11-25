@@ -53,7 +53,6 @@ function Write-Jpg([string]$path, [int]$idx) {
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
-        $hue = ($idx * 17) % 360
         $r = ($idx * 13) % 256
         $gn = ($idx * 29) % 256
         $b = ($idx * 41) % 256
