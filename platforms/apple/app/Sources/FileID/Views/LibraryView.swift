@@ -1204,7 +1204,7 @@ struct LibraryView: View {
                             switch decision.source {
                             case .engine:
                                 let known = Set(engineRows.map(\.id))
-                                newRows = engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : [])
+                                newRows = LibrarySearchOutcome.promotingNameMatches(engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : []), query: trimmed)
                             case .keyword:
                                 newRows = keywordRows
                             }

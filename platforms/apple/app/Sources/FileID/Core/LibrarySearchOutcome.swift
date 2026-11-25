@@ -1,9 +1,20 @@
 import Foundation
+import FileIDShared
 
 /// How a Library search with the engine's strength summary ("3 matches (2 strong visual), 1 weaker.") is shown.
 /// The engine lists matches first (strong picture scores, then name, tag and text hits), then weaker look-alikes;
 /// its summary says how many of each and how many of the matches are strong visual ones.
 enum LibrarySearchOutcome {
+    /// Files whose own name holds the typed text go first, in their given order: a search for a file name should not bury that file under look-alike pictures.
+    static func promotingNameMatches(_ rows: [FileRow], query: String) -> [FileRow] {
+        let wanted = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else { return rows }
+        let named = rows.filter { $0.url.lastPathComponent.range(of: wanted, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+        guard !named.isEmpty, named.count < rows.count else { return rows }
+        let ids = Set(named.map(\.id))
+        return named + rows.filter { !ids.contains($0.id) }
+    }
+
     struct Strength: Equatable {
         let good: Int
         let strong: Int?
