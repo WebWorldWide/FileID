@@ -141,7 +141,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "a83ca357f422a3f9bf7e8519618839de899a4a0d20d31cb641e504cd7a2b88e9",
   "platforms/windows/src/engine/src/commands/bulk.rs": "d96d40dd5beb881566b8b7ffff824a08d3bd2c6f616f0187d005463ac9f1fe20",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "123beeef5a4b06ab53eecb0739e23627cd19d6cb782c8f4e8ab35ad1b7d31f05",
-  "platforms/windows/src/engine/src/commands/restructure.rs": "327e3ce31981f25dff4ee54948ef383c3cbe1092611ea441cc3e6104e72c5ffd",
+  "platforms/windows/src/engine/src/commands/restructure.rs": "81a50dca2edfb40b25f8392123760cfc0bb57dae00b2156f740745908d0591b8",
   "platforms/windows/src/engine/src/commands/trash.rs": "7420dd17ff9c8091a3f96eea893fe3af50a2a2132de2bf2745105cc990f3a510",
   "platforms/windows/src/engine/src/downloader.rs": "86ca0e4ff876f8f7f2204ce584ddeb38d42bd57140bab5c9d590a46ebe143922",
   "platforms/windows/src/engine/src/server.rs": "6f2f4d873ad9de3ac8205365349f5782b02778d7d44d440eac41ca41d20cface",
