@@ -292,7 +292,7 @@ impl CatalogIndex {
         let mut judged = self.search_unfiltered(&wide, root.as_ref(), encode)?;
         let response = &mut judged.response;
         let conn = self.reader()?;
-        let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
+        let mut statement = conn.prepare(&format!("SELECT 1 FROM files f WHERE f.id=?1 AND {} BETWEEN ?2 AND ?3", crate::util::SQL_TAKEN_DATE))?;
         let mut inside = std::collections::HashSet::new();
         for hit in &response.hits {
             if inside.contains(&hit.file_id) {
@@ -316,11 +316,11 @@ impl CatalogIndex {
                 let seen: std::collections::HashSet<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
                 let wanted = serde_json::to_string(&subject)?;
                 let mut more = conn.prepare(
-                    "SELECT id,path_text,kind,COALESCE(vlm_description,'') FROM files
-                     WHERE failed=0 AND id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3 AND {}
-                     ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?4"
-                        .replace("{}", &crate::commands::roots::clause("path_text", "?5"))
-                        .as_str(),
+                    &"SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') FROM files f
+                     WHERE f.failed=0 AND f.id IN (SELECT value FROM json_each(?1)) AND {taken} BETWEEN ?2 AND ?3 AND {roots}
+                     ORDER BY {taken} DESC,f.id DESC LIMIT ?4"
+                        .replace("{taken}", crate::util::SQL_TAKEN_DATE)
+                        .replace("{roots}", &crate::commands::roots::clause("f.path_text", "?5")),
                 )?;
                 let rows = more.query_map(rusqlite::params![wanted, from, to, (limit + seen.len()) as i64, root.as_ref().map(|root| root.param())], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))

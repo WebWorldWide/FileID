@@ -9,7 +9,7 @@ use sha2::Digest;
 
 use crate::scan_session::{prefix_upper_bound, root_descendant_prefix};
 
-const VERSION: &str = "v3";
+const VERSION: &str = "v4";
 const READ_CHUNK: usize = 200;
 
 pub(crate) fn marker(state_dir: &Path, root: &Path) -> PathBuf {
@@ -278,9 +278,11 @@ mod tests {
         )
         .unwrap();
         let database = Mutex::new(conn);
-        let old = state.join("capture-dates-v2").join(marker(&state, &root).file_name().unwrap());
-        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, b"").unwrap();
+        for version in ["v2", "v3"] {
+            let old = state.join(format!("capture-dates-{version}")).join(marker(&state, &root).file_name().unwrap());
+            std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+            std::fs::write(&old, b"").unwrap();
+        }
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 1);
         std::fs::remove_dir_all(scratch).unwrap();
     }
