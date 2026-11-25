@@ -126,7 +126,13 @@ public sealed class LocationsCard : UserControl
         var name = new TextBlock { Text = root.Display, FontSize = 13.5, FontWeight = Microsoft.UI.Text.FontWeights.Medium, Foreground = _text1, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         var nameRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         nameRow.Children.Add(name);
-        if (!root.Online) nameRow.Children.Add(OfflinePill());
+        if (!root.Online) nameRow.Children.Add(Pill("OFFLINE", _warning, _warningStroke));
+        if (root.ReadOnly == true)
+        {
+            var readOnly = Pill("READ-ONLY", _text3, _divider);
+            ToolTipService.SetToolTip(readOnly, LocationPresentation.ReadOnlyTooltip);
+            nameRow.Children.Add(readOnly);
+        }
         var path = Caption(root.Path);
         path.TextWrapping = TextWrapping.NoWrap;
         path.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -184,14 +190,14 @@ public sealed class LocationsCard : UserControl
         _status.Visibility = Visibility.Visible;
     }
 
-    private Border OfflinePill()
+    private static Border Pill(string text, Brush foreground, Brush stroke)
     {
-        var label = new TextBlock { Text = "OFFLINE", FontSize = 10.5, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = _warning };
+        var label = new TextBlock { Text = text, FontSize = 10.5, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = foreground };
         return new Border
         {
             Padding = new Thickness(6, 2, 6, 2),
             CornerRadius = new CornerRadius(4),
-            BorderBrush = _warningStroke,
+            BorderBrush = stroke,
             BorderThickness = new Thickness(1),
             VerticalAlignment = VerticalAlignment.Center,
             Child = label,
