@@ -400,10 +400,7 @@ struct CleanupView: View {
     private func list(visible: [DuplicateGroup]) -> some View {
         ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 16) {
-                // First-timer explainer above the groups. Inline (not a
-                // tooltip) so the keeper concept is impossible to miss.
                 if isSimilar {
-                    // CRITICAL safety UX: similar groups are NOT byte-identical.
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(Theme.warning)
@@ -563,7 +560,7 @@ struct CleanupView: View {
     }
 
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
-        guard !deleting else { return }   // re-entrancy guard
+        guard !deleting else { return }
         deleting = true
         statusWarning = false
         defer { deleting = false }
@@ -612,8 +609,7 @@ struct CleanupView: View {
         }
         let keeperURLsToTag = Array(keeperURLSet)
 
-        // auto-tag keepers (Settings toggle, default on). Useful so
-        // the user can find "files I deduped this session" in Finder.
+        // Keepers get a Finder tag when the Settings toggle is on (default).
         let shouldTag = autoTagOn && !keeperURLsToTag.isEmpty
 
         // Run the chunked DELETE and per-keeper xattr writes off the MainActor: on a large pass they are thousands of synchronous DB/FS ops that would re-freeze the UI.
@@ -628,9 +624,7 @@ struct CleanupView: View {
         for id in trashedIDs { selection.remove(id) }
         if shouldTag { store.notifyChanged() }
 
-        // Plain-language status. "DB rows pruned" is internal noise —
-        // users care about file count + reclaimed space. Tag summary
-        // appended only when the auto-tag toggle did something.
+        // The status reports file count and reclaimed space; the tag summary is added only when tagging happened.
         var tagSummary = ""
         if taggedAdded > 0 {
             tagSummary = " · tagged \(Plural.noun(taggedAdded, "kept file", "kept files")) with “\(AppSettings.cleanupAutoTagName)”"
@@ -689,10 +683,7 @@ struct CleanupView: View {
 
     private func reload() {
         // Coalesce instead of cancel-and-restart: hashing and DB reads are not interrupted mid-file. At most one run in flight plus one pending; a result superseded mid-query is dropped so the latest assignment wins.
-        // Freeze the duplicate re-query + selection re-derivation while a
-        // destructive confirmation is on screen, so the count the user is
-        // confirming can't drift mid-scan. Re-runs on dialog dismissal
-        // (onChange of confirmDelete), which re-applies the keeper protection.
+        // Frozen while the confirmation is on screen so the count being confirmed can't drift mid-scan; re-runs when the dialog is dismissed.
         if confirmDelete { return }
         if reloadTask != nil { reloadPending = true; return }
         reloadTask = Task { @MainActor in
@@ -742,8 +733,7 @@ struct CleanupView: View {
                 // A newer reload landed while this query ran — its result is stale;
                 // loop and re-query rather than assigning it.
                 if reloadPending { continue }
-                // Prior keeper of each group (by phash id) before we overwrite `groups`,
-                // so we can tell which copies *became* the keeper across this reload.
+                // Keepers before `groups` is replaced, to tell which copies became the keeper in this reload.
                 let priorKeepers = Set(groups.compactMap { $0.files.first?.id })
                 groups = newGroups
                 #if DEBUG
@@ -760,12 +750,7 @@ struct CleanupView: View {
                 exactUnverified = []
                 let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
                 selection.formIntersection(visibleIDs)
-                // Selection is stored by file id, but a mid-scan re-rank can change
-                // which copy is the keeper (index 0). Only drop a copy that *became*
-                // the keeper this reload — a copy that was already the keeper and is
-                // still selected was explicitly checked by the user ("trash the keeper
-                // too", see header/CopyTile help) and must not be silently reverted on
-                // every throttled batch during a live scan.
+                // A mid-scan re-rank can change the keeper. Only a copy that became the keeper in this reload is deselected; a keeper the user checked on purpose stays checked.
                 for g in newGroups {
                     guard let keeper = g.files.first else { continue }
                     if !priorKeepers.contains(keeper.id) {

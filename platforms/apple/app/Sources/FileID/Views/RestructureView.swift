@@ -278,8 +278,7 @@ struct RestructureView: View {
         .onChange(of: engine.restructurePlanSignal) { _, _ in
             applyPlan()
         }
-        // Coming back used to rebuild the page and plan again every time; now
-        // it plans again only when files changed or the last plan never arrived.
+        // Coming back plans again only when files changed or the last plan never arrived.
         .onPageVisibility(shown: {
             guard libraryRoot != nil, !loading, !applying, !confirmApply, !confirmLargeApply else { return }
             if Self.needsReplan(storeVersion: store.version, planStoreVersion: planStoreVersion, planDelivered: planDelivered) { requestPlan() }

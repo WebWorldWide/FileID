@@ -208,7 +208,7 @@ struct DeepAnalyzeModelPickerCard: View {
 
 }
 
-// Extracted from DeepAnalyzeModelPickerCard to keep the type-checker happy.
+// Split out of DeepAnalyzeModelPickerCard to keep SwiftUI type-checking fast.
 private struct ModelOptionRow: View {
     let kind: AIModelKind
     let isActive: Bool
@@ -316,11 +316,8 @@ private struct ModelOptionRow: View {
     }
 }
 
-// Sentinel-based install check. The engine writes
-// `.fileid-installed` only after ensureLoaded succeeded — i.e. every
-// weight shard is on disk AND MLX successfully built a ModelContainer.
-// Checking config.json (which Hub creates very early) flips green
-// while gigabytes of safetensors are still streaming in.
+// Installed means the `.fileid-installed` sentinel exists, which is written only once every weight shard is on disk and the model loaded.
+// config.json appears early in a download, so it would report installed while the weights are still streaming in.
 enum ModelInstallStatus {
     static func isInstalled(kind: AIModelKind) -> Bool {
         let url = ModelCachePaths.huggingFaceModels
@@ -353,33 +350,25 @@ struct DeepAnalyzeView: View {
     @State private var confirmDownload = false
     @State private var runFailure: (text: String, detail: String)?
 
-    // Cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
-    // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
-    // pass (multi-hour overnight runs). Refreshed on the same coarse triggers as
-    // pendingRenameCount, plus active-model changes (pending is keyed by model).
+    // Cached because body re-evaluates at the 4 Hz progress rate during a run, and computing these runs SQLite COUNT(*) on the main thread.
+    // Refreshed on the same coarse triggers as pendingRenameCount, plus active-model changes.
     @State private var pendingTotals: (total: Int, pending: Int, undescribed: Int) = (0, 0, 0)
 
-    /// True when at least one person cluster has been given a name.
-    /// Hard requirement before Deep Analyze can run — the VLM uses the
-    /// names in captions, and "a person doing X" captions are nearly
-    /// useless. User must visit People and name at least one cluster.
+    /// True when at least one person cluster has been named. Deep Analyze requires it because the VLM puts names in captions.
     @State private var hasNamedAnyone = false
     @State private var hasPeople = false
 
-    /// Throttle state for the `store.version` refresh coalescer (see
-    /// `throttledRefresh`): leading-edge timestamp + trailing debounce.
+    /// Throttle state for `throttledRefresh`: leading-edge timestamp plus trailing debounce.
     @State private var lastReloadAt: Date = .distantPast
     @State private var refreshDebounce: Task<Void, Never>?
 
-    // Engine is alive (not crashed / mid-respawn); the live run cards key
-    // off this so a crash mid-run tears them down at once.
+    // The live run cards key off this so a crash mid-run tears them down at once.
     private var engineLive: Bool {
         if case .ready = engine.state { return true }
         return false
     }
 
-    // Run requested but no per-file progress yet — the VLM cold-load /
-    // model-download window where the "Starting…" card shows.
+    // Run requested but no per-file progress yet: the VLM load and model download window.
     private var isStartingDeepAnalyze: Bool {
         engine.deepAnalyzeInFlight && engine.deepAnalyzeProgress == nil
     }
@@ -406,10 +395,7 @@ struct DeepAnalyzeView: View {
                 if pendingTotals.total > 0 || pendingRenameCount > 0 || hasNamedAnyone {
                     applyActionsCard
                 }
-                // Show a "Starting…" card the instant Deep Analyze is
-                // requested, even before the first progress event lands.
-                // Without this, hitting Skip from the People tab feels
-                // like a 10s freeze (the wait for the VLM model to load).
+                // Shown as soon as the run is requested; the VLM takes about 10 s to load before the first progress event.
                 if isStartingDeepAnalyze, engineLive {
                     startingCard
                         .animation(Theme.spring, value: engine.deepAnalyzeInFlight)
@@ -420,10 +406,7 @@ struct DeepAnalyzeView: View {
                 if let lastDone = engine.deepAnalyzeComplete {
                     completionCard(lastDone)
                 }
-                // Suppress the prior run's caption while a fresh run spins
-                // up — otherwise a stale caption sits beside "Starting…"
-                // (deepAnalyzeLast is private(set) on EngineClient
-                // so it can't be cleared from here).
+                // Hidden while a new run starts: `deepAnalyzeLast` can't be cleared from here and would show the previous run's caption.
                 if let lastFile = engine.deepAnalyzeLast, !isStartingDeepAnalyze {
                     lastFileCard(lastFile)
                 }
@@ -497,7 +480,7 @@ struct DeepAnalyzeView: View {
         }
     }
 
-    // Lay-person explainer of the two AI passes; dismissible.
+    // Dismissible explainer of the two AI passes.
     private var explainerCard: some View {
         Panel(padding: 16) {
             HStack(alignment: .top, spacing: 12) {
@@ -1102,10 +1085,7 @@ struct DeepAnalyzeView: View {
                             .foregroundStyle(Theme.text3)
                             .lineLimit(1).truncationMode(.middle)
                     }
-                    // Live caption stream — engine emits the
-                    // partial caption text at 4 Hz as the VLM generates.
-                    // Empty/nil while pre-inference; fills word-by-word
-                    // once tokens start flowing.
+                    // The engine streams the partial caption at 4 Hz while the VLM generates.
                     if let cap = p.currentCaption, !cap.isEmpty {
                         Text(cap)
                             .font(Theme.Font.body(13.5))
