@@ -177,8 +177,8 @@ struct TitleBar: View {
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
                         .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                        .disabled(HelperGate.folderMenuRescanDisabled(scanRunning: scanRunning, captionsRunning: engine.deepAnalyzeInFlight, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: HelperGate.isDown(engine)))
-                        .help(HelperGate.isDown(engine) ? "FileID’s helper isn’t running. Restart it, then scan again." : engine.deepAnalyzeInFlight || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files. Files already read are skipped.")
+                        .disabled(HelperGate.folderMenuRescanDisabled(scanRunning: scanRunning, captionsRunning: engine.deepAnalyzeInFlight, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: HelperGate.isDown(engine), locationOffline: OfflineRoots(engine.libraryRoots).isOffline(url.path)))
+                        .help(HelperGate.isDown(engine) ? "FileID’s helper isn’t running. Restart it, then scan again." : OfflineRoots(engine.libraryRoots).isOffline(url.path) ? "This location is offline. Reconnect the drive to rescan." : engine.deepAnalyzeInFlight || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files. Files already read are skipped.")
                 }
             }
             .padding(10)

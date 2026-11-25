@@ -27,13 +27,13 @@ enum HelperGate {
         startRequested || helperDown
     }
 
-    static func rescanDisabled(startRequested: Bool, captionsRunning: Bool, faceClusteringInFlight: Bool, helperDown: Bool) -> Bool {
-        startRequested || captionsRunning || faceClusteringInFlight || helperDown
+    static func rescanDisabled(startRequested: Bool, captionsRunning: Bool, faceClusteringInFlight: Bool, helperDown: Bool, locationOffline: Bool = false) -> Bool {
+        startRequested || captionsRunning || faceClusteringInFlight || helperDown || locationOffline
     }
 
     /// The folder menu's Rescan follows the sidebar's rule and also waits for a scan already running.
-    static func folderMenuRescanDisabled(scanRunning: Bool, captionsRunning: Bool, faceClusteringInFlight: Bool, helperDown: Bool) -> Bool {
-        scanRunning || rescanDisabled(startRequested: false, captionsRunning: captionsRunning, faceClusteringInFlight: faceClusteringInFlight, helperDown: helperDown)
+    static func folderMenuRescanDisabled(scanRunning: Bool, captionsRunning: Bool, faceClusteringInFlight: Bool, helperDown: Bool, locationOffline: Bool = false) -> Bool {
+        scanRunning || rescanDisabled(startRequested: false, captionsRunning: captionsRunning, faceClusteringInFlight: faceClusteringInFlight, helperDown: helperDown, locationOffline: locationOffline)
     }
 
     /// The title-bar pill's label when the helper is down; nil means the usual activity labels apply.

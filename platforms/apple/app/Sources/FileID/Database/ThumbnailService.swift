@@ -212,6 +212,11 @@ public final class ThumbnailService {
         // File identity for invalidation — a stat is cheap next to a remote
         // decode, and lets an edited / replaced file miss its stale thumb.
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let alias = ThumbnailDiskCache.aliasURL(path: url.path, size: size, scale: scale)
+        if attrs == nil, let offline = ThumbnailDiskCache.load(alias) {
+            await thumbDecodeGate.release()
+            return offline
+        }
         let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970
         let mtime = modified ?? 0
         let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
@@ -219,13 +224,17 @@ public final class ThumbnailService {
                                              bytes: bytes, size: size, scale: scale)
         let cachedData = ThumbnailDiskCache.load(diskURL)
         await thumbDecodeGate.release()
-        if let cachedData { return cachedData }
+        if let cachedData {
+            ThumbnailDiskCache.link(alias: alias, to: diskURL)
+            return cachedData
+        }
 
         let jpegData = await render(url: url, size: size, scale: scale, modifiedAt: modified,
                                     videoSource: videoSource, quickLook: quickLookJPEG)
         if let jpegData, !Task.isCancelled {
             if (try? ReadOnlyLocations.requireWritable(diskURL)) != nil {
                 try? jpegData.write(to: diskURL, options: .atomic)
+                ThumbnailDiskCache.link(alias: alias, to: diskURL)
                 ThumbnailDiskCache.noteWrite()
             }
         }
@@ -335,7 +344,7 @@ private actor ThumbnailGate {
 
 /// On-disk JPEG thumbnail cache under Application Support/FileID/thumbnails/.
 /// Stateless beyond the filesystem; every I/O error degrades gracefully.
-private enum ThumbnailDiskCache {
+enum ThumbnailDiskCache {
     static let dir: URL = {
         let d = AppSupportPath.fileID.appendingPathComponent("thumbnails", isDirectory: true)
         if (try? ReadOnlyLocations.requireWritable(d)) != nil {
@@ -352,6 +361,24 @@ private enum ThumbnailDiskCache {
         let hex = SHA256.hash(data: Data(raw.utf8))
             .map { String(format: "%02x", $0) }.joined()
         return dir.appendingPathComponent("\(hex).jpg")
+    }
+
+    /// A second name for a thumbnail, keyed by path and size alone, so a file whose drive is unplugged (no mtime or size to hash) still finds its picture.
+    static func aliasURL(in directory: URL? = nil, path: String, size: CGFloat, scale: CGFloat) -> URL {
+        let raw = "alias|\(path)|\(Int(size))|\(Int(scale))"
+        let hex = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return (directory ?? dir).appendingPathComponent("\(hex).jpg")
+    }
+
+    /// Points `alias` at `blob`, replacing an older alias for a file that changed.
+    static func link(alias: URL, to blob: URL) {
+        let manager = FileManager.default
+        guard (try? ReadOnlyLocations.requireWritable(alias)) != nil else { return }
+        let aliasID = try? alias.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        let blobID = try? blob.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        if let aliasID, let blobID, aliasID.isEqual(blobID) { return }
+        try? manager.removeItem(at: alias)
+        try? manager.linkItem(at: blob, to: alias)
     }
 
     static func load(_ url: URL) -> Data? {

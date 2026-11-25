@@ -40,6 +40,8 @@ struct PipelineBlock: View {
         return .scan
     }
 
+    private var locationOffline: Bool { OfflineRoots(engine.libraryRoots).isOffline(pickedURL.path) }
+
     private var showsUnfinishedScan: Bool {
         unfinishedScan != nil && !scanRunning && progress?.phase != .completed
     }
@@ -260,8 +262,8 @@ struct PipelineBlock: View {
                 Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed || showsUnfinishedScan ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
-                    .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown))
-                    .help(helperDown ? "FileID’s helper isn’t running. Restart it, then scan again." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
+                    .disabled(HelperGate.rescanDisabled(startRequested: startRequested, captionsRunning: captionsRunning, faceClusteringInFlight: engine.faceClusteringInFlight, helperDown: helperDown, locationOffline: locationOffline))
+                    .help(helperDown ? "FileID’s helper isn’t running. Restart it, then scan again." : locationOffline ? "This location is offline. Reconnect the drive to rescan." : captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
                 Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
