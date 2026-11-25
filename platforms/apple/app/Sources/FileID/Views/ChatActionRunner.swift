@@ -104,7 +104,10 @@ final class ChatActionRunner {
         case "scanFolder", "rescan":
             guard let progress = engine.lastProgress, [.discovering, .tagging, .postScan].contains(progress.phase) else { return fallback }
             if progress.phase == .discovering { return "Finding files · \(progress.discovered.formatted()) so far" }
-            if progress.phase == .postScan { return "Finishing up" }
+            if progress.phase == .postScan {
+                guard let work = progress.postScanWork(baseline: engine.postScanBaseline) else { return "Finishing up" }
+                return "Adding tags · " + PipelineBlock.postScanDetail(work, etaSeconds: progress.etaSeconds)
+            }
             return "Scanning · \(progress.processed.formatted()) of \(Plural.noun(progress.total, "file", "files"))"
         case "describeFiles":
             guard let progress = engine.deepAnalyzeProgress else { return engine.deepAnalyzeStarting == nil ? fallback : "Loading the local AI model" }
@@ -195,9 +198,16 @@ final class ChatActionRunner {
                         },
                         mustStart: true) {
                 guard let progress = engine.lastProgress else { return "Scan complete." }
-                if progress.phase == .cancelled { return "Scan stopped. Files found so far stay in the library." }
-                if progress.phase == .failed { return "The scan didn’t finish. Scan again to pick up where it left off." }
-                return "Scan complete · \(Plural.noun(progress.processed, "file", "files"))\(progress.failed > 0 ? " · \(progress.failed.formatted()) couldn’t be read" : "")."
+                let baseline = engine.postScanBaseline.flatMap { $0.sessionID == progress.sessionID ? $0 : nil }
+                if progress.phase == .cancelled {
+                    return baseline == nil ? "Scan stopped. Files found so far stay in the library."
+                        : "Scan stopped. Every file was read; scan again to finish adding tags."
+                }
+                if progress.phase == .failed {
+                    return baseline == nil ? "The scan didn’t finish. Scan again to pick up where it left off."
+                        : "Tags aren’t finished yet. Every file was read; scan again to finish adding tags."
+                }
+                return "Scan complete · \(Plural.noun(baseline?.filesRead ?? progress.processed, "file", "files"))\(progress.failed > 0 ? " · \(progress.failed.formatted()) couldn’t be read" : "")."
             }
         case "describeFiles":
             let kind = DeepAnalyzeSettings.shared.activeKind
