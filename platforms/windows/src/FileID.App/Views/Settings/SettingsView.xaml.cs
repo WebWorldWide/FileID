@@ -83,11 +83,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             try
             {
                 if (!System.IO.File.Exists(AppPaths.DbPath)) return list;
-                var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                     new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                     {
                         DataSource = AppPaths.DbPath,
                         Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        Pooling = false,
                     }.ToString());
                 conn.Open();
                 using var cmd = conn.CreateCommand();

@@ -241,7 +241,7 @@
                              HorizontalAlignment="Left"
                              Visibility="Collapsed"
                              AutomationProperties.Name="Open engine log"
-                             AutomationProperties.HelpText="Open the engine diagnostic log in your default viewer">
+                             AutomationProperties.HelpText="Show the engine diagnostic log in File Explorer">
                 <TextBlock Text="Open engine log"
                            FontFamily="{StaticResource BodyFontFamily}"
                            FontSize="12"

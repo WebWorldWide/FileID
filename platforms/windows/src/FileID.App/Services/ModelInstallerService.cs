@@ -63,7 +63,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         _ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         Clip = new ModelSlot(
             displayLabel: "CLIP ViT-B/32",
-            approxBytes: 220UL * 1024 * 1024,
+            approxBytes: (ulong)(ModelDisplaySize.GetDisplaySizeMB("mobileclip_s2") + ModelDisplaySize.GetDisplaySizeMB("clip_text")) * 1024 * 1024,
             // The engine's pre-scan check requires both sentinels.
             installAction: async () =>
             {

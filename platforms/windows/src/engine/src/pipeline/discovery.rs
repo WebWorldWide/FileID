@@ -826,12 +826,12 @@ fn path_extension_lower(path: &std::path::Path) -> Option<String> {
 }
 
 /// True when `to_string_lossy` would mangle this path: the lossy text is the only identity the DB/app layers see, so such a file could never be targeted again.
-fn is_non_unicode_path(path: &std::path::Path) -> bool {
+pub fn is_non_unicode_path(path: &std::path::Path) -> bool {
     path.to_str().is_none()
 }
 
 /// Directory names whose entire subtree is skipped, decided once per directory in `process_read_dir`.
-fn is_noise_directory(name: &str) -> bool {
+pub fn is_noise_directory(name: &str) -> bool {
     // Case-insensitive: Windows lists System Volume Information / $RECYCLE.BIN mixed-case at the root.
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -852,7 +852,17 @@ fn is_noise_directory(name: &str) -> bool {
             | ".temporaryitems"
             | ".documentrevisions-v100"
             | ".pkinstallsandboxmanager"
+            | ".trash"
+            | "lost+found"
     ) || is_chkdsk_recovery_directory(&lower)
+        || is_per_volume_trash_directory(&lower)
+}
+
+/// freedesktop per-volume trash: `.Trash-<uid>` at a mount root.
+fn is_per_volume_trash_directory(lower: &str) -> bool {
+    lower
+        .strip_prefix(".trash-")
+        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// chkdsk's `FOUND.000`, `FOUND.001`, ... hold recovered `.CHK` fragments, not user files.
@@ -863,7 +873,7 @@ fn is_chkdsk_recovery_directory(lower: &str) -> bool {
 }
 
 /// Generic names that are build artifacts ONLY inside a dev tree. They double as ordinary folder names (a photographer's "build" set, a "bin" of scans), so the caller prunes them only when a build-system marker sits alongside; otherwise a user's files would vanish from the app.
-fn is_ambiguous_build_directory(name: &str) -> bool {
+pub fn is_ambiguous_build_directory(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
@@ -871,7 +881,7 @@ fn is_ambiguous_build_directory(name: &str) -> bool {
     )
 }
 
-fn is_build_marker(name: &str) -> bool {
+pub fn is_build_marker(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
@@ -896,7 +906,7 @@ fn is_build_marker(name: &str) -> bool {
 }
 
 /// Per-file noise filter, separate from `is_noise_directory` because file-vs-dir semantics differ (some libraries live under `.local/share/...`).
-fn is_noise_file(name: &str) -> bool {
+pub fn is_noise_file(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
@@ -1274,6 +1284,32 @@ mod tests {
         }
         assert_eq!(files.len(), 1);
         assert_eq!(errors, 0, "an unreadable metadata folder must be skipped, not counted");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linux_volume_folders_are_not_walked_and_per_volume_trash_is_not_indexed() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        std::fs::write(root.join("a.jpg"), b"jpeg").unwrap();
+        let trash = root.join(".Trash-1000/files");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("gone.jpg"), b"jpeg").unwrap();
+        std::fs::create_dir_all(root.join(".Trash/1000")).unwrap();
+        std::fs::write(root.join(".Trash/1000/gone2.jpg"), b"jpeg").unwrap();
+        std::fs::create_dir_all(root.join(".Trash-keep")).unwrap();
+        std::fs::write(root.join(".Trash-keep/mine.jpg"), b"jpeg").unwrap();
+        let locked = root.join("lost+found");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&locked).is_ok();
+        let (files, errors) = walk(root);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(files.len(), 2, "only a.jpg and the non-uid folder's file are library files");
+        if !readable {
+            assert_eq!(errors, 0, "an unreadable lost+found must be skipped, not counted");
+        }
     }
 
     /// Symlink loops, unreadable directories, hard links and sparse files must neither hang, panic nor vanish silently from the walk.

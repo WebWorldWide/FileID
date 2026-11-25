@@ -69,9 +69,9 @@ if ($WipeDb) {
 
 Push-Location $EngineDir
 try {
-    $profileFlag = if ($Release) { "--release" } else { "" }
+    $profileArgs = if ($Release) { @("--release") } else { @() }
     Write-Host "Building FileIDEngine ($([IO.Path]::Combine('release', 'x86_64-pc-windows-msvc')))..." -ForegroundColor Cyan
-    cargo build $profileFlag --target x86_64-pc-windows-msvc
+    cargo build @profileArgs --target x86_64-pc-windows-msvc
 
     if ($RunTests) {
         Write-Host "Running cargo tests..." -ForegroundColor Cyan

@@ -13,8 +13,10 @@ internal sealed partial class EngineClient
 
     private static readonly HashSet<string> ApplyFailureKinds = new(StringComparer.Ordinal)
     {
-        "restructure_busy", "apply_restructure", "db_unavailable",
+        "restructure_busy", "apply_restructure", "db_unavailable", "location_read_only",
     };
+
+    private static readonly TimeSpan ReasonGrace = TimeSpan.FromMilliseconds(1500);
 
     public async Task DescribeFilesAsync(IReadOnlyList<long> fileIDs, string modelKind)
     {
@@ -46,10 +48,12 @@ internal sealed partial class EngineClient
             ev => ev is RestructureApplyResultEvent result ? result.Result : null,
             ApplyFailureKinds,
             TimeSpan.FromHours(2),
-            ct);
+            ct,
+            deferResult: result => result.Applied == 0 && result.Failed > 0 && !result.Cancelled);
 
     private async Task<T> WaitForRestructureReplyAsync<T>(
-        Func<Task> send, Func<EventPayload?, T?> reply, IReadOnlySet<string> failures, TimeSpan timeout, CancellationToken ct)
+        Func<Task> send, Func<EventPayload?, T?> reply, IReadOnlySet<string> failures, TimeSpan timeout, CancellationToken ct,
+        Func<T, bool>? deferResult = null)
         where T : class
     {
         await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
@@ -60,7 +64,15 @@ internal sealed partial class EngineClient
             if (SpawnGeneration != generation) return;
             if (reply(ev.Payload) is { } value)
             {
-                completion.TrySetResult(value);
+                if (deferResult?.Invoke(value) == true)
+                {
+                    // A refusal sends its result first and the reason as an error right after; give the reason a moment to win.
+                    _ = Task.Delay(ReasonGrace).ContinueWith(_ => completion.TrySetResult(value), TaskScheduler.Default);
+                }
+                else
+                {
+                    completion.TrySetResult(value);
+                }
             }
             else if (ev.Payload is ErrorEvent error && failures.Contains(error.Error.Kind))
             {

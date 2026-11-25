@@ -626,10 +626,15 @@ impl Shell {
     }
 
     fn choose(&self, path: &Path) {
-        self.set_folder(path);
         if self.status.borrow().scan_running() {
+            if self.folder_path.borrow().as_deref() != Some(path) {
+                self.set_note(Some(
+                    "A scan is running. Cancel it first, then choose the other folder.".to_owned(),
+                ));
+            }
             return;
         }
+        self.set_folder(path);
         if self.status.borrow().engine_ready {
             self.start_scan();
         } else {
@@ -856,9 +861,7 @@ impl Shell {
                     message,
                     model_kind,
                 } => {
-                    if kind.starts_with("deep_analyze")
-                        && crate::tabs::deep_analyze::error_ends_deep_run(kind)
-                    {
+                    if crate::tabs::deep_analyze::error_ends_deep_run(kind) {
                         status.deep_running = false;
                     }
                     if kind == "scan_already_running" || kind == "scan_failed" {

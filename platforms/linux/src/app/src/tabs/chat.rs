@@ -77,12 +77,16 @@ impl ChatUi {
         if action == "send" && text.trim().is_empty() {
             return;
         }
+        if action == "send" && too_long(&text) {
+            self.status.set_label(TOO_LONG);
+            return;
+        }
         let scope = (action == "send").then(super::chat_handoff::scope).flatten();
         let request = ChatRequest {
             request_id: request_id(),
             conversation_id: CONVERSATION.into(),
             action: action.into(),
-            text: (action == "send").then(|| text.chars().take(2000).collect()),
+            text: (action == "send").then(|| text.clone()),
             use_model: Some(scope.is_some()),
             context: (action == "send").then(context),
             scope_file_ids: scope.as_ref().map(|scope| scope.file_ids.clone()),
@@ -104,7 +108,12 @@ impl ChatUi {
                     self.cards.clear();
                 }
                 self.status.set_label("");
-                send_request(&self.engine, &self.state, &self.status, request);
+                if !send_request(&self.engine, &self.state, &self.status, request)
+                    && action == "send"
+                {
+                    self.set_busy(false);
+                    self.composer.buffer().set_text(&self.question.borrow());
+                }
             }
             Ok(false) => self.status.set_label(
                 "Clear waits until the answer being saved finishes. Nothing is deleted yet.",
@@ -447,7 +456,7 @@ fn send_request(
     state: &Rc<RefCell<ChatState>>,
     status: &gtk::Label,
     request: ChatRequest,
-) {
+) -> bool {
     if engine
         .borrow_mut()
         .send(CommandPayload::ChatRequest(ChatRequestPayload { request }))
@@ -457,7 +466,16 @@ fn send_request(
         status.set_label(
             "FileID is still getting ready. Try again in a moment. Saved answers reload once it is ready.",
         );
+        return false;
     }
+    true
+}
+
+const MAX_QUESTION_CHARS: usize = 2000;
+const TOO_LONG: &str = "Shorten the question to 2,000 characters";
+
+fn too_long(text: &str) -> bool {
+    text.chars().count() > MAX_QUESTION_CHARS
 }
 
 pub fn chat(engine: Engine) -> gtk::Widget {
@@ -842,8 +860,8 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
             let text = buffer.text(&start, &end, false);
             ui.send.set_tooltip_text(Some(if text.trim().is_empty() {
                 "Type a question first"
-            } else if text.chars().count() > 2000 {
-                "Shorten the question to 2,000 characters"
+            } else if too_long(&text) {
+                TOO_LONG
             } else {
                 "Send (Return)"
             }));
@@ -968,6 +986,12 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_over_the_limit_is_refused_not_cut() {
+        assert!(!too_long(&"é".repeat(2000)));
+        assert!(too_long(&"é".repeat(2001)));
+    }
 
     #[test]
     fn citation_meta_prefers_time_then_page() {

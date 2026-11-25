@@ -45,6 +45,7 @@ public sealed partial class PersonDetailSheet : UserControl
         """;
 
     private long _personId;
+    private bool _loadedUnknown;
     private bool _selectMode;
     private bool _moving;
     private readonly HashSet<long> _checked = new();
@@ -175,6 +176,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 LastBox.Text = result.Last;
                 SuffixBox.Text = result.Suffix;
                 IsUnknownCheckBox.IsChecked = result.IsUnknown;
+                _loadedUnknown = result.IsUnknown;
                 MemberCountText.Text = $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
             }
             else
@@ -427,6 +429,13 @@ public sealed partial class PersonDetailSheet : UserControl
         return r.Read();
     }
 
+    private bool HasTypedName() =>
+        !string.IsNullOrWhiteSpace(FirstBox.Text)
+        || !string.IsNullOrWhiteSpace(MiddleBox.Text)
+        || !string.IsNullOrWhiteSpace(LastBox.Text)
+        || !string.IsNullOrWhiteSpace(TitleBox.Text)
+        || !string.IsNullOrWhiteSpace(SuffixBox.Text);
+
     public async Task<bool> CommitAsync()
     {
         // A background re-cluster can merge this person away while the sheet is open; because persons.id is AUTOINCREMENT the id is never reassigned, so a missing row means the person is genuinely gone (not a different person).
@@ -451,7 +460,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 return false;
             }
 
-            if (IsUnknownCheckBox.IsChecked == true)
+            if (IsUnknownCheckBox.IsChecked == true && !(_loadedUnknown && HasTypedName()))
             {
                 var unknownResult = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                     "markPersonsAsUnknown",

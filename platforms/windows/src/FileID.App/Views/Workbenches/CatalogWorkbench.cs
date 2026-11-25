@@ -60,6 +60,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private IReadOnlyList<CatalogHit> _lastHits = Array.Empty<CatalogHit>();
     private long? _searchedScope;
     private bool _scopeSearchPending;
+    private bool _detailRefreshPending;
     private IReadOnlyList<CatalogChapter> _chapterList = Array.Empty<CatalogChapter>();
     private CatalogHit? _selectedHit;
     private TimelineTracks _tracks = TimelineTracks.Empty;
@@ -212,7 +213,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             SelectHit(hit);
             ResetEditor();
             _chapters.ItemsSource = null;
-            Run(RefreshDetailAsync);
+            if (Busy) _detailRefreshPending = true;
+            else Run(RefreshDetailAsync);
         });
         _chapters.SelectionChanged += (_, _) =>
         {
@@ -321,6 +323,11 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         _pause.IsEnabled = CatalogJobActions.CanPause(job?.State);
         _cancel.IsEnabled = CatalogJobActions.CanCancel(job?.State);
         _resume.IsEnabled = CatalogJobActions.CanResume(job?.Kind, job?.State);
+        if (_detailRefreshPending && !Busy)
+        {
+            _detailRefreshPending = false;
+            if (_fileID is not null) Run(RefreshDetailAsync);
+        }
         if (MomentsScopePolicy.RunPending(_scopeSearchPending, _query.Text, Busy))
         {
             _scopeSearchPending = false;

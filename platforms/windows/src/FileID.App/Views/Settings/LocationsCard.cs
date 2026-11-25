@@ -66,10 +66,13 @@ public sealed class LocationsCard : UserControl
         {
             _lifetime?.Dispose();
             _lifetime = new CancellationTokenSource();
+            _engine.PropertyChanged -= OnEngineChanged;
+            _engine.PropertyChanged += OnEngineChanged;
             Refresh();
         });
         Unloaded += (_, _) => DebugLog.SafeRun("LocationsCard.Unloaded", () =>
         {
+            _engine.PropertyChanged -= OnEngineChanged;
             _lifetime?.Cancel();
             _lifetime?.Dispose();
             _lifetime = null;
@@ -149,6 +152,13 @@ public sealed class LocationsCard : UserControl
         return row;
     }
 
+    private void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(EngineClient.Phase)) return;
+        if (_engine.Phase is not (ScanPhase.Completed or ScanPhase.Cancelled or ScanPhase.Failed)) return;
+        DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun("LocationsCard.ScanEnded", Refresh));
+    }
+
     private void Rescan(LibraryRoot root, Button button)
     {
         button.IsEnabled = false;
@@ -161,7 +171,8 @@ public sealed class LocationsCard : UserControl
             }
             catch (Exception ex)
             {
-                ShowStatus(ex.Message);
+                DebugLog.Warn("LocationsCard: rescan failed: " + ex.Message);
+                ShowStatus("FileID couldn't start that scan. " + ex.Message);
                 button.IsEnabled = root.Online;
             }
         });

@@ -393,6 +393,7 @@ pub mod reveal {
         if run_silent(
             Command::new("dbus-send")
                 .arg("--session")
+                .arg("--print-reply")
                 .arg("--dest=org.freedesktop.FileManager1")
                 .arg("--type=method_call")
                 .arg("/org/freedesktop/FileManager1")
@@ -797,6 +798,57 @@ pub mod thumbnail {
             let thumb = from_rgb(64, 32, vec![10; 64 * 32 * 3], 16).unwrap();
             assert_eq!((thumb.width, thumb.height), (16, 8));
             assert!(from_rgb(64, 32, vec![10; 10], 16).is_err());
+        }
+    }
+}
+
+// Inside a Flatpak sandbox XDG_DATA_HOME is the app's private data dir, which the
+// desktop never reads as a Trash; the host's data home is what the file manager shows.
+#[cfg(any(target_os = "linux", test))]
+mod trash_home {
+    use anyhow::{Context, Result};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    pub fn resolve_home_trash(
+        xdg_data_home: Option<OsString>,
+        host_xdg_data_home: Option<OsString>,
+        home: Option<OsString>,
+        flatpak: bool,
+    ) -> Result<PathBuf> {
+        let absolute = |value: Option<OsString>| value.map(PathBuf::from).filter(|p| p.is_absolute());
+        let data_home = if flatpak { absolute(host_xdg_data_home) } else { absolute(xdg_data_home) };
+        if let Some(data_home) = data_home {
+            return Ok(data_home.join("Trash"));
+        }
+        let home = home.context("neither XDG_DATA_HOME nor HOME is set")?;
+        Ok(PathBuf::from(home).join(".local/share/Trash"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_flatpak_sandbox_trashes_into_the_hosts_trash_not_its_private_data_dir() {
+            let os = |text: &str| Some(OsString::from(text));
+            let sandbox = os("/home/u/.var/app/io.github.fileid.FileID/data");
+            assert_eq!(
+                resolve_home_trash(sandbox.clone(), os("/home/u/.local/share"), os("/home/u"), true).unwrap(),
+                PathBuf::from("/home/u/.local/share/Trash")
+            );
+            assert_eq!(
+                resolve_home_trash(sandbox.clone(), None, os("/home/u"), true).unwrap(),
+                PathBuf::from("/home/u/.local/share/Trash")
+            );
+            assert_eq!(
+                resolve_home_trash(sandbox, os("/home/u/.local/share"), os("/home/u"), false).unwrap(),
+                PathBuf::from("/home/u/.var/app/io.github.fileid.FileID/data/Trash")
+            );
+            assert_eq!(
+                resolve_home_trash(None, None, os("/home/u"), false).unwrap(),
+                PathBuf::from("/home/u/.local/share/Trash")
+            );
         }
     }
 }
@@ -1382,14 +1434,9 @@ pub mod trash {
     }
 
     fn home_trash_dir() -> Result<PathBuf> {
-        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-            let p = PathBuf::from(xdg);
-            if p.is_absolute() {
-                return Ok(p.join("Trash"));
-            }
-        }
-        let home = std::env::var_os("HOME").context("neither XDG_DATA_HOME nor HOME is set")?;
-        Ok(PathBuf::from(home).join(".local/share/Trash"))
+        use std::env::var_os;
+        let flatpak = var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists();
+        super::trash_home::resolve_home_trash(var_os("XDG_DATA_HOME"), var_os("HOST_XDG_DATA_HOME"), var_os("HOME"), flatpak)
     }
 
     fn trash_into(path: &Path, trash: &Path) -> Result<()> {
@@ -1529,7 +1576,7 @@ pub mod trash {
             }
             Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
                 Err(error).context(
-                    "Trash is on another filesystem; refusing an identity-changing copy so Undo remains provable",
+                    "Trash is on another filesystem from this file, so FileID can’t move it there (refusing an identity-changing copy so Undo remains provable)",
                 )
             }
             Err(error) => {

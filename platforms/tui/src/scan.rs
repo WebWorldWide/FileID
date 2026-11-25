@@ -79,7 +79,9 @@ fn run_scan(
     engine_data_home: Option<&Path>,
     tx: &Sender<LoadMsg>,
 ) -> Result<ScanSummary> {
-    let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let root_abs = fileid_engine::util::path_safety::strip_extended_length(
+        &std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+    );
 
     // Check models before spawning: a clear message beats a cryptic mid-scan engine error.
     let missing = missing_required();

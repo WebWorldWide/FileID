@@ -11,7 +11,7 @@
 #
 # Usage:
 #   pwsh build/iterate.ps1                                    # default 5K-file synthetic corpus
-#   pwsh build/iterate.ps1 -Corpus C:\path\to\library          # against your real library
+#   pwsh build/iterate.ps1 -Corpus C:\path\to\library          # against a library (state is isolated)
 #   pwsh build/iterate.ps1 -ThroughputTarget 140               # custom throughput floor
 
 param(
@@ -90,19 +90,28 @@ if ($corpusFiles -lt 10) {
 }
 OK "corpus has $corpusFiles files"
 
-$AppDataRoot = Join-Path $env:LOCALAPPDATA "FileID"
+# The harness runs the engine against a private state root (LOCALAPPDATA is
+# redirected for the child); the real %LOCALAPPDATA%\FileID is never wiped.
+$RealRoot = Join-Path $env:LOCALAPPDATA "FileID"
+$StateTemp = Join-Path $env:TEMP "fileid_iterate_state"
+$AppDataRoot = Join-Path $StateTemp "FileID"
+$faceCrops = Join-Path $AppDataRoot "face_crops"
+$modelsLink = Join-Path $AppDataRoot "Models"
 if ($SkipWipe) {
     Step "Skipping DB wipe (-SkipWipe set; testing incremental rescan)"
 } else {
-    Step "Wiping FileID DB"
-    foreach ($f in @("fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm")) {
-        $p = Join-Path $AppDataRoot $f
-        if (Test-Path $p) { Remove-Item -Force $p -ErrorAction SilentlyContinue }
-    }
-    $faceCrops = Join-Path $AppDataRoot "face_crops"
-    if (Test-Path $faceCrops) { Remove-Item -Recurse -Force $faceCrops -ErrorAction SilentlyContinue }
-    OK "DB wiped"
+    Step "Wiping harness state root"
+    if (Test-Path $modelsLink) { cmd /c rmdir "$modelsLink" 2>$null }
+    if (Test-Path $StateTemp) { Remove-Item -Recurse -Force $StateTemp -ErrorAction SilentlyContinue }
+    OK "state root wiped ($StateTemp)"
 }
+New-Item -ItemType Directory -Force -Path $AppDataRoot | Out-Null
+$realModels = Join-Path $RealRoot "Models"
+if (-not (Test-Path $modelsLink) -and (Test-Path $realModels)) {
+    New-Item -ItemType Junction -Path $modelsLink -Target $realModels | Out-Null
+}
+$realSettings = Join-Path $RealRoot "app-settings.json"
+if (Test-Path $realSettings) { Copy-Item $realSettings (Join-Path $AppDataRoot "app-settings.json") -Force }
 
 Step "Driving engine (scan + cluster)"
 $tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_.FullName }
@@ -115,6 +124,7 @@ $psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
+$psi.Environment["LOCALAPPDATA"] = $StateTemp
 $psi.Environment["FILEID_LOG"] = "info"
 # Do not set FILEID_MODEL_POOL_SIZE here: the engine sizes the model pool
 # from installed and available memory (2 sessions, 1 on a low-memory box).
@@ -251,7 +261,7 @@ $faceCount = if (Test-Path $faceCrops) { (Get-ChildItem $faceCrops -File).Count 
 Assert "[A10] face_crops directory present after scan (>= 0 files)" ($faceCount -ge 0) "(found $faceCount)"
 
 # A11: privacy gate -- no telemetry strings in shipped binary.
-$privacyPy = Join-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) "shared\scripts\check_binary_privacy.py"
+$privacyPy = Join-Path $RepoRoot "shared\scripts\check_binary_privacy.py"
 & python $privacyPy $EnginePath
 Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($LASTEXITCODE -eq 0)
 
