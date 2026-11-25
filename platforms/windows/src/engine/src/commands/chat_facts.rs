@@ -14,7 +14,7 @@ pub(crate) const SHOWN: usize = 50;
 /// Above this many matches a listing walks the date or size index; below it SQLite sorts. Same threshold in macOS
 /// `ChatFacts`.
 pub(crate) const LARGE: i64 = 2_000;
-const TAKEN: &str = "COALESCE(f.created_at,f.modified_at)";
+const TAKEN: &str = crate::util::SQL_TAKEN_DATE;
 
 pub(crate) fn format_label(extensions: &[String]) -> String {
     if extensions.iter().any(|e| e == "arw") && extensions.iter().any(|e| e == "cr2") {
@@ -1074,6 +1074,28 @@ mod tests {
 
     use super::*;
     use crate::commands::chat_intent::parse_question;
+
+    #[test]
+    fn dates_in_the_future_never_make_a_photo_the_newest() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, created, modified) in [(1, 2_212_000_000.0, 2_212_000_000.0), (2, 1_700_000_000.0, 1_700_000_000.0), (3, 2_212_000_000.0, 1_650_000_000.0)] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,1,?3,?4,0,'image','jpg')",
+                rusqlite::params![id, format!("/p/{id}.jpg"), created, modified],
+            )
+            .unwrap();
+        }
+        let newest: Vec<i64> = listed(&conn, &Filter::default(), "newest", SHOWN, 3).unwrap().iter().map(|hit| hit.file_id).collect();
+        assert_eq!(newest, vec![2, 3, 1], "the 2040 photo sorts last, and a photo with a bad capture date falls back to its modified date");
+        let years: Vec<Option<String>> = conn
+            .prepare(&format!("SELECT strftime('%Y',{TAKEN},'unixepoch') FROM files f ORDER BY f.id"))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(years, vec![None, Some("2023".into()), Some("2022".into())]);
+    }
 
     #[test]
     fn folder_filters_match_windows_separators() {

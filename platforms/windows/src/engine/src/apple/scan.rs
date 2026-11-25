@@ -240,6 +240,12 @@ pub fn ocr_warmed() -> bool {
     unsafe { ffi::fileid_apple_ocr_warmed() }
 }
 
+/// Repeated failures have paused the accurate tier; the fast read still runs.
+pub fn ocr_paused() -> bool {
+    // SAFETY: no arguments.
+    unsafe { ffi::fileid_apple_ocr_paused() }
+}
+
 /// Compile the accurate text tier once the engine is idle, as the Swift engine
 /// does: after three seconds, and not while a scan is decoding. A scan that
 /// starts first keeps its fast reads until the compile finishes.

@@ -164,3 +164,8 @@ public func fileid_apple_ocr_ready() -> Bool {
 public func fileid_apple_ocr_warmed() -> Bool {
     AccurateOCRWarmup.shared.isReady
 }
+
+@_cdecl("fileid_apple_ocr_paused")
+public func fileid_apple_ocr_paused() -> Bool {
+    AccurateOCRBreaker.shared.paused
+}

@@ -857,6 +857,7 @@ impl ScanSession {
             reachable
         };
         let mut post_scan_announced = false;
+        let mut post_scan_closing = (0u64, 0u64);
         if clean_walk {
             {
                 let mut seen = discovered_seen_paths.lock();
@@ -881,6 +882,11 @@ impl ScanSession {
                     skipped_for_clock = purged.skipped_for_clock,
                     "[STATS] hidden rows of long-gone files removed"
                 );
+            }
+            match clear_future_capture_dates(&self.db_conn.lock(), unix_now()) {
+                Ok(0) => {}
+                Ok(cleared) => tracing::info!(cleared, "[SCAN] capture dates in the future cleared"),
+                Err(err) => tracing::warn!(error = %err, "[SCAN] clearing future capture dates failed"),
             }
             match crate::paths::root() {
                 Ok(state_dir) if capture_dates_current => {
@@ -915,6 +921,7 @@ impl ScanSession {
                         let finished = backfill.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
+                        post_scan_closing = post_scan_closing.max(report.closing_counts());
                         if let Err(error) = finished {
                             tracing::warn!(%error, "[SCAN] capture-date backfill stopped");
                         }
@@ -983,6 +990,7 @@ impl ScanSession {
                         let finished = pass.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
+                        post_scan_closing = post_scan_closing.max(report.closing_counts());
                         if finished.as_ref().is_ok_and(|(summary, _)| summary.disk_full) {
                             sink.send(crate::ipc::EngineError::event(
                                 "scan_disk_full",
@@ -1001,6 +1009,12 @@ impl ScanSession {
                     None => tracing::warn!("[SCAN] the catch-up pass was skipped: the models did not load"),
                 }
             }
+        }
+
+        if !self.coordinator.is_cancelled()
+            && let Some(notice) = careful_reading_notice(crate::pipeline::tagging::careful_reading_paused())
+        {
+            sink.send(notice).await;
         }
 
         let elapsed = started.elapsed().as_secs_f64();
@@ -1098,12 +1112,18 @@ impl ScanSession {
                 emit_phase(SessionPhase::PostScan);
             }
             on_phase(SessionPhase::Completed);
+            let (closing_total, closing_processed) = post_scan_closing;
+            let (shown_total, shown_discovered) = if closing_total > 0 {
+                (closing_total, closing_total)
+            } else {
+                (total + self.carried.0, discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0)
+            };
             sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(terminal_progress(
                 &session_id,
                 ScanPhase::Completed,
-                total + self.carried.0,
-                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
-                total + self.carried.0,
+                shown_total,
+                shown_discovered,
+                closing_processed.max(closing_total).max(total + self.carried.0),
                 failed + self.carried.1,
             )))))
             .await;
@@ -1244,6 +1264,10 @@ impl CatchUpProgress {
 
     /// Sent while the caller holds the state lock, so a snapshot never overtakes a newer one.
     fn send_snapshot(&self, state: &(u64, u64, Instant)) {
+        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(self.snapshot(state)))));
+    }
+
+    fn snapshot(&self, state: &(u64, u64, Instant)) -> ScanProgress {
         let (owed, done, started) = *state;
         let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
         let seconds = started.elapsed().as_secs_f64();
@@ -1252,7 +1276,8 @@ impl CatchUpProgress {
             session_id: self.session_id.clone(),
             phase: ScanPhase::PostScan,
             total,
-            discovered: self.discovered,
+            // The pass adds work the walk never found, so the files seen grow with the total and never fall behind what is processed.
+            discovered: total,
             processed,
             failed: self.failed,
             files_per_second: rate,
@@ -1261,7 +1286,13 @@ impl CatchUpProgress {
             available_mb: 0,
         };
         self.lift.apply(&mut progress);
-        let _ = self.sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
+        progress
+    }
+
+    /// The counts the last snapshot showed, which the scan's closing snapshot must not fall below.
+    fn closing_counts(&self) -> (u64, u64) {
+        let snapshot = self.snapshot(&self.state.lock());
+        (snapshot.total, snapshot.processed)
     }
 }
 
@@ -1888,6 +1919,24 @@ fn parse_retention_days(value: Option<&str>) -> f64 {
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|d| d.is_finite() && *d >= 0.0)
         .unwrap_or(HIDDEN_ROW_RETENTION_DAYS)
+}
+
+/// The Mac's careful text reader stopped answering during the scan, so some photos got only the fast read; the app names it.
+fn careful_reading_notice(paused: bool) -> Option<IpcEvent> {
+    paused.then(|| {
+        crate::ipc::EngineError::event(
+            "ocr_accurate_disabled",
+            "Careful text reading stopped answering during this scan. The photos it skipped were read quickly and are read carefully on a later scan.",
+        )
+    })
+}
+
+/// A catalog scanned before dates in the future were refused still holds them (a drive that stamps 2040).
+fn clear_future_capture_dates(conn: &Connection, now: f64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE files SET created_at = NULL WHERE created_at > ?1",
+        rusqlite::params![now + crate::util::FUTURE_DATE_SLACK_SECONDS],
+    )
 }
 
 fn unix_now() -> f64 {
@@ -3289,6 +3338,22 @@ mod tests {
         assert!(skip.contains("/a/song.m4a"));
     }
 
+    #[test]
+    fn capture_dates_in_the_future_are_cleared_from_an_older_catalog() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, created) in [(1, 1_600_000_000.0), (2, 2_212_000_000.0)] {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,1,?3,?3,0,'image','jpg')",
+                rusqlite::params![id, format!("/p/{id}.jpg"), created],
+            )
+            .unwrap();
+        }
+        assert_eq!(clear_future_capture_dates(&conn, 1_800_000_000.0).unwrap(), 1);
+        let dates: Vec<Option<f64>> =
+            conn.prepare("SELECT created_at FROM files ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(dates, vec![Some(1_600_000_000.0), None]);
+    }
+
     fn post_scan_progress(event: IpcEvent) -> ScanProgress {
         match event.payload {
             EventPayload::Progress(progress) => progress.inner,
@@ -3322,7 +3387,7 @@ mod tests {
             seen.push(post_scan_progress(event));
         }
         assert!(seen.len() >= 8, "a progress event about every tick, got {}", seen.len());
-        assert!(seen.iter().all(|p| p.session_id == "one-session" && p.phase == ScanPhase::PostScan && p.failed == 2 && p.discovered == 100));
+        assert!(seen.iter().all(|p| p.session_id == "one-session" && p.phase == ScanPhase::PostScan && p.failed == 2 && p.discovered == p.total));
         for pair in seen.windows(2) {
             assert!(pair[1].total >= pair[0].total, "total never shrinks: {} then {}", pair[0].total, pair[1].total);
             assert!(pair[1].processed >= pair[0].processed, "processed never shrinks: {} then {}", pair[0].processed, pair[1].processed);
@@ -3372,6 +3437,37 @@ mod tests {
             assert!(pair[1].total >= pair[0].total);
         }
         assert_eq!(seen.last().unwrap().processed, 10 + 1600);
+    }
+
+    #[tokio::test]
+    async fn the_post_scan_totals_count_the_work_the_walk_never_found_and_close_at_the_same_numbers() {
+        let (sink, mut events) = Sink::channel_for_test(256);
+        let report = CatchUpProgress {
+            sink,
+            session_id: "one-session".into(),
+            discovered: 130_108,
+            processed: 130_108,
+            failed: 0,
+            lift: ProgressLift::default(),
+            state: Mutex::new((0, 0, Instant::now())),
+        };
+        report.report(crate::pipeline::catch_up::Progress::Total(76_220));
+        report.report(crate::pipeline::catch_up::Progress::Advance(13_000));
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(post_scan_progress(event));
+        }
+        assert!(seen.iter().all(|p| p.processed <= p.discovered && p.discovered == p.total), "processed never passes the files counted: {seen:?}");
+        assert_eq!(report.closing_counts(), (206_328, 143_108));
+    }
+
+    #[test]
+    fn a_scan_whose_careful_text_reader_stopped_says_so() {
+        assert!(careful_reading_notice(false).is_none());
+        match careful_reading_notice(true).expect("a notice").payload {
+            EventPayload::Error(error) => assert_eq!(error.inner.kind, "ocr_accurate_disabled"),
+            other => panic!("expected an error notice, got {other:?}"),
+        }
     }
 
     #[tokio::test]

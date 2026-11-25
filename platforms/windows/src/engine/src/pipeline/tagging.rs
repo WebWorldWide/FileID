@@ -643,6 +643,18 @@ pub(crate) fn apple_scan_enabled() -> bool {
     }
 }
 
+/// The Mac's careful text reader stopped answering and is paused; the fast read still ran.
+pub(crate) fn careful_reading_paused() -> bool {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        crate::apple::scan::ocr_paused()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        false
+    }
+}
+
 /// `FILEID_TWIN_REUSE=0` analyzes every copy itself (the A/B control).
 fn twin_reuse_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -2753,7 +2765,9 @@ fn enriched_extras(created_unix: Option<f64>, modified_unix: f64, camera_model: 
     let mut extras = Vec::new();
     // Order matters: the Library card's `TopTwoTags` takes the first two tags, so the most informative signals go first.
     // Year_: creation date when present, else modification date; local timezone; strictly inside (1990, 2100), per macOS `extraTags`. Camera family follows.
-    let year_source = created_unix.filter(|&c| c > 0.0).unwrap_or(modified_unix);
+    let now = crate::util::unix_now();
+    let year_source = created_unix.filter(|&c| c > 0.0).and_then(|c| crate::util::not_in_the_future(c, now));
+    let year_source = year_source.or_else(|| crate::util::not_in_the_future(modified_unix, now)).unwrap_or(0.0);
     if year_source > 0.0
         && let Some(year) = local_unix_seconds_to_year(year_source)
             && year > 1990 && year < 2100 {

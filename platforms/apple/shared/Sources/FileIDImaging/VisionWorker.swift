@@ -338,6 +338,12 @@ package final class AccurateOCRBreaker: @unchecked Sendable {
         return true
     }
 
+    /// Whether the pause is in force now, without ending it the way `allowed` does once the pause is over.
+    package var paused: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return consecutiveFailures >= Self.failureLimit && CFAbsoluteTimeGetCurrent() - trippedAt < Self.pauseSeconds
+    }
+
     package func record(success: Bool) {
         lock.lock()
         consecutiveFailures = success ? 0 : consecutiveFailures + 1

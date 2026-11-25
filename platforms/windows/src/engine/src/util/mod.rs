@@ -28,6 +28,23 @@ pub(crate) fn catalog_unix_seconds(time: std::time::SystemTime) -> Option<f64> {
     Some(time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64())
 }
 
+/// A capture or creation date later than this many seconds after now is a clock or metadata error (a camera that was never set, a drive
+/// that stamps 2040), not when the file was made. A day of slack covers time zones and a fast clock.
+pub(crate) const FUTURE_DATE_SLACK_SECONDS: f64 = 86_400.0;
+
+/// The date, unless it lies in the future.
+pub(crate) fn not_in_the_future(time: f64, now: f64) -> Option<f64> {
+    (time.is_finite() && time <= now + FUTURE_DATE_SLACK_SECONDS).then_some(time)
+}
+
+pub(crate) fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// SQL for the date a file was made: the stored capture or creation date, else the modified date, and neither when it lies in the future.
+pub(crate) const SQL_TAKEN_DATE: &str = "CASE WHEN f.created_at <= CAST(strftime('%s','now') AS REAL) + 86400 THEN f.created_at \
+     WHEN f.modified_at <= CAST(strftime('%s','now') AS REAL) + 86400 THEN f.modified_at END";
+
 /// Within a microsecond: the scanners' rule, which also covers catalogs written before the engines stored one number.
 pub(crate) fn same_modified_time(left: f64, right: f64) -> bool {
     left.is_finite() && right.is_finite() && (left - right).abs() < 0.000_001
