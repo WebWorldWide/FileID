@@ -65,6 +65,22 @@ struct ReadOnlyVolumeTests {
         #expect(ReadOnlyLocations.volumeName(for: url, cache: cache, now: start + ReadOnlyLocations.volumeTTL + 1, probe: { _ in nil }) == nil)
     }
 
+    @Test func aLinkIsJudgedByTheVolumeItPointsOnto() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("link-volume-\(UUID().uuidString)")
+        let target = base.appendingPathComponent("target-dir")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let link = base.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        final class Seen: @unchecked Sendable { var path = "" }
+        let seen = Seen()
+        _ = ReadOnlyLocations.volumeName(for: link.appendingPathComponent("new/file.jpg"), cache: ReadOnlyLocations.VolumeCache(), now: Date()) { url in
+            seen.path = url.path
+            return nil
+        }
+        #expect(seen.path.hasSuffix("/target-dir/new/file.jpg"), "probed \(seen.path)")
+    }
+
     @Test func addTagsStopsWhenTheExistingTagsCannotBeReadInsteadOfOverwritingThem() {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent("no-such-\(UUID().uuidString).jpg")
         do {

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 /// The owner's photo drive stays protected by name even where the volume flag cannot be read (owner policy).
 const READ_ONLY_ROOT: &str = "/Volumes/Adlon";
 const VOLUME_TTL: Duration = Duration::from_secs(3);
+const CACHE_LIMIT: usize = 4096;
 
 /// The refusal carried inside the `io::Error` so message builders can name the location without parsing text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,19 +88,26 @@ fn volume_read_only_with(path: &Path, probe: &Probe) -> Option<String> {
         return Some(name);
     }
     let mut existing = path;
-    while !existing.exists() {
-        existing = existing.parent()?;
-    }
-    let (id, volume) = probe(existing)?;
-    let now = Instant::now();
-    let mut cache = cache().lock().ok()?;
-    let volume = match cache.get(&id) {
-        Some((at, cached)) if now.duration_since(*at) < VOLUME_TTL => cached.clone(),
-        _ => {
-            cache.insert(id, (now, volume.clone()));
-            volume
+    let metadata = loop {
+        match std::fs::metadata(existing) {
+            Ok(metadata) => break metadata,
+            Err(_) => existing = existing.parent()?,
         }
     };
+    let directory = if metadata.is_dir() { existing } else { existing.parent()? };
+    let key = directory.to_string_lossy().into_owned();
+    let now = Instant::now();
+    if let Some((at, cached)) = cache().lock().ok()?.get(&key)
+        && now.duration_since(*at) < VOLUME_TTL
+    {
+        return cached.read_only.then(|| cached.name.clone());
+    }
+    let (_, volume) = probe(directory)?;
+    let mut cache = cache().lock().ok()?;
+    if cache.len() >= CACHE_LIMIT {
+        cache.clear();
+    }
+    cache.insert(key, (now, volume.clone()));
     volume.read_only.then_some(volume.name)
 }
 
@@ -265,6 +273,24 @@ mod volume_tests {
         let writable = |_: &Path| Some(("probe-volume".to_owned(), Volume { name: "Backup".into(), read_only: false }));
         refresh();
         assert_eq!(volume_read_only_with(&dir, &writable), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_batch_in_one_folder_asks_the_system_about_the_volume_once() {
+        let dir = std::env::temp_dir().join(format!("fileid-ro-calls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let probe = move |_: &Path| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(("calls-volume".to_owned(), Volume { name: "Backup".into(), read_only: false }))
+        };
+        for index in 0..50 {
+            assert_eq!(volume_read_only_with(&dir.join(format!("{index}.jpg")), &probe), None);
+        }
+        // Other tests clear the shared cache now and then, so allow a few probes; one per file would be 50.
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= 5);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

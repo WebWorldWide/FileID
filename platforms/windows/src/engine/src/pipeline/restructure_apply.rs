@@ -2330,6 +2330,7 @@ impl RestructureApply {
     ///
     /// Replay is NEWEST-FIRST: with dependent moves (A→X then B→A) forward order restores A into the slot B occupies and uniquifies it into "A (2)", silent corruption. A torn TRAILING entry (crash before its fsync, so its move never executed) is skipped; torn data anywhere else fails closed.
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
+        crate::util::read_only::require_writable(&self.library_root)?;
         let Some(path) = self.undo_journal_path() else {
             return Ok(RestructureApplyResult {
                 applied: 0,
@@ -2426,6 +2427,7 @@ impl RestructureApply {
     }
 
     pub fn undo_shortcuts(&self, token: &str) -> Result<RestructureApplyResult> {
+        crate::util::read_only::require_writable(&self.library_root)?;
         let manifest_dir = self.shortcut_undo_dir()?;
         let manifest_path = shortcut_manifest_path(&manifest_dir, token)?;
         let receipt_path = shortcut_receipt_path(&manifest_dir, token)?;
@@ -4397,6 +4399,27 @@ mod tests {
             .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert!(paths_equal(&repaired_db_path, &original.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn undo_on_a_read_only_library_is_refused_before_the_journal_or_any_file_is_touched() {
+        let root = undo_fixture_root("undo-read-only");
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("A.txt");
+        std::fs::write(&a, b"AAAA").unwrap();
+        let moved = root.join("Albums").join("X.txt");
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &a.to_string_lossy());
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false).with_undo_journal_path(journal.clone());
+        apply.apply(&[move_fixture(1, &a.to_string_lossy(), &moved.to_string_lossy())]).unwrap();
+        crate::util::read_only::mark_read_only_for_tests(&root, "Archive");
+        let error = apply.undo_last().unwrap_err();
+        assert_eq!(crate::util::read_only::location_in(&error).map(|l| l.name.as_str()), Some("Archive"));
+        assert!(journal.exists() && moved.exists() && !a.exists(), "nothing was undone or cleared");
+        let error = apply.undo_shortcuts("0123456789abcdef").unwrap_err();
+        assert!(crate::util::read_only::location_in(&error).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
