@@ -23,6 +23,8 @@ public sealed class LocationsAndDateFilterTests
             Assert.Equal("12,400 files · 2.5 GB · scanned 3 days ago",
                 LocationPresentation.Summary(Root(12_400, scanned: Now.AddDays(-3).ToUnixTimeSeconds()), Now));
             Assert.Equal("Camera, offline, 1 file · 2.5 GB · not scanned yet", LocationPresentation.Spoken(Root(1, online: false), Now));
+            Assert.Equal("Camera, online, read-only, 1 file · 2.5 GB · not scanned yet",
+                LocationPresentation.Spoken(Root(1) with { ReadOnly = true }, Now));
         });
     }
 
