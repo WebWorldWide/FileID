@@ -324,6 +324,8 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
                 let clip_started = Instant::now();
                 row.clip_embedding = blocking(move || clip_embedding(&image, &models)).await.flatten();
                 row.clip_ms = clip_started.elapsed().as_secs_f64() * 1000.0;
+            } else {
+                row.text_stage_done = true;
             }
         }
         FileKind::Pdf => pdf_row(&mut row, &file, doc_text, frame.large_pdf, models).await,
@@ -653,6 +655,7 @@ mod tests {
         let row = process(predecode(file, false, None, false), &Arc::new(ModelStack::empty())).await;
         assert_eq!(row.created_unix, Some(1_791_128_655.0));
         assert!(row.captured_from_exif, "the writer must replace the file-system date with the capture date");
+        assert!(row.text_stage_done, "a clip that gave no frame is recorded as attempted so a rescan does not walk it again");
         std::fs::remove_dir_all(&dir).ok();
     }
 

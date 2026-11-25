@@ -1734,8 +1734,11 @@ pub(crate) const SKIP_SET_IMAGE_CLIP_GATE: &str =
 /// A macOS video catalogued while FileID's FFmpeg runtime was absent has no
 /// frame and no CLIP vector; keep it out of the skip set once frames are
 /// available so a rescan backfills it. Appended only on macOS (see `video_clip_gate`).
+/// The `text_stage_done = 0` clause ends the re-walk once a frame was attempted and the
+/// container gave none (mkv, wmv, mpg: 465 of 14,494 videos on the owner's drive), so an
+/// unchanged library rescans without them.
 pub(crate) const SKIP_SET_VIDEO_CLIP_GATE: &str =
-    " AND NOT (kind = 'video' AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
+    " AND NOT (kind = 'video' AND text_stage_done = 0 AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                                             WHERE clip_embeddings.file_id = files.id))";
 
 fn video_clip_gate() -> &'static str {
@@ -3300,11 +3303,13 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
-                 failed INTEGER NOT NULL DEFAULT 0, content_hash BLOB);
+                 failed INTEGER NOT NULL DEFAULT 0, content_hash BLOB, text_stage_done INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE clip_embeddings (file_id INTEGER PRIMARY KEY, embedding BLOB, model TEXT);
              INSERT INTO files (id, path_text, kind, content_hash) VALUES
                  (1, '/v/frameless.mov', 'video', X'00'), (2, '/v/embedded.mov', 'video', X'00'),
                  (3, '/a/song.m4a', 'audio', X'00');
+             INSERT INTO files (id, path_text, kind, content_hash, text_stage_done) VALUES
+                 (4, '/v/unreadable.mkv', 'video', X'00', 1);
              INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (2, X'00', 'clip');",
         )
         .unwrap();
@@ -3312,6 +3317,7 @@ mod tests {
         let skip: std::collections::HashSet<String> =
             conn.prepare(&sql).unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
         assert!(!skip.contains("/v/frameless.mov"));
+        assert!(skip.contains("/v/unreadable.mkv"), "a video the container gave no frame for is not walked again on every rescan");
         assert!(skip.contains("/v/embedded.mov"));
         assert!(skip.contains("/a/song.m4a"));
     }
