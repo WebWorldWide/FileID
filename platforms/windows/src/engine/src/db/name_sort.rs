@@ -143,4 +143,21 @@ mod tests {
         assert_eq!(stale, "", "a path change that leaves the key alone marks it for recomputing");
         assert_eq!(fill_missing(&conn).unwrap(), 1);
     }
+
+    #[test]
+    fn moving_a_file_to_another_folder_keeps_its_key() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,name_sort) VALUES(1,'/a/Photo 2.jpg',1,1,0,'image','jpg',?1)",
+            params![name_sort_key("/a/Photo 2.jpg")],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE files SET path_text = '/b/Photo 2.jpg', name_sort = ?1 WHERE id = 1",
+            params![name_sort_key("/b/Photo 2.jpg")],
+        )
+        .unwrap();
+        let key: String = conn.query_row("SELECT name_sort FROM files WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(key, name_sort_key("/b/Photo 2.jpg"), "a move that keeps the file name must not blank the key");
+    }
 }
