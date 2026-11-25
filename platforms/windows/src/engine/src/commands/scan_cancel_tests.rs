@@ -46,6 +46,7 @@ async fn a_scan_cancelled_part_way_ends_with_cancelled_and_scan_complete_and_fre
             EventPayload::PhaseChanged(phase) => format!("phase:{:?}", phase.inner),
             EventPayload::ScanComplete(_) => "scanComplete".to_string(),
             EventPayload::Progress(_) => "progress".to_string(),
+            EventPayload::Error(error) => format!("error:{}:{}", error.inner.kind, error.inner.message),
             other => format!("{:?}", std::mem::discriminant(other)),
         };
         if !cancelled && label == "progress" && let Some(coord) = scan_state.lock().as_ref() {
