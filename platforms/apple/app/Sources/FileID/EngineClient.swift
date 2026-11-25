@@ -52,7 +52,7 @@ public final class EngineClient {
         let request = CatalogRequest(requestID: UUID().uuidString, action: "similarGroups", limit: limit, offset: offset, similarThreshold: min(16, max(0, threshold)))
         guard let reply = await catalogReply(to: request, timeout: .seconds(300)), reply.status == "ok",
               let groups = reply.similarGroups, let total = reply.similarGroupTotal else { return nil }
-        return ReadStore.SimilarClusterPage(clusters: groups.map(\.fileIDs), total: total)
+        return ReadStore.SimilarClusterPage(clusters: groups.map(\.fileIDs), total: total, sizes: groups.map(\.totalCount))
     }
 
     func catalogResponse(for id: String, timeout: Duration) async -> CatalogResponse? {
