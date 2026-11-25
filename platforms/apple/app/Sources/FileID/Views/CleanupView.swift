@@ -24,6 +24,8 @@ struct CleanupView: View {
     @State private var exactCandidateCount = 0
     @State private var exactSkipped = 0
     @State private var exactCapped = false
+    @State private var exactUnshownClasses = 0
+    @State private var exactUnshownBytes: Int64 = 0
     /// Single-flight guard: a rapid double-tap on the confirmation would
     /// otherwise trash the same files twice (the 2nd fails "already in Trash").
     @State private var deleting = false
@@ -141,6 +143,7 @@ struct CleanupView: View {
             exactCandidateCount = 0
             exactSkipped = 0
             exactCapped = false
+            exactUnshownClasses = 0; exactUnshownBytes = 0
             groups = []
             reload()
         }
@@ -254,7 +257,11 @@ struct CleanupView: View {
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
-            if exactCapped { result += " · more may exist" }
+            if exactCapped {
+                result += exactUnshownClasses > 0
+                    ? " · \(exactUnshownClasses.formatted()) more sets not listed (up to \(ByteCountFormatter.string(fromByteCount: exactUnshownBytes, countStyle: .file)))"
+                    : " · more may exist"
+            }
             if exactSkipped > 0 { result += " · \(exactSkipped.formatted()) couldn’t be checked" }
         }
         return result
@@ -462,7 +469,7 @@ struct CleanupView: View {
             ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn’t be opened, so \(exactSkipped == 1 ? "it wasn’t" : "they weren’t") checked."
             : ""
         if exactCapped {
-            return "**Showing the first \(shown.formatted()) group\(shown == 1 ? "" : "s").** Each one is an exact copy, checked byte by byte. Clear these and more will appear.\(unread)"
+            return "**Showing the first \(shown.formatted()) group\(shown == 1 ? "" : "s").** Each one is an exact copy, checked byte by byte. Clear these and more will appear.\(ExactDuplicateVerifier.unshownNotice(classes: exactUnshownClasses, bytes: exactUnshownBytes))\(unread)"
         }
         return "**Some files couldn’t be checked.** Every group below is an exact copy, checked byte by byte.\(unread)"
     }
@@ -620,6 +627,7 @@ struct CleanupView: View {
                 let newExactCandidateCount: Int
                 let newExactSkipped: Int
                 var newExactCapped = false
+                var newUnshown: (Int, Int64) = (0, 0)
                 var stopped = false
                 if isSimilar {
                     let engine = engine
@@ -637,6 +645,7 @@ struct CleanupView: View {
                     newExactCandidateCount = snapshot.candidateCount
                     newExactSkipped = snapshot.skipped
                     newExactCapped = snapshot.capped
+                    newUnshown = (snapshot.unshownClasses, snapshot.unshownPotentialBytes)
                     stopped = snapshot.cancelled
                 }
                 // Cancelled when the tab went away: drop the unfinished result. A
@@ -660,6 +669,7 @@ struct CleanupView: View {
                 exactCandidateCount = newExactCandidateCount
                 exactSkipped = newExactSkipped
                 exactCapped = newExactCapped
+                (exactUnshownClasses, exactUnshownBytes) = newUnshown
                 let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
                 selection.formIntersection(visibleIDs)
                 // Selection is stored by file id, but a mid-scan re-rank can change

@@ -680,6 +680,8 @@ public final class ReadStore: @unchecked Sendable {
         let files: [FileRow]
         let candidateCount: Int
         let partial: Bool
+        var unshownClasses = 0
+        var unshownPotentialBytes: Int64 = 0
     }
 
     private func exactDuplicateCandidates() -> ExactCandidateLoad {
@@ -697,6 +699,14 @@ public final class ReadStore: @unchecked Sendable {
                     )
                     SELECT COALESCE(SUM(n), 0) FROM candidate_sizes
                     """) ?? 0
+                let sizeClassTotals = try Row.fetchOne(db, sql: """
+                    WITH classes AS (
+                        SELECT size_bytes AS s, COUNT(*) AS n FROM files
+                        WHERE failed = 0 AND size_bytes >= 0
+                        GROUP BY size_bytes HAVING n > 1
+                    )
+                    SELECT COUNT(*) AS classes, COALESCE(SUM((n - 1) * s), 0) AS bytes FROM classes
+                    """)
                 let rows = try Row.fetchAll(db, sql: """
                     WITH per_file AS (
                         -- twins: how many OTHER rows share this row's stored
@@ -770,8 +780,17 @@ public final class ReadStore: @unchecked Sendable {
                 if files.count < min(candidateCount, ExactDuplicateVerifier.candidateCap) {
                     partial = true
                 }
+                var shownClasses: [Int64: Int64] = [:]
+                for file in files where shownClasses[file.sizeBytes] == nil {
+                    shownClasses[file.sizeBytes] = (rows.first { ($0["size_bytes"] as Int64?) == file.sizeBytes }?["group_count"] as Int64? ?? 1) - 1
+                }
+                let shownBytes = shownClasses.reduce(Int64(0)) { $0 + $1.key * max(0, $1.value) }
+                let totalClasses: Int = sizeClassTotals?["classes"] ?? 0
+                let totalBytes: Int64 = sizeClassTotals?["bytes"] ?? 0
                 return ExactCandidateLoad(
-                    files: files, candidateCount: candidateCount, partial: partial)
+                    files: files, candidateCount: candidateCount, partial: partial,
+                    unshownClasses: max(0, totalClasses - shownClasses.count),
+                    unshownPotentialBytes: max(0, totalBytes - shownBytes))
             }
         } catch {
             reportError("Exact duplicate candidate query failed: \(error)")
@@ -786,7 +805,9 @@ public final class ReadStore: @unchecked Sendable {
         return await ExactDuplicateVerifier.verify(
             candidates: load.files,
             candidateCount: load.candidateCount,
-            inputPartial: load.partial)
+            inputPartial: load.partial,
+            unshownClasses: load.unshownClasses,
+            unshownPotentialBytes: load.unshownPotentialBytes)
     }
 
     // MARK: - Perceptual near-duplicate queries

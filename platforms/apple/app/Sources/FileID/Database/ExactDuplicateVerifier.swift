@@ -10,6 +10,8 @@ struct ExactDuplicateSnapshot: Sendable {
     let skipped: Int
     var capped = false
     var cancelled = false
+    var unshownClasses = 0
+    var unshownPotentialBytes: Int64 = 0
 }
 
 enum ExactDuplicateVerifier {
@@ -17,6 +19,12 @@ enum ExactDuplicateVerifier {
     static let readBudgetBytes: Int64 = 64 * 1024 * 1024 * 1024
     static let groupCap = 200
     static let memberCap = 500
+
+    static func unshownNotice(classes: Int, bytes: Int64) -> String {
+        guard classes > 0 else { return "" }
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return " \(classes.formatted()) more set\(classes == 1 ? "" : "s") of same-size files \(classes == 1 ? "isn’t" : "aren’t") listed yet; up to \(size) more could be freed."
+    }
 
     private struct Key: Hashable {
         let digest: Data
@@ -58,7 +66,8 @@ enum ExactDuplicateVerifier {
         attributes: .concurrent)
 
     static func verify(
-        candidates: [FileRow], candidateCount: Int, inputPartial: Bool
+        candidates: [FileRow], candidateCount: Int, inputPartial: Bool,
+        unshownClasses: Int = 0, unshownPotentialBytes: Int64 = 0
     ) async -> ExactDuplicateSnapshot {
         let cancel = CancelFlag()
         return await withTaskCancellationHandler {
@@ -114,7 +123,9 @@ enum ExactDuplicateVerifier {
                     partial: inputPartial || skipped > 0 || groupTruncated || memberTruncated,
                     candidateCount: candidateCount,
                     skipped: skipped,
-                    capped: inputPartial || groupTruncated || memberTruncated))
+                    capped: inputPartial || groupTruncated || memberTruncated,
+                    unshownClasses: unshownClasses,
+                    unshownPotentialBytes: unshownPotentialBytes))
             }
             }
         } onCancel: {
