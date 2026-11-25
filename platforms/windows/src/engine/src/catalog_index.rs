@@ -118,6 +118,15 @@ impl Judged {
         self
     }
 }
+type KeywordJob = std::thread::JoinHandle<Result<Vec<CatalogHit>>>;
+
+fn finish_keyword(keyword: &mut Vec<CatalogHit>, job: &mut Option<KeywordJob>) -> Result<()> {
+    if let Some(job) = job.take() {
+        *keyword = job.join().map_err(|_| anyhow::anyhow!("The keyword search stopped unexpectedly"))??;
+    }
+    Ok(())
+}
+
 pub(crate) struct Reader<'a> {
     slot: &'a Mutex<Option<Connection>>,
     conn: Option<Connection>,
@@ -362,10 +371,16 @@ impl CatalogIndex {
         };
         let conn = self.reader()?;
         let tx = conn.unchecked_transaction()?;
-        let keyword = if mode == "semantic" {
-            vec![]
-        } else {
-            crate::commands::catalog::search(&tx, query, &[], root)?
+        let (mut keyword, mut keyword_job) = match mode {
+            "semantic" => (vec![], None),
+            "keyword" => (crate::commands::catalog::search(&tx, query, &[], root)?, None),
+            _ => {
+                let (index, words, scope) = (self.clone(), query.to_owned(), root.cloned());
+                (vec![], Some(std::thread::Builder::new().name("catalog-keyword".into()).spawn(move || {
+                    let conn = index.reader()?;
+                    crate::commands::catalog::search(&conn, &words, &[], scope.as_ref())
+                })?))
+            }
         };
         let mut response = CatalogResponse {
             request_id: request.request_id.clone(),
@@ -408,6 +423,7 @@ impl CatalogIndex {
             }
             None => {
                 let Some(exact) = self.exact_nearest(&tx, &query_vector, wanted)? else {
+                    finish_keyword(&mut keyword, &mut keyword_job)?;
                     drop(tx);
                     drop(retrieval_lease);
                     let prepared = self.prepare();
@@ -462,6 +478,7 @@ impl CatalogIndex {
                     visual.push((hit, margin));
                 }
         }
+        finish_keyword(&mut keyword, &mut keyword_job)?;
         if judging {
             visual.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.file_id.cmp(&b.0.file_id)));
         }

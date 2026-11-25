@@ -109,6 +109,15 @@ struct EngineQueryRepliesTests {
         #expect(replies.waiting == 0)
     }
 
+    @Test func anEmptyReplyEndsTheWaitAtOnceAsNoFrame() async {
+        let replies = EngineQueryReplies()
+        let waiting = Task { await replies.videoThumbnail(path: "/v/clip.mkv", modifiedAt: 3, maxPixelSize: 448) { true } }
+        await waitFor(replies, count: 1)
+        replies.deliver(ThumbnailGenerated(path: "/v/clip.mkv", modifiedAt: 3, bytes: ""))
+        #expect(await waiting.value == nil)
+        #expect(replies.waiting == 0, "the empty reply answered the wait; no 15 second timeout was needed")
+    }
+
     @Test func eachThumbnailSizeGetsItsOwnFrame() async throws {
         let replies = EngineQueryReplies()
         let grid = Task { await replies.videoThumbnail(path: "/v/a.mov", modifiedAt: 1, maxPixelSize: 512) { true } }

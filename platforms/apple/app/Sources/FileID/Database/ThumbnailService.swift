@@ -107,10 +107,12 @@ public final class ThumbnailService {
         return nil
     }
 
-    /// A busy engine can miss its reply window for a large video, so a video tile that comes back empty asks once more before it settles for its icon.
-    public func tileThumbnail(for url: URL, size: CGFloat) async -> NSImage? {
+    /// A busy engine can miss its reply window for a large video, so a video tile that comes back empty asks once more before it settles for its icon. `onMiss` runs as soon as the first ask comes back empty, so the tile shows its icon during the wait instead of an empty box.
+    public func tileThumbnail(for url: URL, size: CGFloat, onMiss: @MainActor () -> Void = {}) async -> NSImage? {
         if let image = await thumbnail(for: url, size: size) { return image }
-        guard Self.isVideo(url), !Task.isCancelled, (try? await Task.sleep(for: .seconds(5))) != nil else { return nil }
+        guard Self.isVideo(url), !Task.isCancelled else { return nil }
+        onMiss()
+        guard (try? await Task.sleep(for: .seconds(5))) != nil else { return nil }
         return await thumbnail(for: url, size: size)
     }
 

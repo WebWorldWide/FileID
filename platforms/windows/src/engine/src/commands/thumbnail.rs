@@ -1,6 +1,6 @@
 //! On-demand video thumbnail: a 25%-duration keyframe via Media Foundation resized to a JPEG (default long side 192 px,
-//! aspect-preserved, never upscaled), base64-encoded into `thumbnailGenerated`. On ANY failure nothing is emitted (the
-//! app keeps its placeholder) and a redacted warning is logged.
+//! aspect-preserved, never upscaled), base64-encoded into `thumbnailGenerated`. On ANY failure the reply carries empty
+//! `bytes` (no frame), so an app waiting on it moves on at once instead of timing out, and a redacted warning is logged.
 
 use std::io::Cursor;
 use std::sync::OnceLock;
@@ -27,21 +27,19 @@ fn extract_semaphore() -> &'static tokio::sync::Semaphore {
 pub(crate) async fn handle_generate_video_thumbnail(sink: Sink, payload: GenerateVideoThumbnailPayload) {
     let GenerateVideoThumbnailPayload { path, modified_at, max_pixel_size } = payload;
 
-    match build_thumbnail_b64(&path, requested_long_side(max_pixel_size)).await {
-        Ok(bytes) => {
-            sink.send(IpcEvent::now(EventPayload::ThumbnailGenerated(Wrap::new(
-                ThumbnailGenerated { path, modified_at, bytes },
-            ))))
-            .await;
-        }
+    let bytes = match build_thumbnail_b64(&path, requested_long_side(max_pixel_size)).await {
+        Ok(bytes) => bytes,
         Err(err) => {
             tracing::warn!(
                 %err,
                 file = %crate::platform::redact_path_for_log(&path),
-                "video thumbnail generation failed; emitting nothing"
+                "video thumbnail generation failed; replying with no frame"
             );
+            String::new()
         }
-    }
+    };
+    sink.send(IpcEvent::now(EventPayload::ThumbnailGenerated(Wrap::new(ThumbnailGenerated { path, modified_at, bytes }))))
+        .await;
 }
 
 fn requested_long_side(max_pixel_size: Option<i64>) -> u32 {
@@ -85,6 +83,28 @@ fn fit_long_side(w: u32, h: u32, target: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::{fit_long_side, requested_long_side};
+    use crate::ipc::{sink::Sink, EventPayload, GenerateVideoThumbnailPayload};
+
+    #[tokio::test]
+    async fn a_video_with_no_decodable_frame_gets_an_empty_reply_not_silence() {
+        let (sink, mut events) = Sink::channel_for_test(4);
+        let path = std::env::temp_dir().join(format!("fileid-no-frame-{}.mkv", std::process::id()));
+        std::fs::write(&path, b"not a video").unwrap();
+        let payload = GenerateVideoThumbnailPayload {
+            path: path.to_string_lossy().into_owned(),
+            modified_at: Some(7.0),
+            max_pixel_size: Some(448),
+        };
+        super::handle_generate_video_thumbnail(sink, payload).await;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("the engine answered instead of staying silent")
+            .expect("an event");
+        let EventPayload::ThumbnailGenerated(reply) = reply.payload else { panic!("a thumbnailGenerated reply") };
+        assert!(reply.inner.bytes.is_empty(), "no frame means empty bytes");
+        assert_eq!(reply.inner.modified_at, Some(7.0), "the reply still names the revision asked about");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn requested_size_defaults_and_clamps() {

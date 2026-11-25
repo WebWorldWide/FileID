@@ -15,6 +15,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     /// Changes whenever `rows` or `tagsByFile` is replaced.
     var contentVersion: Int = 0
     var scrollToTopToken: Int = 0
+    var scrollToEndToken: Int = 0
     var textSize: TextSize = .standard
     var offline: OfflineRoots = .none
     var sort: LibrarySort = .standard
@@ -23,6 +24,8 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     var onToggleCheck: (FileRow) -> Void
     var onFindSimilar: (FileRow) -> Void
     var onNearEnd: () -> Void
+    var onJumpToEnd: () -> Void = {}
+    var onJumpToStart: () -> Void = {}
     var onClearSelection: () -> Void = {}
     var onRangeCheck: (FileRow) -> Void = { _ in }
     var onCommandCheck: (FileRow) -> Void = { _ in }
@@ -75,6 +78,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastRows: [FileRow] = []
         private var lastContentVersion = Int.min
         private var lastScrollToTopToken = 0
+        private var lastScrollToEndToken = 0
         private var atTop = true
         private var lastClickRowID: Int64?
         private var showsChipRow = true
@@ -132,6 +136,10 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastSort = grid.sort
             lastRows = grid.rows
             lastContentVersion = grid.contentVersion
+            if grid.scrollToEndToken != lastScrollToEndToken {
+                lastScrollToEndToken = grid.scrollToEndToken
+                if !ids.isEmpty { collection.scrollToItems(at: [IndexPath(item: ids.count - 1, section: 0)], scrollPosition: .bottom) }
+            }
             if grid.scrollToTopToken != lastScrollToTopToken {
                 lastScrollToTopToken = grid.scrollToTopToken
                 if let scroll = collection.enclosingScrollView {
@@ -158,6 +166,8 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             guard let model, let collection, !model.rows.isEmpty else { return false }
             let focusID = model.selectMode ? cursorID : model.selectedID
             let current = focusID.flatMap { id in model.rows.firstIndex { $0.id == id } }
+            if key == .home { model.onJumpToStart(); return true }
+            if key == .end { model.onJumpToEnd(); return true }
             if key == .clear {
                 guard current != nil else { return false }
                 if model.selectMode { moveCursor(to: nil) } else { model.onClearSelection() }
@@ -305,14 +315,17 @@ final class TileCollectionView: NSCollectionView {
         CATransaction.commit()
     }
 
-    enum TileKey { case left, right, up, down, open, clear }
+    enum TileKey { case left, right, up, down, open, clear, home, end }
 
     override func keyDown(with event: NSEvent) {
+        let command = event.modifierFlags.contains(.command)
         let key: TileKey? = switch event.keyCode {
         case 123: .left
         case 124: .right
-        case 125: .down
-        case 126: .up
+        case 125: command ? .end : .down
+        case 126: command ? .home : .up
+        case 115: .home
+        case 119: .end
         case 36, 76, 49: .open
         case 53: .clear
         default: nil
@@ -615,21 +628,28 @@ final class LibraryTileItem: NSCollectionViewItem {
         if !keepCurrent { thumbLayer.contents = nil; thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1); kindGlyph.isHidden = true }
         let id = row.id
         thumbTask = Task { @MainActor [weak self] in
-            let image = await ThumbnailService.shared.tileThumbnail(for: row.url, size: 224)
-            guard let self, !Task.isCancelled, self.rowID == id else { return }
-            let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            let isPage = row.kind == "doc" || row.kind == "pdf"
-            let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) }
-                : (self.topLeftText ? cgImage.flatMap { PageThumbnail.topLeftCrop(width: $0.width, height: $0.height) } : nil)
-            let blank = cgImage == nil || (isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true)
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))
-            self.thumbLayer.contents = blank ? nil : cgImage
-            self.kindGlyph.image = blank ? NSImage(systemSymbolName: FileKind.symbolName(forKind: row.kind), accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 34, weight: .light)) : nil
-            self.kindGlyph.isHidden = !blank
-            CATransaction.commit()
+            func show(_ image: NSImage?) {
+                guard let self, !Task.isCancelled, self.rowID == id else { return }
+                self.showThumbnail(image, for: row)
+            }
+            let image = await ThumbnailService.shared.tileThumbnail(for: row.url, size: 224, onMiss: { show(nil) })
+            show(image)
         }
+    }
+
+    private func showThumbnail(_ image: NSImage?, for row: FileRow) {
+        let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        let isPage = row.kind == "doc" || row.kind == "pdf"
+        let crop = isPage ? cgImage.flatMap { PageThumbnail.topCrop(width: $0.width, height: $0.height) }
+            : (self.topLeftText ? cgImage.flatMap { PageThumbnail.topLeftCrop(width: $0.width, height: $0.height) } : nil)
+        let blank = cgImage == nil || (isPage && cgImage.map { PageThumbnail.isBlank($0, crop: crop) } == true)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        self.thumbLayer.contentsRect = blank ? CGRect(x: 0, y: 0, width: 1, height: 1) : (crop ?? CGRect(x: 0, y: 0, width: 1, height: 1))
+        self.thumbLayer.contents = blank ? nil : cgImage
+        self.kindGlyph.image = blank ? NSImage(systemSymbolName: FileKind.symbolName(forKind: row.kind), accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 34, weight: .light)) : nil
+        self.kindGlyph.isHidden = !blank
+        CATransaction.commit()
     }
 
     override func prepareForReuse() {

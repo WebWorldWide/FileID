@@ -103,6 +103,35 @@ struct LibraryKeysetTests {
         }
     }
 
+    @Test("Scrolling with growing pages, or jumping with one big page, reaches the last row on every key and direction")
+    func growingAndJumpPagesReachTheEnd() async throws {
+        let fixture = try await makeCatalog()
+        defer { fixture.store.close(); try? FileManager.default.removeItem(at: fixture.directory) }
+        #expect(LibraryPageSizes.scroll(loaded: 0) == 300)
+        #expect(LibraryPageSizes.scroll(loaded: 1_200) == 600)
+        #expect(LibraryPageSizes.scroll(loaded: 100_000) == LibraryPageSizes.scrollCap)
+        for key in LibrarySortKey.allCases {
+            for ascending in [true, false] {
+                let sort = LibrarySort(key: key, ascending: ascending)
+                var grown: [FileRow] = []
+                var cursor: LibraryCursor?
+                var pages = 0
+                while true {
+                    let limit = LibraryPageSizes.scroll(loaded: grown.count)
+                    let page = await fixture.store.filesPageAsync(offset: cursor == nil ? grown.count : 0, limit: limit, after: cursor, sort: sort)
+                    grown += page.rows
+                    pages += 1
+                    guard page.rows.count == limit else { break }
+                    cursor = page.cursor ?? cursor
+                }
+                let all = await walk(fixture.store, sort, limit: Self.rowCount)
+                #expect(grown.map(\.id) == all.map(\.id), "\(sort.summary) growing pages")
+                #expect(grown.count == Self.rowCount && Set(grown.map(\.id)).count == Self.rowCount, "\(sort.summary) reached the last row once")
+                #expect(pages < Self.rowCount / LibraryPageSizes.first, "\(sort.summary) growth saves round trips")
+            }
+        }
+    }
+
     @Test("Names with numbers sort by value and a page far down costs an index range, not a sort")
     func nameKeyIsNumericAndPagesThroughTheIndex() async throws {
         let fixture = try await makeCatalog()

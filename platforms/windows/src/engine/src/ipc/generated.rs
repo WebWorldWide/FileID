@@ -253,8 +253,10 @@ pub enum EventPayload {
     LibraryWiped(Wrap<LibraryWiped>),
     /// Reply to generateVideoThumbnail. `bytes` is a base64-encoded JPEG (aspect-preserved, long
     /// side = the requested maxPixelSize, 192 by default) — a base64 string, NOT a number array.
-    /// `modifiedAt` is echoed from the request so the app can write the bytes under its (path,
-    /// modifiedAt) cache key.
+    /// `bytes` is empty when the engine could not decode a frame (a container it cannot read, a
+    /// missing file), so a waiting app moves on at once instead of timing out. `modifiedAt` is
+    /// echoed from the request so the app can write the bytes under its (path, modifiedAt) cache
+    /// key.
     #[serde(rename = "thumbnailGenerated")]
     ThumbnailGenerated(Wrap<ThumbnailGenerated>),
     #[serde(rename = "catalogResponse")]
@@ -1683,7 +1685,7 @@ pub struct ThumbnailGenerated {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<f64>,
-    /// Base64-encoded 192px JPEG.
+    /// Base64-encoded 192px JPEG; empty when no frame could be decoded.
     pub bytes: String,
 }
 

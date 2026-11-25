@@ -1134,3 +1134,18 @@ fn a_file_dated_in_the_future_is_not_found_by_a_date_range_that_starts_after_tod
     late.captured_from = Some(3_000_000_000.0);
     assert!(index.search(&late).unwrap().hits.is_empty());
 }
+#[test]
+fn the_keyword_half_of_a_hybrid_search_comes_back_once_and_its_failure_is_not_an_empty_list() {
+    let hit = |file_id| CatalogHit { file_id, path: String::new(), kind: "image".into(), text: String::new(), evidence_id: None, start_seconds: None, page: None, selection_match: None };
+    let mut keyword = Vec::new();
+    let mut job = Some(std::thread::spawn(move || Ok(vec![hit(7)])));
+    finish_keyword(&mut keyword, &mut job).unwrap();
+    assert_eq!(keyword.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), [7]);
+    assert!(job.is_none(), "the job is consumed");
+    finish_keyword(&mut keyword, &mut job).unwrap();
+    assert_eq!(keyword.len(), 1, "asking again keeps what came back");
+    let mut failing = Some(std::thread::spawn(|| -> Result<Vec<CatalogHit>> { bail!("the keyword index is unreadable") }));
+    assert!(finish_keyword(&mut keyword, &mut failing).is_err());
+    let mut panicking = Some(std::thread::spawn(|| -> Result<Vec<CatalogHit>> { panic!("boom") }));
+    assert!(finish_keyword(&mut keyword, &mut panicking).is_err());
+}

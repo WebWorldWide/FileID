@@ -106,3 +106,15 @@ extension LibrarySort {
         }
     }
 }
+
+/// How many rows each Library query asks for.
+enum LibraryPageSizes {
+    static let first = 300
+    static let scrollCap = 2_000
+    /// Rows per query when jumping to the end of a listing; tags follow afterwards.
+    static let jump = 5_000
+    static let tagChunk = 2_000
+
+    /// Pages the grid asks for as the user scrolls grow with what is already loaded, so a long scroll needs few round trips.
+    static func scroll(loaded: Int) -> Int { min(max(first, loaded / 2), scrollCap) }
+}
