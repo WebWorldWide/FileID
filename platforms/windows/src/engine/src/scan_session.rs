@@ -1811,7 +1811,7 @@ fn should_reconcile_missing_rows(
 /// False when the scan root cannot be trusted to reflect the library: missing, not a
 /// directory, empty or unreadable, or (macOS) a leftover `/Volumes/<name>` folder on the
 /// boot volume after the drive was unplugged. Port of the Swift `ScanRootGuard.isReachable`.
-pub(crate) fn scan_root_reachable(root: &Path) -> bool {
+pub fn scan_root_reachable(root: &Path) -> bool {
     root_is_trustworthy(root, &device_of)
 }
 

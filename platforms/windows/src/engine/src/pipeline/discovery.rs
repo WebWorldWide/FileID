@@ -826,12 +826,12 @@ fn path_extension_lower(path: &std::path::Path) -> Option<String> {
 }
 
 /// True when `to_string_lossy` would mangle this path: the lossy text is the only identity the DB/app layers see, so such a file could never be targeted again.
-fn is_non_unicode_path(path: &std::path::Path) -> bool {
+pub fn is_non_unicode_path(path: &std::path::Path) -> bool {
     path.to_str().is_none()
 }
 
 /// Directory names whose entire subtree is skipped, decided once per directory in `process_read_dir`.
-fn is_noise_directory(name: &str) -> bool {
+pub fn is_noise_directory(name: &str) -> bool {
     // Case-insensitive: Windows lists System Volume Information / $RECYCLE.BIN mixed-case at the root.
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -863,7 +863,7 @@ fn is_chkdsk_recovery_directory(lower: &str) -> bool {
 }
 
 /// Generic names that are build artifacts ONLY inside a dev tree. They double as ordinary folder names (a photographer's "build" set, a "bin" of scans), so the caller prunes them only when a build-system marker sits alongside; otherwise a user's files would vanish from the app.
-fn is_ambiguous_build_directory(name: &str) -> bool {
+pub fn is_ambiguous_build_directory(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
@@ -871,7 +871,7 @@ fn is_ambiguous_build_directory(name: &str) -> bool {
     )
 }
 
-fn is_build_marker(name: &str) -> bool {
+pub fn is_build_marker(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
@@ -896,7 +896,7 @@ fn is_build_marker(name: &str) -> bool {
 }
 
 /// Per-file noise filter, separate from `is_noise_directory` because file-vs-dir semantics differ (some libraries live under `.local/share/...`).
-fn is_noise_file(name: &str) -> bool {
+pub fn is_noise_file(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }

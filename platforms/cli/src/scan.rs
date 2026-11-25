@@ -86,6 +86,38 @@ fn prefix_upper_bound(prefix: &str) -> Option<String> {
     None
 }
 
+fn keep_walk_entry(entry: &walkdir::DirEntry) -> bool {
+    use fileid_engine::pipeline::discovery::{
+        is_ambiguous_build_directory, is_build_marker, is_noise_directory, is_noise_file,
+    };
+    if entry.depth() == 0 {
+        return true;
+    }
+    let name = entry.file_name().to_string_lossy();
+    let file_type = entry.file_type();
+    if file_type.is_dir() {
+        if is_noise_directory(&name) {
+            return false;
+        }
+        if is_ambiguous_build_directory(&name) {
+            let has_marker = entry.path().parent().is_some_and(|parent| {
+                std::fs::read_dir(parent).is_ok_and(|entries| {
+                    entries.flatten().any(|sibling| {
+                        sibling.file_type().is_ok_and(|t| t.is_file())
+                            && is_build_marker(&sibling.file_name().to_string_lossy())
+                    })
+                })
+            });
+            return !has_marker;
+        }
+        true
+    } else if file_type.is_file() {
+        !is_noise_file(&name)
+    } else {
+        true
+    }
+}
+
 fn mark_existing_row_failed(
     conn: &rusqlite::Connection,
     path: &Path,
@@ -308,7 +340,12 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         )
         .context("prepare existing-row probe")?;
 
-    for entry in WalkDir::new(&root_abs).follow_links(false) {
+    let mut non_unicode_skipped: u64 = 0;
+    for entry in WalkDir::new(&root_abs)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(keep_walk_entry)
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -330,6 +367,10 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             continue;
         }
         let path = entry.path();
+        if fileid_engine::pipeline::discovery::is_non_unicode_path(path) {
+            non_unicode_skipped += 1;
+            continue;
+        }
         let meta = match std::fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -508,8 +549,20 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             "{batch_raced} empty file(s) changed while FileID was reading the folder. Scan again to pick them up."
         ));
     }
+    if non_unicode_skipped > 0 && warnings.len() < 5 {
+        warnings.push(format!(
+            "{non_unicode_skipped} file(s) with names that are not valid Unicode were skipped."
+        ));
+    }
     if failed == 0 {
-        soft_hide_missing_rows(&conn, &root_abs, now)?;
+        if fileid_engine::scan_session::scan_root_reachable(&root_abs) {
+            soft_hide_missing_rows(&conn, &root_abs, now)?;
+        } else if warnings.len() < 5 {
+            warnings.push(
+                "The scan root is empty or not mounted, so indexed files under it were kept."
+                    .to_string(),
+            );
+        }
     }
 
     if live {
@@ -1205,6 +1258,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!((missing, active), (1, 0));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_skips_noise_directories_and_dotfiles_like_the_engine() {
+        let (temp, root, ctx) = test_layout("noise");
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("node_modules/dup.txt"), "same").unwrap();
+        std::fs::write(root.join(".git/dup.txt"), "same").unwrap();
+        std::fs::write(root.join(".hidden.txt"), "same").unwrap();
+        std::fs::write(root.join("real.txt"), "same").unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let paths: Vec<String> = conn
+            .prepare("SELECT path_text FROM files")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(paths, vec![stored_path(&root.join("real.txt"))]);
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_of_an_emptied_root_keeps_the_indexed_rows() {
+        let (temp, root, ctx) = test_layout("emptied");
+        let file = root.join("kept.txt");
+        std::fs::write(&file, "kept").unwrap();
+        let key = stored_path(&file);
+        run(&ctx, &root, false).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let failed: i64 = conn
+            .query_row(
+                "SELECT failed FROM files WHERE path_text = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed, 0);
         drop(conn);
         std::fs::remove_dir_all(temp).unwrap();
     }
