@@ -10,6 +10,7 @@ pub const DEFAULT_SIMILAR_THRESHOLD: u32 = 8;
 pub const MAX_SIMILAR_THRESHOLD: u32 = 16;
 const MAX_GENERIC_INDEX_ENTRIES: usize = 2_000_000;
 const MAX_SIMILAR_COMPARISONS: u64 = 5_000_000;
+const SIMILAR_COMPARISONS_PER_ROW: u64 = 500;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExactCaps {
@@ -169,14 +170,15 @@ fn similar_components(rows: &[(i64, i64)], threshold: u32, cancel: &dyn Fn() -> 
         bail!("similar threshold {threshold} exceeds the supported maximum of {MAX_SIMILAR_THRESHOLD} bits");
     }
     let mut parent: Vec<usize> = (0..rows.len()).collect();
+    let budget = MAX_SIMILAR_COMPARISONS.max((rows.len() as u64).saturating_mul(SIMILAR_COMPARISONS_PER_ROW));
     let comparisons = if threshold == DEFAULT_SIMILAR_THRESHOLD {
-        radius_eight(rows, &mut parent, cancel)?
+        radius_eight(rows, &mut parent, budget, cancel)?
     } else {
         let entries = rows.len().saturating_mul((threshold + 1) as usize);
         if entries > MAX_GENERIC_INDEX_ENTRIES {
             bail!("similar candidate index would require {entries} entries; limit is {MAX_GENERIC_INDEX_ENTRIES}");
         }
-        generic(rows, threshold, &mut parent, cancel)?
+        generic(rows, threshold, &mut parent, budget, cancel)?
     };
     let mut components: BTreeMap<usize, Vec<i64>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
@@ -197,7 +199,7 @@ fn similar_components(rows: &[(i64, i64)], threshold: u32, cancel: &dyn Fn() -> 
 
 /// Pigeonhole: 64 bits in 3 blocks (21/21/22); two hashes within 8 bits agree within 2 bits on one block, so probing
 /// each block's ≤2-bit neighbourhood finds every candidate.
-fn radius_eight(rows: &[(i64, i64)], parent: &mut [usize], cancel: &dyn Fn() -> bool) -> Result<u64> {
+fn radius_eight(rows: &[(i64, i64)], parent: &mut [usize], budget: u64, cancel: &dyn Fn() -> bool) -> Result<u64> {
     const BLOCKS: [(usize, usize); 3] = [(0, 21), (21, 21), (42, 22)];
     let masks = [masks_within_two(21), masks_within_two(21), masks_within_two(22)];
     let mut indexes: Vec<HashMap<u64, Vec<usize>>> = (0..BLOCKS.len()).map(|_| HashMap::new()).collect();
@@ -223,8 +225,8 @@ fn radius_eight(rows: &[(i64, i64)], parent: &mut [usize], cancel: &dyn Fn() -> 
         }
         for other in candidates {
             comparisons += 1;
-            if comparisons > MAX_SIMILAR_COMPARISONS {
-                bail!("similar candidate comparisons exceeded the {MAX_SIMILAR_COMPARISONS} safety limit");
+            if comparisons > budget {
+                bail!("similar candidate comparisons exceeded the {budget} safety limit");
             }
             if (hash ^ rows[other].1 as u64).count_ones() <= DEFAULT_SIMILAR_THRESHOLD {
                 union(parent, index, other);
@@ -251,7 +253,7 @@ fn masks_within_two(width: usize) -> Vec<u64> {
 }
 
 /// Pigeonhole with `threshold + 1` blocks: within-threshold hashes match exactly on one.
-fn generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize], cancel: &dyn Fn() -> bool) -> Result<u64> {
+fn generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize], budget: u64, cancel: &dyn Fn() -> bool) -> Result<u64> {
     let blocks = (threshold + 1) as usize;
     let block_key = |hash: u64, block: usize| {
         let lo = (block * 64) / blocks;
@@ -279,8 +281,8 @@ fn generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize], cancel: &d
         }
         for other in candidates {
             comparisons += 1;
-            if comparisons > MAX_SIMILAR_COMPARISONS {
-                bail!("similar candidate comparisons exceeded the {MAX_SIMILAR_COMPARISONS} safety limit");
+            if comparisons > budget {
+                bail!("similar candidate comparisons exceeded the {budget} safety limit");
             }
             if (hash ^ rows[other].1 as u64).count_ones() <= threshold {
                 union(parent, index, other);
@@ -373,6 +375,19 @@ mod tests {
     fn generic_search_stops_at_comparison_budget() {
         let rows = (0..3_200).map(|id| (id, id)).collect::<Vec<(i64, i64)>>();
         assert!(components(&rows, 1).unwrap_err().to_string().contains("comparisons exceeded"));
+    }
+
+    #[test]
+    fn a_library_of_dense_clusters_is_searched_not_refused() {
+        let rows: Vec<(i64, i64)> = (0..20_000u64)
+            .map(|i| {
+                let cluster = (i / 600).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 21 << 21;
+                (i as i64, (cluster | (i * 2_654_435_761 % (1 << 21))) as i64)
+            })
+            .collect();
+        let (groups, comparisons) = similar_components(&rows, 8, &|| false).unwrap();
+        assert!(comparisons > MAX_SIMILAR_COMPARISONS, "{comparisons}");
+        assert!(!groups.is_empty());
     }
 
     #[test]
