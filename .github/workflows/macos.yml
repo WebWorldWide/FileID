@@ -50,14 +50,7 @@ jobs:
         run: swift --version
 
       - name: Cache SwiftPM
-        # Cache only the dependency DOWNLOAD cache (resolved package sources +
-        # binary artifacts), NOT the project build products. Caching
-        # `platforms/apple/.build` (compiled .o/.swiftmodule) keyed only on
-        # Package.resolved + a broad restore-keys fallback restored STALE compiled
-        # objects whenever engine SOURCE changed but deps didn't — so `swift test`
-        # silently ran pre-change code (a non-deterministic CI that passed/failed
-        # by which objects survived). org.swift.swiftpm keeps dep downloads cached
-        # (no re-fetch); everything compiles fresh, so the test always reflects HEAD.
+        # Caches dependency downloads only. Caching .build restored stale objects, so tests ran old code.
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -75,10 +68,8 @@ jobs:
       - name: Build App Store sandbox variant (app)
         run: swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
 
-      # The Rust engine as the Mac app hosts it (Contents/MacOS/fileidd):
-      # Apple adapters linked, events on fd 2, app state root. Built
-      # with test-trash-root (implies apple-adapters; test builds only) so the
-      # Trash round trip runs against a per-case folder, never the Trash.
+      # The engine as the Mac app hosts it (Contents/MacOS/fileidd). test-trash-root implies
+      # apple-adapters and keeps the Trash round trip in a per-case folder, never the real Trash.
       - name: Build Rust engine with Apple adapters
         run: |
           set -euo pipefail
@@ -90,41 +81,20 @@ jobs:
           install_name_tool -add_rpath @executable_path "$ENGINE"
 
       - name: Build tests
-        # Compile the test targets outside the 12-minute run cap below: with
-        # FileIDImaging, FileIDVLMCore, FileIDModelInfo and FileIDAppleKit the
-        # debug test build alone takes ~9-10 min on hosted runners.
+        # Compiled outside the 12-minute run cap below; the debug test build alone takes 9-10 minutes.
         run: swift build --build-tests
 
       - name: Run tests
-        # Swift Testing framework. SharedTests + AppleKitTests + FileIDAppTests. Corpus tests
-        # that need a populated Tests/Corpus/ tree skip themselves when the
-        # corpus isn't present (it's downloaded via scripts/build_corpus.sh
-        # locally and is too slow/fragile to fetch in CI).
-        #
-        # 12-minute hard cap (healthy runs finish in ~3): a leaked child
-        # process holding the test harness's output pipe once turned a
-        # finished suite into a 60-minute silent hang that ate the whole
-        # job timeout. On expiry, surface which processes were still
-        # alive, then fail fast.
+        # Corpus tests skip themselves when Tests/Corpus/ is absent. 12-minute hard cap: a leaked
+        # child holding the harness's output pipe can hang a finished suite; on expiry, list the survivors.
         run: |
           set -uo pipefail
-          # perl's alarm survives exec, and perl is always on the runner
-          # (coreutils timeout/gtimeout is not). SIGALRM kills the test
-          # process tree's leader at 12 min → exit 142.
-          #
-          # Capture swift test's REAL exit code: the previous
-          # `if ! cmd; then status=$?` form captured the status of the negated
-          # condition (always 0 when the `then` runs), so a failing OR
-          # non-compiling test suite was reported as exit 0 and the job went
-          # green — the macOS test gate silently never failed (a stale
-          # non-compiling test target rode green for weeks). Run directly,
-          # capture $? immediately, then branch.
-          # `--no-parallel`: the suites that spawn the real engine and read its
-          # pipes run one at a time, so they cannot starve the cooperative
-          # thread pool or each other (a wedged harness shows up as exit 142).
+          # perl's alarm survives exec and perl is always on the runner (coreutils timeout is not);
+          # SIGALRM ends the run at 12 minutes with exit 142.
+          # Read $? right after the command: `if ! cmd; then status=$?` would capture the negation.
+          # `--no-parallel`: suites that spawn the real engine must not starve each other's threads.
           set +e
-          # The query-reply test starts the shared engine as the app hosts it
-          # (FILEID_TEST_HOSTED_ENGINE_PATH, libFileIDAppleKit beside it).
+          # The query-reply test starts the engine as the app hosts it, with libFileIDAppleKit beside it.
           FILEID_TEST_HOSTED_ENGINE_PATH="$RUNNER_TEMP/fileid-conformance-engine-apple/debug/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --skip-build --no-parallel
           status=$?
           set -e
@@ -139,10 +109,8 @@ jobs:
         working-directory: platforms/windows/src/engine
         run: cargo build --locked --jobs 4 --target-dir "$RUNNER_TEMP/fileid-conformance-engine"
 
-      # Shared engine conformance suite (shared/test-corpus/conformance), run
-      # against the plain Rust engine and against the build the Mac app hosts.
-      # Known divergences are tracked per case and fail the run when they stop
-      # reproducing.
+      # Conformance runs against the plain engine and the build the Mac app hosts.
+      # Known divergences are tracked per case and fail the run when they stop reproducing.
       - name: Engine conformance — Rust
         timeout-minutes: 15
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
@@ -154,9 +122,7 @@ jobs:
       - name: Verify catalog index recovery
         run: python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
 
-      # The shipped layout: the app plus the one engine, assembled the way
-      # release.sh and testflight.sh do (App Store variant, unsigned), with the
-      # release Rust engine; its models run on tract, so no ONNX Runtime ships.
+      # The shipped layout (App Store variant, unsigned), assembled the way release.sh and testflight.sh do.
       - name: Assemble the app bundle (fileidd only)
         timeout-minutes: 45
         run: |
@@ -175,8 +141,7 @@ jobs:
             exit 1
           fi
 
-      # Smoke: the bundled engine starts and says ready. IPC events go to
-      # stderr in the app-hosted build; stdin EOF is its shutdown.
+      # The app-hosted engine writes IPC events to stderr; stdin EOF shuts it down.
       - name: Smoke — bundled engine startup
         run: |
           set -euo pipefail
@@ -207,18 +172,12 @@ jobs:
           fi
           echo "Bundled engine startup smoke passed. ✅"
 
-      # Privacy gate parity with Windows: source URL allowlist. Scans
-      # every .swift under platforms/apple/ for any https?:// URL and
-      # asserts every host is on the allowlist. Stops a contributor
-      # from silently adding a new download / telemetry / analytics
-      # endpoint even one that doesn't match the existing deny-list.
-      # MUST stay in sync with the Windows equivalent in windows-engine.yml.
+      # Fails on any https URL in platforms/apple Swift sources whose host is not allowlisted.
+      # Keep the allowlist in sync with windows-engine.yml.
       - name: Privacy — source URL allowlist scan
         run: |
           set -euo pipefail
-          # Allowlist: same hosts as Windows. github.com appears in
-          # Package.swift for SwiftPM deps; huggingface.co for model
-          # downloads at runtime.
+          # github.com is for SwiftPM deps in Package.swift; huggingface.co for model downloads.
           allowed=(
             "huggingface.co"
             "github.com"
@@ -230,8 +189,6 @@ jobs:
             "ai.google.dev"
           )
           hits=()
-          # Find all .swift under apple/, excluding .build/ + DerivedData.
-          # Anchor on "(http|https)://([a-zA-Z0-9._-]+)" — group 2 is the host.
           while IFS= read -r line; do
             file="${line%%:*}"
             url="${line#*:}"
@@ -258,7 +215,6 @@ jobs:
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          # The shipped app and its shared modules link no ONNX Runtime.
           for bin in "$RUNNER_TEMP/FileID.app/Contents/MacOS/FileID" "$RUNNER_TEMP/FileID.app/Contents/Frameworks/libFileIDAppleKit.dylib"; do
             if [[ -n "$(otool -L "$bin" | grep -i onnxruntime || true)" || -n "$(nm -a "$bin" 2>/dev/null | grep -E 'OrtGetApiBase|OnnxRuntimeBindings' || true)" ]]; then
               echo "::error::$bin links ONNX Runtime"; exit 1
