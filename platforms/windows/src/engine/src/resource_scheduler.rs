@@ -105,7 +105,7 @@ impl ResourceScheduler {
                         };
                         (total, available)
                     },
-                    std::env::var("FILEID_SCHED_CPU").ok().and_then(|value| value.parse::<usize>().ok()).filter(|n| (1..=64).contains(n)).unwrap_or_else(|| num_cpus::get().saturating_sub(2).max(1)),
+                    num_cpus::get().saturating_sub(2).max(1),
                     2,
                 )
             })
