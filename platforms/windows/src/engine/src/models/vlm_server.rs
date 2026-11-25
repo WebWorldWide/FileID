@@ -41,6 +41,14 @@ const BIN_EXT: &str = "";
 const MAX_VLM_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_VLM_RESPONSE_BYTES: usize = 1024 * 1024;
 
+fn early_exit_hint() -> &'static str {
+    if cfg!(windows) {
+        "missing GPU runtime DLLs"
+    } else {
+        "missing shared libraries (check the llama.cpp runtime install)"
+    }
+}
+
 impl VlmServer {
     /// Candidate `llama-server` paths in preference order: the CUDA runtime
     /// first (faster on NVIDIA), then the universal Vulkan runtime. `start`
@@ -170,7 +178,7 @@ impl VlmServer {
                 bail!("VLM server startup cancelled");
             }
             if let Some(status) = child.poll_exit()? {
-                bail!("llama-server exited early ({status}) — likely missing GPU runtime DLLs");
+                bail!("llama-server exited early ({status}) — likely {}", early_exit_hint());
             }
             // Short per-request timeout so a server that accepts the connection
             // but stalls the /health response can't defeat the 120s deadline by
