@@ -91,7 +91,7 @@ internal static class TrashFailureText
         if (changed > 0) parts.Add(Sentence(Changed, changed));
         if (isProtected > 0) parts.Add(Sentence(Protected, isProtected));
         if (missing > 0) parts.Add(Sentence(Missing, missing));
-        if (readOnly > 0) parts.Add(readOnly == 1 ? readOnlySentence! : $"{readOnlySentence} ({readOnly:N0} files)");
+        if (readOnly > 0) parts.Add(readOnly == 1 || readOnlySentence!.EndsWith("nothing was changed.", StringComparison.Ordinal) ? readOnlySentence! : $"{readOnlySentence} ({readOnly:N0} files)");
         if (failed > 0) parts.Add(Sentence(Failed, failed));
         if (other is not null)
         {

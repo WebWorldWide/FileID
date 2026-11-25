@@ -76,6 +76,10 @@ public sealed class TrashFailureTextTests
 
         var three = Result(0, 3, Refused(1, "protected", ReadOnlySentence), Refused(2, "protected", ReadOnlySentence), Refused(3, "protected", ReadOnlySentence));
         Assert.Equal(ReadOnlySentence + " (3 files)", TrashFailureText.Summary(three));
+
+        var whole = ReadOnlySentence + " 1 of 3 files are on it, so nothing was changed.";
+        var batch = Result(0, 3, Refused(1, "protected", whole), Refused(2, "protected", whole), Refused(3, "protected", whole));
+        Assert.Equal(whole, TrashFailureText.Summary(batch));
     }
 
     [Fact]
