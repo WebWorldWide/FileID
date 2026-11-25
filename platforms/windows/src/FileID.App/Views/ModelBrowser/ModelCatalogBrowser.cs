@@ -34,6 +34,7 @@ internal sealed class ModelCatalogBrowser : UserControl
     private string? _selectedId;
     private CancellationTokenSource? _lifetime;
     private int _refreshing;
+    private int _refreshQueued;
 
     public ModelCatalogBrowser(bool describeFilesOnly, string? selectedId = null, Action<ModelCatalogItem>? onUse = null)
     {
@@ -122,7 +123,12 @@ internal sealed class ModelCatalogBrowser : UserControl
 
     private void Refresh()
     {
-        if (_lifetime is not { } lifetime || Interlocked.Exchange(ref _refreshing, 1) != 0) return;
+        if (_lifetime is not { } lifetime) return;
+        if (Interlocked.Exchange(ref _refreshing, 1) != 0)
+        {
+            Volatile.Write(ref _refreshQueued, 1);
+            return;
+        }
         var ct = lifetime.Token;
         var role = Role;
         _refresh.IsEnabled = false;
@@ -145,7 +151,11 @@ internal sealed class ModelCatalogBrowser : UserControl
             finally
             {
                 Interlocked.Exchange(ref _refreshing, 0);
-                if (!ct.IsCancellationRequested) _refresh.IsEnabled = true;
+                if (!ct.IsCancellationRequested)
+                {
+                    _refresh.IsEnabled = true;
+                    if (Interlocked.Exchange(ref _refreshQueued, 0) != 0) Refresh();
+                }
             }
         });
     }

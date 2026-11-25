@@ -612,32 +612,30 @@ public sealed partial class SidebarProcessingControl : UserControl
     {
         try
         {
-            // engine.jsonl uses tracing_appender's daily rolling pattern —
-            // the actual file is named "engine.jsonl.YYYY-MM-DD". Pick the
-            // newest one in the logs dir as a heuristic; fall back to the
-            // logs folder itself when no logs exist.
-            var logsDir = System.IO.Path.Combine(
-                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-                "FileID", "logs");
-            string target = logsDir;
+            // The engine's daily log is "engine.jsonl.YYYY-MM-DD", an extension Windows has no handler for, so show the newest one in Explorer instead of launching it.
+            var logsDir = AppPaths.LogsDir;
+            string? newest = null;
             try
             {
                 if (System.IO.Directory.Exists(logsDir))
                 {
-                    var newest = new System.IO.DirectoryInfo(logsDir)
+                    newest = new System.IO.DirectoryInfo(logsDir)
                         .EnumerateFiles("engine.jsonl*")
                         .OrderByDescending(f => f.LastWriteTimeUtc)
-                        .FirstOrDefault();
-                    if (newest is not null) target = newest.FullName;
+                        .FirstOrDefault()?.FullName;
                 }
             }
-            catch { /* swallow — fall through to opening the directory */ }
-            var psi = new System.Diagnostics.ProcessStartInfo
+            catch { /* fall through to opening the folder */ }
+            if (newest is not null)
             {
-                FileName = target,
+                SafeOpen.Reveal(newest);
+                return;
+            }
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = logsDir,
                 UseShellExecute = true,
-            };
-            System.Diagnostics.Process.Start(psi);
+            });
         }
         catch (Exception ex)
         {

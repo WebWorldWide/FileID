@@ -238,10 +238,17 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    private void OnClearClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnClearClicked), () =>
+    private async void OnClearClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnClearClicked), async () =>
         {
             RequestDismiss();
+            var engine = EngineClient.Instance;
+            var phase = engine.Phase ?? engine.LastProgress?.Phase;
+            if (phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan)
+            {
+                try { await engine.CancelScanAsync(); }
+                catch (Exception ex) { DebugLog.Warn("Close folder: cancelling the scan failed: " + ex.Message); }
+            }
             AppViewModel.Instance.FolderPath = null;
         });
 

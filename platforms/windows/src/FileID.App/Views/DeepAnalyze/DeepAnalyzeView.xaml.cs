@@ -1025,6 +1025,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                 openRenameSheet = pending.Count > 0;
             }
         }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Adding tags failed: " + ex.Message);
+            SetApplyBusy(false, "Couldn't add tags: " + ex.Message);
+            return;
+        }
         finally
         {
             System.Threading.Interlocked.Exchange(ref _applyInFlight, 0);

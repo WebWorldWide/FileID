@@ -55,10 +55,7 @@ public sealed partial class BulkRenameSheet : UserControl
     public async Task<bool> CommitAsync()
     {
         var selectedPlans = _items
-            .Where(p => p.Include == true
-                        && !string.IsNullOrWhiteSpace(p.ProposedName)
-                        && !p.ProposedName.Contains('/')
-                        && !p.ProposedName.Contains('\\'))
+            .Where(IsRequestedRename)
             .Select(p => new RenamePlan
             {
                 FileId = p.FileId,
@@ -72,7 +69,7 @@ public sealed partial class BulkRenameSheet : UserControl
 
         if (entries.Length == 0)
         {
-            StatusText.Text = "Nothing to rename — every row is excluded or has an empty name.";
+            StatusText.Text = "Nothing to rename — every row is excluded, unchanged, or has an empty name.";
             return false;
         }
 
@@ -137,16 +134,20 @@ public sealed partial class BulkRenameSheet : UserControl
         }
     }
 
+    internal static bool IsRequestedRename(RenamePlan plan) =>
+        plan.Include == true
+        && !string.IsNullOrWhiteSpace(plan.ProposedName)
+        && !plan.ProposedName.Contains('/')
+        && !plan.ProposedName.Contains('\\')
+        && !string.Equals(plan.ProposedName.Trim(), plan.CurrentName, StringComparison.Ordinal);
+
     internal static IReadOnlyList<RenameEntry> BuildConfirmedInverse(
         IReadOnlyList<RenamePlan> plans,
         BulkActionResult result)
     {
         if (result.Action != "renameFiles") return Array.Empty<RenameEntry>();
         var requested = plans
-            .Where(plan => plan.Include == true
-                && !string.IsNullOrWhiteSpace(plan.ProposedName)
-                && !plan.ProposedName.Contains('/')
-                && !plan.ProposedName.Contains('\\'))
+            .Where(IsRequestedRename)
             .ToArray();
         var confirmed = Services.BulkActionResultTruth.ConfirmedSuccessfulFileIds(
             result, requested.Select(plan => plan.FileId)).ToHashSet();

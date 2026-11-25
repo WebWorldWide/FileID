@@ -77,7 +77,7 @@ internal sealed partial class TakesWorkbench
     private void RankWithGoal()
     {
         var goal = _rankGoalBox.Text.Trim();
-        if (_goalRanking || _current is not { } group || !TakeReviewPolicy.CanRank(goal, _qualities)) return;
+        if (_goalRanking || Busy || _current is not { } group || !TakeReviewPolicy.CanRank(goal, _qualities)) return;
         var key = group.GroupKey;
         var order = TakeReviewPolicy.GoalOrder(_qualities);
         _goalRanking = true;

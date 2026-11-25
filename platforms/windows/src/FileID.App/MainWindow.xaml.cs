@@ -635,7 +635,7 @@ public sealed partial class MainWindow : Window
         CloseStopLease? closeStop = null;
         try
         {
-            var proceed = Services.ChangeLog.Instance.PendingCount == 0;
+            var proceed = Services.ChangeLog.Instance.ActiveUndoCount == 0;
             if (!proceed)
             {
                 try
@@ -643,8 +643,8 @@ public sealed partial class MainWindow : Window
                     var dialog = new ContentDialog
                     {
                         XamlRoot = ((FrameworkElement)Content).XamlRoot,
-                        Title = "FileID changes are still pending",
-                        Content = "Wait for pending undo and restore actions to finish before closing FileID.",
+                        Title = "FileID is still undoing changes",
+                        Content = "Wait for the undo in progress to finish before closing FileID.",
                         PrimaryButtonText = "Check again",
                         CloseButtonText = "Keep FileID open",
                         DefaultButton = ContentDialogButton.Close,
@@ -662,7 +662,7 @@ public sealed partial class MainWindow : Window
 
             closeStop = await StopForApplicationCloseAsync();
             await DrainCloseDispatcherAsync();
-            while (Services.ChangeLog.Instance.PendingCount > 0)
+            while (Services.ChangeLog.Instance.ActiveUndoCount > 0)
             {
                 await closeStop.AbortAsync();
                 closeStop = null;

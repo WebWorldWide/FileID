@@ -264,7 +264,7 @@ public sealed class AdversarialUiSafetyContractTests
             "await DrainCloseDispatcherAsync();",
             StringComparison.Ordinal);
         var latePending = sequence.IndexOf(
-            "while (Services.ChangeLog.Instance.PendingCount > 0",
+            "while (Services.ChangeLog.Instance.ActiveUndoCount > 0",
             StringComparison.Ordinal);
         var zeroEngineProof = sequence.IndexOf(
             "closeStop.TryCommit()",

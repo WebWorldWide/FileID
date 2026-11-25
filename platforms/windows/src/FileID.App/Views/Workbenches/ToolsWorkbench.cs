@@ -317,7 +317,13 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     protected override void OnClosed()
     {
         Engine.PropertyChanged -= OnEngineChanged;
-        _player?.Pause();
+        _playerRevision++;
+        _playerPath = null;
+        var previous = _player;
+        _player = null;
+        _playerView.SetMediaPlayer(null);
+        previous?.Dispose();
+        _playerView.Visibility = Visibility.Collapsed;
     }
 
     private void OnToolFilesRequested(object? sender, EventArgs e)

@@ -51,7 +51,8 @@ public sealed class RecentChangesUiContractTests
 
         Assert.Contains("ChangeLog.Instance.PendingCount", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("ChangeLog.Instance.UndoableCount", sidebar, StringComparison.Ordinal);
-        Assert.Contains("ChangeLog.Instance.PendingCount", window, StringComparison.Ordinal);
+        Assert.Contains("ChangeLog.Instance.ActiveUndoCount", window, StringComparison.Ordinal);
+        Assert.DoesNotContain("ChangeLog.Instance.PendingCount", window, StringComparison.Ordinal);
         Assert.Contains("ChangeStatus.Undoing => \"Undoing…\"", sheet, StringComparison.Ordinal);
         Assert.Contains("IsEnabled = !ChangeLog.Instance.IsUndoInFlight", sheet, StringComparison.Ordinal);
         Assert.Contains("entry.Status == ChangeStatus.Undoing", sheet, StringComparison.Ordinal);

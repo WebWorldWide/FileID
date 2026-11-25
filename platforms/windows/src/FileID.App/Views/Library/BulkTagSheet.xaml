@@ -38,7 +38,6 @@
         <TextBox Grid.Row="2"
                  x:Name="TagsInput"
                  PlaceholderText="vacation, italy, family"
-                 KeyDown="OnTagsKeyDown"
                  Header="Tags (comma-separated)"
                  AutomationProperties.HelpText="Enter one or more tags separated by commas" />
 

@@ -786,6 +786,7 @@ internal sealed partial class EngineClient
     private int _restructureCommandInFlight;
     internal bool LastRestructureResultWasUndo { get; private set; }
     internal bool LastRestructureResultWasShortcutApply { get; private set; }
+    internal bool LastRestructureResultWasShortcutUndo { get; private set; }
     internal string? RestructureOperationRoot { get; private set; }
 
     public async Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks)

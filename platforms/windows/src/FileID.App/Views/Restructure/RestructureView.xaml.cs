@@ -998,6 +998,7 @@ public sealed partial class RestructureView : UserControl
         RefreshStepStrip();
         _applyingPlan = plan;   // Record the in-flight plan (see SyncPlan)
         _applyRequestInFlight = true;
+        _readOnlyRefusalShown = false;
         _awaitingFreshPlan = false;
         _applyingGeneration = EngineClient.Instance.SpawnGeneration;
         ApplySymlinkButton.IsEnabled = false;
@@ -1202,7 +1203,7 @@ public sealed partial class RestructureView : UserControl
             return;
         }
         ApplyStatusText.Text = wasUndo
-            ? FormatUndoCompletion(r)
+            ? FormatUndoCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutUndo)
             : FormatApplyCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutApply);
         SyncUndoAffordance();
         if (r.Failed == 0 && r.Applied > 0)
@@ -1213,26 +1214,51 @@ public sealed partial class RestructureView : UserControl
         else if (r.Failed > 0)
         {
             // Partial/total failure must be a dismissible, actionable surface - not a status line the user can scroll past thinking it worked.
-            _ = ShowAlertAsync("Some changes couldn't be applied",
-                $"Applied {r.Applied:N0}, but {r.Failed:N0} failed. The originals for the failed items are unchanged.\n\n" +
-                "This usually means a file was open, moved, or you don't have permission to write the destination. " +
-                "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then try again.");
+            _ = ShowFailedApplyAlertAsync(r);
         }
     }
 
+    private async Task ShowFailedApplyAlertAsync(RestructureApplyResult r)
+    {
+        if (r.Applied == 0 && !r.Cancelled)
+        {
+            // A read-only refusal sends this result first and its reason as an error right after.
+            await Task.Delay(500);
+            if (_unloaded || _readOnlyRefusalShown) return;
+        }
+        await ShowAlertAsync("Some changes couldn't be applied",
+            $"Applied {r.Applied:N0}, but {r.Failed:N0} failed. The originals for the failed items are unchanged.\n\n" +
+            "This usually means a file was open, moved, or you don't have permission to write the destination. " +
+            "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then try again.");
+    }
+
     // A plan/apply that dies engine-side surfaces as EngineClient.LastError with a restructure kind (restructure.rs: "plan_restructure_failed" / "apply_restructure" / "plan_restructure_db" / "undo_restructure") - never as a Plan/ApplyResult event.
+    private bool _readOnlyRefusalShown;
+
     private void SyncEngineError()
     {
         var err = EngineClient.Instance.LastError;
         if (err is null || !IsUnhandledCompletion(err, _lastHandledError)) return;
         if (!IsPlanRestructureErrorKind(err.Kind)
             && err.Kind != "apply_restructure"
-            && err.Kind != "undo_restructure")
+            && err.Kind != "undo_restructure"
+            && err.Kind != "location_read_only")
         {
             return;
         }
 
         _lastHandledError = err;
+
+        if (err.Kind == "location_read_only")
+        {
+            _readOnlyRefusalShown = true;
+            ReleaseApplyGuard();
+            RecomputeSelection();
+            var sentence = EngineErrorText.Plain(err.Message, "This drive is read-only, so nothing was moved.");
+            ApplyStatusText.Text = sentence;
+            _ = ShowAlertAsync("Nothing was moved", sentence);
+            return;
+        }
 
         // The apply itself, or the post-apply re-plan, failed - release the single-flight guard so the buttons aren't stuck disabled.
         if (err.Kind == "apply_restructure" || (!_applyRequestInFlight && !_awaitingFreshPlan))
