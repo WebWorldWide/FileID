@@ -29,11 +29,13 @@ pub(crate) struct QueueSettings {
     pub split_min_cohesion: f64,
     pub oversized_min_faces: usize,
     pub oversized_share: f64,
+    pub oversized_large_faces: usize,
+    pub oversized_large_share: f64,
 }
 
 impl Default for QueueSettings {
     fn default() -> Self {
-        Self { merge_min: 0.55, split_max: 0.45, split_min_faces: 6, split_min_cohesion: 0.5, oversized_min_faces: 300, oversized_share: 0.2 }
+        Self { merge_min: 0.55, split_max: 0.45, split_min_faces: 6, split_min_cohesion: 0.5, oversized_min_faces: 300, oversized_share: 0.2, oversized_large_faces: 2000, oversized_large_share: 0.05 }
     }
 }
 
@@ -57,6 +59,8 @@ impl QueueSettings {
             split_min_cohesion: read("FILEID_FACE_SPLIT_MIN_COHESION", defaults.split_min_cohesion),
             oversized_min_faces: defaults.oversized_min_faces,
             oversized_share: defaults.oversized_share,
+            oversized_large_faces: defaults.oversized_large_faces,
+            oversized_large_share: defaults.oversized_large_share,
         }
     }
 }
@@ -273,20 +277,30 @@ pub(crate) fn two_groups(vectors: &[&[f32]]) -> Option<(Vec<usize>, Vec<f32>, Ve
 
 /// A person holding this share of every assigned face (and at least the minimum) is a chained cluster whose centroid
 /// has drifted to the average face: its two halves stay close in embedding space, so the separation gates would never
-/// offer it, yet nothing else lets the user take it apart.
+/// offer it, yet nothing else lets the user take it apart. In a big library a chained cluster holds a smaller share
+/// (four of them held 11-13% each of 64,000 faces), so a person of thousands of faces counts at a smaller share too.
 fn oversized(person: &Person, total: usize, settings: &QueueSettings) -> bool {
     let faces = person.members.len();
-    faces >= settings.oversized_min_faces && faces as f64 >= total as f64 * settings.oversized_share
+    let share = faces as f64 / total.max(1) as f64;
+    (faces >= settings.oversized_min_faces && share >= settings.oversized_share)
+        || (faces >= settings.oversized_large_faces && share >= settings.oversized_large_share)
 }
 
 fn split_of(person: &Person, big: bool, settings: &QueueSettings) -> Option<SplitRow> {
-    let members: Vec<&Member> = person.members.iter().take(MAX_SPLIT_FACES).collect();
+    let members: Vec<&Member> = person.members.iter().collect();
     let n = members.len();
     if n < settings.split_min_faces {
         return None;
     }
     let vectors: Vec<&[f32]> = members.iter().map(|member| member.vector.as_slice()).collect();
-    let (groups, first, second) = two_groups(&vectors)?;
+    let (groups, first, second) = if n <= MAX_SPLIT_FACES {
+        two_groups(&vectors)?
+    } else {
+        let sample: Vec<&[f32]> = (0..MAX_SPLIT_FACES).map(|index| vectors[index * n / MAX_SPLIT_FACES]).collect();
+        let (_, first, second) = two_groups(&sample)?;
+        let groups = vectors.iter().map(|vector| usize::from(dot(vector, &first) < dot(vector, &second))).collect();
+        (groups, first, second)
+    };
     let min_group = 3.max(n.div_ceil(10));
     let sizes = (groups.iter().filter(|group| **group == 0).count(), groups.iter().filter(|group| **group == 1).count());
     if sizes.0 < min_group || sizes.1 < min_group {

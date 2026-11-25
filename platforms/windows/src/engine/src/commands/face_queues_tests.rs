@@ -277,3 +277,49 @@ fn two_groups_is_deterministic_and_separates_clear_groups() {
     assert!(dot(&first, &second).abs() < 1e-6);
     assert!(two_groups(&[&a, &a]).is_none());
 }
+
+fn library_of_files(count: i64) -> Connection {
+    let conn = memory_db();
+    conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    for file in 1..=count {
+        insert_file(&conn, file, &format!("/photos/{file}.jpg"), "image");
+    }
+    conn
+}
+
+#[test]
+fn a_chained_person_holding_a_tenth_of_a_big_library_is_still_offered_for_splitting() {
+    let conn = library_of_files(100);
+    person(&conn, 1, None, false);
+    let arc = [(1.0, 0.0), (0.99, 0.1), (0.98, 0.2), (0.95, 0.3), (0.9, 0.4), (0.85, 0.5), (0.8, 0.6), (0.75, 0.66)];
+    for (index, xy) in arc.into_iter().enumerate() {
+        let id = index as i64 + 1;
+        face(&conn, id, id, 1, xy);
+    }
+    for other in 0..9 {
+        person(&conn, 10 + other, None, false);
+        for slot in 0..8 {
+            let id = 100 + other * 8 + slot;
+            face(&conn, id, 10 + other * 8 + slot, 10 + other, (0.0, 1.0));
+        }
+    }
+    assert_eq!(refresh_all(&conn).1, 0, "a person of eight faces is not oversized in a library of eighty");
+    let thousands = QueueSettings { oversized_large_faces: 8, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &thousands, 10.0).unwrap().1, 1, "8 of 80 faces is over the large-person bar of 5%");
+    let share_too_high = QueueSettings { oversized_large_faces: 8, oversized_large_share: 0.2, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &share_too_high, 10.0).unwrap().1, 0);
+}
+
+#[test]
+fn a_person_of_thousands_is_split_over_all_of_its_faces_not_the_first_two_thousand() {
+    let conn = library_of_files(2500);
+    person(&conn, 1, None, false);
+    for id in 1..=2500i64 {
+        let xy = if id <= 1250 { (1.0, 0.0) } else { (0.0, 1.0) };
+        face(&conn, id, id, 1, xy);
+    }
+    assert_eq!(refresh_all(&conn).1, 1);
+    let page = listed(&conn, "splits");
+    let split = &page.splits.as_ref().unwrap()[0];
+    assert_eq!((split.keep_count, split.split_count), (1250, 1250), "every face lands in one of the two groups");
+}
