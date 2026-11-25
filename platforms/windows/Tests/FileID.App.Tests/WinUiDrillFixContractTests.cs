@@ -83,6 +83,16 @@ public sealed class WinUiDrillFixContractTests
         Assert.True(settings.IndexOf("using var conn = new Microsoft.Data.Sqlite.SqliteConnection(", start, StringComparison.Ordinal) > start);
     }
 
+    [Fact]
+    public void CloseFolder_CancelsARunningScanBeforeClearingTheFolder()
+    {
+        var header = App("Views", "Sidebar", "SidebarFolderHeader.xaml.cs");
+        var start = header.IndexOf("private async void OnClearClicked", StringComparison.Ordinal);
+        var cancel = header.IndexOf("engine.CancelScanAsync()", start, StringComparison.Ordinal);
+        var clear = header.IndexOf("AppViewModel.Instance.FolderPath = null;", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && cancel > start && clear > cancel);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
