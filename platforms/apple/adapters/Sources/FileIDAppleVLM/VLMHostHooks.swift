@@ -11,7 +11,7 @@ import Foundation
 struct VLMModelSpec: Codable, Sendable, Equatable {
     let kind: String
     let repo: String
-    /// Folder that holds `models/<repo>`, like the Swift engine's Hugging Face root.
+    /// Folder that holds `models/<repo>`, the Hugging Face cache root.
     let huggingFaceRoot: String
     let revision: String?
     let displayName: String

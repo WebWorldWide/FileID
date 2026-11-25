@@ -1,4 +1,4 @@
-// Stage 6 C entry points (faces). Declared in adapters/include/fileid_apple.h
+// C entry points for faces. Declared in adapters/include/fileid_apple.h
 // and platforms/windows/src/engine/src/apple/ffi.rs inside the
 // "Stage 6: faces" blocks; the safe Rust side is src/apple/faces.rs.
 import CoreGraphics
