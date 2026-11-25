@@ -14,7 +14,7 @@ struct LibrarySortTests {
         let store: ReadStore
     }
 
-    private func makeCatalog() async throws -> Fixture {
+    private func makeCatalog(futureIDs: Set<Int64> = []) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory.appending(component: "fileid-sort-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let url = directory.appending(component: "fileid.sqlite")
@@ -39,7 +39,7 @@ struct LibrarySortTests {
                 let id = Int64(i)
                 let folder = "/m/Photos/\(["Zeta", "alpha", "Mid"][i % 3])/\(i % 7)"
                 let name = "IMG \(String(format: "%04d", (i * 37) % 997)) \(i).jpg"
-                let taken: Double? = i % 11 == 0 ? nil : Double((i * 7919) % 100_003)
+                let taken: Double? = futureIDs.contains(id) ? Date().timeIntervalSince1970 + 15 * 365 * 86_400 : i % 11 == 0 ? nil : Double((i * 7919) % 100_003)
                 let modified: Double? = i % 11 == 0 ? (i % 22 == 0 ? nil : Double(i)) : nil
                 try db.execute(sql: """
                     INSERT INTO files(id, path_text, path_search, size_bytes, created_at, modified_at, scanned_at, kind, extension)
@@ -103,12 +103,9 @@ struct LibrarySortTests {
     }
 
     @Test func aDateInTheFutureIsNotACaptureDateAndSortsAmongTheUndated() async throws {
-        let fixture = try await makeCatalog()
+        let fixture = try await makeCatalog(futureIDs: [1, 2])
         defer { fixture.store.close(); try? FileManager.default.removeItem(at: fixture.directory) }
         let future = Date().timeIntervalSince1970 + 15 * 365 * 86_400
-        let queue = try DatabaseQueue(path: fixture.directory.appending(component: "fileid.sqlite").path)
-        try await queue.write { try $0.execute(sql: "UPDATE files SET created_at = ? WHERE id IN (1, 2)", arguments: [future]) }
-        try queue.close()
         for ascending in [true, false] {
             let sort = LibrarySort(key: .dateTaken, ascending: ascending)
             let firstPage = fixture.store.files(limit: 300, sort: sort)
