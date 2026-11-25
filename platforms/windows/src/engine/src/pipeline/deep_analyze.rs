@@ -771,6 +771,9 @@ fn analysis_source(
             .ok_or(crate::commands::deep_scope::ScopeError::ExcludedTarget)?,
         None => path,
     };
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        ensure_available_offline(&path, crate::pipeline::discovery::is_online_only(&metadata))?;
+    }
     Ok((path, kind))
 }
 
