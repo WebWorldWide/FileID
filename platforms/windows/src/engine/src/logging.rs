@@ -116,6 +116,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for day in 1..=20 {
             std::fs::write(dir.join(format!("engine.jsonl.2020-01-{day:02}")), b"x").unwrap();
+            // The appender prunes by creation time, which Linux records at timer-tick granularity; equal times prune in any order.
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         std::fs::write(dir.join("engine-stderr.log"), b"keep").unwrap();
         assert!(open_log_writer_in(&dir).is_ok());
