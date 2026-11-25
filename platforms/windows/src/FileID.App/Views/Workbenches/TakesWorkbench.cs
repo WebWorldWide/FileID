@@ -1352,6 +1352,8 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     {
         if (_current is not { } group || _trashing || Busy || _qualities.Count == 0) return;
         if (TakeReviewPolicy.TrashButton(_qualities, _keep).DisabledReason is not null) return;
+        var confirmedQualities = _qualities;
+        var confirmedKeep = _keep.ToHashSet();
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -1371,14 +1373,22 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
             DebugLog.Warn("TakesWorkbench confirmation unavailable: " + ex.Message);
             return;
         }
-        if (result == ContentDialogResult.Primary) Run(TrashAsync);
+        if (result != ContentDialogResult.Primary) return;
+        if (_current?.GroupKey != group.GroupKey)
+        {
+            ShowToast("This group changed while you were confirming, so nothing was moved. Choose it again.", null, PlainToastWindow);
+            return;
+        }
+        if (Busy)
+        {
+            ShowToast("FileID is busy for a moment. Nothing was moved; try again.", null, PlainToastWindow);
+            return;
+        }
+        Run(ct => TrashAsync(group, confirmedQualities, confirmedKeep, ct));
     }
 
-    private async Task TrashAsync(CancellationToken ct)
+    private async Task TrashAsync(CatalogTakeAutoGroup group, IReadOnlyList<CatalogTakeQuality> qualities, HashSet<long> keep, CancellationToken ct)
     {
-        if (_current is not { } group) return;
-        var qualities = _qualities;
-        var keep = _keep.ToHashSet();
         var ids = TakeReviewPolicy.TrashIds(qualities, keep);
         if (ids.Count == 0) return;
         var doomed = qualities.Where(q => !keep.Contains(q.PrimaryFileID)).ToArray();

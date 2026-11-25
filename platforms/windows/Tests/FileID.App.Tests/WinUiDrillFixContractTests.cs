@@ -153,6 +153,15 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("&& !_scoreFailed) return;", takes, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TakesTrash_ActsOnTheSnapshotTheUserConfirmedAndTellsThemWhenItCannot()
+    {
+        var takes = App("Views", "Workbenches", "TakesWorkbench.cs");
+        Assert.Contains("Run(ct => TrashAsync(group, confirmedQualities, confirmedKeep, ct));", takes, StringComparison.Ordinal);
+        Assert.Contains("This group changed while you were confirming", takes, StringComparison.Ordinal);
+        Assert.Contains("FileID is busy for a moment. Nothing was moved", takes, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
