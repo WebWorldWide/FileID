@@ -162,6 +162,18 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("FileID is busy for a moment. Nothing was moved", takes, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void FileTools_ReleasesThePreviewedVideoWhenThePanelCloses()
+    {
+        var tools = App("Views", "Workbenches", "ToolsWorkbench.cs");
+        var start = tools.IndexOf("protected override void OnClosed()", StringComparison.Ordinal);
+        var end = tools.IndexOf("private void OnToolFilesRequested", start, StringComparison.Ordinal);
+        var body = tools[start..end];
+        Assert.Contains("previous?.Dispose();", body, StringComparison.Ordinal);
+        Assert.Contains("_playerPath = null;", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("_player?.Pause();", body, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
