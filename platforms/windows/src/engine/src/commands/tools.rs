@@ -775,7 +775,7 @@ fn run_action(
                             bail!("Export cancelled before publication")
                         }
                         db.with(|conn| require_unchanged(conn, id, &item))?;
-                        fs::hard_link(&stage, output)?;
+                        crate::util::file_move::publish_staged(&stage, output)?;
                         let last = receipts.last_mut().context("Missing export receipt")?;
                         last.output.state = "completed".into();
                         last.output.message = match (&media, video_summary.is_empty()) {
