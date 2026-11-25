@@ -181,7 +181,15 @@ struct LibraryView: View {
             .onChange(of: queryHandoff) { _, _ in consumeQueryHandoff() }
             #if DEBUG
             .onReceive(NotificationCenter.default.publisher(for: .selfShotOpenPreview)) { note in
-                if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
+                guard let name = note.object as? String else { return }
+                if let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row); return }
+                searchText = name
+                Task { @MainActor in
+                    for _ in 0..<40 {
+                        try? await Task.sleep(for: .milliseconds(250))
+                        if let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row); return }
+                    }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .selfShotClosePreview)) { _ in previewSelectedID = nil }
             .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
