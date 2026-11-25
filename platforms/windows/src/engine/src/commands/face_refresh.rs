@@ -91,8 +91,11 @@ pub(crate) fn current_model() -> Option<String> {
     Some(model)
 }
 
+/// A scan inserts faces with empty vectors and embeds them afterwards; those are waiting to be grouped, not saved by an earlier version.
+const NOT_YET_EMBEDDED: &str = "AND NOT (length(fp.print_data)=0 AND length(COALESCE(fp.arcface_embedding,X''))=0 AND fp.embedding_model IS NULL)";
+
 pub(crate) fn outdated(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<i64> {
-    conn.query_row(&format!("SELECT COUNT(*) {OUTDATED}"), params![model, processing], |row| row.get(0))
+    conn.query_row(&format!("SELECT COUNT(*) {OUTDATED} {NOT_YET_EMBEDDED}"), params![model, processing], |row| row.get(0))
 }
 
 pub(crate) fn status(conn: &Connection, model: Option<&str>, processing: &str) -> rusqlite::Result<FaceRefreshStatus> {

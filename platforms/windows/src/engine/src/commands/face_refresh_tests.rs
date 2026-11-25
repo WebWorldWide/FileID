@@ -249,6 +249,17 @@ fn pixel_boxes_follow_both_engines_box_formats() {
 }
 
 #[test]
+fn faces_a_scan_has_not_embedded_yet_are_not_called_outdated() {
+    let library = library();
+    let before = outdated(&library.conn, "m", "p").unwrap();
+    library
+        .conn
+        .execute("INSERT INTO face_prints(id,file_id,print_data,bbox) VALUES(90,1,X'','0,0,1,1'),(91,1,X'','0,0,.5,.5')", [])
+        .unwrap();
+    assert_eq!(outdated(&library.conn, "m", "p").unwrap(), before);
+}
+
+#[test]
 fn status_page_reads_the_backlog() {
     let library = library();
     let page = status_page(&library.conn, "r").unwrap();
