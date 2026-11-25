@@ -421,7 +421,8 @@ public final class ReadStore: @unchecked Sendable {
             let nameArgs: StatementArguments
             if trigram {
                 nameMatch = "id IN (SELECT rowid FROM files_search_fts WHERE files_search_fts MATCH ?)"
-                nameArgs = ["\"" + normalized.replacingOccurrences(of: "\"", with: "\"\"") + "\""]
+                let quote = "\u{22}"
+                nameArgs = [quote + normalized.replacingOccurrences(of: quote, with: quote + quote) + quote]
             } else {
                 nameMatch = """
                     path_search LIKE ? ESCAPE '\\'
