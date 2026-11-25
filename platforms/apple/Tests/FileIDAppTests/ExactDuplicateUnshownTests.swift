@@ -29,7 +29,7 @@ struct ExactDuplicateUnshownTests {
             for index in 0..<classes {
                 for copy in 0..<2 {
                     try db.execute(sql: "INSERT INTO files(path_text,size_bytes,kind) VALUES (?,?,'image')",
-                                   arguments: ["/missing/\(index)-\(copy).jpg", 1_000 + index])
+                                   arguments: ["/missing/\(index)-\(copy).jpg", 2_000 + index])
                 }
             }
         }
@@ -38,7 +38,7 @@ struct ExactDuplicateUnshownTests {
         defer { store.close() }
         let snapshot = await store.exactDuplicateSnapshotAsync()
         #expect(snapshot.unshownClasses == extra)
-        let hiddenBytes = (ExactDuplicateVerifier.groupCap..<classes).reduce(Int64(0)) { $0 + Int64(1_000 + $1) }
+        let hiddenBytes = (ExactDuplicateVerifier.groupCap..<classes).reduce(Int64(0)) { $0 + Int64(2_000 + $1) }
         #expect(snapshot.unshownPotentialBytes == hiddenBytes)
         #expect(ExactDuplicateVerifier.unshownNotice(classes: extra, bytes: hiddenBytes).contains("10 more sets"))
         #expect(ExactDuplicateVerifier.unshownNotice(classes: 0, bytes: 0).isEmpty)
