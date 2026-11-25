@@ -830,10 +830,13 @@ struct CleanupView: View {
         do {
             defer { exactLoadingMore = false }
             let load = await store.exactStoredGroupsAsync(offset: offset, limit: ExactDuplicateVerifier.groupCap)
-            guard !isSimilar, exactStored.count == offset, !load.groups.isEmpty else { return }
+            guard !isSimilar, exactStored.count == offset else { return }
+            let known = Set(exactStored.map(\.id))
+            let fresh = load.groups.filter { !known.contains($0.id) }
+            guard !fresh.isEmpty else { return }
             let wasIdle = exactQueued.isEmpty && exactBatch.isEmpty
-            exactStored += load.groups
-            exactQueued += load.groups
+            exactStored += fresh
+            exactQueued += fresh
             groups = exactSettled + exactBatch + exactQueued
             refreshExactTotals()
             if wasIdle {
