@@ -73,30 +73,25 @@ pub struct App {
     /// the loader, then clears it.
     pub reload_requested: bool,
     pub db_label: String,
-    /// True when running against the default SCRATCH library (no `--db`): the
-    /// TUI opens EMPTY and only accumulates what the user scans here, never the
-    /// desktop app's library. Drives the friendly empty-screen + Settings copy.
+    /// Running against the default scratch library (no `--db`): the TUI opens empty and only holds what the user scans here, never the desktop app's library.
     pub scratch: bool,
 
     /// The single-line path-input prompt is open (typing a folder to scan).
     pub input_active: bool,
-    /// The text typed so far in the path prompt.
     pub input: String,
     /// Inline validation error shown in the prompt (bad/!dir path). The prompt
     /// stays open so the user can fix it — never a panic.
     pub input_error: Option<String>,
-    /// The folder the user chose to scan (shown in the Library header / status).
+    /// The folder being scanned, shown in the Library header and status.
     pub scan_root: Option<String>,
-    /// A scan is in flight (drives the header + blocks a second concurrent scan).
+    /// A scan is in flight; blocks a second one.
     pub scanning: bool,
     /// Set when a scan is confirmed; `main` consumes it, spawns the engine-driven
     /// scan thread, and clears it (mirrors `reload_requested`).
     pub scan_requested: Option<PathBuf>,
-    /// The folder-browser overlay opened by `s`.
     pub browser: Option<Browser>,
 
-    /// An AI-model download is in flight (drives the status line +
-    /// blocks a second concurrent download).
+    /// An AI-model download is in flight; blocks a second one.
     pub downloading: bool,
     /// Set when the user presses `D`; `main` consumes it, spawns the download
     /// worker thread, and clears it (mirrors `scan_requested`).
@@ -965,8 +960,7 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(input)
 }
 
-/// Where external / removable drives mount, for the browser's `d` jump (FEATURE
-/// 1): macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that
+/// Where external / removable drives mount, for the browser's `d` jump: macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that
 /// exists); else the filesystem root `/`. Never panics.
 fn drive_roots() -> Vec<PathBuf> {
     existing_drive_roots(&drives_candidates(), |path| path.is_dir())
@@ -1172,9 +1166,7 @@ mod tests {
         }
     }
 
-    /// The empty-results panel advertises `Esc  clear the search`; before the
-    /// guarded arm that honours it, Esc fell through to the quit arm and closed
-    /// the app instead of doing what the screen said.
+    /// The empty-results panel advertises `Esc  clear the search`, so Esc must clear a committed search rather than quit.
     #[test]
     fn esc_clears_a_committed_search_before_it_quits() {
         let mut app = app_with_files(3);
@@ -1527,7 +1519,7 @@ mod tests {
         assert!(!app.input_active);
     }
 
-    /// A throwaway tree with KNOWN contents so the FIX-2 counts are exact:
+    /// A throwaway tree with KNOWN contents so the counts are exact:
     /// `base/{photo.jpg, notes.txt, docs/, sub/{a.jpg,b.png,c.txt,nested/}}`.
     fn count_tree(tag: &str) -> PathBuf {
         let mut base = std::env::temp_dir();

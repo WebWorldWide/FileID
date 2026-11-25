@@ -15,7 +15,7 @@ use crate::context::terminal_text;
 use crate::data::{PLAN_CAP, short};
 use fileid_engine::util::display::{self, file_size_i64, fmt_date};
 
-// ── Palette — lifted from the design's terminal panels (NOT the beige page) ──
+// ── Palette ──
 /// Main panel background (`#141417`). Painted under the whole UI so light
 /// terminal themes can't render the gold/light foreground invisibly.
 const BG: Color = Color::Rgb(20, 20, 23);
@@ -64,9 +64,7 @@ pub fn frame_chunks(area: Rect) -> Rc<[Rect]> {
 
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
-    // Paint the brand-dark background under everything FIRST. A Block's style
-    // fills the whole area's bg; subsequent widgets patch only fg, so the dark
-    // bg shows through — legible on light AND dark terminals alike.
+    // Later widgets patch only fg, so this bg shows through on light and dark terminals alike.
     f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
 
     let chunks = frame_chunks(area);
@@ -185,13 +183,9 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_body(f: &mut Frame, app: &App, area: Rect) {
-    // A standing "models missing" / "installing" banner sits ABOVE every tab's
-    // content so a fresh install can't miss that the AI models need downloading.
     let area = render_model_banner(f, app, area);
-    // The first-run welcome stands in for the EMPTY Library only. Every other tab
-    // (Settings included) must still render even before the first scan creates the
-    // library DB — otherwise the welcome screen masks the whole UI and Settings /
-    // the model-download prompt become unreachable.
+    // Only the Library tab shows the welcome; Settings and its model-download prompt
+    // must stay reachable before the first scan creates the library DB.
     if !app.data.db_exists && !app.loading && app.tab == Tab::Library {
         render_welcome(f, app, area);
         return;
@@ -1028,9 +1022,7 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
 /// The status line: a ✓/⏳ prefix + the live status message. The actionable keys
 /// live on their OWN always-visible row (`render_key_bar`).
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
-    // A failure must not wear the success ✓: an errored scan/download/load shows
-    // a persistent ⚠ until the next action, so the feedback can't be mistaken for
-    // "done OK".
+    // A failed scan/download/load shows ⚠ until the next action, never a success ✓.
     let (icon, color) = if app.status_error {
         ("⚠", PINK)
     } else if app.loading {
@@ -2389,8 +2381,7 @@ mod tests {
                 text.contains("AI models not installed"),
                 "{tab:?}: the standing models-missing banner must render above the body",
             );
-            // The banner states the REAL size of the TUI's (non-VLM) model set,
-            // never the false ~25 GB that included the Deep-Analyze VLMs.
+            // The size covers the TUI's non-VLM model set only.
             assert!(
                 text.contains("~1.6 GB"),
                 "{tab:?}: banner must state the real ~1.6 GB size"
