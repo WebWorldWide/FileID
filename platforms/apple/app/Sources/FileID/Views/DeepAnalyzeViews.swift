@@ -873,7 +873,7 @@ struct DeepAnalyzeView: View {
                     }
                     GridRow {
                         Text("AI model").foregroundStyle(Theme.text3)
-                        HStack(spacing: 8) {
+                        FlowLayout(spacing: 8) {
                             Text(settings.activeKind.displayName).font(Theme.Font.body(13, .medium))
                             MetaText(modelInstalled ? "Downloaded" : "Not downloaded yet · about \(DescriptionModelStore.downloadSizeText(settings.activeKind))",
                                      color: modelInstalled ? Theme.delight : Theme.text2, size: 11.5)

@@ -24,4 +24,10 @@ import Testing
         #expect(body.contains("FlowLayout(spacing: 8) { controls }"))
         #expect(!body.contains("HStack(alignment: .center, spacing: 12) { controls }"))
     }
+
+    @Test func describeModelRowWrapsInsteadOfWideningThePage() throws {
+        let deep = try appSource("Views/DeepAnalyzeViews.swift")
+        let row = try #require(deep.range(of: "Text(\"AI model\").foregroundStyle(Theme.text3)"))
+        #expect(deep[row.upperBound...].prefix(200).contains("FlowLayout(spacing: 8)"))
+    }
 }
