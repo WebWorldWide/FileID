@@ -35,8 +35,14 @@ struct UnfinishedScanTests {
 
     @Test("the sentence says how many files were read and how to read the rest")
     func detailWording() {
-        #expect(PipelineBlock.unfinishedScanDetail(filesRead: 45) == "45 files read so far. Press Scan again to read the rest.")
-        #expect(PipelineBlock.unfinishedScanDetail(filesRead: 1).hasPrefix("1 file read so far"))
+        #expect(PipelineBlock.unfinishedScanDetail(filesRead: 45) == "45 files read and ready to browse. Press Scan again to finish adding tags.")
+        #expect(PipelineBlock.unfinishedScanDetail(filesRead: 1).hasPrefix("1 file read and ready"))
         #expect(PipelineBlock.unfinishedScanDetail(filesRead: 0).hasPrefix("Press Scan again to read the rest"))
+    }
+
+    @Test("a library with files in it says tags are being added, not that the scan failed")
+    func titleForReadFiles() {
+        #expect(PipelineBlock.unfinishedScanTitle(filesRead: 130_108) == "Tags are still being added")
+        #expect(PipelineBlock.unfinishedScanTitle(filesRead: 0) == "The scan didn’t finish")
     }
 }

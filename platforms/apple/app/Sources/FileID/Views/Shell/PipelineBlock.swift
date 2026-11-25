@@ -53,9 +53,13 @@ struct PipelineBlock: View {
         return newest.status == "cancelled" || newest.status == "failed" ? newest : nil
     }
 
+    nonisolated static func unfinishedScanTitle(filesRead: Int) -> String {
+        filesRead > 0 ? "Tags are still being added" : "The scan didn’t finish"
+    }
+
     nonisolated static func unfinishedScanDetail(filesRead: Int) -> String {
         filesRead > 0
-            ? "\(filesRead.formatted()) file\(filesRead == 1 ? "" : "s") read so far. Press Scan again to read the rest."
+            ? "\(filesRead.formatted()) file\(filesRead == 1 ? "" : "s") read and ready to browse. Press Scan again to finish adding tags."
             : "Press Scan again to read the rest."
     }
 
@@ -111,7 +115,7 @@ struct PipelineBlock: View {
             return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.danger, sub: "Press Scan again. Files already read are skipped.")
         }
         if showsUnfinishedScan {
-            return Status(title: "The scan didn’t finish", fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
+            return Status(title: Self.unfinishedScanTitle(filesRead: store.totalFiles), fraction: 0, tone: .paused, color: Theme.warning, sub: Self.unfinishedScanDetail(filesRead: store.totalFiles))
         }
         if store.totalFiles > 0 || progress?.phase == .completed {
             return Status(title: "Scan complete", fraction: 1, tone: .done, color: Theme.delight, sub: "\(Plural.noun(store.totalFiles, "file", "files")) ready to browse")

@@ -47,7 +47,7 @@ enum LocationText {
     static func summary(_ root: LibraryRoot, now: Date = Date()) -> String {
         let count = root.fileCount.formatted()
         let size = ByteCountFormatter.string(fromByteCount: root.totalBytes, countStyle: .file)
-        let scanned = root.lastScanAt.map { relative(Date(timeIntervalSince1970: $0), now: now) } ?? "not scanned yet"
+        let scanned = root.lastScanAt.map { relative(Date(timeIntervalSince1970: $0), now: now) } ?? (root.fileCount > 0 ? "tags still being added" : "not scanned yet")
         return "\(count) \(root.fileCount == 1 ? "file" : "files") · \(size) · \(scanned)"
     }
 
