@@ -685,13 +685,13 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Cleanup queries
 
-    private struct ExactCandidateLoad: Sendable {
+    struct ExactCandidateLoad: Sendable {
         let files: [FileRow]
         let candidateCount: Int
         let partial: Bool
     }
 
-    private func exactDuplicateCandidates() -> ExactCandidateLoad {
+    func exactDuplicateCandidates() -> ExactCandidateLoad {
         guard let q = queue else {
             return ExactCandidateLoad(files: [], candidateCount: 0, partial: true)
         }
@@ -701,7 +701,7 @@ public final class ReadStore: @unchecked Sendable {
                 let candidateCount = try Int.fetchOne(db, sql: """
                     WITH candidate_sizes AS (
                         SELECT COUNT(*) AS n FROM files
-                        WHERE failed = 0 AND size_bytes >= 0
+                        WHERE failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
                         GROUP BY size_bytes HAVING n > 1
                     )
                     SELECT COALESCE(SUM(n), 0) FROM candidate_sizes
@@ -717,10 +717,11 @@ public final class ReadStore: @unchecked Sendable {
                                         PARTITION BY content_hash, size_bytes
                                     ) - 1 END AS twins
                         FROM files
-                        WHERE failed = 0 AND size_bytes >= 0
+                        WHERE failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
+                          AND size_bytes <= \(ExactDuplicateVerifier.maxFileBytes)
                           AND size_bytes IN (
                               SELECT size_bytes FROM files
-                              WHERE failed = 0 AND size_bytes >= 0
+                              WHERE failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
                               GROUP BY size_bytes HAVING COUNT(*) > 1
                           )
                     ),
@@ -732,7 +733,7 @@ public final class ReadStore: @unchecked Sendable {
                     ),
                     top_groups AS (
                         SELECT gsize, n, hash_twins FROM candidate_sizes
-                        ORDER BY (hash_twins > 0) DESC, hash_twins DESC,
+                        ORDER BY (hash_twins > 0) DESC, hash_twins * gsize DESC,
                                  n DESC, gsize ASC
                         LIMIT ?
                     ),
@@ -754,7 +755,8 @@ public final class ReadStore: @unchecked Sendable {
                     )
                     SELECT * FROM ranked
                     WHERE member_rank <= ?
-                    ORDER BY (group_hash_twins > 0) DESC, group_hash_twins DESC,
+                    ORDER BY (group_hash_twins > 0) DESC,
+                             group_hash_twins * size_bytes DESC,
                              group_count DESC, size_bytes ASC, member_rank ASC
                     LIMIT ?
                     """, arguments: [

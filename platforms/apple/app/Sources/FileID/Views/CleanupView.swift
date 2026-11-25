@@ -35,6 +35,7 @@ struct CleanupView: View {
     @State private var selection: Set<Int64> = []
     @State private var skippedGroups: Set<Int64> = CleanupSession.skipped["exact"] ?? []
     @State private var reloadTask: Task<Void, Never>?
+    @State private var exactChecking = true
     @State private var lastScanTimeReload = Date.distantPast
     @State private var reloadPending = false
     @Environment(\.pageActive) private var pageActive
@@ -221,6 +222,14 @@ struct CleanupView: View {
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
     }
 
+    enum ExactEmptyPhase: Equatable { case checking, partial, none }
+
+    /// An empty list says "no copies" only after a check has finished; while one runs it says so.
+    static func exactEmptyPhase(checking: Bool, partial: Bool) -> ExactEmptyPhase {
+        if checking { return .checking }
+        return partial ? .partial : .none
+    }
+
     static func exactSummary(groups: Int, extraCopies: Int, bytes: Int64) -> String {
         if groups == 0 { return "No extra copies found" }
         let freed = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
@@ -277,7 +286,14 @@ struct CleanupView: View {
                 message: "You skipped all the groups. Show them again to keep going.",
                 primaryAction: (label: "Show skipped groups again", run: { skippedGroups.removeAll() })
             )
-        } else if !isSimilar && exactPreviewPartial {
+        } else if !isSimilar && Self.exactEmptyPhase(checking: exactChecking, partial: exactPreviewPartial) == .checking {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "Looking for extra copies",
+                message: "FileID compares the files byte by byte, so this can take a few minutes on a big library or an external drive.",
+                progressLabel: "Checking files"
+            )
+        } else if !isSimilar && Self.exactEmptyPhase(checking: exactChecking, partial: exactPreviewPartial) == .partial {
             EmptyStateView(
                 icon: "exclamationmark.magnifyingglass",
                 title: "No extra copies found so far",
@@ -611,6 +627,8 @@ struct CleanupView: View {
         if confirmDelete { return }
         if reloadTask != nil { reloadPending = true; return }
         reloadTask = Task { @MainActor in
+            exactChecking = true
+            defer { exactChecking = false }
             repeat {
                 reloadPending = false
                 // Read the mode fresh each iteration so a mid-flight mode switch
