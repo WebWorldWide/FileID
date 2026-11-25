@@ -49,6 +49,7 @@ pub fn text(kind: &str, message: &str) -> String {
         "model_download_failed" => "Check your internet connection, then press Retry.",
         "download_tls_pin_failed" => "The download couldn't be checked as safe, so it was stopped. Try again later.",
         "model_download_disk_full" => "Free some space on this computer, then press Retry.",
+        "location_read_only" if !message.is_empty() => return message.to_owned(),
         _ if looks_technical(message) => "Try again. If it keeps happening, quit and reopen FileID.",
         _ => return message.to_owned(),
     };
@@ -101,6 +102,12 @@ mod tests {
         assert_eq!(title("db_disk_full"), "Your disk is full");
         assert_eq!(title("scan_disk_full"), title("db_disk_full"));
         assert_eq!(title("no_such_kind"), "Something went wrong");
+    }
+
+    #[test]
+    fn a_read_only_drive_refusal_keeps_the_drive_name_even_with_an_underscore() {
+        let message = "\u{201c}USB_DRIVE\u{201d} is a read-only drive, so nothing was moved.";
+        assert_eq!(text("location_read_only", message), message);
     }
 
     #[test]
