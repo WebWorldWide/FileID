@@ -741,6 +741,11 @@ impl std::error::Error for ModelFailed {}
 /// Consecutive videos that fail on the model before the job stops instead of grinding through the rest.
 const MODEL_FAILURE_LIMIT: usize = 3;
 
+fn model_stopped(error: &anyhow::Error) -> anyhow::Error {
+    tracing::warn!(error = %format!("{error:#}"), "timeline stopped: the description model kept failing");
+    anyhow!("The description model failed on {MODEL_FAILURE_LIMIT} videos in a row, so the job stopped. Check the model in Deep Analyze, then resume.")
+}
+
 fn model_keeps_failing(streak: &mut usize, error: &anyhow::Error) -> bool {
     *streak = if error.is::<ModelFailed>() { *streak + 1 } else { 0 };
     *streak >= MODEL_FAILURE_LIMIT
@@ -778,7 +783,7 @@ async fn process<M: FrameModel>(
             Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => return Err(error),
             Err(error) => {
                 if model_keeps_failing(&mut model_failures, &error) {
-                    return Err(error);
+                    return Err(model_stopped(&error));
                 }
                 tracing::warn!(file_id, error = %format!("{error:#}"), "timeline skipped a video it could not analyse");
                 let _ = std::fs::remove_dir_all(frames.join(format!("pool-{file_id}")));

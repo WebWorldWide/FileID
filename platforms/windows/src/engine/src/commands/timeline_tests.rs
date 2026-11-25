@@ -586,6 +586,14 @@ async fn the_job_stops_when_the_model_fails_on_several_videos_in_a_row() {
     }
 }
 
+#[test]
+fn the_stopped_job_says_so_in_plain_words_without_the_models_raw_error() {
+    let raw = anyhow!("mlx failed at /Users/someone/Models/x.safetensors: tensor shape mismatch").context(ModelFailed);
+    let text = crate::util::user_message::job_failure_text(&model_stopped(&raw));
+    assert!(text.contains("job stopped"), "{text}");
+    assert!(!text.contains("safetensors") && !text.contains("/Users"), "{text}");
+}
+
 #[tokio::test]
 async fn an_unreadable_video_between_model_failures_does_not_count_against_the_model() {
     let model = scripted(vec!["unused"], None);
