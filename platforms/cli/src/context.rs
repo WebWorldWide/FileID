@@ -220,14 +220,22 @@ pub fn print_json(value: &serde_json::Value) {
 
 pub fn display_path(p: &str) -> String {
     for name in ["HOME", "USERPROFILE"] {
-        if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
-            let home = home.to_string_lossy();
-            if let Some(rest) = p.strip_prefix(home.as_ref()) {
-                return terminal_text(&format!("~{rest}"));
-            }
+        if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty())
+            && let Some(shown) = tilde_path(p, &home.to_string_lossy())
+        {
+            return terminal_text(&shown);
         }
     }
     terminal_text(p)
+}
+
+fn tilde_path(p: &str, home: &str) -> Option<String> {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return None;
+    }
+    let rest = p.strip_prefix(home)?;
+    (rest.is_empty() || rest.starts_with(['/', '\\'])).then(|| format!("~{rest}"))
 }
 
 /// Neutralize control characters before data-derived text reaches a terminal.
@@ -283,6 +291,19 @@ fn terminal_output(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tilde_replaces_home_only_at_a_path_component_boundary() {
+        assert_eq!(tilde_path("/home/al/x", "/home/al").as_deref(), Some("~/x"));
+        assert_eq!(tilde_path("/home/al", "/home/al/").as_deref(), Some("~"));
+        assert_eq!(tilde_path("/home/alice/x", "/home/al"), None);
+        assert_eq!(tilde_path("/home/x", "/"), None);
+        assert_eq!(
+            tilde_path("C:\\Users\\Al\\a", "C:\\Users\\Al").as_deref(),
+            Some("~\\a")
+        );
+        assert_eq!(tilde_path("C:\\Users\\Alan\\a", "C:\\Users\\Al"), None);
+    }
+
     use super::*;
     use rusqlite::Connection;
 

@@ -42,9 +42,11 @@ impl PlanSpool {
             "fileid-restructure-{}-{nonce}-{seq}.ndjson",
             std::process::id()
         ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
             .open(&path)
             .with_context(|| format!("creating restructure spool {}", path.display()))?;
         Ok((Self { path }, BufWriter::new(file)))
@@ -561,6 +563,16 @@ fn to_ipc_move(pm: &ProposedMove, identity: Option<&PlannedIdentity>) -> Restruc
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn plan_spool_is_private_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (spool, writer) = PlanSpool::create().unwrap();
+        drop(writer);
+        let mode = std::fs::metadata(&spool.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+    }
+
     use super::*;
     use fileid_engine::pipeline::discovery::FileKind;
     use fileid_engine::pipeline::restructure::Confidence;

@@ -982,8 +982,13 @@ fn drives_candidates() -> Vec<PathBuf> {
             .map(|letter| PathBuf::from(format!("{letter}:\\")))
             .collect()
     } else {
-        let mut v = Vec::with_capacity(3);
-        if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
+        let mut v = Vec::with_capacity(5);
+        let user = std::env::var_os("USER").filter(|u| !u.is_empty());
+        if let Some(user) = &user {
+            v.push(Path::new("/run/media").join(user));
+        }
+        v.push(PathBuf::from("/run/media"));
+        if let Some(user) = &user {
             v.push(Path::new("/media").join(user));
         }
         v.push(PathBuf::from("/media"));
@@ -1017,6 +1022,15 @@ fn existing_drive_roots(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_drive_candidates_include_udisks_run_media() {
+        let candidates = drives_candidates();
+        let run_media = candidates.iter().position(|p| p == Path::new("/run/media"));
+        let media = candidates.iter().position(|p| p == Path::new("/media"));
+        assert!(run_media.is_some() && run_media < media);
+    }
+
     use super::*;
     use crate::data::FileRow;
 
