@@ -303,7 +303,7 @@ public final class ThumbnailService {
 
     nonisolated static func storedFaceCrop(identity: String, in directory: URL? = nil) async -> NSImage? {
         let url = faceCropURL(identity: identity, in: directory)
-        guard let data = await Task.detached(priority: .userInitiated, operation: { try? Data(contentsOf: url) }).value else { return nil }
+        guard let data = await Task.detached(priority: .userInitiated, operation: { ThumbnailDiskCache.load(url) }).value else { return nil }
         return await decoded(data)
     }
 
