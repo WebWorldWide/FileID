@@ -14,7 +14,14 @@ struct ExactDuplicateSnapshot: Sendable {
 
 enum ExactDuplicateVerifier {
     static let candidateCap = 5_000
-    static let readBudgetBytes: Int64 = 64 * 1024 * 1024 * 1024
+    static let readBudgetBytes: Int64 = 16 * 1024 * 1024 * 1024
+    static let maxFileBytes: Int64 = 2 * 1024 * 1024 * 1024
+    static let minFileBytes: Int64 = 1024
+    static let sidecarExtensions = ["xmp", "aae", "thm", "json", "xml", "txt", "plist", "dop", "pp3", "sidecar"]
+    static var eligibleSQL: String {
+        let list = sidecarExtensions.map { "'\($0)'" }.joined(separator: ",")
+        return "size_bytes >= \(minFileBytes) AND LOWER(extension) NOT IN (\(list))"
+    }
     static let groupCap = 200
     static let memberCap = 500
 
