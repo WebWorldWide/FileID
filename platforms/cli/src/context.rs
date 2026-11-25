@@ -62,10 +62,8 @@ impl Ctx {
         })
     }
 
-    /// Interactive yes/no gate for destructive actions. SAFE by construction:
-    /// returns true only on an explicit `--yes` (`assume_yes`) or a typed
-    /// `y`/`yes` at a TTY. A non-interactive stdin (pipe/CI) without `--yes`
-    /// returns false — we never apply on a guess.
+    /// Interactive yes/no gate for destructive actions. Returns true only on an explicit `--yes` (`assume_yes`) or a typed
+    /// `y`/`yes` at a TTY; a non-interactive stdin without `--yes` returns false.
     pub fn confirm(&self, prompt: &str, assume_yes: bool) -> bool {
         use std::io::Write as _;
         if assume_yes {
@@ -109,9 +107,7 @@ impl Ctx {
         }
     }
 
-    /// Brand gold (`#FFCC00` ≈ xterm 220) — used to mark required models and
-    /// other identity accents. Pad text to its column width BEFORE wrapping, so
-    /// the invisible escape bytes never throw off `{:<width}` alignment.
+    /// Brand gold (`#FFCC00` ≈ xterm 220). Pad text to its column width before wrapping, so the invisible escape bytes never throw off `{:<width}` alignment.
     pub fn gold(&self, s: &str) -> String {
         let s = terminal_text(s);
         if self.color {
@@ -350,8 +346,7 @@ mod tests {
 
     #[test]
     fn basename_underscore_is_literal_not_a_wildcard() {
-        // Only a look-alike is indexed; the named file is absent. The old
-        // unescaped `LIKE '%/report_2023.pdf'` resolved this wrong file.
+        // Only a look-alike is indexed; an unescaped `_` wildcard would wrongly match it.
         let conn = db_with(&[(1, "/seed/reportX2023.pdf")]);
         assert_eq!(resolve_file_id(&conn, "report_2023.pdf"), None);
 

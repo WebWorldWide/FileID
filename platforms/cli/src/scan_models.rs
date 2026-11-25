@@ -36,7 +36,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         anyhow::bail!("full-pipeline scan did not run: AI models not installed");
     }
 
-    // Forward an explicit DB to the child. Otherwise the engine writes its XDG library, and on macOS reads may prefer the Swift app's library; surface that mismatch.
+    // Forward an explicit DB to the child. Otherwise the engine writes its XDG library, and on macOS reads may prefer the desktop app's library; surface that mismatch.
     if engine_writes_unseen_library(engine_db.as_deref(), ctx.db.as_path()) {
         let where_ = engine_db.as_ref().map_or_else(
             || "<engine default>".to_string(),
