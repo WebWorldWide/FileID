@@ -33,7 +33,7 @@ const LOCAL_MODELS: [(&str, &str, &str); 5] = [
     ),
     (
         "qwen2_5_vl_7b",
-        "Descriptions and Chat · optional",
+        "Descriptions and moments · optional",
         "Writes descriptions and suggested names on the Describe Files page, and finds moments in videos. Model: Qwen2.5-VL-7B (Apache-2.0). It also needs a llama.cpp runtime (llama-server); downloading the model alone does not provide one.",
     ),
 ];
