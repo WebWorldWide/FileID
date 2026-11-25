@@ -821,6 +821,64 @@ public final class ReadStore: @unchecked Sendable {
             unshownPotentialBytes: load.unshownPotentialBytes)
     }
 
+    struct ExactStoredLoad: Sendable {
+        let groups: [DuplicateGroup]
+        let totalGroups: Int
+        let totalExtraCopies: Int
+        let totalBytes: Int64
+        var shownBytes: Int64 { groups.reduce(0) { $0 + $1.reclaimableBytes } }
+    }
+
+    /// The Cleanup list straight from the stored hashes: one indexed query, no file reads. Groups are ranked by what they could free; `ExactDuplicateVerifier.verifyStored` then re-reads what is shown. Totals cover every group, not just the ones listed.
+    func exactStoredGroups() -> ExactStoredLoad {
+        guard let q = queue else { return ExactStoredLoad(groups: [], totalGroups: 0, totalExtraCopies: 0, totalBytes: 0) }
+        do {
+            return try q.read { db in
+                let totals = try Row.fetchOne(db, sql: """
+                    WITH twins AS (
+                        SELECT size_bytes AS s, COUNT(*) AS n FROM files
+                        WHERE failed = 0 AND content_hash IS NOT NULL AND \(ExactDuplicateVerifier.eligibleSQL)
+                        GROUP BY content_hash, size_bytes HAVING n > 1
+                    )
+                    SELECT COUNT(*) AS groups, COALESCE(SUM(n - 1), 0) AS extra, COALESCE(SUM((n - 1) * s), 0) AS bytes FROM twins
+                    """)
+                let top = try Row.fetchAll(db, sql: """
+                    SELECT content_hash AS h, size_bytes AS s FROM files
+                    WHERE failed = 0 AND content_hash IS NOT NULL AND \(ExactDuplicateVerifier.eligibleSQL)
+                    GROUP BY content_hash, size_bytes HAVING COUNT(*) > 1
+                    ORDER BY (COUNT(*) - 1) * size_bytes DESC, size_bytes DESC, content_hash
+                    LIMIT ?
+                    """, arguments: [ExactDuplicateVerifier.groupCap])
+                var groups: [DuplicateGroup] = []
+                groups.reserveCapacity(top.count)
+                for key in top {
+                    let hash: Data = key["h"]
+                    let size: Int64 = key["s"]
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT * FROM files
+                        WHERE content_hash = ? AND size_bytes = ? AND failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
+                        """, arguments: [hash, size])
+                    let files = rows.map(Self.toFileRow).sorted(by: ExactDuplicateVerifier.keeperComesFirst)
+                    guard files.count > 1 else { continue }
+                    groups.append(DuplicateGroup(
+                        id: ExactDuplicateVerifier.groupID(hash),
+                        files: Array(files.prefix(ExactDuplicateVerifier.memberCap)),
+                        totalFileCount: files.count, totalBytes: Int64(files.count) * size))
+                }
+                return ExactStoredLoad(
+                    groups: groups, totalGroups: totals?["groups"] ?? 0,
+                    totalExtraCopies: totals?["extra"] ?? 0, totalBytes: totals?["bytes"] ?? 0)
+            }
+        } catch {
+            reportError("Exact duplicate stored-hash query failed: \(error)")
+            return ExactStoredLoad(groups: [], totalGroups: 0, totalExtraCopies: 0, totalBytes: 0)
+        }
+    }
+
+    func exactStoredGroupsAsync() async -> ExactStoredLoad {
+        await Task.detached(priority: .userInitiated) { [self] in exactStoredGroups() }.value
+    }
+
     // MARK: - Perceptual near-duplicate queries
 
     /// Default Hamming threshold for "visually similar" grouping. `FILEID_NEARDUP_HAMMING`

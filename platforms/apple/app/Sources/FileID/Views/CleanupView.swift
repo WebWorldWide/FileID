@@ -26,6 +26,10 @@ struct CleanupView: View {
     @State private var exactCapped = false
     @State private var exactUnshownClasses = 0
     @State private var exactUnshownBytes: Int64 = 0
+    @State private var exactTotals: (groups: Int, extra: Int, bytes: Int64)?
+    @State private var exactVerify: (done: Int, total: Int)?
+    @State private var exactUnverified: Set<Int64> = []
+    @State private var verifyTask: Task<Void, Never>?
     /// Single-flight guard: a rapid double-tap on the confirmation would
     /// otherwise trash the same files twice (the 2nd fails "already in Trash").
     @State private var deleting = false
@@ -103,7 +107,7 @@ struct CleanupView: View {
         .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
             if pageActive { scanBatchArrived() } else { staleWhileHidden = true }
         }
-        .onDisappear { reloadTask?.cancel() }
+        .onDisappear { reloadTask?.cancel(); verifyTask?.cancel(); exactVerify = nil }
         // Exact mode skips its per-batch reload during a live scan, so the final
         // verified set — and the last batch the scan-active skip drops — is computed
         // once here when the scan reaches a terminal phase. Mirrors LibraryView's
@@ -121,6 +125,8 @@ struct CleanupView: View {
             store.notifyChanged()
             reload()
         }, hidden: {
+            verifyTask?.cancel()
+            if exactVerify != nil { exactVerify = nil; staleWhileHidden = true }
             if reloadTask != nil {
                 reloadTask?.cancel()
                 reloadPending = false
@@ -145,6 +151,8 @@ struct CleanupView: View {
             exactSkipped = 0
             exactCapped = false
             exactUnshownClasses = 0; exactUnshownBytes = 0
+            verifyTask?.cancel()
+            exactTotals = nil; exactVerify = nil; exactUnverified = []
             groups = []
             reload()
         }
@@ -262,12 +270,21 @@ struct CleanupView: View {
         } else {
             let bytes = visible.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
             let extraCopies = visible.reduce(0) { $0 + max(0, $1.totalFileCount - 1) }
-            base = Self.exactSummary(groups: g, extraCopies: extraCopies, bytes: bytes)
+            if let totals = exactTotals, totals.groups > g {
+                base = Self.exactSummary(groups: totals.groups, extraCopies: totals.extra, bytes: totals.bytes)
+            } else {
+                base = Self.exactSummary(groups: g, extraCopies: extraCopies, bytes: bytes)
+            }
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
+        if !isSimilar, let verify = exactVerify {
+            result += " · checking byte by byte (\(verify.done.formatted()) of \(verify.total.formatted()) groups)"
+        }
         if !isSimilar && exactPreviewPartial {
             if exactCapped {
-                result += exactUnshownClasses > 0
+                result += exactTotals != nil
+                    ? " · showing the \(g.formatted()) biggest"
+                    : exactUnshownClasses > 0
                     ? " · \(exactUnshownClasses.formatted()) more sets not listed (up to \(ByteCountFormatter.string(fromByteCount: exactUnshownBytes, countStyle: .file)))"
                     : " · more may exist"
             }
@@ -484,6 +501,12 @@ struct CleanupView: View {
         let unread = exactSkipped > 0
             ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn’t be opened, so \(exactSkipped == 1 ? "it wasn’t" : "they weren’t") checked."
             : ""
+        if exactVerify != nil || !exactUnverified.isEmpty {
+            let pending = exactVerify != nil
+                ? "**Checking the copies byte by byte.** These groups already match by their saved fingerprints; any that don’t hold up are removed when the check reaches them."
+                : "**\(exactUnverified.count.formatted()) large group\(exactUnverified.count == 1 ? "" : "s") match by saved fingerprint only.** FileID reads every copy byte by byte before anything moves to Trash. The other groups are checked byte by byte."
+            return LocalizedStringKey(pending + (exactCapped ? " Clear these and more will appear." : "") + unread)
+        }
         if exactCapped {
             return "**Showing the first \(shown.formatted()) group\(shown == 1 ? "" : "s").** Each one is an exact copy, checked byte by byte. Clear these and more will appear.\(ExactDuplicateVerifier.unshownNotice(classes: exactUnshownClasses, bytes: exactUnshownBytes))\(unread)"
         }
@@ -645,6 +668,7 @@ struct CleanupView: View {
                 let newExactCandidateCount: Int
                 let newExactSkipped: Int
                 var newExactCapped = false
+                var newExactTotals: (groups: Int, extra: Int, bytes: Int64)?
                 var newUnshown: (Int, Int64) = (0, 0)
                 var stopped = false
                 if isSimilar {
@@ -657,14 +681,14 @@ struct CleanupView: View {
                     newExactCandidateCount = 0
                     newExactSkipped = 0
                 } else {
-                    let snapshot = await store.exactDuplicateSnapshotAsync()
-                    newGroups = snapshot.groups
-                    newExactPartial = snapshot.partial
-                    newExactCandidateCount = snapshot.candidateCount
-                    newExactSkipped = snapshot.skipped
-                    newExactCapped = snapshot.capped
-                    newUnshown = (snapshot.unshownClasses, snapshot.unshownPotentialBytes)
-                    stopped = snapshot.cancelled
+                    let load = await store.exactStoredGroupsAsync()
+                    newGroups = load.groups
+                    newExactCapped = load.totalGroups > load.groups.count
+                    newExactPartial = newExactCapped
+                    newExactCandidateCount = load.totalExtraCopies + load.totalGroups
+                    newExactSkipped = 0
+                    newUnshown = (max(0, load.totalGroups - load.groups.count), max(0, load.totalBytes - load.shownBytes))
+                    newExactTotals = (load.totalGroups, load.totalExtraCopies, load.totalBytes)
                 }
                 // Cancelled when the tab went away: drop the unfinished result. A
                 // reload asked for since then (the tab came back) starts a fresh task.
@@ -688,6 +712,8 @@ struct CleanupView: View {
                 exactSkipped = newExactSkipped
                 exactCapped = newExactCapped
                 (exactUnshownClasses, exactUnshownBytes) = newUnshown
+                exactTotals = newExactTotals
+                exactUnverified = []
                 let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
                 selection.formIntersection(visibleIDs)
                 // Selection is stored by file id, but a mid-scan re-rank can change
@@ -704,6 +730,40 @@ struct CleanupView: View {
                 }
             } while reloadPending
             reloadTask = nil
+            if !isSimilar { startExactVerification(of: groups) }
+        }
+    }
+
+    /// The stored-hash groups are already on screen; this re-reads them byte by byte off the main thread and swaps in what held up.
+    private func startExactVerification(of stored: [DuplicateGroup]) {
+        verifyTask?.cancel()
+        guard !stored.isEmpty else { exactVerify = nil; return }
+        exactVerify = (0, stored.count)
+        exactPreviewPartial = true
+        let baseSkipped = exactSkipped
+        verifyTask = Task { @MainActor in
+            let final = await ExactDuplicateVerifier.verifyStored(stored) { update in
+                Task { @MainActor in
+                    guard !Task.isCancelled, exactVerify != nil else { return }
+                    adopt(update, baseSkipped: baseSkipped)
+                }
+            }
+            guard !Task.isCancelled, !final.cancelled else { return }
+            adopt(final, baseSkipped: baseSkipped)
+            exactVerify = nil
+        }
+    }
+
+    private func adopt(_ update: ExactDuplicateVerifier.VerifyUpdate, baseSkipped: Int) {
+        let priorKeepers = Set(groups.compactMap { $0.files.first?.id })
+        groups = update.groups
+        exactUnverified = update.unverified
+        exactSkipped = baseSkipped + update.skipped
+        if !update.finished { exactVerify = (update.done, update.total) }
+        exactPreviewPartial = exactCapped || !update.unverified.isEmpty || exactSkipped > 0 || !update.finished
+        selection.formIntersection(Set(update.groups.flatMap { $0.files.map(\.id) }))
+        for group in update.groups {
+            if let keeper = group.files.first, !priorKeepers.contains(keeper.id) { selection.remove(keeper.id) }
         }
     }
 }

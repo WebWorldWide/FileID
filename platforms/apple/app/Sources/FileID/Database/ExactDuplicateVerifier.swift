@@ -140,6 +140,93 @@ enum ExactDuplicateVerifier {
         }
     }
 
+    struct VerifyUpdate: Sendable {
+        var groups: [DuplicateGroup]
+        var unverified: Set<Int64>
+        var done: Int
+        var total: Int
+        var skipped = 0
+        var finished = false
+        var cancelled = false
+    }
+
+    /// Re-reads the groups the stored hashes produced. Cheapest groups go first so most of the list settles at once; a group whose copies are too large to read, or that would pass the read budget, keeps its stored-hash match (`unverified`) after an edge-sample check, and the Trash step re-hashes it anyway. `onUpdate` is called off the main thread about twice a second.
+    static func verifyStored(
+        _ stored: [DuplicateGroup], fullReadLimit: Int64 = maxFileBytes, budget: Int64 = readBudgetBytes,
+        onUpdate: @escaping @Sendable (VerifyUpdate) -> Void
+    ) async -> VerifyUpdate {
+        let cancel = CancelFlag()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    var result: [[DuplicateGroup]] = stored.map { [$0] }
+                    var unverified = Set<Int64>()
+                    var skipped = 0
+                    var spent: Int64 = 0
+                    var lastEmit = Date()
+                    let order = stored.indices.sorted {
+                        let l = stored[$0].files.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                        let r = stored[$1].files.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                        return l != r ? l < r : $0 < $1
+                    }
+                    func snapshot(done: Int, finished: Bool, cancelled: Bool = false) -> VerifyUpdate {
+                        VerifyUpdate(
+                            groups: result.flatMap { $0 }, unverified: unverified, done: done, total: stored.count,
+                            skipped: skipped, finished: finished, cancelled: cancelled)
+                    }
+                    for (done, index) in order.enumerated() {
+                        if cancel.isSet { return continuation.resume(returning: snapshot(done: done, finished: false, cancelled: true)) }
+                        let group = stored[index]
+                        let size = group.files.first?.sizeBytes ?? 0
+                        let readBytes = size * Int64(group.files.count)
+                        let readsWhole = size <= fullReadLimit && spent + readBytes <= budget
+                        var buckets: [Key: [Prefiltered]] = [:]
+                        for file in group.files {
+                            guard let sampled = prefilter(for: file) else { skipped += 1; continue }
+                            buckets[Key(digest: sampled.prefilter, size: file.sizeBytes), default: []].append(sampled)
+                        }
+                        var rebuilt: [DuplicateGroup] = []
+                        for members in buckets.values where members.count > 1 {
+                            if readsWhole {
+                                var byDigest: [Key: [FileRow]] = [:]
+                                for member in members {
+                                    guard let digest = fullDigest(for: member) else { skipped += 1; continue }
+                                    byDigest[Key(digest: digest, size: member.file.sizeBytes), default: []].append(member.file)
+                                }
+                                for (key, files) in byDigest where files.count > 1 {
+                                    let whole = files.count == group.files.count
+                                    let count = whole ? group.totalFileCount : files.count
+                                    rebuilt.append(DuplicateGroup(
+                                        id: groupID(key.digest), files: files.sorted(by: keeperComesFirst),
+                                        totalFileCount: count, totalBytes: Int64(count) * key.size))
+                                }
+                            } else {
+                                let files = members.map(\.file).sorted(by: keeperComesFirst)
+                                let count = files.count == group.files.count ? group.totalFileCount : files.count
+                                let rebuiltGroup = DuplicateGroup(
+                                    id: group.id &+ Int64(rebuilt.count), files: files,
+                                    totalFileCount: count, totalBytes: Int64(count) * size)
+                                unverified.insert(rebuiltGroup.id)
+                                rebuilt.append(rebuiltGroup)
+                            }
+                        }
+                        if readsWhole { spent += readBytes }
+                        rebuilt.sort { $0.id < $1.id }
+                        result[index] = rebuilt
+                        if Date().timeIntervalSince(lastEmit) > 0.5 {
+                            lastEmit = Date()
+                            onUpdate(snapshot(done: done + 1, finished: false))
+                        }
+                    }
+                    trimCache()
+                    continuation.resume(returning: snapshot(done: stored.count, finished: true))
+                }
+            }
+        } onCancel: {
+            cancel.set()
+        }
+    }
+
     // The cache key is (path, size, modified time, device, inode), so an entry is
     // valid for as long as the file is untouched: no expiry, only a size bound.
     private static func prefilter(for file: FileRow) -> Prefiltered? {
@@ -205,7 +292,7 @@ enum ExactDuplicateVerifier {
         for key in oldest { cacheState.values.removeValue(forKey: key) }
     }
 
-    private static func keeperComesFirst(_ lhs: FileRow, _ rhs: FileRow) -> Bool {
+    static func keeperComesFirst(_ lhs: FileRow, _ rhs: FileRow) -> Bool {
         let la = lhs.aesthetic ?? 0
         let ra = rhs.aesthetic ?? 0
         if la != ra { return la > ra }
@@ -219,7 +306,7 @@ enum ExactDuplicateVerifier {
         return lhs.pathText < rhs.pathText
     }
 
-    private static func groupID(_ digest: Data) -> Int64 {
+    static func groupID(_ digest: Data) -> Int64 {
         var value: UInt64 = 0
         for (index, byte) in digest.prefix(8).enumerated() {
             value |= UInt64(byte) << (8 * index)
