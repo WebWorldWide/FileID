@@ -431,12 +431,16 @@ public final class ReadStore: @unchecked Sendable {
                     """
                 nameArgs = [like, like, like]
             }
+            // The distinct tags (v27, kept by triggers) are scanned for the text, then the tags index finds the files.
+            let tagMatch = try db.tableExists("catalog_tag_vocab")
+                ? "id IN (SELECT file_id FROM tags WHERE tag IN (SELECT tag FROM catalog_tag_vocab WHERE tag LIKE ? ESCAPE '\\'))"
+                : "id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')"
             base += """
                  AND (
                       id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
                       OR id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?)
                       OR \(nameMatch)
-                      OR id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')
+                      OR \(tagMatch)
                       OR id IN (
                           SELECT face_prints.file_id FROM face_prints
                           INNER JOIN persons ON persons.id = face_prints.person_id

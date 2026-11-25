@@ -162,12 +162,17 @@ struct LibraryKeysetTests {
             try db.execute(sql: "UPDATE files SET path_text = '/m/SunsetBeach.jpg', path_search = '/m/SunsetBeach.jpg' WHERE id = 7")
             try db.execute(sql: "UPDATE files SET path_text = '/m/beachball.png', path_search = '/m/beachball.png' WHERE id = 8")
             try db.execute(sql: "UPDATE files SET vlm_description = 'two dogs on the beach' WHERE id = 9")
+            try db.execute(sql: "CREATE TABLE catalog_tag_vocab(tag TEXT PRIMARY KEY) WITHOUT ROWID; CREATE INDEX tags_by_tag ON tags(tag)")
+            try db.execute(sql: "INSERT INTO tags(file_id, tag, source) VALUES (12, 'seashell', 'auto'), (13, 'shellfish', 'auto')")
+            try db.execute(sql: "INSERT INTO catalog_tag_vocab(tag) VALUES ('seashell'), ('shellfish')")
             try db.execute(sql: String(contentsOf: Self.repositoryRoot().appending(path: "shared/catalog/v39.sql"), encoding: .utf8))
         }
         let wholeWord = await fixture.store.filesAsync(limit: 50, search: "beach")
         #expect(Set(wholeWord.map(\.id)) == [7, 8, 9])
         let partial = await fixture.store.filesAsync(limit: 50, search: "each")
         #expect(Set(partial.map(\.id)) == [7, 8, 9])
+        let tagged = await fixture.store.filesAsync(limit: 50, search: "shell")
+        #expect(Set(tagged.map(\.id)) == [12, 13], "a tag is found by part of its text through the tag vocabulary")
         let phrase = await fixture.store.filesAsync(limit: 50, search: "dogs on")
         #expect(Set(phrase.map(\.id)) == [9])
         try await fixture.queue.write { db in
