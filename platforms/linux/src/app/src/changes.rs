@@ -29,7 +29,8 @@ pub struct Entry {
 struct Log {
     next: u64,
     entries: Vec<Entry>,
-    listeners: Vec<Rc<dyn Fn()>>,
+    next_listener: u64,
+    listeners: Vec<(u64, Rc<dyn Fn()>)>,
 }
 
 thread_local! {
@@ -38,14 +39,24 @@ thread_local! {
 
 fn changed() {
     let listeners = LOG.with_borrow(|log| log.listeners.clone());
-    for listener in listeners {
+    for (_, listener) in listeners {
         listener();
     }
 }
 
-pub fn subscribe(listener: Rc<dyn Fn()>) {
-    LOG.with_borrow_mut(|log| log.listeners.push(listener));
+pub fn subscribe(listener: Rc<dyn Fn()>) -> u64 {
+    LOG.with_borrow_mut(|log| {
+        log.next_listener += 1;
+        let id = log.next_listener;
+        log.listeners.push((id, listener));
+        id
+    })
 }
+
+pub fn unsubscribe(id: u64) {
+    LOG.with_borrow_mut(|log| log.listeners.retain(|(listener, _)| *listener != id));
+}
+
 
 /// Records a change; `reverse` puts it back. Returns the entry id.
 pub fn push(label: &str, reverse: Option<Reverse>) -> u64 {
@@ -210,6 +221,21 @@ mod tests {
 
     fn reset() {
         LOG.with_borrow_mut(|log| *log = Log::default());
+    }
+
+    #[test]
+    fn an_unsubscribed_listener_is_no_longer_called() {
+        reset();
+        let calls = Rc::new(Cell::new(0));
+        let id = subscribe(Rc::new({
+            let calls = calls.clone();
+            move || calls.set(calls.get() + 1)
+        }));
+        push("one", None);
+        unsubscribe(id);
+        push("two", None);
+        assert_eq!(calls.get(), 1);
+        assert!(LOG.with_borrow(|log| log.listeners.is_empty()));
     }
 
     #[test]
