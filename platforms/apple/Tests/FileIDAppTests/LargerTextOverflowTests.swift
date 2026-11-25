@@ -46,4 +46,19 @@ import Testing
         #expect(chat.contains(".frame(height: max(Theme.Metrics.paneHeaderHeight, pageHeaderHeight), alignment: .top)"))
         #expect(!chat.contains("TagChip(text: \"Names\").hidden()"))
     }
+
+    @MainActor
+    @Test func anOptionRowPutsItsLabelAboveTheControlsOnlyWhenBothDoNotFit() {
+        func height(width: CGFloat) -> CGFloat {
+            let view = OptionRowLayout(labelColumn: 100) {
+                Text("Label")
+                ScrollView(.horizontal) { Color.clear.frame(width: 200, height: 20) }
+                Text("A note").fixedSize(horizontal: false, vertical: true)
+            }
+            return NSHostingController(rootView: view).sizeThatFits(in: CGSize(width: width, height: 1000)).height
+        }
+        let beside = height(width: 400)
+        let stacked = height(width: 250)
+        #expect(stacked > beside + 8)
+    }
 }
