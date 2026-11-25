@@ -728,6 +728,39 @@ async fn decode_jpeg(
     .map_err(|error| interrupted_or(cancel, error))
 }
 
+/// A caption the model could not produce, as opposed to a video that could not be read.
+#[derive(Debug)]
+struct ModelFailed;
+impl std::fmt::Display for ModelFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The description model could not caption a frame")
+    }
+}
+impl std::error::Error for ModelFailed {}
+
+/// Consecutive videos that fail on the model before the job stops instead of grinding through the rest.
+const MODEL_FAILURE_LIMIT: usize = 3;
+
+fn model_stopped(error: &anyhow::Error) -> anyhow::Error {
+    tracing::warn!(error = %format!("{error:#}"), "timeline stopped: the description model kept failing");
+    anyhow!("The description model failed on {MODEL_FAILURE_LIMIT} videos in a row, so the job stopped. Check the model in Deep Analyze, then resume.")
+}
+
+fn model_keeps_failing(streak: &mut usize, error: &anyhow::Error) -> bool {
+    *streak = if error.is::<ModelFailed>() { *streak + 1 } else { 0 };
+    *streak >= MODEL_FAILURE_LIMIT
+}
+
+async fn caption_frame<M: FrameModel>(model: &M, frame: &Path, prompt: &str, cancel: &Arc<AtomicBool>) -> Result<String> {
+    let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
+    let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable()).context(ModelFailed)))?;
+    let caption = caption.trim();
+    if caption.is_empty() {
+        return Err(unreadable().context(ModelFailed));
+    }
+    Ok(caption.to_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process<M: FrameModel>(
     id: &str,
@@ -742,13 +775,16 @@ async fn process<M: FrameModel>(
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
     let mut next_pool: Option<(i64, PoolTask)> = None;
-    let (mut attempted, mut skipped, mut last_error) = (0usize, 0usize, None);
+    let (mut attempted, mut skipped, mut last_error, mut model_failures) = (0usize, 0usize, None, 0usize);
     for (index, &file_id) in job.ids.iter().enumerate().skip(job.index) {
         attempted += 1;
         match process_video(id, job, model, frames, cancel, sink, database, share, (index, file_id, total), &mut next_pool).await {
-            Ok(()) => {}
+            Ok(()) => model_failures = 0,
             Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => return Err(error),
             Err(error) => {
+                if model_keeps_failing(&mut model_failures, &error) {
+                    return Err(model_stopped(&error));
+                }
                 tracing::warn!(file_id, error = %format!("{error:#}"), "timeline skipped a video it could not analyse");
                 let _ = std::fs::remove_dir_all(frames.join(format!("pool-{file_id}")));
                 skipped += 1;
@@ -985,12 +1021,7 @@ async fn scene_captions<M: FrameModel>(
             continue;
         }
         let frame = &pool.frames.get(scene.representative).context("Missing scene frame")?.2;
-        let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
-        let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-        let caption = caption.trim();
-        if caption.is_empty() {
-            return Err(unreadable());
-        }
+        let caption = caption_frame(model, frame, prompt, cancel).await?;
         let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
         while_running(database, id, move |conn| {
             checked.verify(conn, file_id)?;

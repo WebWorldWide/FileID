@@ -575,6 +575,38 @@ async fn every_video_is_tried_even_when_the_first_cannot_be_read() {
 }
 
 #[tokio::test]
+async fn the_job_stops_when_the_model_fails_on_several_videos_in_a_row() {
+    let model = scripted(vec!["unused"], None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let missing = Path::new("/no/such/frame.jpg");
+    let mut streak = 0;
+    for video in 1..=MODEL_FAILURE_LIMIT {
+        let error = caption_frame(&model, missing, "describe", &cancel).await.unwrap_err();
+        assert_eq!(model_keeps_failing(&mut streak, &error), video == MODEL_FAILURE_LIMIT, "video {video}");
+    }
+}
+
+#[test]
+fn the_stopped_job_says_so_in_plain_words_without_the_models_raw_error() {
+    let raw = anyhow!("mlx failed at /Users/someone/Models/x.safetensors: tensor shape mismatch").context(ModelFailed);
+    let text = crate::util::user_message::job_failure_text(&model_stopped(&raw));
+    assert!(text.contains("job stopped"), "{text}");
+    assert!(!text.contains("safetensors") && !text.contains("/Users"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unreadable_video_between_model_failures_does_not_count_against_the_model() {
+    let model = scripted(vec!["unused"], None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let model_error = caption_frame(&model, Path::new("/no/such/frame.jpg"), "describe", &cancel).await.unwrap_err();
+    let mut streak = 0;
+    assert!(!model_keeps_failing(&mut streak, &model_error));
+    assert!(!model_keeps_failing(&mut streak, &anyhow!("decode failed")));
+    assert!(!model_keeps_failing(&mut streak, &model_error));
+    assert!(!model_keeps_failing(&mut streak, &model_error));
+}
+
+#[tokio::test]
 async fn dropping_a_prefetched_pool_stops_its_decode() {
     let cancel = Arc::new(AtomicBool::new(false));
     let (started, stopped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
