@@ -221,4 +221,16 @@ struct ScanAdapterTests {
     @Test func ocrWarmupIsOptional() {
         #expect(!fileid_apple_ocr_ready() || AccurateOCRWarmup.shared.isReady)
     }
+
+    @Test func theAdapterReportsTheAccurateReaderPausedAfterThreeFailuresInARow() {
+        let breaker = AccurateOCRBreaker.shared
+        breaker.record(success: true)
+        defer { breaker.record(success: true) }
+        #expect(!fileid_apple_ocr_paused())
+        for _ in 0..<AccurateOCRBreaker.failureLimit { breaker.record(success: false) }
+        #expect(fileid_apple_ocr_paused())
+        #expect(!fileid_apple_ocr_ready())
+        breaker.record(success: true)
+        #expect(!fileid_apple_ocr_paused())
+    }
 }
