@@ -1,4 +1,5 @@
 import AppKit
+import FileIDShared
 import Testing
 @testable import FileID
 
@@ -27,16 +28,44 @@ struct LibraryScaleTests {
         #expect(loop.lowerBound < scroll.lowerBound, "the view lands on the last row only after the last page arrived")
     }
 
-    @Test func aRefreshKeepsEveryLoadedPageInsteadOfCuttingBackToThreeThousandRows() throws {
+    @Test func aRefreshRequeriesOnlyTheHeadOfAListingLoadedToTheEnd() throws {
         let library = try appSource("Views/LibraryView.swift")
-        #expect(!library.contains("refreshCap"))
-        #expect(library.contains("let want = sameListing && !firstPageOnly ? max(Self.pageSize, rows.count) : Self.pageSize"))
+        #expect(!library.contains("max(Self.pageSize, rows.count)"))
+        #expect(library.contains("LibraryReload.plan(loaded: rows.count"))
+        #expect(library.contains("private func recheckTail("))
+        let small = LibraryReload.plan(loaded: 1_200, sameListing: true, firstPageOnly: false, searching: false, complete: true)
+        #expect(small == LibraryReload.Plan(want: 1_200, keepsTail: false), "a short listing is re-read whole")
+        let far = LibraryReload.plan(loaded: 129_979, sameListing: true, firstPageOnly: false, searching: false, complete: true)
+        #expect(far == LibraryReload.Plan(want: LibraryReload.head, keepsTail: true), "after End a refresh asks for one head, not 130,000 rows")
+        let partial = LibraryReload.plan(loaded: 20_000, sameListing: true, firstPageOnly: false, searching: false, complete: false)
+        #expect(partial == LibraryReload.Plan(want: LibraryReload.head, keepsTail: false), "a half-loaded listing pages on from the head")
+        let search = LibraryReload.plan(loaded: 20_000, sameListing: true, firstPageOnly: false, searching: true, complete: true)
+        #expect(!search.keepsTail && search.want == LibraryReload.head)
+        let other = LibraryReload.plan(loaded: 129_979, sameListing: false, firstPageOnly: false, searching: false, complete: true)
+        #expect(other.want == LibraryPageSizes.first)
+    }
+
+    @Test func aRefreshedHeadSplicesOntoTheRowsLoadedBeyondItAndDropsWhatLeftTheListing() {
+        func row(_ id: Int64, size: Int64 = 1) -> FileRow {
+            FileRow(id: id, pathText: "/x/\(id).jpg", sizeBytes: size, createdAt: nil, modifiedAt: nil, scannedAt: Date(timeIntervalSince1970: 0), kind: "image", extension: "jpg", phash: nil,
+                    aesthetic: nil, hasFaces: false, hasText: false, cameraModel: nil, locationLat: nil, locationLon: nil, failed: false, errorMessage: nil)
+        }
+        let loaded = (1...10).map { row(Int64($0)) }
+        let head = [row(0), row(1, size: 9), row(2), row(3)]
+        let spliced = LibraryReload.splice(head: head, onto: loaded)
+        #expect(spliced?.map(\.id) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        #expect(spliced?[1].sizeBytes == 9)
+        #expect(LibraryReload.splice(head: [row(99)], onto: loaded) == nil, "a head that left the loaded rows entirely cannot be spliced")
+        let checked = Set((4...10).map(Int64.init))
+        let applied = LibraryReload.applying([5: row(5, size: 7), 6: row(6)], checked: checked, to: spliced ?? [])
+        #expect(applied.map(\.id) == [0, 1, 2, 3, 5, 6])
+        #expect(applied.first { $0.id == 5 }?.sizeBytes == 7)
     }
 
     @Test func rowsLoadedWithoutTagsGetTheirChipsFromTheBottomUp() throws {
         let library = try appSource("Views/LibraryView.swift")
         #expect(library.contains("private func fillTags(for ids: [Int64]"))
-        #expect(library.contains("let laterIDs = newRows.dropFirst(Self.tagChunk)"))
+        #expect(library.contains("let laterIDs = newRows[min(Self.tagChunk, headCount)..<headCount]"))
     }
 
     @Test func theVisualHalfOfASearchStartsBesideTheKeywordListing() throws {

@@ -118,3 +118,32 @@ enum LibraryPageSizes {
     /// Pages the grid asks for as the user scrolls grow with what is already loaded, so a long scroll needs few round trips.
     static func scroll(loaded: Int) -> Int { min(max(first, loaded / 2), scrollCap) }
 }
+
+/// What a refresh of an already loaded listing re-queries. Re-reading every loaded row costs seconds at 130,000 rows, so a refresh re-pages only the head and re-checks the rest by id in the background.
+enum LibraryReload {
+    static let head = 5_000
+    static let recheckChunk = 5_000
+
+    struct Plan: Equatable {
+        var want: Int
+        var keepsTail: Bool
+    }
+
+    static func plan(loaded: Int, sameListing: Bool, firstPageOnly: Bool, searching: Bool, complete: Bool, firstPage: Int = LibraryPageSizes.first) -> Plan {
+        guard sameListing, !firstPageOnly else { return Plan(want: firstPage, keepsTail: false) }
+        guard loaded > head else { return Plan(want: max(firstPage, loaded), keepsTail: false) }
+        return Plan(want: head, keepsTail: !searching && complete)
+    }
+
+    /// The fresh head followed by the loaded rows after it, or nil when the head's last row is not among them (the listing moved too far to splice).
+    static func splice(head: [FileRow], onto loaded: [FileRow]) -> [FileRow]? {
+        guard let last = head.last, let at = loaded.firstIndex(where: { $0.id == last.id }) else { return nil }
+        let known = Set(head.map(\.id))
+        return head + loaded[(at + 1)...].filter { !known.contains($0.id) }
+    }
+
+    /// The loaded rows with each re-checked one replaced by its fresh copy, or dropped when it left the listing.
+    static func applying(_ fresh: [Int64: FileRow], checked: Set<Int64>, to rows: [FileRow]) -> [FileRow] {
+        rows.compactMap { row in checked.contains(row.id) ? fresh[row.id] : row }
+    }
+}

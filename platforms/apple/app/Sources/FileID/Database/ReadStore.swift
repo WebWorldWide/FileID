@@ -531,6 +531,34 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// The listing's rows for these ids as they are now; an id that left the listing is missing from the result.
+    public func listedRowsAsync(ids: [Int64], kindFilter: String? = nil) async -> [Int64: FileRow] {
+        guard !ids.isEmpty, let q = queue else { return [:] }
+        let scope = self.scope
+        return (try? await q.read { db in
+            let unreadable = kindFilter == Self.unreadableFilter
+            var sql = "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?)) AND " + (unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0")
+            var args: StatementArguments = [String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)]
+            if let kindFilter, !unreadable { sql += " AND kind = ?"; args += [kindFilter] }
+            if let scope { sql += " AND " + LibraryScope.sql("path_text"); args += [scope.param] }
+            return Dictionary(try Row.fetchAll(db, sql: sql, arguments: args).map { ($0["id"] as Int64, Self.toFileRow($0)) }, uniquingKeysWith: { first, _ in first })
+        }) ?? [:]
+    }
+
+    /// How many rows the unsearched listing has, nil when the query fails.
+    public func listingCountAsync(kindFilter: String? = nil) async -> Int? {
+        guard let q = queue else { return nil }
+        let scope = self.scope
+        return try? await q.read { db in
+            let unreadable = kindFilter == Self.unreadableFilter
+            var sql = "SELECT COUNT(*) FROM files WHERE " + (unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0")
+            var args: StatementArguments = []
+            if let kindFilter, !unreadable { sql += " AND kind = ?"; args += [kindFilter] }
+            if let scope { sql += " AND " + LibraryScope.sql("path_text"); args += [scope.param] }
+            return try Int.fetchOne(db, sql: sql, arguments: args) ?? 0
+        }
+    }
+
     public func catalogFilesAsync(ids: [Int64], kindFilter: String? = nil) async -> [FileRow] {
         guard !ids.isEmpty, ids.count <= 100, let q = queue else { return [] }
         let scope = self.scope

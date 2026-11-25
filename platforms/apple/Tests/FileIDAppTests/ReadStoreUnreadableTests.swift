@@ -126,4 +126,44 @@ struct ReadStoreUnreadableTests {
         #expect(store.scopedUnreadableFiles == 1)
         #expect(store.scopedTotalFiles - store.scopedUnreadableFiles == store.files().count)
     }
+
+    @MainActor
+    @Test("a re-check by id returns the rows still in the listing and a count that matches the listing")
+    func recheckByIDMatchesTheListing() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-recheck-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appending(component: "fileid.sqlite")
+        try await DatabaseQueue(path: url.path).write { db in
+            try db.execute(sql: """
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY, path_text TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL, modified_at REAL, scanned_at REAL NOT NULL DEFAULT 0,
+                    kind TEXT NOT NULL, extension TEXT NOT NULL DEFAULT '', phash INTEGER, aesthetic REAL,
+                    has_faces INTEGER, has_text INTEGER, camera_model TEXT, location_lat REAL, location_lon REAL,
+                    failed INTEGER NOT NULL DEFAULT 0, error_message TEXT, vlm_description TEXT,
+                    vlm_proposed_name TEXT, vlm_model TEXT, vlm_full_model TEXT, vlm_analyzed_at REAL,
+                    vlm_inherited_from INTEGER, auto_tags TEXT)
+                """)
+            try db.execute(sql: """
+                INSERT INTO files(id,path_text,kind,failed,error_message,size_bytes) VALUES
+                    (1,'/lib/a.jpg','image',0,NULL,10),
+                    (2,'/lib/b.mov','video',0,NULL,20),
+                    (3,'/lib/c.png','image',1,'Could not decode image',30),
+                    (4,'/lib/d.jpg','image',0,NULL,40)
+                """)
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        let all = await store.listedRowsAsync(ids: [1, 2, 3, 4, 99])
+        #expect(Set(all.keys) == [1, 2, 4])
+        #expect(all[4]?.sizeBytes == 40)
+        let images = await store.listedRowsAsync(ids: [1, 2, 3, 4], kindFilter: "image")
+        #expect(Set(images.keys) == [1, 4])
+        #expect(await store.listingCountAsync() == store.files().count)
+        #expect(await store.listingCountAsync(kindFilter: "image") == 2)
+        #expect(await store.listingCountAsync(kindFilter: ReadStore.unreadableFilter) == 1)
+    }
 }
