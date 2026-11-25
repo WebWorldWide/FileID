@@ -102,6 +102,18 @@ public sealed class WinUiDrillFixContractTests
         Assert.Contains("ScanPhase.Completed or ScanPhase.Cancelled or ScanPhase.Failed", card, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void OpenEngineLog_RevealsTheDatedLogInsteadOfLaunchingIt()
+    {
+        var control = App("Views", "Sidebar", "SidebarProcessingControl.xaml.cs");
+        var start = control.IndexOf("private void OnOpenLogClicked", StringComparison.Ordinal);
+        var end = control.IndexOf("OnOpenLogClicked threw", start, StringComparison.Ordinal);
+        var body = control[start..end];
+        Assert.Contains("AppPaths.LogsDir", body, StringComparison.Ordinal);
+        Assert.Contains("SafeOpen.Reveal(newest)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("FileName = target", body, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
