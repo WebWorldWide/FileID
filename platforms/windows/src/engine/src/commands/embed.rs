@@ -93,6 +93,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
         return;
     }
 
+    let prompt = (crate::models::search_strength::applies() && !query.trim().is_empty()).then(|| crate::models::search_strength::prompt(query.trim()));
     let result = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| embed_text_blocking(&payload.query))).await;
 
     match result {
@@ -105,6 +106,9 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
                 },
             ))))
             .await;
+            if let Some(prompt) = prompt {
+                let _ = tokio::task::spawn_blocking(move || crate::util::qos::interactive(|| embed_text_blocking(&prompt))).await;
+            }
         }
         Ok(Err(err)) => {
             // Resolve with an empty embedding so search drops to the FTS fallback instead of stalling 5 s and tripping
@@ -146,16 +150,49 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
 pub(crate) static CLIP_TEXT: crate::models::idle::IdleSlot<crate::models::clip_text::ClipText> =
     crate::models::idle::IdleSlot::new("CLIP text", crate::models::idle::PARK_AFTER);
 
+/// The most recent text vectors, so a repeated query, and the judged search that follows an embed, do not run the text
+/// model again. A failed encode is never kept.
+pub(crate) struct TextVectors {
+    entries: std::collections::VecDeque<(String, Vec<f32>)>,
+}
+
+impl TextVectors {
+    const CAPACITY: usize = 64;
+
+    pub(crate) const fn new() -> Self {
+        Self { entries: std::collections::VecDeque::new() }
+    }
+
+    pub(crate) fn get_or_encode(&mut self, text: &str, encode: impl FnOnce() -> anyhow::Result<Vec<f32>>) -> anyhow::Result<Vec<f32>> {
+        if let Some(position) = self.entries.iter().position(|(key, _)| key == text) {
+            let hit = self.entries.remove(position).expect("position came from this queue");
+            let vector = hit.1.clone();
+            self.entries.push_back(hit);
+            return Ok(vector);
+        }
+        let vector = encode()?;
+        if self.entries.len() == Self::CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((text.to_owned(), vector.clone()));
+        Ok(vector)
+    }
+}
+
+static TEXT_VECTORS: parking_lot::Mutex<TextVectors> = parking_lot::Mutex::new(TextVectors::new());
+
 pub(crate) fn embed_text_blocking(query: &str) -> anyhow::Result<Vec<f32>> {
     if crate::coordinator::process_gpu_device_removed() {
         anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
     }
-    CLIP_TEXT.with(load_clip_text, |model| {
-        if crate::coordinator::process_gpu_device_removed() {
-            anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
-        }
-        model.embed(query)
-    })?
+    TEXT_VECTORS.lock().get_or_encode(query, || {
+        CLIP_TEXT.with(load_clip_text, |model| {
+            if crate::coordinator::process_gpu_device_removed() {
+                anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
+            }
+            model.embed(query)
+        })?
+    })
 }
 
 /// A catalog with picture vectors can be searched by meaning, and the text model is installed, on a machine with room to
@@ -222,6 +259,39 @@ mod tests {
         assert!(clip_text_prewarm_wanted(&conn, true, High));
         assert!(!clip_text_prewarm_wanted(&conn, true, Low), "a small Mac keeps its memory");
         assert!(!clip_text_prewarm_wanted(&conn, false, Balanced), "no weights installed");
+    }
+
+    #[test]
+    fn a_repeated_text_is_encoded_once_and_a_failed_encode_is_not_kept() {
+        let mut vectors = TextVectors::new();
+        let mut calls = 0;
+        let mut ask = |vectors: &mut TextVectors, text: &str| {
+            vectors.get_or_encode(text, || {
+                calls += 1;
+                Ok(vec![text.len() as f32])
+            })
+        };
+        assert_eq!(ask(&mut vectors, "a dog").unwrap(), vec![5.0]);
+        assert_eq!(ask(&mut vectors, "a dog").unwrap(), vec![5.0]);
+        assert_eq!(calls, 1, "the second ask came from the kept vector");
+        assert!(vectors.get_or_encode("broken", || anyhow::bail!("no model")).is_err());
+        assert_eq!(vectors.get_or_encode("broken", || Ok(vec![1.0])).unwrap(), vec![1.0], "the failure was not kept");
+    }
+
+    #[test]
+    fn the_oldest_text_vector_is_dropped_first_and_a_hit_renews_its_place() {
+        let mut vectors = TextVectors::new();
+        let mut encoded = Vec::new();
+        for index in 0..TextVectors::CAPACITY {
+            vectors.get_or_encode(&format!("query {index}"), || Ok(vec![index as f32])).unwrap();
+        }
+        vectors.get_or_encode("query 0", || panic!("kept")).unwrap();
+        vectors.get_or_encode("one more", || Ok(vec![-1.0])).unwrap();
+        for text in ["query 0", "one more"] {
+            vectors.get_or_encode(text, || panic!("{text} kept")).unwrap();
+        }
+        vectors.get_or_encode("query 1", || { encoded.push("query 1"); Ok(vec![1.0]) }).unwrap();
+        assert_eq!(encoded, ["query 1"], "the least recently used entry was the one dropped");
     }
 
     #[test]
