@@ -57,7 +57,6 @@ pub fn unsubscribe(id: u64) {
     LOG.with_borrow_mut(|log| log.listeners.retain(|(listener, _)| *listener != id));
 }
 
-
 /// Records a change; `reverse` puts it back. Returns the entry id.
 pub fn push(label: &str, reverse: Option<Reverse>) -> u64 {
     let id = LOG.with_borrow_mut(|log| {

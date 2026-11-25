@@ -927,9 +927,6 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 
-/// Optimistic refresh after a fire-and-forget command (the engine's
-/// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
-/// so we re-read the DB shortly after instead of waiting for confirmation).
 fn rename_summary(succeeded: u32, failed: u32, messages: &[fileid_engine::ipc::BulkActionItem]) -> String {
     if failed == 0 {
         return format!("Renamed {}.", plural(succeeded as usize, "file"));
@@ -946,6 +943,9 @@ fn rename_summary(succeeded: u32, failed: u32, messages: &[fileid_engine::ipc::B
     }
 }
 
+/// Optimistic refresh after a fire-and-forget command (the engine's
+/// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
+/// so we re-read the DB shortly after instead of waiting for confirmation).
 fn schedule_refresh(ui: &Rc<DeepUi>, ms: u64) {
     let ui = ui.clone();
     glib::timeout_add_local_once(Duration::from_millis(ms), move || refresh(&ui));

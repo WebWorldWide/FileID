@@ -1429,10 +1429,9 @@ impl Cleanup {
                 this.trash_generation.set(operation.wrapping_add(1));
                 this.deleting.set(false);
                 this.status_label.set_text(&format!(
-                    "Nothing was moved to Trash. {rejected} chosen file{} changed since the scan, \
-                     or {} every copy in a group. Keep at least one copy of each.",
+                    "Nothing was moved to Trash. {rejected} chosen file{} changed since the scan or \
+                     had no other copy to keep. Keep at least one copy of each group.",
                     plural(rejected),
-                    if rejected == 1 { "is" } else { "are" },
                 ));
                 this.reveal_status();
                 this.reload();
