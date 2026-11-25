@@ -624,8 +624,8 @@ public final class EngineClient {
             // Events reach the main actor as unstructured Tasks the runtime may reorder, so a late "discovered: 100" must never overwrite the final "discovered: 4000": drop any snapshot that rolls a counter (or the phase) backwards within the same session.
             guard p.supersedes(lastProgress) else { break }
             lastProgress = p
-            if p.phase == .postScan, postScanBaseline?.sessionID != p.sessionID {
-                postScanBaseline = PostScanBaseline(sessionID: p.sessionID, filesRead: p.processed)
+            if p.phase == .postScan, let baseline = PostScanBaseline.observing(p, current: postScanBaseline), baseline != postScanBaseline {
+                postScanBaseline = baseline
             }
             // Release the App-Nap token on any terminal scan phase; cancel/fail arrive here as a phase change, not as .scanComplete.
             switch p.phase {
@@ -1338,6 +1338,14 @@ public final class EngineClient {
 public struct PostScanBaseline: Equatable, Sendable {
     public let sessionID: String
     public let filesRead: Int
+
+    /// The files read before post-scan began. A snapshot that carries the engine's own owed and done counts gives it exactly, however late the app joined; only an engine that omits them leaves the first snapshot seen as the best guess.
+    static func observing(_ progress: ScanProgress, current: PostScanBaseline?) -> PostScanBaseline? {
+        if let done = progress.postScanDone {
+            return PostScanBaseline(sessionID: progress.sessionID, filesRead: max(0, progress.processed - done))
+        }
+        return current?.sessionID == progress.sessionID ? current : PostScanBaseline(sessionID: progress.sessionID, filesRead: progress.processed)
+    }
 }
 
 /// What the post-scan phase has left: the engine reports it as files found plus the work owed, so the work is the part above the files already read.
@@ -1350,6 +1358,9 @@ struct PostScanWork: Equatable {
 
 extension ScanProgress {
     func postScanWork(baseline: PostScanBaseline?) -> PostScanWork? {
+        if let owed = postScanOwed, let done = postScanDone {
+            return owed > 0 ? PostScanWork(owed: owed, done: min(owed, done)) : nil
+        }
         let start = baseline.flatMap { $0.sessionID == sessionID ? $0.filesRead : nil } ?? discovered
         let owed = total - start
         guard owed > 0 else { return nil }
