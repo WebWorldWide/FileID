@@ -444,9 +444,9 @@ fn hyperparameters() -> (Hyperparameters, bool) {
             pass3_variance_threshold: 0.04,
             pass3_min_mean_cosine: 0.60,
             pass3_max_splits: 7,
-            k_nn: env_int("FILEID_FACE_KNN", 10, 4..=256),
+            k_nn: env_int("FILEID_FACE_KNN", 16, 4..=256),
         },
-        env_bool("FILEID_FACE_MUTUAL_KNN", false),
+        env_bool("FILEID_FACE_MUTUAL_KNN", true),
     )
 }
 

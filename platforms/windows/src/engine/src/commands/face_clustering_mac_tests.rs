@@ -686,3 +686,33 @@ fn a_persist_that_fails_part_way_leaves_every_person_and_assignment_as_it_was() 
     assert_eq!(person_ids(&catalog).len(), 2, "with the refusal gone the same pass publishes");
     assert!(catalog.assignments().iter().all(|(_, person)| person.is_some()));
 }
+
+fn unit_vector(parts: &[(usize, f32)]) -> Vec<f32> {
+    let mut values = vec![0.0f32; DIM];
+    for &(index, weight) in parts {
+        values[index] += weight;
+    }
+    let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+    values.iter().map(|v| v / norm).collect()
+}
+
+#[test]
+fn one_bridge_face_between_two_look_alike_groups_does_not_join_them() {
+    let near_bridge = |member: usize| if member < 5 { 0.3 } else { 0.0 };
+    let mut vectors = Vec::new();
+    for member in 0..20 {
+        vectors.push(unit_vector(&[(0, 1.0), (10 + member, 0.1), (100, near_bridge(member))]));
+    }
+    for member in 0..20 {
+        vectors.push(unit_vector(&[(1, 1.0), (40 + member, 0.1), (100, near_bridge(member))]));
+    }
+    vectors.push(unit_vector(&[(0, 1.0), (1, 1.0), (100, 0.5)]));
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let clusters = cluster(&vectors, &files);
+    let group_of = |face: usize| clusters.iter().find(|(_, members)| members.contains(&face)).map(|(id, _)| *id).unwrap();
+    assert_ne!(group_of(0), group_of(20), "the two groups stay separate people");
+    for member in 1..20 {
+        assert_eq!(group_of(0), group_of(member));
+        assert_eq!(group_of(20), group_of(20 + member));
+    }
+}
