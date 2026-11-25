@@ -1243,7 +1243,7 @@ struct LibraryView: View {
                     if let half, !Task.isCancelled {
                         let response = half.response
                         #if DEBUG
-                        if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: visual search \"\(trimmed)\" keyword \(keywordMs) ms embed \(half.embedMs) ms engine \(half.engineMs) ms total \((clock.now - began).milliseconds) ms\n".utf8)) }
+                        if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: visual search [\(trimmed)] keyword \(keywordMs) ms embed \(half.embedMs) ms engine \(half.engineMs) ms total \((clock.now - began).milliseconds) ms\n".utf8)) }
                         #endif
                         guard !Task.isCancelled else { return }
                         if let response, response.status == "ok" {
