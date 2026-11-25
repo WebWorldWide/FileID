@@ -1393,6 +1393,11 @@ mod tests {
 
     #[tokio::test]
     async fn one_slow_file_does_not_hold_back_the_workers_that_are_free() {
+        // The shared scheduler admits cores minus two; with one CPU slot the second worker rightly waits.
+        if num_cpus::get().saturating_sub(2) < 2 {
+            eprintln!("skipped: this machine gives background work a single CPU slot");
+            return;
+        }
         let library = Library::new("one-slow");
         library.write((0..8).map(|i| owing(&library, &format!("photo{i}.png"))).collect()).await;
         let analyzer = OneSlowFile { calls: AtomicUsize::new(0), batch: 8 };

@@ -3210,7 +3210,7 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 mod tests {
     #[test]
     fn stored_failure_messages_never_carry_scheduler_or_codec_wording() {
-        let production = include_str!("tagging.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        let production = production_source();
         assert!(!production.contains("Some(error.to_string())"), "a scheduler refusal is stored verbatim");
         assert!(!production.contains("format!(\"image decode: {err"), "a codec error is stored verbatim");
         for message in [BUSY_MESSAGE, UNDECODABLE_IMAGE_MESSAGE] {
@@ -3219,7 +3219,16 @@ mod tests {
     }
 
     fn production_source() -> &'static str {
-        include_str!("tagging.rs").split("#[cfg(test)]\nmod tests").next().unwrap()
+        production_part(include_str!("tagging.rs"))
+    }
+
+    // Windows checks sources out with CRLF, so the test module marker is found in either form.
+    fn production_part(source: &str) -> &str {
+        let end = source
+            .find("#[cfg(test)]\nmod tests {")
+            .or_else(|| source.find("#[cfg(test)]\r\nmod tests {"))
+            .unwrap_or(source.len());
+        &source[..end]
     }
 
     #[test]
@@ -3228,7 +3237,7 @@ mod tests {
             ("tagging.rs", include_str!("tagging.rs")),
             ("shell/mod.rs", include_str!("../shell/mod.rs")),
         ] {
-            let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+            let production = production_part(source);
             assert!(!production.contains("Mmap::map"), "{name} maps a file; a pulled drive would SIGBUS the engine");
         }
     }
