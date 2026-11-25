@@ -1,4 +1,4 @@
-﻿// PeopleView code-behind. Cluster cards are draggable + drop targets;
+﻿// PeopleView code-behind. Cluster cards are draggable and drop targets for merging.
 
 using System;
 using System.Collections.Generic;
@@ -25,12 +25,12 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     internal PeopleViewModel ViewModel { get; }
     private const string MergeFormatId = "fileid/person-cluster-id";
 
-    // SolidColorBrush is a DispatcherObject; constructing one per drag-over event (fired continuously while a cluster card hovers) is the native fast-fail shape — cache once on the dispatcher this view owns and reuse.
+    // A SolidColorBrush is a DispatcherObject; building one per drag-over event is a native fast-fail, so cache one.
     private readonly SolidColorBrush _goldBrush = new(Microsoft.UI.Colors.Gold);
 
     private readonly System.Collections.Generic.HashSet<int> _selectedClusterIds = new();
 
-    // Two concurrent waiters then share the single LastBulkAction correlation slot and both fire on the FIRST matching reply, so one op is credited with the other's result and the loser times out; a re-fired merge also hits already-deleted source rows.
+    // Concurrent bulk ops would share the single LastBulkAction correlation slot, crediting one op with the other's reply, and a re-fired merge would hit already-deleted source rows.
     private int _bulkOpInFlight; // 0 = idle, 1 = a bulk op running
 
     private bool _selectMaintenancePending;
@@ -42,7 +42,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         InitializeComponent();
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Clusters.CollectionChanged += OnClustersCollectionChanged;
-        // Subscribe to the engine event and call RefreshAsync inline; the _unloaded guard prevents a late-firing dispatcher continuation from touching disposed state.
+        // The _unloaded guard stops a late dispatcher continuation from touching disposed state.
         FileID.ViewModels.EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
         _undonePeopleChanges = UndonePeopleChanges();
         ChangeLog.Instance.Changed += OnChangeLogChanged;
@@ -162,7 +162,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             await RefreshReviewCountAsync();
         });
 
-    // Tracks how many is_unknown=1 clusters are currently filtered out by the global HideUnknown setting; surfaces a one-tap reveal so the user can flip the visibility without diving into Settings.
+    // Counts the is_unknown clusters hidden by the HideUnknown setting and offers a one-tap reveal.
 
     private async void UpdateHiddenUnknownsFooter()
     {
@@ -195,7 +195,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         bool hideUnknown = false;
         try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
-        // Wrap UI mutations in try/catch so a disposed-XAML race doesn't surface as a dispatcher fast-fail.
+        // A disposed-XAML race here would otherwise fast-fail the dispatcher.
         try
         {
             if (hiddenCount == 0 || !hideUnknown)
@@ -215,7 +215,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Shows once at least one cluster is named (and not flagged unknown) so the user is nudged forward into Deep Analyze, which uses those names in its captions + smart filenames.
+    // Shows once at least one cluster is named (and not unknown), nudging the user to Deep Analyze, which uses the names in captions and filenames.
 
     private async void RefreshContinueToDeepAnalyzeBanner()
     {
@@ -273,7 +273,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             try
             {
-                // Shared singleton, not a fresh Load() — avoids the static-debounce lost-update (a fresh instance's Save() cancels the singleton's pending write).
+                // Use the shared singleton: a fresh instance's Save() would cancel the singleton's pending debounced write.
                 var s = AppViewModel.Instance.Settings;
                 s.PeopleHideUnknown = false;
                 s.Save();
@@ -301,7 +301,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(FooterVisibility));
         RefreshContinueToDeepAnalyzeBanner();
 
-        // Re-apply wiring + checkbox visibility + count so the select UI never goes stale after a re-cluster while the user is mid-selection.
+        // A re-cluster mid-selection must re-wire checkboxes and the count.
         if (!ViewModel.IsSelectMode) return;
 
         if (e.OldItems != null)
@@ -312,14 +312,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             }
         }
 
-        // The settled selection projection, checkbox visibility, and count depend only on the FINAL collection, so coalesce them to a single deferred pass guarded by a pending flag instead of O(N) work + a whole-subtree walk per delta (O(N^2) when a re-cluster replaces most instances mid-selection).
+        // Only the final collection matters, so coalesce into one deferred pass; per-delta work is O(N^2) when a re-cluster replaces most instances.
         if (_selectMaintenancePending) return;
         _selectMaintenancePending = true;
         DispatcherQueue.TryEnqueue(() =>
         {
             _selectMaintenancePending = false;
             if (_unloaded || !ViewModel.IsSelectMode) return;
-            // Detach-then-attach makes the reproject non-re-entrant and guards against double-subscription; restores selection by stable ClusterId so a mid-selection re-cluster never silently drops the user's multi-select.
+            // Detaching before re-attaching avoids re-entrancy and double subscription; selection is restored by stable ClusterId.
             foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
             ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
             foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
@@ -340,7 +340,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         try { foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged; } catch { /* swallow */ }
         try { FileID.ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
         try { ChangeLog.Instance.Changed -= OnChangeLogChanged; } catch { /* swallow */ }
-        // Dispose the ViewModel — cancels its _disposalCts so any in-flight RefreshAsync task running on a thread-pool thread unwinds with OperationCanceledException instead of accessing detached state.
+        // Disposing cancels in-flight RefreshAsync tasks so they unwind instead of touching detached state.
         try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 
@@ -456,7 +456,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
     {
-        // The engine emits a faceClusteringComplete IPC event when done; we refresh after our local IPC fire-and-forget to avoid a confusing "old data shown briefly" flicker.
+        // The engine emits faceClusteringComplete when done; refreshing only then avoids briefly showing old data.
         try
         {
             await ViewModels.EngineClient.Instance.WaitForReadyAsync(TimeSpan.FromSeconds(15));
@@ -469,7 +469,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
-    // OnClusterDoubleTapped has no Tag fallback, so without this bridge a double-tap silently returns and the person-detail sheet never opens.
+    // OnClusterDoubleTapped has no Tag fallback, so the DataContext must be set here or a double-tap never opens the detail sheet.
     private void OnClusterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                           Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
     {
@@ -480,10 +480,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (cluster is null) return;
         el.DataContext = cluster;
 
-        // ItemsRepeater virtualizes + recycles cards, so the one-shot UpdateCheckboxVisibility() walk (run only at toggle time) misses any card realized later via scroll/refresh — its select checkbox then never appears (or a recycled card keeps a stale Visible).
+        // ItemsRepeater recycles cards, so the one-shot UpdateCheckboxVisibility() walk misses cards realized later; their checkbox would never appear or stay stale.
         el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
-            // A snapshot would then write the stale visibility as the final state.
             if (_unloaded) return;
             var selectVisible = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
             foreach (var d in EnumerateDescendants(el))
@@ -768,7 +767,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         BulkActionBar.Visibility = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
         _selectedClusterIds.Clear();
         PublishCheckedPeople();
-        // ItemsRepeater doesn't ItemContainerStyle, so we walk realized children.
+        // ItemsRepeater has no ItemContainerStyle, so walk the realized children.
         UpdateCheckboxVisibility();
         UpdateSelectionCountText();
         foreach (var c in ViewModel.Clusters)
@@ -791,7 +790,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     private void OnClusterIsSelectedChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(PersonCluster.IsSelected)) return;
-        // Keep the id-keyed selection set in sync as the user toggles cards, so a later instance-replacing refresh can re-project selection by id.
+        // The id-keyed set lets a later instance-replacing refresh re-project the selection.
         if (sender is PersonCluster pc)
         {
             if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
@@ -804,7 +803,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     private void PublishCheckedPeople() =>
         PersonSelectionRegistry.Instance.SetChecked(ViewModel.Clusters.Where(c => c.IsSelected).Select(c => (long)c.ClusterId));
 
-    // Pulled out as a static so the survives-an-instance-replacing-refresh behavior is unit-testable without the UI runtime.
+    // Static so the selection survives an instance-replacing refresh and is testable without the UI runtime.
     internal static void ReprojectSelection(
         System.Collections.Generic.IEnumerable<PersonCluster> clusters,
         System.Collections.Generic.ISet<int> selectedIds)
@@ -984,7 +983,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             foreach (var id in ids) longIds.Add(id);
             try
             {
-                // Surface any failure and do NOT exit select mode / refresh so the user can retry.
+                // On failure stay in select mode so the user can retry.
                 var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
                     "markPersonsAsUnknown",
                     () => EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds),
@@ -1021,7 +1020,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ShowAsync can throw on a broken XamlRoot (mid-shutdown, tab re-host) so the call is wrapped and logged — a failed alert must never escalate to UnhandledException.
+    // ShowAsync throws on a broken XamlRoot (mid-shutdown, tab re-host); a failed alert must not reach UnhandledException.
     private async Task ShowAlertAsync(string title, string body)
     {
         try

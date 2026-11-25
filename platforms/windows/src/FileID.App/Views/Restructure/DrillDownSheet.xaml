@@ -1,10 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    DrillDownSheet — modal listing every file flowing through a single
-    Sankey ribbon or TreeDiff folder. Each row shows a thumbnail + the
-    pre-move path + the post-move path.
-    drill-down behavior.
--->
+<!-- DrillDownSheet: modal listing the files behind one Sankey ribbon or TreeDiff folder, each row showing the thumbnail, the pre-move path and the post-move path. -->
 <UserControl
     x:Class="FileID.Views.Restructure.DrillDownSheet"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

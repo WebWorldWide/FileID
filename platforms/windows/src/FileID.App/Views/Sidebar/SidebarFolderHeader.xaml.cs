@@ -1,5 +1,4 @@
-﻿// SidebarFolderHeader code-behind. The title-bar folder popover: wires the
-// Hosted in a Flyout, so it subscribes on Loaded (each open) and asks the host to close before any picker or dialog appears.
+﻿// SidebarFolderHeader code-behind: the title-bar folder popover. Hosted in a Flyout, it subscribes on Loaded (each open) and asks the host to close before any picker or dialog appears.
 
 using System.ComponentModel;
 using FileID.IpcSchema;
@@ -194,7 +193,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    // disable the button while a picker dialog is open so a double-click can't spawn two concurrent pickers and race their FolderPath setters.
+    // The button is disabled while a picker is open so a double-click can't spawn two pickers racing on FolderPath.
     private int _pickInFlight; // 0 = idle, 1 = picker open
 
     private async void OnPickClicked(object sender, RoutedEventArgs e)
@@ -267,7 +266,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    // A second click that lands while the first is in flight would race the deletes against the new engine's open + likely corrupt the fresh DB.
+    // A second click during a wipe would race the deletes against the new engine's open and could corrupt the fresh DB.
     private int _wipeInFlight; // 0 = idle, 1 = wipe running
 
     private async void OnWipeClicked(object sender, RoutedEventArgs e)
@@ -309,7 +308,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    /// <summary>ALWAYS attempted in the finally so a delete failure doesn't strand the user.</summary>
+    /// <summary>Runs from a finally block so a delete failure doesn't strand the user.</summary>
     private async Task RunWipeAsync()
     {
         DebugLog.Info("[WIPE] stage 1: clear stale UI state");
@@ -322,7 +321,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] ResetForWipe threw (non-fatal): " + ex.Message);
         }
 
-        // It owns the only SQLite handle, so truncating tables there can't hit the "file in use by another process" race the app-side delete did — no shutdown/restart.
+        // The engine owns the only SQLite handle, so truncating there avoids the "file in use by another process" race of an app-side delete and needs no shutdown or restart.
         if (EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
         {
             try
@@ -376,7 +375,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] stage 3 (delete) threw: " + ex);
         }
 
-        // Earlier wipes only deleted the SQLite trio, leaving stale face crops and thumbnails on disk that the fresh DB would re-reference (face crops live alongside face_print rows; thumbnails are content- hashed but a wipe shouldn't accumulate orphaned files).
+        // The SQLite files are not the only state: face crops and thumbnails would otherwise be left as orphans that the fresh DB could re-reference.
         try
         {
             foreach (var dir in new[] { AppPaths.FacesDir, AppPaths.ThumbsDir })
@@ -394,7 +393,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] stage 3b (face_crops/thumbs) threw (non-fatal): " + ex.Message);
         }
 
-        // Without this, a single locked WAL leaves the user with a dead engine and no recovery path short of relaunching the app.
+        // A single locked WAL would otherwise leave a dead engine with no recovery short of relaunching.
         DebugLog.Info("[WIPE] stage 4: restart engine");
         try
         {

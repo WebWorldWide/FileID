@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    Sidebar — Prototype v3 composition root (232 DIP). Hosts:
+    Sidebar — composition root (232 DIP). Hosts:
       • SidebarTabList           (Browse / Analyze / Act switcher + page rows)
       • SidebarEngineStatus      (only while the engine is starting / crashed)
       • SidebarQueueList         (pending jobs, hidden when empty)

@@ -1,4 +1,4 @@
-﻿// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
+﻿// SankeyFlowControl: Sankey diagram built from plain XAML shapes.
 
 using System;
 using System.Collections.Generic;
@@ -36,7 +36,7 @@ public sealed class SankeyFlowControl : Control
     private readonly Dictionary<Rectangle, Brush> _rectIdleFill = new();
     private TextBlock? _hoverTooltip;
 
-    // With 12 sources × 12 categories that's up to 288 SolidColorBrush allocations per Render call, and Render fires on Loaded + SizeChanged — including during tab-swap mid-scan when the dispatcher is under burst load from EngineClient.
+    // Up to 288 brushes (12 sources x 12 categories) would otherwise be allocated per Render, which fires on Loaded and SizeChanged, including under dispatcher load mid-scan.
     private readonly Brush[] _ribbonIdleBrushes;
     private readonly Brush[] _ribbonHoverBrushes;
     private readonly Brush[] _categoryRectBrushes;
@@ -109,7 +109,7 @@ public sealed class SankeyFlowControl : Control
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => RenderIfResized();
 
-    // The layout is quantized to integer pixels, so re-rendering only when the rounded size actually changes keeps the O(S * C) layout off the hot drag path.
+    // Layout is quantized to integer pixels, so re-rendering only when the rounded size changes keeps the O(S * C) layout off the drag path.
     private void RenderIfResized()
     {
         int w = (int)Math.Round(ActualWidth);
@@ -121,7 +121,7 @@ public sealed class SankeyFlowControl : Control
     private void Render()
     {
         if (_canvas is null) return;
-        // Record the size being evaluated UP FRONT — even when we bail sub-threshold below — so the RenderIfResized debounce doesn't suppress a later restore to a prior size after a sub-threshold pass blanked the canvas (which would leave the diagram permanently blank, e.g. after the Flow/Tree toggle or a narrow-then-widen).
+        // Record the size up front, even for a sub-threshold pass that blanks the canvas; otherwise the RenderIfResized debounce would suppress a later restore to the prior size and leave the diagram blank.
         _lastRenderW = (int)Math.Round(ActualWidth);
         _lastRenderH = (int)Math.Round(ActualHeight);
         _canvas.Children.Clear();
@@ -185,7 +185,7 @@ public sealed class SankeyFlowControl : Control
         }
         int FlowOf(string src, string cat) => flow.TryGetValue((src, cat), out var f) ? f : 0;
 
-        // Group by the precomputed bucket keys (over move indices — no re-parse, no per-move materialization); only each group's Key + Count is read downstream.
+        // Group over move indices with the precomputed bucket keys; only each group's Key and Count are used downstream.
         var rawSourceGroups = Enumerable.Range(0, n).GroupBy(i => srcBucketOf[i])
                                         .OrderByDescending(g => g.Count())
                                         .ToList();
@@ -421,7 +421,7 @@ public sealed class SankeyFlowControl : Control
             b0 * p0.Y + b1 * p1.Y + b2 * p2.Y + b3 * p3.Y);
     }
 
-    // Shared by hover (PointerMoved) and tap (OnTapped) so a touch/pen tap — which never produces a hover phase — still resolves a ribbon.
+    // Shared by hover and tap so a touch or pen tap, which has no hover phase, still resolves a ribbon.
     private Ribbon? HitTest(Point pos)
     {
         const double HitThreshold = 14.0;
@@ -468,7 +468,7 @@ public sealed class SankeyFlowControl : Control
         if (_hoverTooltip != null) { _canvas?.Children.Remove(_hoverTooltip); _hoverTooltip = null; }
         if (hovered is null) return;
 
-        // White-highlight brush is pre-allocated to avoid per-hover DispatcherObject construction during pointer moves.
+        // The highlight brush is pre-allocated to avoid DispatcherObject construction on every pointer move.
         hovered.Path.Fill = hovered.HoverFill;
         if (_sourceRects.TryGetValue(hovered.Source, out var srcRect))
         {

@@ -1,16 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SettingsView — model installer cards, engine info, GPU EP override,
-    Performance Pack downloader, system info.
-
- Hosts five panels:
-      1. Local AI — install / re-install the face models (YuNet + SFace),
-         CLIP ViT-B/32, RAM++ auto-tagger, and the optional Face Mesh
-         eye model
-      2. Engine — version, PID, worker cap, "open log folder"
-      3. Performance — GPU EP picker + Performance Pack downloader
-      4. Storage — DB path, thumbs cache, model cache
-      5. About — version + open-source credits
+    SettingsView — model install cards and catalog, engine controls, GPU
+    override, advanced diagnostics, appearance, organize/cleanup options,
+    locations, storage paths, recent scans and about.
 -->
 <UserControl
     x:Class="FileID.Views.Settings.SettingsView"
@@ -23,9 +15,7 @@
 
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   HorizontalScrollBarVisibility="Disabled">
-        <!-- HorizontalAlignment=Center (was Stretch) so on wide
-             windows the 820-MaxWidth content centers instead of pinning
-             to the leading edge with empty right-side gutter. -->
+        <!-- Centered so the 820-MaxWidth content doesn't pin to the leading edge on wide windows. -->
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">
@@ -35,8 +25,7 @@
                            TextWrapping="Wrap" />
             </StackPanel>
 
-            <!-- FEAT-CRIT-4: Models card. Shows install/progress per model
-                 kind, mirrors macOS Settings.swift "Local AI" section. -->
+            <!-- Models card: install and progress per model kind. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -50,10 +39,7 @@
                                TextWrapping="Wrap"
                                Text="AI models that run on this PC. Each downloads once."/>
 
-                    <!-- ArcFace. Every dynamic surface x:Binds against
-                         Svc.Arcface.* so the card reflects engine state
-                         changes regardless of where they originated
-                         (Welcome sheet, another window, etc). -->
+                    <!-- ArcFace. x:Binds against Svc.Arcface so the card follows installs started from any sheet or window. -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -115,8 +101,7 @@
                         </Grid>
                     </Grid>
 
-                    <!-- CLIP ViT-B/32 — powers free-text semantic image search
-                         AND scan-time zero-shot scene tagging. -->
+                    <!-- CLIP ViT-B/32: free-text image search and scan-time scene tagging. -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -178,9 +163,7 @@
                         </Grid>
                     </Grid>
 
-                    <!-- RAM++ auto-tagger. Primary in-scan tagger (4,585-concept
-                         multi-label ONNX); binds to Svc.RamPlus like the other
-                         cards so install state stays consistent with Welcome. -->
+                    <!-- RAM++ auto-tagger: the primary in-scan tagger; binds to Svc.RamPlus. -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -336,8 +319,7 @@
                                Style="{StaticResource BodyTextBlockStyle}"/>
                     <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
                         <Button Content="Open log folder" Click="OnOpenLogsClicked" />
-                        <!-- PAR-148: always-available engine lifecycle controls,
-                             mirroring macOS SettingsView's Engine section. -->
+                        <!-- Always-available engine lifecycle controls. -->
                         <Button x:Name="RestartEngineCardButton"
                                 Content="Restart engine"
                                 Click="OnRestartEngineCardClicked"
@@ -467,10 +449,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- Advanced — collapsed by default, mirroring macOS's "Advanced"
-                 disclosure. Read-only hardware diagnostics + the power-user
-                 force-retag / thumbnail-cache actions live behind the chevron so
-                 the default Settings page stays clean. -->
+            <!-- Advanced: read-only hardware diagnostics and the force-retag and thumbnail-cache actions, collapsed by default. -->
             <Expander HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Stretch"
                       CornerRadius="12"
@@ -561,7 +540,7 @@
                 </StackPanel>
             </Expander>
 
-            <!-- Appearance. Mirrors macOS AppearanceCard (lava lamp, Text size). -->
+            <!-- Appearance (lava lamp, text size). -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -623,7 +602,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- Organize Folders. Mirrors macOS Settings' "Folder granularity" row. -->
+            <!-- Organize Folders granularity. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -659,7 +638,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- Cleanup. Mirrors macOS Settings' single "Cleanup" toggle. -->
+            <!-- Cleanup toggle. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -690,14 +669,10 @@
                 </StackPanel>
             </Border>
 
-            <!-- Locations. Mirrors macOS Settings' Locations card: scanned
-                 folders and drives from listRoots, OFFLINE when unplugged. -->
+            <!-- Locations: scanned folders and drives from listRoots, OFFLINE when unplugged. -->
             <settings:LocationsCard />
 
-            <!-- Storage. Shows where every on-disk artifact lives — DB,
-                 thumbnail cache, model cache — so users know exactly what
-                 to back up + can clear caches when needed. Mirrors macOS
-                 SettingsView's storage subsection. -->
+            <!-- Storage: where the database, thumbnail cache and model cache live. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -767,9 +742,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- Recent scans. Most-recent 5 scan_sessions rows: started_at,
-                 file count, duration, root path. Refreshes whenever the
-                 Settings tab is opened (cheap query against a small table). -->
+            <!-- Recent scans: the 5 newest scan_sessions rows, refreshed whenever the tab opens. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"

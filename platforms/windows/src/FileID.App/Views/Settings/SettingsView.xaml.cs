@@ -16,12 +16,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private bool _unloaded;
     private bool _initializingToggles;
 
-    /// <summary> expose the singleton ModelInstallerService so
-    /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
-    /// way WelcomeSheet does. Without this binding path the cards stayed
-    /// stale after Welcome installed a model — the imperative TextBlock
-    /// mutation only fired when the user clicked the in-card Install button.
-    /// </summary>
+    /// <summary>The shared installer singleton, so the model cards x:Bind to its slots and stay current when another sheet installs a model.</summary>
     internal Services.ModelInstallerService Svc => Services.ModelInstallerService.Instance;
 
     public SettingsView()
@@ -48,28 +43,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Loaded += (_, _) =>
         {
             HydrateToggles();
-            // Re-seed from on-disk sentinels in case Welcome / DeepAnalyze
-            // installed a model while a different tab was active. The call
-            // happens on the UI thread (Loaded handler), so any
-            // PropertyChanged events from slot.Status flips land on the
-            // dispatcher the bindings live on. Belt-and-suspenders: a
-            // direct Bindings.Update() below forces re-evaluation even
-            // if a PropertyChanged event was dropped (singleton first-
-            // touched off the UI thread, etc.).
+            // A model may have been installed from another sheet while this tab was inactive.
             try { Svc.Refresh(); } catch { }
-            // sync the CUDA llama.cpp install button to
-            // reflect already-installed state at page load. Before this
-            // the buttons always showed "Install" and the user had to
-            // click them just to see the state flip (matching engine's
-            // immediate sentinel-check short-circuit).
             try { SyncInstallButtonStates(); } catch { }
-            // Force a bindings refresh after sentinel re-seed. Without
-            // this, the ArcFace / MobileCLIP install buttons can stay on
-            // "Install" at page load even when the sentinels exist on
-            // disk — Set()'s equality short-circuit suppresses the
-            // PropertyChanged event when Refresh()'s SeedSlot writes a
-            // status equal to the cached field. NEXT.md tracked this
-            // as the "install-state detection at page load" bug.
+            // Set()'s equality short-circuit can swallow PropertyChanged when Refresh() writes an unchanged status, so force the bindings.
             try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
             try { _ = PopulateRecentScansAsync(); } catch { }
         };
@@ -114,9 +91,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }).ConfigureAwait(true);
 
         if (_unloaded) return;
-        // Defensive: view may have unloaded during the async DB read; the
-        // XAML element references could be disposed. Wrap in try/catch
-        // to keep an in-flight continuation from fast-failing the dispatcher.
+        // The view may have unloaded during the DB read; a throw here would fast-fail the dispatcher.
         try
         {
             if (rows.Count == 0)
@@ -134,9 +109,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 var dur = completed.HasValue && completed.Value > started
                     ? FormatDuration(completed.Value - started)
                     : (status == "running" ? "running…" : "—");
-                // The engine stamps failed (DbWriter error / GPU TDR) and
-                // cancelled rows too — surface those instead of letting them
-                // read like clean completions.
+                // Failed and cancelled sessions must not read like clean completions.
                 var statusNote = status switch
                 {
                     "failed" => "  ·  failed",
@@ -165,20 +138,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         return $"{ts.Minutes}m{ts.Seconds:00}s";
     }
 
-    /// <summary>probe the engine's install sentinels and flip the
-    /// NVIDIA-acceleration card buttons to "Installed" + disabled if the
-    /// runtime is already present on disk. Same sentinel path the engine
-    /// writes after a successful prewarm (atomic temp+rename) — file
-    /// existence is sufficient. Matches <see cref="Services.ModelInstallerService"/>'s
-    /// SentinelInstalled probe.
-    ///
-    /// Also covers the ArcFace + MobileCLIP slots that the model-card x:Binds
-    /// observe via Svc.Arcface.Status / Svc.Clip.Status. SeedFromSentinels
-    /// already keeps those slots in sync, but if the singleton was first
-    /// touched off the UI thread or PropertyChanged was suppressed by Set()'s
-    /// equality short-circuit, the bindings stay stale. Directly forcing
-    /// the slot Status here (on the UI dispatcher) wakes those bindings up.
-    /// </summary>
+    /// <summary>Probes the engine's install sentinels (written atomically after a successful prewarm) and marks the CUDA llama.cpp button and the ArcFace, CLIP and VLM slots installed when present.</summary>
     private void SyncInstallButtonStates()
     {
         if (SentinelExists("llama_runtime_cuda_x64"))
@@ -187,8 +147,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp is installed. Describe Files uses it on the next run.";
         }
-        // ArcFace requires the "arcface" sentinel (the engine bundles
-        // SCRFD + ArcFace as one install in registry.rs).
+        // The engine installs SCRFD and ArcFace together under the "arcface" sentinel.
         if (SentinelExists("arcface") && Svc.Arcface.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
@@ -197,7 +156,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Svc.Arcface.Fraction = 1.0;
             });
         }
-        // CLIP requires BOTH halves on disk (image encoder + text encoder).
+        // CLIP needs both the image and the text encoder on disk.
         if (SentinelExists("mobileclip_s2") && SentinelExists("clip_text")
             && Svc.Clip.Status != Services.ModelInstallStatus.Installed)
         {
@@ -356,28 +315,19 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnProviderOverrideChanged), () =>
         {
-            // The ComboBox's SelectedIndex="0" raises SelectionChanged during
-            // InitializeComponent — before HydrateToggles seeds the saved value
-            // and before _initializingToggles is set. Persisting here would
-            // clobber the user's GPU EP override to "auto" on every Settings
-            // open. Bail until the view is live; HydrateToggles re-selects then.
+            // SelectedIndex="0" raises SelectionChanged during InitializeComponent, before the saved value is seeded; persisting then would reset the override to "auto" on every open.
             if (!IsLoaded || _initializingToggles) return;
             if (ProviderCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
             var s = AppViewModel.Instance.Settings;
             s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
             s.Save();
-            // The engine reads this value each time Describe Files starts
-            // (runtime.rs's user_forced_cpu()), so no restart is needed.
         });
 
     public string EngineVersionText
     {
         get
         {
-            // Info can be null even when State==Ready in the brief
-            // window between spawn + first ready event. Surface State so
-            // the Settings card stops claiming "Engine starting..." for
-            // a Ready engine.
+            // Info is null briefly after spawn even when State is Ready.
             var ec = EngineClient.Instance;
             var info = ec.Info;
             if (info is not null) return $"Engine v{info.Version} - PID {info.Pid}";
@@ -444,10 +394,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     public Visibility RecommendationVisibility =>
         string.IsNullOrEmpty(RecommendationText) ? Visibility.Collapsed : Visibility.Visible;
 
-    /// <summary>P/E core split when hybrid, plus logical thread count
-    /// and the worker cap currently in effect. Falls back to physical
-    /// cores when running against an older engine that didn't populate
-    /// the new fields.</summary>
+    /// <summary>P/E core split when hybrid, plus logical thread count and the worker cap in effect.</summary>
     public string CpuTopologyText
     {
         get
@@ -522,7 +469,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Scan-time scene tagging uses CLIP (source='auto') and is enabled by default.
     public string SceneTaggingDiagnosticsText =>
         "Tags: CLIP zero-shot (source='auto', scan-time, fast) + manual VLM refinement.";
 
@@ -537,11 +483,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
         });
 
-    // Force re-tag: re-scan the current library root with rescan=true so the
-    // engine recomputes tags for files it already has (incremental rescan
-    // skips up-to-date files). Without this, a tagging change isn't visible
-    // unless the user deletes fileid.sqlite. Root comes from the same place
-    // the normal scan path uses (AppViewModel.FolderPath).
+    // An incremental rescan skips up-to-date files, so re-tagging needs rescan=true on the current root.
     private async void OnForceRetagClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnForceRetagClicked), async () =>
         {
@@ -618,22 +560,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
         catch
         {
-            // Settings is low-stakes — silently ignore. The path is already
-            // shown next to the button so the user can copy it manually.
+            // The path is shown next to the button, so a failed reveal is harmless.
         }
     }
 
-    /// <summary> route the Settings install button through the
-    /// shared ModelInstallerService slot, same as WelcomeSheet. Single source
-    /// of truth for status; the x:Bind paths on the card update automatically
-    /// via the slot's PropertyChanged. No more local OnProgress subscription
-    /// (which couldn't pick up state changes that originated in Welcome).</summary>
-    // Per-card install re-entry guard. Mirrors WelcomeSheet: PrewarmAsync
-    // only flips Status to Downloading after awaiting WaitForReadyAsync, so a
-    // rapid double-click on Install/Retry could otherwise fire two
-    // slot.InstallAsync() (→ duplicate prewarm IPC) while Status is still
-    // NotInstalled/Failed. UI-thread-confined (click handler + ConfigureAwait
-    // (true) continuation).
+    // PrewarmAsync flips Status to Downloading only after WaitForReadyAsync, so a rapid double-click would otherwise send a duplicate prewarm. UI-thread-confined.
     private readonly System.Collections.Generic.HashSet<Services.ModelSlot> _installInFlight = new();
 
     private void OnInstallModelClicked(object sender, RoutedEventArgs e)
@@ -652,9 +583,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         // Cancel this row's in-flight model (the engine now supports per-model cancel).
         if (slot.Status == Services.ModelInstallStatus.Downloading)
         {
-            // Pre-flip caption to "Cancelling…" so the user gets instant
-            // feedback — engine confirmation takes 1-5 s. Mirrors macOS
-            // WelcomeSheet.swift:74-82's pre-emptive reset.
+            // Engine confirmation takes 1-5 s, so show "Cancelling…" immediately.
             slot.Message = "Cancelling…";
             slot.BytesPerSecond = 0;
             slot.EtaSeconds = 0;
@@ -673,10 +602,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }, "Install " + slot.DisplayLabel);
     }
 
-    // Drive the cancel and surface failure. If CancelAllAsync throws (engine
-    // crashed / IPC dead), the slot would otherwise sit at "Cancelling…"
-    // forever with the button still reading "Cancel". Reset it back to the
-    // Downloading caption and tell the user the cancel couldn't be delivered.
+    // If the engine is dead the cancel never lands, so the optimistic "Cancelling…" caption must be reverted and the user told.
     private async Task CancelSlotAsync(Services.ModelSlot slot)
     {
         try
@@ -687,9 +613,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             DebugLog.Warn($"[SETTINGS] Cancel {slot.DisplayLabel} threw: {ex}");
             if (_unloaded) return;
-            // Clear the optimistic "Cancelling…" caption so the row no longer
-            // claims a cancel is in progress; the slot stays Downloading and
-            // the button reverts to "Cancel" for another attempt.
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (slot.Status == Services.ModelInstallStatus.Downloading
@@ -721,10 +644,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // ContentDialog.ShowAsync can throw on a broken XamlRoot
-        // (mid-shutdown, tab re-host). Catch + log so a failed alert never
-        // escalates to App.UnhandledException. Mirrors
-        // SidebarProcessingControl.ShowAlertAsync.
+        // ShowAsync throws on a broken XamlRoot (mid-shutdown, tab re-host); a failed alert must not reach App.UnhandledException.
         try
         {
             if (XamlRoot is null)
@@ -757,13 +677,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     internal Visibility VisibleIfFailed(Services.ModelInstallStatus s) =>
         s == Services.ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
 
-    // Single ProgressBar per model card: indeterminate until the first byte,
-    // then determinate. Replaces the old ProgressBar↔ProgressRing Visibility
-    // swap that flickered each time Fraction crossed 0.
-    //
-    // Gate indeterminate on NOT-yet-started (HasStarted is sticky for the
-    // session), not on an instantaneous frac<=0 — so a multi-pack fraction
-    // rewind can't re-flap the bar to its marquee. Mirrors WelcomeSheet.
+    // Indeterminate until the first byte. Gated on the sticky HasStarted rather than fraction<=0 so a multi-pack fraction rewind doesn't flap the bar back to its marquee.
     internal bool IsStarting(Services.ModelInstallStatus s, bool hasStarted) =>
         s == Services.ModelInstallStatus.Downloading && !hasStarted;
 
@@ -777,18 +691,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         _ => "Download",
     };
 
-    // Sticky once started — see WelcomeSheet.ShowRateEta. Avoids flapping the
-    // row in/out on a single transient sub-100 B/s stall sample; RateEtaLabel
-    // renders empty text while stalled so the row holds a blank line.
+    // Sticky once started so one transient stall sample doesn't flap the row; RateEtaLabel renders empty while stalled.
     internal Visibility ShowRateEta(Services.ModelInstallStatus status, bool hasStarted) =>
         status == Services.ModelInstallStatus.Downloading && hasStarted
             ? Visibility.Visible : Visibility.Collapsed;
 
     internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
     {
-        // Prefer the engine's caption (e.g. "Queued — starting download…") while
-        // we're still at 0%, so the row doesn't read "Starting…" forever after
-        // the engine has acknowledged the prewarm.
+        // At 0% prefer the engine's caption (e.g. "Queued — starting download…") over "Starting…".
         string pct;
         if (fraction > 0) pct = $"{fraction * 100:0}%";
         else if (!string.IsNullOrEmpty(message)) pct = message;

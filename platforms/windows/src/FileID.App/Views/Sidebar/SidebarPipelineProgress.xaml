@@ -1,7 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SidebarPipelineProgress — the scan card's five-step indicator
-    (Prototype v3): Scan → Tag → Faces → Captions → Done as five 3 px
+    SidebarPipelineProgress — the scan card's five-step indicator: Scan → Tag → Faces → Captions → Done as five 3 px
     capsule segments plus "Step N of 5 · Stage". Finished steps are muted,
     the current step takes the stage colour (gold, lavender while captions
     run, pink when done). 1:1 port of the macOS PipelineBlock step strip.

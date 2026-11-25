@@ -1,10 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    PersonDetailSheet — modal showing every face in a cluster + a
-    structured-name editor (title / first / middle / last / suffix).
-    Save fires renamePerson IPC; deletes are deferred (split is a
-    People-tab gesture, not a sheet action).
--->
+<!-- PersonDetailSheet: modal listing a cluster's faces with a structured-name editor (title / first / middle / last / suffix). Save fires renamePerson; deletes are a People-tab gesture, not a sheet action. -->
 <UserControl
     x:Class="FileID.Views.People.PersonDetailSheet"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
