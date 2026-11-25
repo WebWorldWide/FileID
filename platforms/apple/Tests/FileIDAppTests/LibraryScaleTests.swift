@@ -62,6 +62,15 @@ struct LibraryScaleTests {
         #expect(applied.first { $0.id == 5 }?.sizeBytes == 7)
     }
 
+    @Test func theListingSaysHowManyRowsWaitBelowTheLoadedOnes() throws {
+        #expect(LibraryView.moreBelowNote(loaded: 2_300, total: 129_979) == "2,300 of 129,979 loaded · Load all")
+        #expect(LibraryView.moreBelowNote(loaded: 129_979, total: 129_979) == nil)
+        #expect(LibraryView.moreBelowNote(loaded: 600, total: nil) == "More files below · Load all")
+        let library = try appSource("Views/LibraryView.swift")
+        #expect(library.contains("else if canLoadMore, similarSeed == nil, let note = Self.moreBelowNote("))
+        #expect(library.contains("Button { jumpToEnd() } label: { Text(note) }"))
+    }
+
     @Test func rowsLoadedWithoutTagsGetTheirChipsFromTheBottomUp() throws {
         let library = try appSource("Views/LibraryView.swift")
         #expect(library.contains("private func fillTags(for ids: [Int64]"))
