@@ -1800,7 +1800,6 @@ fn hrow(key: &str, desc: &str) -> Line<'static> {
     ])
 }
 
-/// `N word` with singular/plural agreement.
 fn library_count_label(
     search_empty: bool,
     truncated: bool,
@@ -1821,6 +1820,7 @@ fn library_count_label(
     }
 }
 
+/// `N word` with singular/plural agreement.
 fn plural(n: usize, singular: &str, plural: &str) -> String {
     format!("{n} {}", if n == 1 { singular } else { plural })
 }
