@@ -1046,43 +1046,6 @@ def load_catalog(database, sql_text, pragmas):
         connection.close()
 
 
-def catalog_image(path):
-    """Everything a catalog file holds, to compare two of them: its schema objects, the
-    rows of every table (the shadow tables of the full-text indexes included) and its pragmas."""
-    with tempfile.TemporaryDirectory(prefix="FileIDImage-") as temporary:
-        copy = Path(temporary) / "c.sqlite"
-        for suffix in ("", "-wal", "-shm"):
-            if Path(str(path) + suffix).exists():
-                shutil.copy2(str(path) + suffix, str(copy) + suffix)
-        connection = sqlite3.connect(copy)
-        try:
-            master = sorted(connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master"), key=repr)
-            image = {"master": master,
-                     "pragmas": {name: connection.execute(f"PRAGMA {name}").fetchone()[0]
-                                 for name in ("user_version", "application_id", "page_size", "auto_vacuum", "encoding")}}
-            virtual = [name for kind, name, _, sql in master if kind == "table" and (sql or "").upper().startswith("CREATE VIRTUAL")]
-            for kind, name, _, sql in master:
-                if kind != "table" or any(name == v + suffix for v in virtual for suffix in FTS_SHADOWS if suffix != "_config"):
-                    continue
-                if name in virtual:
-                    # the index itself: every term with its row, column and position, whatever its segment layout
-                    connection.execute(f"CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main,{sql_literal(name)},'instance')")
-                    image["index " + name] = sorted(connection.execute("SELECT term,doc,col,offset FROM temp.vocab").fetchall())
-                    connection.execute("DROP TABLE temp.vocab")
-                    columns = [row[1] for row in connection.execute(f"PRAGMA table_xinfo({quote_name(name)})") if row[6] == 0]
-                    image["text " + name] = sorted(connection.execute(
-                        f"SELECT rowid,{','.join(quote_name(c) for c in columns)} FROM {quote_name(name)}").fetchall(), key=repr)
-                else:
-                    image["table " + name] = sorted(table_rows(connection, name)[1], key=repr)
-            return image
-        finally:
-            connection.close()
-
-
-def differing(left, right):
-    return [key for key in sorted(set(left) | set(right)) if left.get(key) != right.get(key)]
-
-
 FIXTURE_FORMAT = 1
 STATE_SKIP = ("FileID/fileid.sqlite", "FileID/logs/", "home/", "Models/")
 
@@ -1258,18 +1221,6 @@ def verify_fixture(name, parent, os_name):
         if problems:
             raise Failure(f"fixture {name} does not capture back to itself: {', '.join(problems)}")
         return same_forms
-
-
-def check_catalog_round_trip(ctx, directory):
-    """The captured SQL, expanded here, must rebuild the live catalog exactly."""
-    meta = json.loads((Path(directory) / "fixture.json").read_text(encoding="utf-8"))
-    sql_text = expand_text(ctx, (Path(directory) / "catalog.sql").read_text(encoding="utf-8"))
-    with tempfile.TemporaryDirectory(prefix="FileIDRoundTrip-") as temporary:
-        rebuilt = Path(temporary) / "fileid.sqlite"
-        load_catalog(rebuilt, sql_text, meta["pragmas"])
-        problems = differing(catalog_image(ctx.database), catalog_image(rebuilt))
-    if problems:
-        raise Failure(f"the dump does not rebuild the catalog: {', '.join(problems)}")
 
 
 FIXTURE_FOLDER = Path("/private/tmp/fileid-conformance-fixture")

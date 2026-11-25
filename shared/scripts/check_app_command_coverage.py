@@ -8,7 +8,7 @@ build) by default. Every command it can send must therefore be
    `server.rs` that does more than `{}`, and, for catalog, tool and chat
    requests, the action named in the matching handler; and
 2. exercised on that engine by a conformance case CI runs against the
-   app-hosted build (pinned to the Swift engine's replies), or listed in
+   app-hosted build (its expected replies were captured from the retired Swift engine), or listed in
    OUTSIDE_CONFORMANCE with the reason and where it was measured instead.
 
 "App-reachable" is read from the app's sources: a command case of
@@ -40,7 +40,7 @@ HANDLERS = {
 }
 
 # Reachable commands that no conformance case can run on CI's runner, with the
-# reason and where the Rust engine was checked against the Swift engine instead.
+# reason and where the Rust engine was checked instead.
 # Empty: every app-reachable command has a case. An entry looks like
 # ("command", "benchmarkModel"): "needs an installed model; <reason>".
 OUTSIDE_CONFORMANCE: dict[tuple[str, str], str] = {}

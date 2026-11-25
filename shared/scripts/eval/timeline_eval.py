@@ -7,7 +7,7 @@ Two modes, both on scratch catalogs inside the evaluation folder:
               pool worker (--sample-video-pool), embeds the pool frames with the
               engine's CLIP through a photo scan, then applies the scene-pool
               rules (scene cuts by CLIP cosine, activity windows by luma change;
-              a port of VideoSceneSelection.swift / video_scene_selection.rs)
+              the same rules as video_scene_selection.rs)
               with the given thresholds. Fast enough to sweep.
   full        End to end. Scans the videos, loads an installed visual model (no
               download is ever started: the run aborts if one begins), runs the
