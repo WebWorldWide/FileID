@@ -210,7 +210,7 @@ struct RestructureView: View {
                     }
                 Hairline()
             }
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 16) {
                     header
                     if let outcome = moveOutcome {
@@ -1335,7 +1335,7 @@ struct RestructureView: View {
                     .padding(Theme.Metrics.pageInsetX)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(Array(groups.enumerated()), id: \.element.id) { idx, g in
                             if idx > 0 { Hairline(color: Theme.hairlineSoft) }

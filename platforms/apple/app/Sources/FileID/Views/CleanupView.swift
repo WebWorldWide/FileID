@@ -361,7 +361,7 @@ struct CleanupView: View {
 
     @ViewBuilder
     private func list(visible: [DuplicateGroup]) -> some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 16) {
                 // First-timer explainer above the groups. Inline (not a
                 // tooltip) so the keeper concept is impossible to miss.

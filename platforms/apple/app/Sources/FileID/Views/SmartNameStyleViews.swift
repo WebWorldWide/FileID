@@ -206,7 +206,7 @@ struct SmartNamePreviewSheet: View {
             MetaText(loading ? "Working out names…" : (status ?? "No files to name."))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(spacing: 6) {
                     ForEach(rows) { row in
                         SmartNameRow(row: row,

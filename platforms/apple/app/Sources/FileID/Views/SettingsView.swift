@@ -16,7 +16,7 @@ struct SettingsTab: View {
     @State private var confirmFactoryReset = false
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 20) {
                 AppearanceCard()
                 PrivacyCard()

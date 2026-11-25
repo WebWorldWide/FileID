@@ -65,7 +65,7 @@ struct CatalogWorkbench: View {
                         search()
                     }
                 VHairline()
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 16) {
                         if let selected {
                             playerCard(selected)
@@ -721,7 +721,7 @@ private struct MomentResultsList: View, Equatable {
     }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(rows) { row in
                     RailRow(selected: selectedIndex == row.id || checked.contains(row.id), action: { onSelect(row.id) }) {

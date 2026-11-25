@@ -224,7 +224,7 @@ struct FaceReviewSheet: View {
             .padding(16)
             picker.padding(.horizontal, 16).padding(.bottom, 12)
             Hairline()
-            ScrollView { content.padding(16) }
+            ScrollView(.vertical) { content.padding(16) }
         }
         .frame(minWidth: 760, minHeight: 520)
         .sheetSurface()

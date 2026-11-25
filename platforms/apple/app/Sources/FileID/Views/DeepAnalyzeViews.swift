@@ -385,7 +385,7 @@ struct DeepAnalyzeView: View {
     }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 if !hideExplainer {

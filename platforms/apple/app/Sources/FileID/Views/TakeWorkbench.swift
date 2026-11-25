@@ -94,7 +94,7 @@ struct TakeWorkbench: View {
                         TakeReview(engine: engine, group: group) { reloadAuto(after: group.groupKey) }
                             .id(group.groupKey)
                     } else if selectedEvent != nil || manual {
-                        ScrollView {
+                        ScrollView(.vertical) {
                             VStack(alignment: .leading, spacing: 16) {
                                 groupPanel
                                 if let job = goalJob { goalJobRow(job) }
@@ -155,7 +155,7 @@ struct TakeWorkbench: View {
     private var groupsPane: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)

@@ -81,7 +81,7 @@ struct WelcomeSheet: View {
             MetaText("Without these, FileID still finds files by name and by text inside them.", size: 11.5)
                 .padding(.horizontal, 22).padding(.bottom, 4)
 
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 0) {
             modelRow(
                 title: "Search by description",

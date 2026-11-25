@@ -142,7 +142,7 @@ struct BulkRenameSheet: View {
     }
 
     private var renameList: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(spacing: 4) {
                 ForEach(nameable) { row in
                     BulkRenameRow(

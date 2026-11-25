@@ -252,7 +252,7 @@ struct ToolsWorkbench: View {
                 .overlay(alignment: .bottom) { Hairline() }
             }
             HStack(spacing: 0) {
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 16) {
                         recipePanel
                         outputPanel
@@ -578,7 +578,7 @@ struct ToolsWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             .padding(.top, Theme.Metrics.pageInsetY)
             Hairline()
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     ZStack {
                         Color.black.opacity(0.35)

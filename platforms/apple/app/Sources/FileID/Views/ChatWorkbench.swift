@@ -122,7 +122,7 @@ struct ChatWorkbench: View {
             header
             Hairline()
             ScrollViewReader { scroll in
-                ScrollView {
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if messages.isEmpty {
                             if readiness.hasFiles { emptyState } else { needsScanState }
@@ -400,7 +400,7 @@ struct ChatWorkbench: View {
                     .accessibilityLabel("Source player")
                 Hairline()
             }
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
                         SourceRow(index: index + 1, hit: hit, selected: openedSource == index) { open(hit, index: index) }
@@ -440,7 +440,7 @@ struct ChatWorkbench: View {
                         .padding(.horizontal, 12).padding(.bottom, 8)
                         .accessibilityLabel("Source player")
                 }
-                ScrollView {
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
                             SourceRow(index: index + 1, hit: hit, selected: openedSource == index) { open(hit, index: index) }
