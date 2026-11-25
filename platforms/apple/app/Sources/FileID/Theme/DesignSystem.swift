@@ -54,10 +54,16 @@ struct PanelHeader<Trailing: View>: View {
     var trailing: Trailing
     init(_ title: String, @ViewBuilder trailing: () -> Trailing) { self.title = title; self.trailing = trailing() }
     var body: some View {
-        HStack(spacing: 12) {
-            SectionLabel(title)
-            Spacer(minLength: 8)
-            trailing
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                SectionLabel(title)
+                Spacer(minLength: 8)
+                trailing
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(title)
+                trailing
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .overlay(alignment: .bottom) { Hairline() }

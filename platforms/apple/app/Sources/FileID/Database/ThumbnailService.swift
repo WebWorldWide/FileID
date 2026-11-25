@@ -310,6 +310,28 @@ public final class ThumbnailService {
         min(size, 3072 / max(scale, 1))
     }
 
+    /// A person tile's face crop is kept on disk beside the thumbnails, so a tile never re-reads the original photo (slow on a
+    /// network or USB drive) after the first time. The identity already carries the photo's revision, box and processing.
+    nonisolated static func faceCropURL(identity: String, in directory: URL? = nil) -> URL {
+        let hex = SHA256.hash(data: Data("face|\(identity)".utf8)).map { String(format: "%02x", $0) }.joined()
+        return (directory ?? ThumbnailDiskCache.dir).appendingPathComponent("\(hex).jpg")
+    }
+
+    nonisolated static func storedFaceCrop(identity: String, in directory: URL? = nil) async -> NSImage? {
+        let url = faceCropURL(identity: identity, in: directory)
+        guard let data = await Task.detached(priority: .userInitiated, operation: { ThumbnailDiskCache.load(url) }).value else { return nil }
+        return await decoded(data)
+    }
+
+    nonisolated static func storeFaceCrop(_ image: NSImage, identity: String, in directory: URL? = nil) {
+        let url = faceCropURL(identity: identity, in: directory)
+        guard (try? ReadOnlyLocations.requireWritable(url)) != nil,
+              let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let data = jpegData(pixels) else { return }
+        try? data.write(to: url, options: .atomic)
+        ThumbnailDiskCache.noteWrite()
+    }
+
     nonisolated static func jpegData(_ image: CGImage) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }

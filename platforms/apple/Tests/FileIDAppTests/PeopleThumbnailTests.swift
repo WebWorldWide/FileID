@@ -95,3 +95,22 @@ struct PeopleThumbnailTests {
         #expect(await ThumbnailService.sourceOrientation(for: root.appendingPathComponent("missing.jpg")) == nil)
     }
 }
+
+@Suite("Stored face crops", .serialized)
+struct StoredFaceCropTests {
+    @Test("a stored crop comes back for the same identity and not for another")
+    @MainActor func roundTrip() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(component: "face-crops-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let image = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in
+            NSColor.red.setFill(); rect.fill(); return true
+        }
+        let identity = "7|9|/photos/a.jpg|0.1,0.1,0.2,0.2|rev"
+        #expect(await ThumbnailService.storedFaceCrop(identity: identity, in: directory) == nil)
+        ThumbnailService.storeFaceCrop(image, identity: identity, in: directory)
+        let back = await ThumbnailService.storedFaceCrop(identity: identity, in: directory)
+        #expect(back != nil)
+        #expect(await ThumbnailService.storedFaceCrop(identity: identity + "|other", in: directory) == nil)
+    }
+}

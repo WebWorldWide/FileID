@@ -40,6 +40,11 @@ struct RelatedTriesSection: View {
                     .id(group.groupKey)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
+            if let note = TakeProposals.listLimitNote(shown: proposals.count) {
+                MetaText(note, size: 11.5)
+                    .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .animation(Theme.springStandard, value: proposals.map(\.groupKey))
         .animation(Theme.springStandard, value: job?.state)

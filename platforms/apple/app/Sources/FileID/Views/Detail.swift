@@ -78,6 +78,7 @@ struct Detail: View {
             Spacer(minLength: 0)
             MetaText(pageMeta, color: Theme.text2, size: 12)
         }
+        .environment(\.fixedTextSize, true)
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, 18).padding(.bottom, 14)
         .overlay(alignment: .bottom) { Hairline() }
     }

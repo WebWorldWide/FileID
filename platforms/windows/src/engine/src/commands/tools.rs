@@ -453,6 +453,17 @@ fn execute_with_move(
     run_action(&mut Db::Held(conn), request, move_file)
 }
 
+/// An export is catalogued only when it lands inside a library location; one written elsewhere is not the library's file.
+fn output_in_library(conn: &Connection, output: &Path) -> rusqlite::Result<bool> {
+    let output = fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
+    let mut statement = conn.prepare("SELECT path FROM library_roots")?;
+    let roots = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(roots.iter().any(|root| {
+        let root = Path::new(root);
+        output.starts_with(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()))
+    }))
+}
+
 /// The writer was free while the output was produced, so a rename, rescan or Undo may have intervened.
 fn require_unchanged(conn: &Connection, id: &str, item: &Item) -> Result<()> {
     let state: Option<String> = conn
@@ -788,11 +799,13 @@ fn run_action(
                         db.with(|conn| {
                             let tx = conn.transaction()?;
                             require_unchanged(&tx, id, &item)?;
-                            tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
-                            let derived = tx.last_insert_rowid();
-                            tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,?3,?4)",params![item.output.file_id,derived,role,recipe_json])?;
-                            if let Some(last) = receipts.last_mut() {
-                                last.derived_id = Some(derived);
+                            if output_in_library(&tx, output)? {
+                                tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
+                                let derived = tx.last_insert_rowid();
+                                tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,?3,?4)",params![item.output.file_id,derived,role,recipe_json])?;
+                                if let Some(last) = receipts.last_mut() {
+                                    last.derived_id = Some(derived);
+                                }
                             }
                             persist(&tx, id, &receipts, "running")?;
                             tx.commit()?;
@@ -1157,6 +1170,7 @@ mod tests {
                 .unwrap();
             let conn = crate::db::open_writer(&root.join("catalog.sqlite")).unwrap();
             crate::db::test_support::insert_file(&conn, 1, source.to_str().unwrap(), "image");
+            conn.execute("INSERT INTO library_roots(path,display,added_at) VALUES(?1,'t',0)", [root.to_string_lossy()]).unwrap();
             Self { root, source, conn }
         }
 
@@ -1941,6 +1955,23 @@ mod tests {
         let id = preview.operation_id.unwrap();
         let exported = execute(&mut fixture.conn, &action(Some(id.clone()), "execute")).unwrap();
         (fixture, id, std::path::PathBuf::from(&exported.outputs[0].output_path))
+    }
+    #[test]
+    fn an_export_outside_every_library_location_is_not_catalogued() {
+        let mut fixture = Fixture::new();
+        fixture.conn.execute("DELETE FROM library_roots", []).unwrap();
+        let request = fixture.request("jpeg");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let id = preview.operation_id.unwrap();
+        let exported = execute(&mut fixture.conn, &action(Some(id.clone()), "execute")).unwrap();
+        assert!(std::path::Path::new(&exported.outputs[0].output_path).is_file());
+        let files: i64 = fixture.conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).unwrap();
+        let assets: i64 = fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets", [], |row| row.get(0)).unwrap();
+        assert_eq!((files, assets), (1, 0));
+        let (_, receipts, _) = load(&fixture.conn, &id).unwrap();
+        assert_eq!(receipts[0].derived_id, None);
+        execute(&mut fixture.conn, &action(Some(id), "undo")).unwrap();
+        assert!(!std::path::Path::new(&exported.outputs[0].output_path).exists());
     }
     #[test]
     fn undo_publication_race_cannot_clobber_even_identical_unowned_bytes() {

@@ -656,6 +656,7 @@ struct LibraryView: View {
                 }
             }
         }
+        .environment(\.fixedTextSize, true)
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 12)
         .sheet(isPresented: $bulkTagSheetOpen, onDismiss: refreshBulkState) {
             BulkTagSheet(
@@ -667,6 +668,7 @@ struct LibraryView: View {
                     editEpoch += 1   // refresh tile dots even mid-scan
                 }
             )
+            .environment(\.fixedTextSize, false)
         }
     }
 
@@ -678,7 +680,7 @@ struct LibraryView: View {
                 .textFieldStyle(.plain)
                 .help("Filter by name, tag, description or person")
                 .accessibilityLabel("Filter by name, tag, description or person")
-                .font(Theme.Font.body(13.5))
+                .font(Theme.Font.body(13.5, fixed: true))
                 .focused($searchFocused)
             if !searchText.isEmpty {
                 Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
@@ -725,7 +727,7 @@ struct LibraryView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.up.arrow.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.text3)
-                Text(sort.summary).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2).lineLimit(1)
+                Text(sort.summary).font(Theme.Font.body(12.5, .medium, fixed: true)).foregroundStyle(Theme.text2).lineLimit(1)
             }
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.control)
@@ -976,7 +978,7 @@ struct LibraryView: View {
                     }
                 } label: {
                     Text(k.label)
-                        .font(Theme.Font.body(12.5, active ? .semibold : .medium))
+                        .font(Theme.Font.body(12.5, active ? .semibold : .medium, fixed: true))
                         .foregroundStyle(active ? Theme.onGold : Theme.text2)
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)

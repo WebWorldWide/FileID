@@ -522,17 +522,21 @@ struct ToolsWorkbench: View {
     }
 
     private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, @ViewBuilder content: () -> Content) -> some View {
-        HStack(alignment: alignment, spacing: 12) {
-            Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: Theme.Font.scaled(92), alignment: .leading)
-                .padding(.top, alignment == .top ? 6 : 0)
-                .accessibilityHidden(label.isEmpty)
-            let row = HStack(alignment: alignment, spacing: 12) { content() }
-            ViewThatFits(in: .horizontal) {
+        let row = HStack(alignment: alignment, spacing: 12) { content() }
+        let title = Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: alignment, spacing: 12) {
+                title
+                    .frame(width: Theme.Font.scaled(92), alignment: .leading)
+                    .padding(.top, alignment == .top ? 6 : 0)
+                    .accessibilityHidden(label.isEmpty)
                 row
+                Spacer(minLength: 0)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                if !label.isEmpty { title }
                 ScrollView(.horizontal, showsIndicators: false) { row }
             }
-            Spacer(minLength: 0)
         }
     }
 
