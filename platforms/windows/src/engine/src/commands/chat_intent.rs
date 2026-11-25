@@ -334,6 +334,9 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         return None;
     }
     if ["undo", "revert", "reverse"].contains(&verb) {
+        if has_prefix(rest, &["renam"]) && !has_prefix(rest, &["move", "organi", "restructur", "reorgani", "layout"]) {
+            return Some(Intent::new("refuse"));
+        }
         let movement = rest.is_empty()
             || has_prefix(rest, &["move", "organi", "restructur", "reorgani", "layout"])
             || has(rest, &["last", "that", "it", "folder", "folders"]);
@@ -382,7 +385,10 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         let folder = folder_reference(rest, &cased[1..], text).filter(|folder| folder != "library");
         return Some(Intent { folder: Some(folder.unwrap_or_else(|| "library".into())), ..Intent::new("applyFolderLayout") });
     }
+    let into_folders = ["move", "put", "sort", "group", "file", "split", "separate"].contains(&verb)
+        && (has(rest, &["folders"]) || (verb != "sort" && has(rest, &["by"]) && has(rest, &["year", "month", "date", "type", "kind", "event", "day"])));
     let organize = ["organize", "organise", "reorganize", "reorganise", "restructure", "tidy", "arrange"].contains(&verb)
+        || into_folders
         || starts(&words, &["sort", "out"])
         || (verb == "clean" && rest.first().is_some_and(|word| word == "up"))
         || (["suggest", "plan", "propose"].contains(&verb) && has(rest, &layout));
@@ -390,6 +396,13 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         let skip = usize::from(rest.first().is_some_and(|word| word == "up" || word == "out"));
         let folder = folder_reference(&rest[skip..], &cased[1 + skip..], text);
         return Some(Intent { folder: Some(folder.unwrap_or_else(|| "library".into())), ..Intent::new("suggestFolderLayout") });
+    }
+    let about_people = has_prefix(rest, &["person", "people", "group", "cluster", "face"]);
+    if (verb == "rename" && !about_people)
+        || (["move", "copy", "put"].contains(&verb) && has(rest, &["to", "into", "onto"]))
+        || (["tag", "retag"].contains(&verb) && has(rest, &["photos", "pictures", "images", "files", "videos", "everything", "library", "them", "these", "all"]))
+    {
+        return Some(Intent::new("refuse"));
     }
     if ["name", "call", "label"].contains(&verb) {
         let targets: [&[&str]; 9] = [
@@ -581,7 +594,10 @@ pub fn parse_question(text: &str) -> Question {
             }
         }
     }
-    if has(&words, &["camera", "cameras"]) && has(&words, &["which", "what", "whats", "most", "top", "fewest", "least"]) {
+    let camera_named = words.iter().enumerate().any(|(index, word)| {
+        ["camera", "cameras"].contains(&word.as_str()) && !words.get(index + 1).is_some_and(|next| next == "folder" || next == "directory")
+    });
+    if camera_named && has(&words, &["which", "what", "whats", "most", "top", "fewest", "least"]) {
         question.breakdown = Some("camera".into());
         if question.measure == "list" {
             question.measure = "count".into();
@@ -809,7 +825,7 @@ pub fn size_bounds(words: &[String]) -> Option<(Option<i64>, Option<i64>, BTreeS
             _ => return None,
         })
     };
-    let above = ["bigger", "larger", "over", "above", "more", "exceeding", "heavier"];
+    let above = ["bigger", "larger", "longer", "over", "above", "more", "exceeding", "heavier"];
     let below = ["smaller", "under", "below", "less", "lighter"];
     let amount = |index: usize| -> Option<(f64, usize)> {
         let word = words.get(index)?;
@@ -1412,6 +1428,16 @@ pub fn off_topic(text: &str) -> bool {
     let words: Vec<String> = lower.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect();
     let asks = words.iter().any(|word| OFF_TOPIC_WORDS.contains(&word.as_str())) || OFF_TOPIC_PHRASES.iter().any(|phrase| lower.contains(phrase));
     asks && !words.iter().any(|word| FILE_WORDS.contains(&word.as_str()))
+}
+
+/// "How many files couldn't be read?", "Which files failed?": about the catalog's unreadable files, not words to search.
+pub fn unreadable_ask(text: &str) -> bool {
+    let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).collect();
+    if has(&words, &["person", "people", "face", "faces", "named"]) {
+        return false;
+    }
+    has(&words, &["unreadable", "corrupt", "corrupted", "failed", "fail", "fails", "failing", "unopenable"])
+        || (has(&words, &["read", "readable", "opened"]) && has(&words, &["couldnt", "cant", "cannot", "unable", "wasnt", "werent", "didnt", "wont", "not"]))
 }
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];

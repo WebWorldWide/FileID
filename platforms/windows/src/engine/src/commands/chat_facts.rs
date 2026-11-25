@@ -41,7 +41,7 @@ pub(crate) struct Filter {
     pub excluded_person_names: Vec<String>,
     pub min_bytes: Option<i64>,
     pub max_bytes: Option<i64>,
-    pub camera: Option<String>,
+    pub camera: Option<CameraPick>,
     pub root: Option<RootScope>,
     /// Only files showing someone ("photos of people"): a face that is not excluded, or a person observed by the user.
     pub with_faces: bool,
@@ -106,9 +106,13 @@ impl Filter {
             args.push(json(&self.excluded_person_ids));
             args.push(json(&self.excluded_person_ids));
         }
-        if let Some(camera) = &self.camera {
-            parts.push("lower(trim(f.camera_model))=lower(?)".into());
-            args.push(Value::Text(camera.clone()));
+        match &self.camera {
+            Some(CameraPick::Models { models, .. }) => {
+                parts.push("lower(trim(f.camera_model)) IN (SELECT value FROM json_each(?))".into());
+                args.push(json(&models.iter().map(|model| model.to_lowercase()).collect::<Vec<_>>()));
+            }
+            Some(CameraPick::Missing) => parts.push("(f.camera_model IS NULL OR trim(f.camera_model)='')".into()),
+            None => {}
         }
         if self.with_faces {
             parts.push("f.id IN (SELECT file_id FROM face_prints WHERE COALESCE(excluded,0)=0 UNION SELECT file_id FROM catalog_observations WHERE person_id IS NOT NULL AND stale=0)".into());
@@ -182,8 +186,12 @@ impl Filter {
         if !self.extensions.is_empty() {
             let _ = write!(text, " in {} format", format_label(&self.extensions));
         }
-        if let Some(camera) = &self.camera {
-            let _ = write!(text, " taken with {camera}");
+        match &self.camera {
+            Some(CameraPick::Models { label, .. }) => {
+                let _ = write!(text, " taken with {label}");
+            }
+            Some(CameraPick::Missing) => text += " with no camera information",
+            None => {}
         }
         if !self.person_names.is_empty() {
             let separator = if self.all_people || self.person_names.len() == 1 { " and " } else { " or " };
@@ -214,9 +222,17 @@ impl Filter {
     }
 }
 
-/// A camera model the catalog knows, named in the question; `rest` is the question without those words.
+/// What a question says about the camera: models the catalog knows (one model, or every model of a brand) or files
+/// that record none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CameraPick {
+    Models { label: String, models: Vec<String> },
+    Missing,
+}
+
+/// A camera choice named in a question; `rest` is the question without those words.
 pub(crate) struct CameraAsk {
-    pub model: String,
+    pub pick: CameraPick,
     pub rest: String,
 }
 
@@ -224,12 +240,53 @@ fn alphanumerics(text: &str) -> String {
     text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-const CAMERA_LEAD_WORDS: [&str; 12] = ["taken", "shot", "captured", "recorded", "made", "with", "on", "by", "using", "from", "the", "a"];
+const CAMERA_LEAD_WORDS: [&str; 13] = ["taken", "shot", "captured", "recorded", "made", "with", "on", "by", "using", "from", "the", "a", "an"];
+
+/// (words that name the brand, label, lowercase model prefixes or fragments). Models carry no make column, so a brand
+/// is its known model families.
+const CAMERA_BRANDS: [(&[&str], &str, &[&str]); 12] = [
+    (&["sony"], "Sony", &["ilce", "ilca", "ilme", "dsc", "nex", "slt", "zv-", "dcr", "hdr-", "fdr", "dslr-a", "sony"]),
+    (&["canon"], "Canon", &["canon", "eos", "powershot", "ixus"]),
+    (&["nikon"], "Nikon", &["nikon", "coolpix"]),
+    (&["iphone", "apple"], "Apple", &["iphone", "ipad", "apple"]),
+    (&["samsung", "galaxy"], "Samsung", &["samsung", "sm-", "galaxy"]),
+    (&["pixel", "google"], "Google", &["pixel"]),
+    (&["fujifilm", "fuji"], "Fujifilm", &["fujifilm", "finepix", "x-t", "x-e", "x-pro", "x100", "gfx"]),
+    (&["panasonic", "lumix"], "Panasonic", &["panasonic", "dmc-", "dc-"]),
+    (&["olympus"], "Olympus", &["olympus", "e-m", "tg-", "om-"]),
+    (&["gopro"], "GoPro", &["gopro", "hero"]),
+    (&["leica"], "Leica", &["leica"]),
+    (&["pentax"], "Pentax", &["pentax"]),
+];
+
+const MISSING_WORDS: [&str; 7] = ["no", "without", "missing", "lacking", "lack", "lacks", "nothing"];
+const CAMERA_DETAIL_WORDS: [&str; 14] = ["camera", "cameras", "information", "info", "data", "model", "models", "metadata", "exif", "recorded", "listed", "details", "set", "saved"];
+
+fn lowered(word: &str) -> String {
+    super::chat_intent::clean(word).replace('\'', "")
+}
 
 pub(crate) fn camera_asked_about(conn: &Connection, text: &str) -> Result<Option<CameraAsk>> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let lower: Vec<String> = words.iter().map(|word| lowered(word)).collect();
+    let camera_word = lower.iter().enumerate().any(|(index, word)| {
+        (word == "camera" || word == "cameras") && !lower.get(index + 1).is_some_and(|next| next == "folder" || next == "directory")
+    });
+    if camera_word && lower.iter().any(|word| MISSING_WORDS.contains(&word.as_str())) {
+        let drop: Vec<bool> = lower
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                MISSING_WORDS.contains(&word.as_str())
+                    || CAMERA_DETAIL_WORDS.contains(&word.as_str())
+                    || (word == "with" && lower.get(index + 1).is_some_and(|next| MISSING_WORDS.contains(&next.as_str())))
+            })
+            .collect();
+        let rest = words.iter().zip(&drop).filter(|(_, dropped)| !**dropped).map(|(word, _)| *word).collect::<Vec<_>>().join(" ");
+        return Ok(Some(CameraAsk { pick: CameraPick::Missing, rest }));
+    }
     let mut statement = conn.prepare("SELECT DISTINCT trim(camera_model) FROM files WHERE failed=0 AND camera_model IS NOT NULL AND trim(camera_model)<>''")?;
     let models = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let words: Vec<&str> = text.split_whitespace().collect();
     let mut best: Option<(&String, usize, usize)> = None;
     for model in &models {
         let wanted = alphanumerics(model);
@@ -245,16 +302,41 @@ pub(crate) fn camera_asked_about(conn: &Connection, text: &str) -> Result<Option
             }
         }
     }
-    Ok(best.map(|(model, start, end)| {
+    let strip = |start: usize, end: usize| {
         let mut first = start;
-        while first > 0 && CAMERA_LEAD_WORDS.contains(&words[first - 1].to_lowercase().as_str()) {
+        while first > 0 && CAMERA_LEAD_WORDS.contains(&lower[first - 1].as_str()) {
             first -= 1;
         }
-        CameraAsk {
-            model: model.clone(),
-            rest: words.iter().enumerate().filter(|(index, _)| !(first..end).contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" "),
+        let mut last = end;
+        if lower.get(last).is_some_and(|word| word == "camera" || word == "cameras") {
+            last += 1;
         }
-    }))
+        words.iter().enumerate().filter(|(index, _)| !(first..last).contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" ")
+    };
+    if let Some((model, start, end)) = best {
+        return Ok(Some(CameraAsk { pick: CameraPick::Models { label: model.clone(), models: vec![model.clone()] }, rest: strip(start, end) }));
+    }
+    let context = lower.iter().any(|word| ["camera", "cameras", "taken", "shot", "took", "captured", "photographed", "take"].contains(&word.as_str()));
+    if !context {
+        return Ok(None);
+    }
+    for (names, label, families) in CAMERA_BRANDS {
+        let Some(at) = lower.iter().position(|word| names.contains(&word.as_str())) else { continue };
+        let known: Vec<String> = models
+            .iter()
+            .filter(|model| {
+                let model = model.to_lowercase();
+                families.iter().any(|family| model.starts_with(family) || (family.len() > 4 && model.contains(family)))
+            })
+            .cloned()
+            .collect();
+        if known.is_empty() {
+            continue;
+        }
+        let article = if label.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+        return Ok(Some(CameraAsk { pick: CameraPick::Models { label: format!("{article} {label} camera"), models: known }, rest: strip(at, at + 1) }));
+    }
+    Ok(None)
 }
 
 pub(crate) fn file_name(path: &str) -> String {
@@ -642,6 +724,78 @@ pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Opt
         })
         .collect();
     Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
+}
+
+/// The files the unreadable note counts, named, for "which files failed?" and "how many files couldn't be read?".
+pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+    let mut args = vec![
+        Value::Text(crate::scan_session::HIDDEN_ROW_MESSAGE.to_owned()),
+        Value::Text(crate::db::zero_byte::ZERO_BYTE_REASON.to_owned()),
+    ];
+    let within = match root {
+        Some(root) => {
+            args.push(Value::Text(root.param().to_owned()));
+            format!(" AND {}", super::roots::clause("f.path_text", "?3"))
+        }
+        None => String::new(),
+    };
+    let mut statement = conn.prepare(&format!(
+        "SELECT f.id,f.path_text,f.kind,COALESCE(f.error_message,'') FROM files f WHERE f.failed=1 AND COALESCE(f.error_message,'') NOT LIKE '%will retry%' \
+         AND COALESCE(f.error_message,'') NOT IN (?1,?2){within} ORDER BY f.path_text ASC,f.id ASC"
+    ))?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(("No files failed to read.".into(), vec![]));
+    }
+    let count = rows.len() as i64;
+    let hits: Vec<CatalogHit> = rows
+        .into_iter()
+        .take(SHOWN)
+        .map(|(file_id, path, kind, reason)| CatalogHit {
+            file_id,
+            path,
+            kind,
+            text: if reason.trim().is_empty() { "Couldn't be read".to_owned() } else { reason.trim().chars().take(120).collect() },
+            evidence_id: None,
+            start_seconds: None,
+            page: None,
+            selection_match: None,
+        })
+        .collect();
+    let shown = if count as usize > hits.len() { format!(" Showing the first {}.", hits.len()) } else { String::new() };
+    let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
+    Ok((format!("{} {noun} couldn't be read, so {pronoun} not in other answers.{shown}", count_label(count)), hits))
+}
+
+/// "Takeout" names one nested folder here and "Google Takeout Export" holds thousands of files: offer the longer
+/// names that contain the word, since the exact match alone can badly undercount what the person means.
+pub(crate) fn containing_folders_note(conn: &Connection, folder: &str, root: Option<&RootScope>) -> Result<Option<String>> {
+    let Some(name) = folder.strip_prefix("named:").map(str::trim).filter(|name| name.chars().count() >= 3) else { return Ok(None) };
+    let wanted = name.to_lowercase();
+    let within = super::roots::clause("f.path_text", "?2");
+    let mut statement = conn.prepare(&format!(
+        "SELECT f.path_text FROM files f WHERE f.failed=0 AND lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {within}"
+    ))?;
+    let mut found: HashMap<String, i64> = HashMap::new();
+    let mut rows = statement.query(rusqlite::params![format!("%{}%", like_escape(&wanted)), root.map(RootScope::param)])?;
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        let parts: Vec<&str> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+        let Some((_, folders)) = parts.split_last() else { continue };
+        if let Some(holder) = folders.iter().find(|part| part.to_lowercase().contains(&wanted)) {
+            *found.entry((*holder).to_owned()).or_default() += 1;
+        }
+    }
+    found.retain(|holder, _| !holder.eq_ignore_ascii_case(name));
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let mut found: Vec<(String, i64)> = found.into_iter().collect();
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let places: Vec<String> = found.iter().take(3).map(|(holder, count)| format!("{holder} ({})", count_noun(*count, "file", "files"))).collect();
+    Ok(Some(format!("Folders with “{name}” in their name: {}. Ask about one by its full name.", places.join(", "))))
 }
 
 /// Said after an answer when files failed to read (a busy machine timed them out, say): they are in none of the answers.

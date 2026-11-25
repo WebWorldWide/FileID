@@ -952,7 +952,7 @@ struct Prepared {
 struct Earlier {
     question: super::chat_intent::Question,
     plan: SearchPlan,
-    camera: Option<String>,
+    camera: Option<chat_facts::CameraPick>,
 }
 
 fn plan_for(
@@ -1043,7 +1043,7 @@ fn earlier_turn(
             let camera = chat_facts::camera_asked_about(conn, text)?;
             let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
             let (question, plan) = plan_for(planned, earlier.as_ref(), people, events);
-            earlier = Some(Earlier { question, plan, camera: camera.map(|ask| ask.model) });
+            earlier = Some(Earlier { question, plan, camera: camera.map(|ask| ask.pick) });
         }
     }
     Ok(earlier)
@@ -1083,6 +1083,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let history = user_history(conn, &request.conversation_id)?;
     let mut prepared = prepare_turn(conn, request, semantic, text, &history, &people, &events, root.as_ref())?;
     if prepared.actions.is_empty()
+        && !super::chat_intent::unreadable_ask(&prepared.text)
         && let Some(note) = chat_facts::unreadable_files_note(conn, root.as_ref())?
     {
         prepared.message = format!("{} {note}", prepared.message);
@@ -1139,6 +1140,10 @@ fn prepare_turn(
         let (message, hits) = chat_facts::people_answer(conn, &question, root.as_ref())?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
+    if super::chat_intent::unreadable_ask(&text) {
+        let (message, hits) = chat_facts::unreadable_answer(conn, root.as_ref())?;
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+    }
     if let Some(kinds) = place_ask(&text) {
         let message = chat_facts::places_answer(conn, &kinds, root.as_ref())?;
         return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false });
@@ -1167,7 +1172,7 @@ fn prepare_turn(
     let camera = chat_facts::camera_asked_about(conn, &text)?;
     let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
     let (question, plan) = plan_for(planned, previous.as_ref(), people, events);
-    let camera = camera.map(|ask| ask.model).or_else(|| {
+    let camera = camera.map(|ask| ask.pick).or_else(|| {
         let words: Vec<String> = text.to_lowercase().split(|c: char| !c.is_alphabetic()).map(str::to_owned).collect();
         let continues = super::chat_intent::follow_up_rest(&text).is_some() || super::chat_intent::points_back(&words);
         previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())
@@ -1325,10 +1330,14 @@ fn prepare_turn(
 }
 
 fn with_same_named_folders_note(conn: &Connection, folder: &str, root: Option<&super::roots::RootScope>, message: String) -> Result<String> {
-    Ok(match chat_facts::same_named_folders_note(conn, folder, root)? {
+    let mut message = match chat_facts::same_named_folders_note(conn, folder, root)? {
         Some(note) => format!("{message} {note}"),
         None => message,
-    })
+    };
+    if let Some(note) = chat_facts::containing_folders_note(conn, folder, root)? {
+        message = format!("{message} {note}");
+    }
+    Ok(message)
 }
 
 const UNNAMED_PEOPLE_NOTE: &str = "People aren't named yet — name them in People to search by person.";
@@ -2296,6 +2305,113 @@ mod tests {
         assert_eq!(ask("How many photos have faces?").0, "Found 2 photos with faces, using 20 bytes.");
         assert_eq!(ask("How many files have faces?").0, "Found 3 files with faces, using 30 bytes.");
         assert_eq!(ask("Which camera took the most photos?").0, "ILCE-7M5 has the most photos (2). Photos by camera: ILCE-7M5: 2, DMC-FH22: 1.");
+    }
+
+    fn adlon_like() -> Connection {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,camera_model) VALUES
+             (1,'/lib/Camera/a.jpg',1,1000,1688472000,0,'image','jpg','ILCE-7M5'),
+             (2,'/lib/Camera/b.jpg',2,1000,1688472001,0,'image','jpg','DSC-RX100'),
+             (3,'/lib/Camera/c.jpg',3,1000,1688472002,0,'image','jpg','iPhone 12'),
+             (4,'/lib/Camera/d.jpg',4,1000,1688472003,0,'image','jpg',NULL),
+             (5,'/lib/Camera/e.jpg',5,1000,1688472004,0,'image','jpg',''),
+             (6,'/lib/Camera/f.mp4',6,2000000000,1688472005,0,'video','mp4',NULL),
+             (7,'/lib/Clips/g.mp4',7,5000,1688472006,0,'video','mp4',NULL),
+             (8,'/lib/Models/ship.obj',8,300,1688472007,0,'model','obj',NULL),
+             (9,'/lib/Models/hull.stl',9,300,1688472008,0,'model','stl',NULL),
+             (10,'/lib/Google Takeout Export/Photos/h.jpg',10,10,1688472009,0,'image','jpg',NULL),
+             (11,'/lib/Google Takeout Export/Photos/i.jpg',11,10,1688472010,0,'image','jpg',NULL),
+             (12,'/lib/Mail/Takeout/MyActivity.html',12,10,1688472011,0,'other','html',NULL);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,error_message) VALUES
+             (20,'/lib/Mail/broken.pdf',20,10,0,'pdf','pdf',1,'Could not parse the file'),
+             (21,'/lib/Mail/broken2.jpg',21,10,0,'image','jpg',1,'Image decode failed');",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn adlon_like_readable() -> Connection {
+        let conn = adlon_like();
+        conn.execute("DELETE FROM files WHERE failed=1", []).unwrap();
+        conn
+    }
+
+    #[test]
+    fn a_camera_brand_counts_every_model_of_that_brand() {
+        let mut conn = adlon_like_readable();
+        let sony = ask(&mut conn, "How many photos were taken with a Sony camera?");
+        assert_eq!(sony.message, "Found 2 photos taken with a Sony camera, using 2.0 KB.");
+        assert_eq!(sony.hits.len(), 2);
+        assert!(ask(&mut conn, "How many photos were taken with an iPhone?").message.starts_with("Found 1 photo taken with an Apple camera"));
+        assert_eq!(ask_in(&mut conn, "brand", "How many photos were taken with a Sony camera?").hits.len(), 2);
+        let again = ask_in(&mut conn, "brand", "And videos?");
+        assert!(again.message.contains("No videos taken with a Sony camera"), "{}", again.message);
+    }
+
+    #[test]
+    fn photos_without_camera_information_are_counted_not_searched() {
+        let mut conn = adlon_like_readable();
+        let none = ask(&mut conn, "How many photos have no camera information?");
+        assert_eq!(none.message, "Found 4 photos with no camera information, using 2.0 KB.");
+        let listed = ask(&mut conn, "Show photos without camera data");
+        assert!(listed.message.starts_with("Found 4 photos with no camera information"), "{}", listed.message);
+    }
+
+    #[test]
+    fn unreadable_file_questions_name_the_failed_files() {
+        let mut conn = adlon_like();
+        for text in ["How many files couldn't be read?", "Which files failed?"] {
+            let answer = ask(&mut conn, text);
+            assert_eq!(answer.message, "2 files couldn't be read, so they're not in other answers.", "{text}");
+            assert_eq!(answer.hits.len(), 2, "{text}");
+        }
+    }
+
+    #[test]
+    fn three_d_model_and_video_size_questions_use_the_kind_and_the_size() {
+        let mut conn = adlon_like_readable();
+        let models = ask(&mut conn, "Do I have any 3D models?");
+        assert_eq!(models.hits.len(), 2, "{}", models.message);
+        assert!(models.message.starts_with("Found 2 matches"), "{}", models.message);
+        let big = ask(&mut conn, "Show me videos longer than 1 GB");
+        assert_eq!(big.message, "Found 1 video over 1.0 GB.", "{}", big.message);
+    }
+
+    #[test]
+    fn requests_chat_cannot_do_say_so_instead_of_searching() {
+        let mut conn = adlon_like_readable();
+        for (text, expected) in [
+            ("Undo the last rename", "Renames can't be undone from Chat."),
+            ("Rename the file Pulp Fiction to Pulp", "Chat can't rename a single file."),
+            ("Copy my photos to my desktop", "Chat can't move or copy files to a place you name."),
+            ("Tag my photos", "Chat doesn't tag files on request."),
+        ] {
+            let answer = ask(&mut conn, text);
+            assert!(answer.message.starts_with(expected), "{text}: {}", answer.message);
+            assert!(answer.hits.is_empty(), "{text}");
+        }
+        let request = ChatRequest {
+            request_id: "r".into(),
+            conversation_id: "layout".into(),
+            action: "send".into(),
+            text: Some("Move my photos into folders by year".into()),
+            use_model: Some(false),
+            context: Some(crate::ipc::ChatContext { library_root: Some("/lib".into()), ..Default::default() }),
+            ..Default::default()
+        };
+        let layout = execute(&mut conn, &request).unwrap();
+        assert_eq!(layout.actions.as_ref().map(|actions| actions[0].kind.as_str()), Some("suggestFolderLayout"), "{}", layout.message);
+    }
+
+    #[test]
+    fn a_folder_named_camera_is_a_folder_not_a_camera_breakdown() {
+        let mut conn = adlon_like_readable();
+        let camera = ask(&mut conn, "What's in the Camera folder?");
+        assert_eq!(camera.message, "Found 6 files in Camera.");
+        let takeout = ask(&mut conn, "What's in the Takeout folder?");
+        assert!(takeout.message.starts_with("Found 1 file in Takeout."), "{}", takeout.message);
+        assert!(takeout.message.contains("Folders with “Takeout” in their name: Google Takeout Export (2 files)."), "{}", takeout.message);
     }
 
     #[test]
