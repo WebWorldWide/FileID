@@ -728,10 +728,7 @@ fn remove_quarantined_victim(
     }
 
     let trash_path = original.to_path_buf();
-    let removed = fileid_engine::shell::trash::trash(std::slice::from_ref(&trash_path))
-        .into_iter()
-        .next()
-        .unwrap_or(false);
+    let removed = trash_one(&trash_path);
     if removed {
         RemovalOutcome::Removed
     } else if trash_unavailable_on_this_platform() {
@@ -739,6 +736,42 @@ fn remove_quarantined_victim(
     } else {
         RemovalOutcome::Failed
     }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn trash_one(path: &Path) -> bool {
+    match fileid_engine::shell::trash::trash_path(path) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("{}", trash_failure_line(path, &error));
+            false
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn trash_one(path: &Path) -> bool {
+    fileid_engine::shell::trash::trash(std::slice::from_ref(&path.to_path_buf()))
+        .into_iter()
+        .next()
+        .unwrap_or(false)
+}
+
+#[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
+fn trash_failure_line(path: &Path, error: &anyhow::Error) -> String {
+    let chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+    let mut line = format!(
+        "dedupe: could not move {} to the Trash: {chain}",
+        display_path(path.to_string_lossy().as_ref())
+    );
+    if chain.contains("another filesystem") {
+        line.push_str(" (re-run with --delete to remove files on this drive permanently)");
+    }
+    line
 }
 
 fn quarantine(original: &Path) -> std::io::Result<PathBuf> {
@@ -885,6 +918,23 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cross_filesystem_trash_failure_names_the_reason_and_suggests_delete() {
+        let error =
+            anyhow::anyhow!("EXDEV").context("Trash is on another filesystem from this file");
+        let line = trash_failure_line(Path::new("/mnt/data/a.jpg"), &error);
+        assert!(
+            line.contains("another filesystem") && line.contains("EXDEV"),
+            "{line}"
+        );
+        assert!(line.contains("--delete"), "{line}");
+        let other = trash_failure_line(Path::new("/x/a.jpg"), &anyhow::anyhow!("denied"));
+        assert!(
+            other.contains("denied") && !other.contains("--delete"),
+            "{other}"
+        );
+    }
+
     use super::*;
 
     fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {

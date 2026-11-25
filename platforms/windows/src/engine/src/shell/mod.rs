@@ -393,6 +393,7 @@ pub mod reveal {
         if run_silent(
             Command::new("dbus-send")
                 .arg("--session")
+                .arg("--print-reply")
                 .arg("--dest=org.freedesktop.FileManager1")
                 .arg("--type=method_call")
                 .arg("/org/freedesktop/FileManager1")
@@ -1529,7 +1530,7 @@ pub mod trash {
             }
             Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
                 Err(error).context(
-                    "Trash is on another filesystem; refusing an identity-changing copy so Undo remains provable",
+                    "Trash is on another filesystem from this file, so FileID can’t move it there (refusing an identity-changing copy so Undo remains provable)",
                 )
             }
             Err(error) => {
