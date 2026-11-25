@@ -606,6 +606,44 @@ async fn an_unreadable_video_between_model_failures_does_not_count_against_the_m
     assert!(!model_keeps_failing(&mut streak, &model_error));
 }
 
+fn frame_file(pixel: impl Fn(u32, u32) -> u8) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("fileid-frame-{}.png", uuid::Uuid::new_v4()));
+    image::GrayImage::from_fn(64, 64, |x, y| image::Luma([pixel(x, y)])).save(&path).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn an_empty_caption_on_a_black_or_flat_frame_is_no_description_not_a_model_failure() {
+    let model = scripted(vec![""], None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (black, flat) = (frame_file(|_, _| 2), frame_file(|_, _| 128));
+    for frame in [&black, &flat] {
+        assert_eq!(caption_frame(&model, frame, "describe", &cancel).await.unwrap(), "");
+    }
+    let busy = frame_file(|x, y| ((x * 37 + y * 11) % 200 + 30) as u8);
+    let error = caption_frame(&model, &busy, "describe", &cancel).await.unwrap_err();
+    assert!(error.is::<ModelFailed>(), "an empty caption on a frame with content still counts against the model");
+    for frame in [black, flat, busy] {
+        let _ = std::fs::remove_file(frame);
+    }
+}
+
+#[test]
+fn judging_failures_stops_the_job_only_on_a_streak_of_model_failures() {
+    let model_failed = || anyhow!("mlx").context(ModelFailed);
+    let mut streak = 0;
+    assert!(matches!(judge_failure(model_failed(), false, &mut streak), Failure::Skip(_)));
+    assert!(matches!(judge_failure(model_failed(), false, &mut streak), Failure::Skip(_)));
+    assert!(matches!(judge_failure(anyhow!("decode failed"), false, &mut streak), Failure::Skip(_)));
+    assert_eq!(streak, 0, "a video the model never saw ends the streak");
+    for _ in 1..MODEL_FAILURE_LIMIT {
+        assert!(matches!(judge_failure(model_failed(), false, &mut streak), Failure::Skip(_)));
+    }
+    let Failure::Stop(error) = judge_failure(model_failed(), false, &mut streak) else { panic!("the third in a row stops the job") };
+    assert!(error.to_string().contains("job stopped"));
+    assert!(matches!(judge_failure(model_failed(), true, &mut 0), Failure::Interrupted(_)), "a cancelled job is interrupted, not blamed on the model");
+}
+
 #[tokio::test]
 async fn dropping_a_prefetched_pool_stops_its_decode() {
     let cancel = Arc::new(AtomicBool::new(false));
