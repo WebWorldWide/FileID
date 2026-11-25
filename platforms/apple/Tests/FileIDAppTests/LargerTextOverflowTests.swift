@@ -16,4 +16,12 @@ import Testing
         }
         #expect(bare.isEmpty, "A ScrollView with no axis scrolls sideways too and is offered no width, so one row that does not wrap widens the whole page past the window: \(bare)")
     }
+
+    @Test func duplicatesControlsWrapWhenTheyDoNotFitBesideTheSummary() throws {
+        let cleanup = try appSource("Views/CleanupView.swift")
+        let header = try #require(cleanup.range(of: "private func header(visible"))
+        let body = String(cleanup[header.lowerBound...].prefix(6500))
+        #expect(body.contains("FlowLayout(spacing: 8) { controls }"))
+        #expect(!body.contains("HStack(alignment: .center, spacing: 12) { controls }"))
+    }
 }
