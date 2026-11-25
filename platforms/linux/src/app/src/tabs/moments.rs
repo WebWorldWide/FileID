@@ -165,6 +165,16 @@ impl CatalogUi {
         }
     }
 
+    fn clear_player(&self) {
+        if let Some(stream) = self.stream() {
+            stream.pause();
+        }
+        self.video.set_media_stream(None::<&gtk::MediaStream>);
+        self.timeline.set_playhead(None);
+        self.chapter_rows.borrow_mut().clear();
+        self.detail_stack.set_visible_child_name("empty");
+    }
+
     fn show_player(self: &Rc<Self>, hit: &CatalogHit) {
         self.detail_stack.set_visible_child_name("detail");
         self.player_file.set_text(&v3::file_name(&hit.path));
@@ -1321,6 +1331,7 @@ fn run_search(ui: &Rc<CatalogUi>) {
     }
     ui.set_status("");
     *ui.selected.borrow_mut() = None;
+    ui.clear_player();
     ui.requests.borrow_mut().forget("detail");
     ui.reset_editor();
     v3::clear(&ui.chapters);

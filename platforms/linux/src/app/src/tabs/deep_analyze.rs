@@ -927,6 +927,22 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 
+fn rename_summary(succeeded: u32, failed: u32, messages: &[fileid_engine::ipc::BulkActionItem]) -> String {
+    if failed == 0 {
+        return format!("Renamed {}.", plural(succeeded as usize, "file"));
+    }
+    let reason = messages
+        .iter()
+        .find(|item| !item.ok)
+        .and_then(|item| item.message.as_deref())
+        .filter(|message| !crate::engine_errors::looks_technical(message));
+    let head = format!("Renamed {}; {failed} couldn't be renamed.", plural(succeeded as usize, "file"));
+    match reason {
+        Some(reason) => format!("{head} {reason}"),
+        None => head,
+    }
+}
+
 /// Optimistic refresh after a fire-and-forget command (the engine's
 /// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
 /// so we re-read the DB shortly after instead of waiting for confirmation).
@@ -1066,6 +1082,11 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
             }
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
+        EngineEvent::BulkActionResult(result) if result.action == "renameFiles" => {
+            ui.apply_status.set_text(&rename_summary(result.succeeded, result.failed, &result.messages));
+            ui.apply_status.set_visible(true);
+            refresh(ui);
+        }
         EngineEvent::Error { kind, .. } if error_ends_deep_run(kind) => end_run(ui),
         EngineEvent::Exited => end_run(ui),
         _ => {}
@@ -1075,7 +1096,15 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
 /// A busy bounce means a run IS going, and a server-format fallback keeps the
 /// run alive on the slower path; neither may tear down the live run.
 pub(crate) fn error_ends_deep_run(kind: &str) -> bool {
-    !matches!(kind, "deep_analyze_already_running" | "vlm_server_payload_rejected")
+    match kind {
+        "deep_analyze_already_running" => false,
+        "deep_load_failed"
+        | "deep_source_changed"
+        | "llama_cpp_missing"
+        | "model_license_not_accepted"
+        | "models_not_installed" => true,
+        _ => kind.starts_with("deep_analyze"),
+    }
 }
 
 
@@ -2112,6 +2141,9 @@ mod recommendation_tests {
         assert!(!error_ends_deep_run("vlm_server_payload_rejected"));
         assert!(error_ends_deep_run("deep_analyze_failed"));
         assert!(error_ends_deep_run("llama_cpp_missing"));
+        for unrelated in ["prewarm_failed", "list_roots_failed", "folder_access_denied"] {
+            assert!(!error_ends_deep_run(unrelated));
+        }
     }
 
     #[test]

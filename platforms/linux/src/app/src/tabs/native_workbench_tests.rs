@@ -188,7 +188,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();
         conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-index-job','catalogIndex','[1]','{}','paused',0,'Synthetic paused index; no model inference ran',0,0)",[]).unwrap();
     }
-    wait(|| text(&catalog).contains("Catalog index") && text(&catalog).contains("Paused"));
+    wait(|| text(&catalog).contains("Search index") && text(&catalog).contains("Paused"));
     job_buttons(&catalog)
         .into_iter()
         .find(|b| b.label().as_deref() == Some("Cancel"))

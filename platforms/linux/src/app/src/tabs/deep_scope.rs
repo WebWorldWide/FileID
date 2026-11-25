@@ -39,6 +39,9 @@ fn check_explicit_target(
     exclusions: &[PathBuf],
     db: &Path,
 ) -> Result<(), String> {
+    if exclusions.is_empty() {
+        return Ok(());
+    }
     let conn = fileid_engine::db::open_read(db).map_err(|error| error.to_string())?;
     let paths: Vec<String> = match payload {
         CommandPayload::DeepAnalyzeFile(request) => vec![conn
@@ -70,14 +73,20 @@ fn check_explicit_target(
         _ => return Ok(()),
     };
     for raw in paths {
-        let path = Path::new(&raw)
-            .canonicalize()
-            .map_err(|_| "A scanned folder is offline. Reconnect it, then try again.".to_owned())?;
-        if exclusions.iter().any(|excluded| path.starts_with(excluded)) {
+        if inside_exclusion(&raw, exclusions)? {
             return Err("This is inside one of the folders not to describe.".into());
         }
     }
     Ok(())
+}
+
+/// A file that is gone cannot be inside a folder; only a real I/O failure means the drive is away.
+fn inside_exclusion(raw: &str, exclusions: &[PathBuf]) -> Result<bool, String> {
+    match Path::new(raw).canonicalize() {
+        Ok(path) => Ok(exclusions.iter().any(|excluded| path.starts_with(excluded))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("A scanned folder is offline. Reconnect it, then try again.".to_owned()),
+    }
 }
 
 pub(super) fn prepare(mut payload: CommandPayload) -> Result<CommandPayload, String> {
@@ -111,6 +120,25 @@ pub(super) fn prepare(mut payload: CommandPayload) -> Result<CommandPayload, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_file_does_not_block_a_run_but_an_excluded_one_does() {
+        let dir = std::env::temp_dir().join(format!("fileid-deep-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let excluded = dir.canonicalize().unwrap();
+        let present = dir.join("a.jpg");
+        std::fs::write(&present, b"x").unwrap();
+        let exclusions = vec![excluded];
+        assert_eq!(
+            inside_exclusion(dir.join("gone.jpg").to_str().unwrap(), &exclusions),
+            Ok(false)
+        );
+        assert_eq!(
+            inside_exclusion(present.to_str().unwrap(), &exclusions),
+            Ok(true)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn invalid_exclusion_settings_fail_closed() {

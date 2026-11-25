@@ -55,7 +55,7 @@ impl JobReplay {
                 if let Some(model_kind) = model_kind {
                     self.downloads.retain(|(kind, _)| kind != model_kind);
                 }
-                if kind.starts_with("deep_analyze") && crate::tabs::deep_analyze::error_ends_deep_run(kind) {
+                if crate::tabs::deep_analyze::error_ends_deep_run(kind) {
                     self.end_deep();
                 }
                 if kind == "models_not_installed" || kind == "scan_failed" {

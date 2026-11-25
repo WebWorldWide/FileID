@@ -23,6 +23,7 @@ pub fn title(kind: &str) -> &'static str {
         "model_download_disk_full" => "Not enough disk space",
         "scan_already_running" => "A scan is already running",
         "scan_slower_path" => "This scan will take longer",
+        "location_read_only" => "This drive is read-only",
         _ => "Something went wrong",
     }
 }
