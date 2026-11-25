@@ -455,17 +455,29 @@ fn rename_failure_text(err: &anyhow::Error, dest: &std::path::Path) -> String {
 }
 
 fn tag_failure_text(err: &anyhow::Error) -> String {
+    tag_failure_sentence(err, cfg!(target_os = "macos"))
+}
+
+fn tag_failure_sentence(err: &anyhow::Error, finder: bool) -> String {
     use crate::util::user_message::{io_cause, IoCause};
     if let Some(sentence) = crate::util::user_message::read_only_sentence(err) {
         return sentence;
     }
+    let read_only = || {
+        if finder {
+            "This disk is read-only, so Finder tags can’t be added."
+        } else {
+            "This disk is read-only, so tags can’t be added."
+        }
+    };
     match io_cause(err) {
-        Some(IoCause::ReadOnly) => "This disk is read-only, so Finder tags can’t be added.".into(),
+        Some(IoCause::ReadOnly) => read_only().into(),
         Some(cause) => cause.sentence().into(),
         None if err.chain().any(|layer| layer.to_string().contains("OSStatus error -61")) => {
-            "This disk is read-only, so Finder tags can’t be added.".into()
+            read_only().into()
         }
-        None => "Couldn’t add the Finder tag to this file.".into(),
+        None if finder => "Couldn’t add the Finder tag to this file.".into(),
+        None => "Couldn’t add the tag to this file.".into(),
     }
 }
 
@@ -3203,7 +3215,7 @@ mod tests {
             &mut failed,
             &mut messages,
             0,
-            "Couldn’t add the Finder tag to this file.".into(),
+            "Couldn’t add the tag to this file.".into(),
         );
 
         assert_eq!(succeeded, 0);
@@ -3211,7 +3223,7 @@ mod tests {
         assert!(!messages[0].ok);
         assert_eq!(
             messages[0].message.as_deref(),
-            Some("Couldn’t add the Finder tag to this file.")
+            Some("Couldn’t add the tag to this file.")
         );
     }
 
@@ -4067,10 +4079,15 @@ mod tests {
         assert!(rename_failure_text(&full, dest).starts_with("There isn’t enough free space"));
         let busy = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ResourceBusy));
         assert_eq!(rename_failure_text(&busy, dest), "FileID couldn’t rename this file. Try again.");
-        assert_eq!(tag_failure_text(&read_only), "This disk is read-only, so Finder tags can’t be added.");
+        assert_eq!(tag_failure_sentence(&read_only, true), "This disk is read-only, so Finder tags can’t be added.");
         let status = anyhow::anyhow!("The operation couldn’t be completed. (OSStatus error -61.)");
-        assert_eq!(tag_failure_text(&status), "This disk is read-only, so Finder tags can’t be added.");
-        assert_eq!(tag_failure_text(&anyhow::anyhow!("boom")), "Couldn’t add the Finder tag to this file.");
+        assert_eq!(tag_failure_sentence(&status, true), "This disk is read-only, so Finder tags can’t be added.");
+        assert_eq!(tag_failure_sentence(&anyhow::anyhow!("boom"), true), "Couldn’t add the Finder tag to this file.");
+        assert_eq!(tag_failure_sentence(&read_only, false), "This disk is read-only, so tags can’t be added.");
+        assert_eq!(tag_failure_sentence(&status, false), "This disk is read-only, so tags can’t be added.");
+        let unknown = tag_failure_sentence(&anyhow::anyhow!("boom"), false);
+        assert_eq!(unknown, "Couldn’t add the tag to this file.");
+        assert!(!unknown.contains("Finder"));
     }
 
     #[test]
