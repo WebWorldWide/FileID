@@ -200,6 +200,14 @@ pub(crate) async fn analyze_file_scoped(
     })
 }
 
+/// Opening a cloud placeholder (OneDrive Files On-Demand, iCloud) downloads it, which is network egress the user did not ask for.
+fn ensure_available_offline(path: &std::path::Path, online_only: bool) -> anyhow::Result<()> {
+    if online_only {
+        anyhow::bail!("File is online-only; make it available offline first: {}", path.display());
+    }
+    Ok(())
+}
+
 /// Resolves a file's on-disk path and rasterizes it for the VLM: images pass through, video → 25%-duration keyframe, PDF → page-1 render. Returns the image path plus an optional temp path the caller must clean up. Shared by the per-file CLI and the persistent-server path.
 pub(crate) async fn rasterize_for_vlm(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -220,9 +228,8 @@ pub(crate) async fn rasterize_for_vlm(
             .ok_or(crate::commands::deep_scope::ScopeError::ExcludedTarget)?,
         None => source_path,
     };
-    if !source_path.exists() {
-        anyhow::bail!("source file missing: {}", source_path.display());
-    }
+    let metadata = std::fs::metadata(&source_path).map_err(|_| anyhow::anyhow!("source file missing: {}", source_path.display()))?;
+    ensure_available_offline(&source_path, crate::pipeline::discovery::is_online_only(&metadata))?;
     match kind.as_str() {
         "image" => {
             // llama.cpp's image loader (stb_image) reads JPEG/PNG natively, so those pass through untouched. Everything else (webp, bmp, tiff, gif, …) is transcoded to a temp JPEG: the server declares the real MIME but stb_image has NO webp support, so a .webp would fail per-file with no tags. image-rs decodes webp/bmp/tiff/gif; HEIC isn't supported and falls through to a decode error.
@@ -1182,6 +1189,14 @@ mod tests {
         assert_eq!(apply_person_prefix("jose-at-beach", &people(&["José"])), "jose-at-beach");
         assert_eq!(apply_person_prefix("beach", &people(&["Müller", "Muller"])), "muller-beach");
         assert_eq!(apply_person_prefix("beach", &people(&["東京"])), "beach");
+    }
+
+    #[test]
+    fn an_online_only_file_is_refused_before_it_is_opened() {
+        let path = std::path::Path::new("cloud.jpg");
+        let error = ensure_available_offline(path, true).unwrap_err().to_string();
+        assert!(error.contains("online-only"), "{error}");
+        assert!(ensure_available_offline(path, false).is_ok());
     }
 
     struct Source {
