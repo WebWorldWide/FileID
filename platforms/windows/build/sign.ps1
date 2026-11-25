@@ -40,14 +40,14 @@ if (-not $signingCertificate) {
 # Locate signtool.exe -- ships with the Windows SDK; vswhere can find the
 # latest installed location.
 $signtool = $null
-$candidates = @(
-    "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe",
-    "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
-    "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
-    "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe"
-)
-foreach ($c in $candidates) {
-    if (Test-Path $c) { $signtool = $c; break }
+$onPath = Get-Command signtool.exe -ErrorAction SilentlyContinue
+if ($onPath) { $signtool = $onPath.Source }
+if (-not $signtool) {
+    $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+    $signtool = Get-ChildItem -Path "$kitsRoot\*\x64\signtool.exe" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Directory.Parent.Name -match '^\d+(\.\d+){1,3}$' } |
+        Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+        Select-Object -ExpandProperty FullName -First 1
 }
 if (-not $signtool) {
     Write-Host "sign.ps1: signtool.exe not found. Install Windows 10/11 SDK." -ForegroundColor Red

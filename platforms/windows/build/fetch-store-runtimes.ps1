@@ -15,12 +15,24 @@ New-Item -ItemType Directory -Force -Path $OutputRoot, $CacheDir | Out-Null
 
 function Get-VerifiedFile([string]$Name, [string]$Uri, [string]$Sha256) {
     $path = Join-Path $CacheDir $Name
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        Invoke-WebRequest -Uri $Uri -OutFile $path -UseBasicParsing
+    $expected = $Sha256.ToLowerInvariant()
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $cached = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($cached -eq $expected) { return $path }
+        Write-Host "  discarding invalid cached file: $path" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $path -Force
     }
-    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $Sha256) {
-        throw "SHA-256 mismatch for $Name; expected $Sha256, got $actual."
+    $temporary = "$path.tmp-$PID"
+    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    try {
+        Invoke-WebRequest -Uri $Uri -OutFile $temporary -UseBasicParsing
+        $actual = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "SHA-256 mismatch for $Name; expected $expected, got $actual."
+        }
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
     return $path
 }

@@ -117,9 +117,9 @@ $DistDir     = Join-Path $PlatformDir "dist/$ArchLabel"
 $StagingDir  = Join-Path $DistDir "FileID"
 
 # Run dotnet from the platform dir so platforms/windows/global.json pins the
-# SDK (8.x) regardless of where this script was launched from. Without this,
-# invoking from the repo root resolves the machine-default SDK (e.g. 10.x) and
-# the "need 8.x/9.x" guard below trips even though SDK 8 is installed. (`pwsh
+# SDK (10.x) regardless of where this script was launched from. Without this,
+# invoking from the repo root resolves the machine-default SDK (e.g. 8.x) and
+# the "need 10.x" guard below trips even though SDK 10 is installed. (`pwsh
 # -File` runs in a child process, so this cwd change does not leak to your shell.)
 Set-Location $PlatformDir
 
@@ -174,8 +174,8 @@ if (-not $SkipApp) {
         Write-Host "       Install the .NET 10 SDK: winget install Microsoft.DotNet.SDK.10" -ForegroundColor Yellow
         exit 1
     }
-    if (-not ($dotnetVer -match "^(8|9)\.")) {
-        Write-Host "ERROR: dotnet SDK $dotnetVer found; need 8.x or 9.x." -ForegroundColor Red
+    if (-not ($dotnetVer -match "^10\.")) {
+        Write-Host "ERROR: dotnet SDK $dotnetVer found; need 10.x." -ForegroundColor Red
         Write-Host "       winget install Microsoft.DotNet.SDK.10" -ForegroundColor Yellow
         exit 1
     }
@@ -373,7 +373,7 @@ if (-not $SkipApp) {
     if ($RunTests) {
         Write-Host "Running xUnit tests..." -ForegroundColor Cyan
         & dotnet test (Join-Path $PlatformDir "Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj") `
-            --nologo --no-build -c $Configuration
+            --nologo -c $Configuration
     }
 }
 
