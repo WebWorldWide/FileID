@@ -37,6 +37,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     private int _focusedIndex;
     private bool _zoom;
     private bool _rendering;
+    private bool _scoreFailed;
     private bool _loadedOnce;
     private bool _trashing;
     private bool _focusStripWhenReady;
@@ -175,7 +176,12 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             if (_rendering || _groupList.SelectedIndex < 0 || _groupList.SelectedIndex >= _groups.Count) return;
             var group = _groups[_groupList.SelectedIndex];
-            if (_current?.GroupKey == group.GroupKey && _proposalKey is null) return;
+            if (Busy)
+            {
+                RestoreGroupSelection();
+                return;
+            }
+            if (_current?.GroupKey == group.GroupKey && _proposalKey is null && !_scoreFailed) return;
             LeaveManual();
             ClearProposalSelection();
             Run(ct => ScoreAsync(group, focusStrip: false, ct));
@@ -530,11 +536,38 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         });
     }
 
+    private void RestoreGroupSelection()
+    {
+        var index = -1;
+        for (var i = 0; i < _groups.Count; i++)
+        {
+            if (_groups[i].GroupKey == _current?.GroupKey) { index = i; break; }
+        }
+        _rendering = true;
+        try { _groupList.SelectedIndex = index; }
+        finally { _rendering = false; }
+    }
+
     private async Task ScoreAsync(CatalogTakeAutoGroup group, bool focusStrip, CancellationToken ct)
     {
         await UI(() => ShowScoring(group), ct);
         var ids = group.Shots.SelectMany(s => s.FileIDs).Take(800).ToArray();
-        var response = await Engine.CatalogAsync(Request("scoreTakes", ids), ct);
+        CatalogResponse response;
+        try
+        {
+            response = await Engine.CatalogAsync(Request("scoreTakes", ids), ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            DebugLog.Warn("TakesWorkbench: scoreTakes failed: " + ex.Message);
+            await UI(() =>
+            {
+                if (_current?.GroupKey != group.GroupKey) return;
+                ShowFailure(group, ex is TimeoutException ? "FileID didn't answer in time. Try again in a moment." : ex.Message);
+                Status.Text = "";
+            }, ct);
+            return;
+        }
         await UI(() =>
         {
             if (_current?.GroupKey != group.GroupKey) return;
@@ -586,6 +619,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _manualPage.Visibility = Visibility.Collapsed;
         _review.Visibility = Visibility.Visible;
         _scoringText.Text = $"Checking sharpness, faces and exposure in {group.Shots.Count} {TakeReviewPolicy.Noun(group, group.Shots.Count)}…";
+        _scoreFailed = false;
         _scoring.Visibility = Visibility.Visible;
         _failure.Visibility = Visibility.Collapsed;
         _compare.Visibility = Visibility.Collapsed;
@@ -595,6 +629,10 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     private void ShowFailure(CatalogTakeAutoGroup group, string message)
     {
+        _scoreFailed = true;
+        _rendering = true;
+        try { _groupList.SelectedIndex = -1; }
+        finally { _rendering = false; }
         _scoring.Visibility = Visibility.Collapsed;
         _failureTitle.Text = $"Couldn't score these {TakeReviewPolicy.Noun(group, 2)}";
         _failureBody.Text = message;

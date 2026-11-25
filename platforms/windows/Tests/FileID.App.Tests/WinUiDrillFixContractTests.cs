@@ -141,6 +141,18 @@ public sealed class WinUiDrillFixContractTests
         Assert.True(start >= 0 && uncheck > start && clear > uncheck);
     }
 
+    [Fact]
+    public void TakesScoring_ShowsFailureOnExceptionsAndKeepsGroupListInSyncWhileBusy()
+    {
+        var takes = App("Views", "Workbenches", "TakesWorkbench.cs");
+        var score = takes.IndexOf("private async Task ScoreAsync", StringComparison.Ordinal);
+        var caught = takes.IndexOf("catch (Exception ex) when (!ct.IsCancellationRequested)", score, StringComparison.Ordinal);
+        Assert.True(caught > score);
+        Assert.True(takes.IndexOf("ShowFailure(group, ex is TimeoutException", caught, StringComparison.Ordinal) > caught);
+        Assert.Contains("RestoreGroupSelection();", takes, StringComparison.Ordinal);
+        Assert.Contains("&& !_scoreFailed) return;", takes, StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
