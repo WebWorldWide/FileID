@@ -2373,6 +2373,8 @@ mod tests {
              (2,'/lib/Photos/b.mov',2,10,1688472000,0,'video','mov');",
         )
         .unwrap();
+        let tmp = std::env::temp_dir().to_string_lossy().trim_end_matches('/').to_owned();
+        conn.execute("UPDATE files SET path_text = ?1 || path_text", [&tmp]).unwrap();
         let idle = ask_in(&mut conn, "idle", "Apply it");
         assert!(idle.message.starts_with("There's nothing waiting for your OK"), "{}", idle.message);
         assert!(idle.hits.is_empty() && idle.actions.is_none());
@@ -2381,7 +2383,7 @@ mod tests {
         for text in ["Apply it", "do it", "Go ahead", "yes"] {
             let applied = ask_in(&mut conn, "card", text);
             let actions = applied.actions.unwrap_or_else(|| panic!("{text}: {}", applied.message));
-            assert_eq!((actions[0].kind.as_str(), actions[0].requires_confirmation, actions[0].path.as_deref()), ("applyFolderLayout", true, Some("/lib/Photos")), "{text}");
+            assert_eq!((actions[0].kind.as_str(), actions[0].requires_confirmation, actions[0].path.as_deref()), ("applyFolderLayout", true, Some(format!("{tmp}/lib/Photos").as_str())), "{text}");
             assert!(applied.hits.is_empty(), "{text}");
         }
         for text in ["Name person 1 Alex", "Who is person 1?", "Merge the people", "What are the longest videos?"] {
@@ -2454,6 +2456,8 @@ mod tests {
              (2,'/lib/copy of a.jpg',2,10,1688472000,0,'image','jpg','h');",
         )
         .unwrap();
+        let tmp = std::env::temp_dir().to_string_lossy().trim_end_matches('/').to_owned();
+        conn.execute("UPDATE files SET path_text = ?1 || path_text", [&tmp]).unwrap();
         let request = ChatRequest { request_id: "r".into(), conversation_id: "c".into(), action: "send".into(), text: Some("Find duplicates and move them to Trash".into()), use_model: Some(false), ..Default::default() };
         let response = execute(&mut conn, &request).unwrap();
         let actions = response.actions.unwrap();

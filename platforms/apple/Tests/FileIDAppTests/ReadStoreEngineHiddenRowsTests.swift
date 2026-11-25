@@ -140,4 +140,62 @@ struct ReadStoreEngineHiddenRowsTests {
         #expect(groups.count == 1)
         #expect(Set(groups.first?.files.map(\.id) ?? []) == [90, 200])
     }
+
+    @Test("look-alike groups built from the engine's clusters need no perceptual hashes in the app's reads")
+    func engineClustersBuildGroupsWithoutLoadingHashes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-engine-similar-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try seed(root)
+        try await DatabaseQueue(path: url.path).write { db in
+            for id in 10...13 {
+                try db.execute(sql: "INSERT INTO files(id,path_text,kind,size_bytes) VALUES (?,?,'image',?)",
+                               arguments: [id, "/lib/s\(id).jpg", id])
+            }
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        let groups = await store.similarImageGroupsAsync { offset, _ in
+            ReadStore.SimilarClusterPage(clusters: offset == 0 ? [[10, 11], [12, 13]] : [], total: 2)
+        }
+        #expect(groups.count == 2)
+        #expect(groups.map { Set($0.files.map(\.id)) }.contains([12, 13]))
+        #expect(groups.allSatisfy { $0.isSimilar })
+    }
+
+    @Test("an engine that cannot answer leaves the app to group look-alikes itself")
+    func aSilentEngineFallsBackToLocalGrouping() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "fileid-engine-silent-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try seed(root)
+        try await DatabaseQueue(path: url.path).write { db in
+            for (id, hash) in [(20, 0b1), (21, 0b11)] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,kind,phash,content_hash) VALUES (?,?,'image',?,?)",
+                               arguments: [id, "/lib/l\(id).jpg", hash, "h\(id)"])
+            }
+        }
+        let store = ReadStore(dbURL: url)
+        store.openIfPossible()
+        defer { store.close() }
+        let groups = await store.similarImageGroupsAsync(maxHamming: 8) { _, _ in nil }
+        #expect(groups.count == 1)
+    }
+
+    @Test("pages are requested until the engine's total or the display cap is reached")
+    func pagesAreCollectedUpToTheTotal() async {
+        actor Seen { var offsets: [Int] = []; func note(_ o: Int) { offsets.append(o) } }
+        let seen = Seen()
+        let clusters = await ReadStore.collectSimilarClusters { offset, limit in
+            await seen.note(offset)
+            let n = min(limit, 130 - offset)
+            return ReadStore.SimilarClusterPage(clusters: (0..<max(0, n)).map { [Int64(offset + $0), -1] }, total: 130)
+        }
+        #expect(clusters?.count == 130)
+        let offsets = await seen.offsets
+        #expect(offsets == [0, 100])
+    }
 }

@@ -225,7 +225,9 @@
           "takeFeedback",
           "takeDecision",
           "naming",
-          "nameEdits"
+          "nameEdits",
+          "offset",
+          "similarThreshold"
         ],
         "fields": {
           "queryVector": {
@@ -606,6 +608,8 @@
           "recommendation",
           "suggestedTakeGroups",
           "takeGroups",
+          "similarGroups",
+          "similarGroupTotal",
           "takeQualities",
           "takeGoalRanking"
         ],
