@@ -971,6 +971,11 @@ private struct PersonCard: View {
         }
         thumbnail = nil
         guard let path = person.representativePath else { return }
+        if person.representativeBBox != nil, let stored = await ThumbnailService.storedFaceCrop(identity: key), !Task.isCancelled {
+            FaceCropCache.store(stored, for: key)
+            thumbnail = stored
+            return
+        }
         let url = URL(fileURLWithPath: path)
         guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360,
                   revision: person.representativeCacheRevision), !Task.isCancelled else { return }
@@ -996,6 +1001,7 @@ private struct PersonCard: View {
         }.value
         guard !Task.isCancelled else { return }
         let face = cropped?.image ?? full
+        if let real = cropped?.image { ThumbnailService.storeFaceCrop(real, identity: key) }
         FaceCropCache.store(face, for: key)
         thumbnail = face
     }
