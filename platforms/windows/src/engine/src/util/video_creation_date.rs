@@ -7,17 +7,22 @@ const MAX_TOP_LEVEL_BOXES: usize = 4096;
 const MAX_MOOV_CHILDREN: usize = 256;
 const BOX_TYPES_AT_FILE_START: [&[u8; 4]; 8] = [b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot", b"junk"];
 
-/// The movie header's creation time (`moov/mvhd`) of an MP4, MOV, M4V or 3GP file as Unix seconds: the same value
-/// ffprobe reports as `creation_time`. Other containers, an unset clock (0), a pre-1990 reset or a future date yield None.
+/// When an MP4, MOV, M4V or 3GP file was shot, as Unix seconds. Apple devices write the capture time to
+/// `moov/meta` as `com.apple.quicktime.creationdate`; the movie header's creation time (`moov/mvhd`, ffprobe's
+/// `creation_time`) is the export time there, so the Apple key wins and the header is the fallback. Other
+/// containers, an unset clock (0), a pre-1990 reset or a future date yield None.
 pub(crate) fn container_creation_unix(path: &Path) -> Option<f64> {
     let mut file = std::fs::File::open(crate::util::path_safety::to_extended_length(path)).ok()?;
     let length = file.metadata().ok()?.len();
-    let unix = movie_header_creation(&mut file, length)?;
+    let (apple, header) = movie_dates(&mut file, length)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
-    (unix >= MIN_PLAUSIBLE_UNIX && unix <= now + 86_400.0).then_some(unix)
+    let plausible = |unix: &f64| *unix >= MIN_PLAUSIBLE_UNIX && *unix <= now + 86_400.0;
+    apple.filter(plausible).or(header.filter(plausible))
 }
 
-fn movie_header_creation<R: Read + Seek>(reader: &mut R, length: u64) -> Option<f64> {
+const APPLE_CREATION_KEY: &[u8] = b"com.apple.quicktime.creationdate";
+
+fn movie_dates<R: Read + Seek>(reader: &mut R, length: u64) -> Option<(Option<f64>, Option<f64>)> {
     let mut at = 0;
     for index in 0..MAX_TOP_LEVEL_BOXES {
         let (kind, payload, end) = box_at(reader, at, length)?;
@@ -25,7 +30,9 @@ fn movie_header_creation<R: Read + Seek>(reader: &mut R, length: u64) -> Option<
             return None;
         }
         if &kind == b"moov" {
-            return mvhd_creation(reader, payload, end);
+            let header = mvhd_creation(reader, payload, end);
+            let apple = apple_creation(reader, payload, end);
+            return (header.is_some() || apple.is_some()).then_some((apple, header));
         }
         at = end;
     }
@@ -59,6 +66,84 @@ fn mvhd_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option
         at = next;
     }
     None
+}
+
+fn apple_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option<f64> {
+    let mut at = start;
+    for _ in 0..MAX_MOOV_CHILDREN {
+        let (kind, payload, next) = box_at(reader, at, end)?;
+        if &kind == b"meta" {
+            return meta_creation(reader, payload, next);
+        }
+        at = next;
+    }
+    None
+}
+
+fn meta_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option<f64> {
+    let is_full_box = box_at(reader, start, end).is_none_or(|(kind, ..)| !matches!(&kind, b"hdlr" | b"keys" | b"ilst"));
+    let mut at = if is_full_box { start.checked_add(4)? } else { start };
+    let (mut keys, mut items) = (None, None);
+    for _ in 0..MAX_MOOV_CHILDREN {
+        let Some((kind, payload, next)) = box_at(reader, at, end) else { break };
+        match &kind {
+            b"keys" => keys = Some((payload, next)),
+            b"ilst" => items = Some((payload, next)),
+            _ => {}
+        }
+        at = next;
+    }
+    let (keys, items) = (keys?, items?);
+    let wanted = key_index(reader, keys.0, keys.1)?;
+    let mut at = items.0;
+    for _ in 0..MAX_MOOV_CHILDREN {
+        let (kind, payload, next) = box_at(reader, at, items.1)?;
+        if u32::from_be_bytes(kind) == wanted {
+            return item_text(reader, payload, next).and_then(|text| parse_apple_date(&text));
+        }
+        at = next;
+    }
+    None
+}
+
+fn key_index<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option<u32> {
+    reader.seek(SeekFrom::Start(start)).ok()?;
+    let mut head = [0u8; 8];
+    reader.read_exact(&mut head).ok()?;
+    let count = u32::from_be_bytes(head[4..].try_into().ok()?).min(MAX_MOOV_CHILDREN as u32);
+    let mut at = start + 8;
+    for index in 1..=count {
+        let (_, payload, next) = box_at(reader, at, end)?;
+        let length = usize::try_from(next - payload).ok().filter(|len| *len <= 256)?;
+        reader.seek(SeekFrom::Start(payload)).ok()?;
+        let mut name = vec![0u8; length];
+        reader.read_exact(&mut name).ok()?;
+        if name == APPLE_CREATION_KEY {
+            return Some(index);
+        }
+        at = next;
+    }
+    None
+}
+
+fn item_text<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option<String> {
+    let (kind, payload, next) = box_at(reader, start, end)?;
+    let length = usize::try_from(next.checked_sub(payload)?.checked_sub(8)?).ok().filter(|len| *len <= 128)?;
+    if &kind != b"data" {
+        return None;
+    }
+    reader.seek(SeekFrom::Start(payload + 8)).ok()?;
+    let mut text = vec![0u8; length];
+    reader.read_exact(&mut text).ok()?;
+    String::from_utf8(text).ok().map(|text| text.trim_end_matches('\0').to_string())
+}
+
+fn parse_apple_date(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let parsed = chrono::DateTime::parse_from_rfc3339(text)
+        .or_else(|_| chrono::DateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f%z"))
+        .ok()?;
+    Some(parsed.timestamp() as f64)
 }
 
 /// The box starting at `at` inside a region ending at `limit`: its type, where its payload starts, where it ends.
@@ -122,7 +207,47 @@ pub(crate) mod tests {
     }
 
     fn read(bytes: &[u8]) -> Option<f64> {
-        movie_header_creation(&mut Cursor::new(bytes), bytes.len() as u64)
+        let (apple, header) = movie_dates(&mut Cursor::new(bytes), bytes.len() as u64)?;
+        apple.or(header)
+    }
+
+    fn apple_meta(key: &[u8], value: &str, full_box: bool) -> Vec<u8> {
+        let hdlr = boxed(b"hdlr", &[0; 24]);
+        let mut entries = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        entries.extend(boxed(b"mdta", key));
+        let keys = boxed(b"keys", &entries);
+        let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+        data.extend_from_slice(value.as_bytes());
+        let ilst = boxed(b"ilst", &boxed(&1u32.to_be_bytes(), &boxed(b"data", &data)));
+        let mut payload = if full_box { vec![0, 0, 0, 0] } else { vec![] };
+        payload.extend([hdlr, keys, ilst].concat());
+        boxed(b"meta", &payload)
+    }
+
+    fn mp4_with_meta(mvhd_unix: u64, meta: Vec<u8>) -> Vec<u8> {
+        let ftyp = boxed(b"ftyp", b"qt  \0\0\0\0qt  ");
+        let moov = boxed(b"moov", &[mvhd_v1(mvhd_unix + SECONDS_1904_TO_1970), meta].concat());
+        [ftyp, moov, boxed(b"mdat", &[7; 64])].concat()
+    }
+
+    #[test]
+    fn the_apple_capture_time_beats_the_movie_header_export_time() {
+        let shot = 1_560_549_623.0;
+        for full_box in [true, false] {
+            let bytes = mp4_with_meta(1_560_704_690, apple_meta(APPLE_CREATION_KEY, "2019-06-14T15:00:23-0700", full_box));
+            assert_eq!(read(&bytes), Some(shot), "full_box={full_box}");
+        }
+        for text in ["2019-06-14T22:00:23+00:00", "2019-06-14T22:00:23Z", "2019-06-14T22:00:23.250+0000"] {
+            let bytes = mp4_with_meta(1_560_704_690, apple_meta(APPLE_CREATION_KEY, text, true));
+            assert_eq!(read(&bytes).map(f64::floor), Some(shot), "{text}");
+        }
+    }
+
+    #[test]
+    fn another_metadata_key_or_a_bad_date_leaves_the_movie_header() {
+        for meta in [apple_meta(b"com.apple.quicktime.model", "2019-06-14T15:00:23-0700", true), apple_meta(APPLE_CREATION_KEY, "yesterday", true)] {
+            assert_eq!(read(&mp4_with_meta(1_560_704_690, meta)), Some(1_560_704_690.0));
+        }
     }
 
     #[test]
