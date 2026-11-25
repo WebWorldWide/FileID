@@ -1342,9 +1342,30 @@ pub(crate) fn needed_after_scan(db: &parking_lot::Mutex<rusqlite::Connection>) -
     })
 }
 
-/// Written when a pass is accepted, before it waits behind a scan, so a quit while it waits still resumes it.
-pub(crate) fn mark_pending(db: &parking_lot::Mutex<rusqlite::Connection>) {
+/// Marks a pass accepted, before it waits behind a scan, so a quit while it waits still resumes it. If the pass is
+/// dropped without ever starting (a paused scan refused it), the marker is cleared.
+pub(crate) struct PendingPass {
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    waiting: bool,
+}
+
+impl PendingPass {
+    pub(crate) fn started(&mut self) {
+        self.waiting = false;
+    }
+}
+
+impl Drop for PendingPass {
+    fn drop(&mut self) {
+        if self.waiting {
+            skip::with_reader(&self.db, skip::mark_finished);
+        }
+    }
+}
+
+pub(crate) fn mark_pending(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>) -> PendingPass {
     skip::with_reader(db, skip::mark_running);
+    PendingPass { db: db.clone(), waiting: true }
 }
 
 /// A pass the app or engine cut off (quit mid-grouping) left its marker: faces still wait and nothing changed them
@@ -1542,10 +1563,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    fn catalog_with_waiting_face() -> (std::path::PathBuf, parking_lot::Mutex<rusqlite::Connection>) {
+    fn catalog_with_waiting_face() -> (std::path::PathBuf, std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>) {
         let directory = std::env::temp_dir().join(format!("fileid-resume-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
-        let db = parking_lot::Mutex::new(crate::db::open_writer(&directory.join("catalog.sqlite")).unwrap());
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(crate::db::open_writer(&directory.join("catalog.sqlite")).unwrap()));
         db.lock()
             .execute_batch(
                 "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES (1,'/a.jpg',1,100,10,0,'image','jpg');
@@ -1559,7 +1580,8 @@ mod tests {
     fn a_pass_cut_off_by_a_quit_resumes_at_the_next_launch_and_a_finished_one_does_not() {
         let (directory, db) = catalog_with_waiting_face();
         assert!(!interrupted_pass_to_resume(&db), "no pass was ever started");
-        mark_pending(&db);
+        let mut pending = mark_pending(&db);
+        pending.started();
         assert!(interrupted_pass_to_resume(&db), "the engine stopped with the pass accepted and faces still waiting");
         assert!(interrupted_pass_to_resume(&db), "asking does not use the marker up");
         skip::with_reader(&db, skip::mark_finished);
@@ -1568,15 +1590,23 @@ mod tests {
     }
 
     #[test]
+    fn a_pass_refused_before_it_started_leaves_no_marker_to_resume() {
+        let (directory, db) = catalog_with_waiting_face();
+        drop(mark_pending(&db));
+        assert!(!interrupted_pass_to_resume(&db), "a pass the engine never ran is not an interrupted one");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_marker_with_no_face_waiting_or_nothing_changed_is_cleared_instead_of_resuming() {
         let (directory, db) = catalog_with_waiting_face();
-        mark_pending(&db);
+        mark_pending(&db).started();
         db.lock().execute("UPDATE face_prints SET person_id=NULL WHERE id=20", []).unwrap();
         let result = FaceClusteringResult { person_count: 0, face_count: 1, unmatched_faces: 1, duration_seconds: 1.0, deferred_faces: None, review_queued: Some(0) };
         skip::remember(&db.lock(), &result);
         assert!(!interrupted_pass_to_resume(&db), "the catalog is exactly as the last finished pass left it");
         assert!(!skip::with_reader(&db, skip::was_interrupted), "the stale marker is cleared");
-        mark_pending(&db);
+        mark_pending(&db).started();
         db.lock().execute_batch("INSERT INTO persons(id,name,created_at) VALUES(1,'Ann',1); UPDATE face_prints SET person_id=1").unwrap();
         assert!(!interrupted_pass_to_resume(&db), "no face waits any more");
         assert!(!skip::with_reader(&db, skip::was_interrupted));

@@ -163,6 +163,7 @@ pub(super) fn mark_finished(conn: &Connection) {
     }
 }
 
+#[cfg(any(test, all(target_os = "macos", feature = "apple-adapters")))]
 pub(super) fn was_interrupted(conn: &Connection) -> bool {
     running_path(conn).is_some_and(|path| path.is_file())
 }

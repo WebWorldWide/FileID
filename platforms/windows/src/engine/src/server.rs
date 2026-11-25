@@ -723,7 +723,7 @@ impl AfterScan {
         let terminal_active = self.active.clone();
         let track = JobTrackGuard::start(&self.jobs, JobCategory::FaceCluster, "Group faces");
         tracing::info!("[CLUSTER] grouping faces after the scan");
-        commands::face_clustering::mark_pending(&self.db);
+        let mut pending = commands::face_clustering::mark_pending(&self.db);
         let (sink, db) = (self.sink.clone(), self.db.clone());
         spawn_mutation_with_rejection(
             &self.gate,
@@ -731,6 +731,7 @@ impl AfterScan {
             &self.scan_state,
             face_clustering_rejection_event("FileID can't group faces while the scan is paused. Resume or stop the scan, then try again."),
             async move {
+                pending.started();
                 let _guard = guard;
                 let finding = track.finding_faces();
                 let _track = track;
@@ -1462,7 +1463,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let guard = FaceClusterActiveGuard(face_cluster_active.clone());
             let terminal_active = face_cluster_active.clone();
             let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Group faces");
-            commands::face_clustering::mark_pending(db);
+            let mut pending = commands::face_clustering::mark_pending(db);
             let sink_c = sink.clone();
             let db_c = db.clone();
             spawn_mutation_with_rejection(
@@ -1473,6 +1474,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                     "FileID can't group faces while the scan is paused. Resume or stop the scan, then try again.",
                 ),
                 async move {
+                    pending.started();
                     let _guard = guard;
                     let finding = track.finding_faces();
                     let _track = track;
