@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use super::smart_name_style::{lower, split_name, Style};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
     Image,
     Raw,
@@ -79,21 +79,22 @@ pub fn is_group(members: &[Member]) -> bool {
 
 /// The first `_N` bump (1 = none, up to 99) at which every member's new name is free in the folder and batch, or is its
 /// own name in another case.
+/// The first `_N` bump (1 = none, up to 99) at which every member's new name is free in its own folder, or is its own
+/// name in another case. `free(index, lowercase name)` says whether member `index`'s folder has the name free.
 pub fn shared_names(
     stem: &str,
     members: &[(String, String)],
-    taken: &HashSet<String>,
-    claimed: &HashSet<String>,
+    free: impl Fn(usize, &str) -> bool,
 ) -> Option<Vec<String>> {
     (1..=99).find_map(|bump| {
         let base = if bump == 1 { stem.to_string() } else { format!("{stem}_{bump}") };
         let names: Vec<String> = members.iter().map(|(suffix, _)| format!("{base}{suffix}")).collect();
         let mut keys = HashSet::new();
-        let free = names.iter().zip(members).all(|(name, (_, own))| {
+        let ok = names.iter().zip(members).enumerate().all(|(index, (name, (_, own)))| {
             let key = lower(name);
-            keys.insert(key.clone()) && (key == *own || (!taken.contains(&key) && !claimed.contains(&key)))
+            keys.insert(key.clone()) && (key == *own || free(index, &key))
         });
-        free.then_some(names)
+        ok.then_some(names)
     })
 }
 
@@ -183,6 +184,9 @@ mod tests {
 
     #[test]
     fn shared_names_bump_together_or_not_at_all() {
+        fn shared_names(stem: &str, members: &[(String, String)], taken: &HashSet<String>, claimed: &HashSet<String>) -> Option<Vec<String>> {
+            super::shared_names(stem, members, |_, key| !taken.contains(key) && !claimed.contains(key))
+        }
         let members = vec![(".JPG".to_string(), "dsc_1.jpg".to_string()), (".ARW".to_string(), "dsc_1.arw".to_string())];
         let none = HashSet::new();
         assert_eq!(shared_names("beach", &members, &none, &none), Some(vec!["beach.JPG".into(), "beach.ARW".into()]));
