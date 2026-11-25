@@ -30,4 +30,13 @@ import Testing
         let row = try #require(deep.range(of: "Text(\"AI model\").foregroundStyle(Theme.text3)"))
         #expect(deep[row.upperBound...].prefix(200).contains("FlowLayout(spacing: 8)"))
     }
+
+    @Test func panelHeaderRuleSpansThePanelWhenTheHeaderStacks() throws {
+        let design = try appSource("Theme/DesignSystem.swift")
+        let header = try #require(design.range(of: "struct PanelHeader<Trailing"))
+        let body = String(design[header.lowerBound...].prefix(1100))
+        let frame = try #require(body.range(of: ".frame(maxWidth: .infinity, alignment: .leading)"))
+        let rule = try #require(body.range(of: ".overlay(alignment: .bottom) { Hairline() }"))
+        #expect(frame.lowerBound < rule.lowerBound)
+    }
 }

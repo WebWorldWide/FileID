@@ -66,6 +66,7 @@ struct PanelHeader<Trailing: View>: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottom) { Hairline() }
     }
 }
