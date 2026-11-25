@@ -1188,18 +1188,30 @@ struct LibraryView: View {
                     problem = Self.searchProblem(response, similar: true)
                 }
             } else {
+                #if DEBUG
+                let clock = ContinuousClock(), began = clock.now
+                #endif
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                let visualTask = trimmed.count >= 3 && encoderReady && kind != ReadStore.unreadableFilter
+                    ? Task { @MainActor in await visualHalf(of: trimmed) } : nil
                 let first = await store.filesPageAsync(limit: want, search: query, kindFilter: kind, sort: sort)
                 newRows = first.rows
                 newCursor = first.cursor
                 pageable = newRows.count == want
-                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
-                    guard !Task.isCancelled else { return }
+                if let visualTask {
+                    guard !Task.isCancelled else { visualTask.cancel(); return }
                     rows = newRows
                     rowsEpoch &+= 1
                     visualSearchPending = true
-                    if let vector = await engine.embedTextQuery(trimmed), !Task.isCancelled {
-                        let response = await catalogSearch(query: trimmed, vector: vector)
+                    #if DEBUG
+                    let keywordMs = (clock.now - began).milliseconds
+                    #endif
+                    let half = await withTaskCancellationHandler { await visualTask.value } onCancel: { visualTask.cancel() }
+                    if let half, !Task.isCancelled {
+                        let response = half.response
+                        #if DEBUG
+                        if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: visual search \"\(trimmed)\" keyword \(keywordMs) ms embed \(half.embedMs) ms engine \(half.engineMs) ms total \((clock.now - began).milliseconds) ms\n".utf8)) }
+                        #endif
                         guard !Task.isCancelled else { return }
                         if let response, response.status == "ok" {
                             #if DEBUG
@@ -1262,6 +1274,15 @@ struct LibraryView: View {
             do { try await Task.sleep(for: .seconds(1)) } catch { return nil }
         }
         return nil
+    }
+
+    /// The picture half of a search: the query's CLIP vector, then the engine's visual search. It starts beside the keyword listing so the two run together.
+    private func visualHalf(of text: String) async -> (response: CatalogResponse?, embedMs: Int, engineMs: Int)? {
+        let clock = ContinuousClock(), began = clock.now
+        guard let vector = await engine.embedTextQuery(text), !Task.isCancelled else { return nil }
+        let embedded = clock.now
+        let response = await catalogSearch(query: text, vector: vector)
+        return (response, (embedded - began).milliseconds, (clock.now - embedded).milliseconds)
     }
 
     private func loadMore() {
@@ -2159,4 +2180,8 @@ private struct PendingPreviewRename {
         return "\(oldName) → \(newName)"
             + (others > 0 ? "\n\(others.formatted()) matching file\(others == 1 ? "" : "s") shot with it \(others == 1 ? "is" : "are") renamed to match." : "")
     }
+}
+
+extension Duration {
+    var milliseconds: Int { Int((Double(components.seconds) * 1000 + Double(components.attoseconds) / 1e15).rounded()) }
 }
