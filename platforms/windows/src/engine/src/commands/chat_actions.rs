@@ -510,7 +510,8 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let clause = scope.filter.clause(&mut args);
             args.push(rusqlite::types::Value::Integer(MAX_IDS as i64));
             let mut statement = conn.prepare(&format!(
-                "SELECT f.id,f.path_text,trim(f.vlm_proposed_name) FROM files f WHERE {clause} AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' ORDER BY COALESCE(f.created_at,f.modified_at) IS NULL,COALESCE(f.created_at,f.modified_at) DESC,f.id DESC LIMIT ?"
+                "SELECT f.id,f.path_text,trim(f.vlm_proposed_name) FROM files f WHERE {clause} AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' ORDER BY {taken} IS NULL,{taken} DESC,f.id DESC LIMIT ?",
+                taken = crate::util::SQL_TAKEN_DATE
             ))?;
             let rows: Vec<(i64, String, String)> = statement
                 .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -1153,6 +1154,27 @@ mod tests {
         let resolved = resolve(&conn, &intent, &context).unwrap();
         assert!(resolved.actions.is_empty());
         assert!(resolved.message.contains("read-only drive"), "{}", resolved.message);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn suggested_renames_list_files_with_a_real_date_before_one_dated_in_the_future() {
+        let conn = crate::db::test_support::memory_db();
+        let dir = std::env::temp_dir().join(format!("fileid-chat-dates-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for id in 1..=3 {
+            crate::db::test_support::insert_file(&conn, id, &dir.join(format!("IMG_{id}.jpg")).to_string_lossy(), "image");
+        }
+        conn.execute("UPDATE files SET modified_at=4000000000 WHERE id=1", []).unwrap();
+        conn.execute("UPDATE files SET vlm_proposed_name='Beach day '||id", []).unwrap();
+        conn.execute("UPDATE files SET created_at=1500000000 WHERE id=2", []).unwrap();
+        conn.execute("UPDATE files SET created_at=1600000000 WHERE id=3", []).unwrap();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let context = context(None, &people, &events, "rename to suggested names");
+        let intent = Intent { kind: "renameToSuggested".into(), ..Intent::default() };
+        let resolved = resolve(&conn, &intent, &context).unwrap();
+        assert!(!resolved.actions.is_empty(), "{}", resolved.message);
+        assert_eq!(resolved.actions[0].file_ids.as_deref(), Some(&[3, 2, 1][..]));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

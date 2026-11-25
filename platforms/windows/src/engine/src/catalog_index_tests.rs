@@ -1124,3 +1124,13 @@ fn exact_scan_and_build_times() {
         index.shutdown();
     }
 }
+
+#[test]
+fn a_file_dated_in_the_future_is_not_found_by_a_date_range_that_starts_after_today() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index.writer.lock().execute("UPDATE files SET created_at=4000000000 WHERE id=2", []).unwrap();
+    let mut late = seed();
+    late.captured_from = Some(3_000_000_000.0);
+    assert!(index.search(&late).unwrap().hits.is_empty());
+}
