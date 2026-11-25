@@ -35,6 +35,7 @@ internal static class EngineErrorText
             or "face_cluster_persist_failed" => "Grouping faces didn't finish",
         "face_clustering_busy" => "Faces are already being grouped",
         "find_merge_suggestions_failed" => "Looking for matching people didn't finish",
+        "location_read_only" => "This drive is read-only",
         _ => "Something went wrong"
     };
 
@@ -63,6 +64,9 @@ internal static class EngineErrorText
         "face_clustering_failed" or "face_clustering_aborted" or "face_clustering_start_failed" or "face_cluster_persist_failed"
             => "Open People and press Refresh to try again.",
         "find_merge_suggestions_failed" => "Open People and try Suggested merges again in a moment.",
+        "location_read_only" => string.IsNullOrWhiteSpace(message)
+            ? "FileID can show and search these files but can\u2019t change them."
+            : message.Trim(),
         _ => Plain(message, TryAgain)
     };
 
