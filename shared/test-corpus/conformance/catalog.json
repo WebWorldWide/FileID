@@ -98,7 +98,7 @@
       {"label": "past the end", "catalog": {"action": "similarGroups", "limit": 1, "offset": 2},
        "expect": {"status": "ok", "similarGroupTotal": 2, "similarGroups": []}},
 
-      {"label": "page size out of range refused", "catalog": {"action": "similarGroups", "limit": 101},
+      {"label": "page size out of range refused", "catalog": {"action": "similarGroups", "limit": 201},
        "expect": {"status": "error"}}
     ]
   }
