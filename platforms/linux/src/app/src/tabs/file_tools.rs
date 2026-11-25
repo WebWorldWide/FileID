@@ -18,6 +18,19 @@ use crate::spring::{animate_with, Spring};
 use crate::v3;
 
 const KINDS: [&str; 3] = ["photo", "video", "chapters"];
+/// Returns true when `id` was refused because MAX_FILES are already chosen.
+fn select_within_limit(ids: &mut Vec<i64>, id: i64, active: bool) -> bool {
+    ids.retain(|other| *other != id);
+    if !active {
+        return false;
+    }
+    if ids.len() < MAX_FILES {
+        ids.push(id);
+        return false;
+    }
+    true
+}
+
 const PHOTO_FORMATS: [(&str, &str); 3] = [("PNG", "png"), ("JPEG", "jpeg"), ("TIFF", "tiff")];
 const CHAPTER_FORMATS: [(&str, &str); 2] = [("WebVTT", "vtt"), ("JSON", "json")];
 const FRAMES: [(&str, Option<&str>, f64); 5] = [
@@ -84,6 +97,7 @@ pub(super) fn turn_rgba(rgba: &[u8], width: usize, height: usize, quarter_turns:
 pub(super) struct RecipeChoice {
     pub kind: usize,
     pub format: usize,
+    pub chapter_format: usize,
     pub longest_side: u32,
     pub resolution: usize,
     pub frame: usize,
@@ -187,7 +201,7 @@ impl RecipeChoice {
         let (format, max_dimension) = match kind {
             "photo" => (PHOTO_FORMATS[self.format.min(2)].1, self.longest_side),
             "video" => ("mp4", RESOLUTIONS[self.resolution.min(1)].1),
-            _ => (CHAPTER_FORMATS[self.format.min(1)].1, 2048),
+            _ => (CHAPTER_FORMATS[self.chapter_format.min(1)].1, 2048),
         };
         ToolRecipe {
             kind: kind.into(),
@@ -236,7 +250,7 @@ impl RecipeChoice {
                 RESOLUTIONS[self.resolution.min(1)].0,
                 FRAMES[self.frame.min(4)].0
             ),
-            _ => format!("{files} · {}", CHAPTER_FORMATS[self.format.min(1)].0),
+            _ => format!("{files} · {}", CHAPTER_FORMATS[self.chapter_format.min(1)].0),
         }
     }
 
@@ -777,15 +791,14 @@ impl ToolsUi {
             let id = file.id;
             check.connect_toggled(move |check| {
                 let Some(ui) = weak.upgrade() else { return };
-                {
-                    let mut ids = ui.selected.borrow_mut();
-                    ids.retain(|other| *other != id);
-                    if check.is_active() && ids.len() < MAX_FILES {
-                        ids.push(id);
-                    } else if check.is_active() {
-                        check.set_active(false);
-                        ui.status.set_label("Up to 100 files per export.");
-                    }
+                let over_limit = select_within_limit(
+                    &mut ui.selected.borrow_mut(),
+                    id,
+                    check.is_active(),
+                );
+                if over_limit {
+                    check.set_active(false);
+                    ui.status.set_label("Up to 100 files per export.");
                 }
                 ui.load_preview_picture();
                 ui.changed();
@@ -1154,6 +1167,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         choice: RefCell::new(RecipeChoice {
             kind: 0,
             format: 0,
+            chapter_format: 0,
             longest_side: 2048,
             resolution: 1,
             frame: 0,
@@ -1256,7 +1270,8 @@ fn wire(
             {
                 let mut choice = ui.choice.borrow_mut();
                 match field {
-                    0 | 1 => choice.format = index,
+                    0 => choice.format = index,
+                    1 => choice.chapter_format = index,
                     _ => choice.resolution = index,
                 }
             }
@@ -1594,6 +1609,7 @@ mod tests {
         RecipeChoice {
             kind,
             format: 0,
+            chapter_format: 0,
             longest_side: 4096,
             resolution: 1,
             frame: 0,
@@ -1699,6 +1715,16 @@ mod tests {
     }
 
     #[test]
+    fn the_101st_file_is_refused_without_holding_the_selection() {
+        let mut ids: Vec<i64> = (0..MAX_FILES as i64).collect();
+        assert!(select_within_limit(&mut ids, 999, true));
+        assert_eq!(ids.len(), MAX_FILES);
+        assert!(!select_within_limit(&mut ids, 999, false));
+        assert!(!select_within_limit(&mut ids, 5, true));
+        assert_eq!(ids.len(), MAX_FILES);
+    }
+
+    #[test]
     fn recipes_only_carry_what_the_engine_accepts() {
         let photo = choice(0).recipe();
         assert_eq!(
@@ -1722,6 +1748,9 @@ mod tests {
         assert_eq!(video.allow_upscale, None);
         assert!(video.video_framing.is_none() && video.video_stabilization.is_none());
         assert_eq!(choice(1).recipe().video_aspect_ratio, None);
+        let json = RecipeChoice { chapter_format: 1, ..choice(2) };
+        assert_eq!(json.recipe().format, "json");
+        assert_eq!(RecipeChoice { kind: 0, ..json }.recipe().format, "png");
         let chapters = choice(2).recipe();
         assert_eq!(
             (chapters.kind.as_str(), chapters.format.as_str()),
