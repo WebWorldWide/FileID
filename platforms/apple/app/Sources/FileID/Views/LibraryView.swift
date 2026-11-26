@@ -481,7 +481,7 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func inFlightHeadline(_ p: ScanProgress) -> some View {
-        let work = p.phase == .postScan ? p.postScanWork(baseline: engine.postScanBaseline) : nil
+        let work = p.phase == .postScan ? p.postScanWork : nil
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: "doc.text.magnifyingglass")

@@ -1430,14 +1430,28 @@ fn task_did_not_complete(error: &tokio::task::JoinError) -> IpcEvent {
 /// Faces read so far and in all while a pass finds them; `None` once it has.
 pub(crate) type FindingFaces = Arc<dyn Fn(Option<(usize, usize)>) + Send + Sync>;
 
+/// A pass the engine's shutdown cut short keeps its marker, so the next launch finishes it.
+fn stopped_for_shutdown(cancel: &AtomicBool, active: &AtomicBool) -> bool {
+    let stopped = cancel.load(Ordering::Acquire);
+    if stopped {
+        tracing::info!("[CLUSTER] grouping stopped for shutdown; it resumes at the next launch");
+        release_active_before_terminal(active);
+    }
+    stopped
+}
+
 pub(crate) async fn handle_run_face_clustering(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     active: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(unused_variables))] finding: FindingFaces,
 ) {
     let _sleep = SleepGuard::acquire();
     skip::with_reader(&db, skip::mark_running);
+    if stopped_for_shutdown(&cancel, &active) {
+        return;
+    }
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         let problem_db = db.clone();
@@ -1446,11 +1460,15 @@ pub(crate) async fn handle_run_face_clustering(
         }
         let extract_db = db.clone();
         let report = finding.clone();
+        let stop = cancel.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::apple::faces::extract_before_clustering(&extract_db, &|done, total| report(Some((done, total))));
+            crate::apple::faces::extract_before_clustering(&extract_db, &|| stop.load(Ordering::Acquire), &|done, total| report(Some((done, total))));
         })
         .await;
         finding(None);
+    }
+    if stopped_for_shutdown(&cancel, &active) {
+        return;
     }
     let started = Instant::now();
     let skip_db = db.clone();
@@ -1586,6 +1604,21 @@ mod tests {
         assert!(interrupted_pass_to_resume(&db), "asking does not use the marker up");
         skip::with_reader(&db, skip::mark_finished);
         assert!(!interrupted_pass_to_resume(&db), "a pass that ended leaves nothing to resume");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn a_pass_stopped_for_shutdown_sends_no_result_and_stays_resumable() {
+        let (directory, db) = catalog_with_waiting_face();
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let active = Arc::new(AtomicBool::new(true));
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut pending = mark_pending(&db);
+        pending.started();
+        handle_run_face_clustering(sink, db.clone(), active.clone(), cancel, Arc::new(|_| {})).await;
+        assert!(events.try_recv().is_err(), "a stopped pass reports no result");
+        assert!(!active.load(Ordering::Acquire), "a new pass can start");
+        assert!(interrupted_pass_to_resume(&db), "the next launch finishes the pass");
         let _ = std::fs::remove_dir_all(&directory);
     }
 

@@ -33,7 +33,23 @@ pub(crate) fn catalog_has_rows(conn: &Connection, root: &Path) -> bool {
     .unwrap_or(true)
 }
 
-pub(crate) fn mark_done(state_dir: &Path, root: &Path) {
+/// A folder is checked once. The catalog remembers it, so a catalog moved or restored without its state folder is not
+/// read through again; the marker file is what earlier versions left and is read for libraries they checked.
+pub(crate) fn is_done(conn: &Connection, state_dir: &Path, root: &Path) -> bool {
+    let recorded: Option<String> = conn
+        .query_row("SELECT capture_dates_checked FROM library_roots WHERE path = ?1", [root.to_string_lossy()], |row| row.get(0))
+        .unwrap_or(None);
+    recorded.as_deref() == Some(VERSION) || marker(state_dir, root).exists()
+}
+
+pub(crate) fn mark_done(conn: &Connection, state_dir: &Path, root: &Path) {
+    let marked = conn.execute(
+        "UPDATE library_roots SET capture_dates_checked = ?1 WHERE path = ?2",
+        params![VERSION, root.to_string_lossy()],
+    );
+    if let Err(error) = marked {
+        tracing::warn!(%error, "could not record the capture-date backfill in the catalog");
+    }
     let mark = marker(state_dir, root);
     let written = mark.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&mark, b""));
     if let Err(error) = written {
@@ -88,7 +104,7 @@ fn run_chunked(
 ) -> usize {
     use super::catch_up::Progress;
     use rayon::prelude::*;
-    if marker(state_dir, root).exists() {
+    if is_done(&database.lock(), state_dir, root) {
         return 0;
     }
     let resume_file = progress_path(state_dir, root);
@@ -140,7 +156,7 @@ fn run_chunked(
         save_progress(&resume_file, chunk.last().map_or(resume, |photo| photo.0));
         progress(Progress::Advance(chunk.len() as u64));
     }
-    mark_done(state_dir, root);
+    mark_done(&database.lock(), state_dir, root);
     let _ = std::fs::remove_file(&resume_file);
     tracing::info!(checked = photos.len(), fixed, "capture dates backfilled");
     fixed
@@ -338,8 +354,33 @@ mod tests {
 
         database.lock().execute("UPDATE files SET created_at = 1700000000 WHERE id = 1", []).unwrap();
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 0, "the marker keeps it to one pass per folder");
-        mark_done(&state, &scratch);
+        mark_done(&database.lock(), &state, &scratch);
         assert!(marker(&state, &scratch).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn a_catalog_moved_without_its_state_folder_is_not_checked_again() {
+        let scratch = std::env::temp_dir().join(format!("fileid-capture-dates-{}", uuid::Uuid::new_v4()));
+        let (root, state, elsewhere) = (scratch.join("Library"), scratch.join("state"), scratch.join("elsewhere"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("1.jpg");
+        std::fs::write(&path, jpeg_taken_at("2019:07:04 12:00:00", "+00:00", "")).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(1,?1,1,1,0,'image','jpg',1700000000)",
+            params![path.to_str().unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO library_roots(path,display,kind,added_at) VALUES(?1,?1,'internal',0)",
+            params![root.to_string_lossy()],
+        )
+        .unwrap();
+        let database = Mutex::new(conn);
+        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 1);
+        database.lock().execute("UPDATE files SET created_at = 1700000000", []).unwrap();
+        assert_eq!(run_if_needed(&database, &elsewhere, &root, &|| false), 0, "the catalog says this folder was checked");
         std::fs::remove_dir_all(scratch).unwrap();
     }
 

@@ -1339,16 +1339,13 @@ public struct PostScanBaseline: Equatable, Sendable {
     public let sessionID: String
     public let filesRead: Int
 
-    /// The files read before post-scan began. A snapshot that carries the engine's own owed and done counts gives it exactly, however late the app joined; only an engine that omits them leaves the first snapshot seen as the best guess.
+    /// The files read before post-scan began: the engine keeps the scan's own counts through post-scan, so any snapshot of the session gives them.
     static func observing(_ progress: ScanProgress, current: PostScanBaseline?) -> PostScanBaseline? {
-        if let done = progress.postScanDone {
-            return PostScanBaseline(sessionID: progress.sessionID, filesRead: max(0, progress.processed - done))
-        }
-        return current?.sessionID == progress.sessionID ? current : PostScanBaseline(sessionID: progress.sessionID, filesRead: progress.processed)
+        current?.sessionID == progress.sessionID ? current : PostScanBaseline(sessionID: progress.sessionID, filesRead: progress.processed)
     }
 }
 
-/// What the post-scan phase has left: the engine reports it as files found plus the work owed, so the work is the part above the files already read.
+/// What the post-scan phase has left, from the owed and done counts the engine sends with every post-scan snapshot.
 struct PostScanWork: Equatable {
     let owed: Int
     let done: Int
@@ -1357,14 +1354,9 @@ struct PostScanWork: Equatable {
 }
 
 extension ScanProgress {
-    func postScanWork(baseline: PostScanBaseline?) -> PostScanWork? {
-        if let owed = postScanOwed, let done = postScanDone {
-            return owed > 0 ? PostScanWork(owed: owed, done: min(owed, done)) : nil
-        }
-        let start = baseline.flatMap { $0.sessionID == sessionID ? $0.filesRead : nil } ?? discovered
-        let owed = total - start
-        guard owed > 0 else { return nil }
-        return PostScanWork(owed: owed, done: min(owed, max(0, processed - start)))
+    var postScanWork: PostScanWork? {
+        guard let owed = postScanOwed, let done = postScanDone, owed > 0 else { return nil }
+        return PostScanWork(owed: owed, done: min(owed, done))
     }
 
     func settled(by phase: ScanPhase) -> ScanProgress? {

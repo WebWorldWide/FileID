@@ -222,6 +222,13 @@ struct ScanAdapterTests {
         #expect(!fileid_apple_ocr_ready() || AccurateOCRWarmup.shared.isReady)
     }
 
+    @Test func aReadWaitingOnTheNeuralEnginesFirstCompileIsNotTimedOutLikeAClassifyCall() {
+        #expect(accurateReadTimeoutSeconds >= 120, "the compile takes up to 70 s on a busy Mac")
+        #expect(accurateReadTimeoutSeconds > visionPerformTimeoutSeconds)
+        #expect(!runVisionWithTimeout(seconds: 0.05) { Thread.sleep(forTimeInterval: 0.3) })
+        #expect(runVisionWithTimeout(seconds: 5) { Thread.sleep(forTimeInterval: 0.1) })
+    }
+
     @Test func theAdapterReportsTheAccurateReaderPausedAfterThreeFailuresInARow() {
         let breaker = AccurateOCRBreaker.shared
         breaker.record(success: true)

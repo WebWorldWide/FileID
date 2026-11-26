@@ -341,7 +341,7 @@ struct TitleBar: View {
     private var rows: [ActivityRow] {
         var out: [ActivityRow] = []
         if let p = engine.lastProgress, p.phase != .idle {
-            let work = p.phase == .postScan ? p.postScanWork(baseline: engine.postScanBaseline) : nil
+            let work = p.phase == .postScan ? p.postScanWork : nil
             let frac = work?.fraction ?? (p.total > 0 ? Double(p.processed) / Double(p.total) : (p.phase == .completed ? 1 : 0))
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",

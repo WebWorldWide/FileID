@@ -280,6 +280,12 @@ impl ScanSession {
         let capture_dates_current = self.capture_dates_current.unwrap_or_else(|| {
             self.rescan || !crate::pipeline::capture_date_backfill::catalog_has_rows(&self.db_conn.lock(), root)
         });
+        if capture_dates_current && !self.rescan {
+            match crate::paths::root() {
+                Ok(state_dir) => crate::pipeline::capture_date_backfill::mark_done(&self.db_conn.lock(), &state_dir, root),
+                Err(error) => tracing::warn!(%error, "[SCAN] no state folder for the capture-date marker"),
+            }
+        }
 
         // Resolve user exclusions against this root and purge already-cataloged rows beneath them before the skip-set preload, so a stale excluded row cannot enter the skip set.
         let exclusions = crate::util::path_safety::resolve_exclusions(root, &self.excluded_paths);
@@ -777,7 +783,6 @@ impl ScanSession {
             reachable
         };
         let mut post_scan_announced = false;
-        let mut post_scan_closing = (0u64, 0u64);
         if clean_walk {
             {
                 let mut seen = discovered_seen_paths.lock();
@@ -810,10 +815,10 @@ impl ScanSession {
             }
             match crate::paths::root() {
                 Ok(state_dir) if capture_dates_current => {
-                    crate::pipeline::capture_date_backfill::mark_done(&state_dir, root);
+                    crate::pipeline::capture_date_backfill::mark_done(&self.db_conn.lock(), &state_dir, root);
                 }
                 Ok(state_dir) => {
-                    if !crate::pipeline::capture_date_backfill::marker(&state_dir, root).exists() && !self.coordinator.is_cancelled() {
+                    if !crate::pipeline::capture_date_backfill::is_done(&self.db_conn.lock(), &state_dir, root) && !self.coordinator.is_cancelled() {
                         on_phase(SessionPhase::PostScan);
                         emit_phase(SessionPhase::PostScan);
                         post_scan_announced = true;
@@ -845,7 +850,6 @@ impl ScanSession {
                         let finished = backfill.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
-                        post_scan_closing = post_scan_closing.max(report.closing_counts());
                         if let Err(error) = finished {
                             tracing::warn!(%error, "[SCAN] capture-date backfill stopped");
                         }
@@ -916,7 +920,6 @@ impl ScanSession {
                         let finished = pass.await;
                         heartbeat.abort();
                         let _ = heartbeat.await;
-                        post_scan_closing = post_scan_closing.max(report.closing_counts());
                         if finished.as_ref().is_ok_and(|(summary, _)| summary.disk_full) {
                             sink.send(crate::ipc::EngineError::event(
                                 "scan_disk_full",
@@ -1019,18 +1022,12 @@ impl ScanSession {
                 emit_phase(SessionPhase::PostScan);
             }
             on_phase(SessionPhase::Completed);
-            let (closing_total, closing_processed) = post_scan_closing;
-            let (shown_total, shown_discovered) = if closing_total > 0 {
-                (closing_total, closing_total)
-            } else {
-                (total + self.carried.0, discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0)
-            };
             sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(terminal_progress(
                 &session_id,
                 ScanPhase::Completed,
-                shown_total,
-                shown_discovered,
-                closing_processed.max(closing_total).max(total + self.carried.0),
+                total + self.carried.0,
+                discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                total + self.carried.0,
                 failed + self.carried.1,
             )))))
             .await;
@@ -1129,8 +1126,8 @@ fn spawn_late_careful_reads(
     });
 }
 
-/// Progress of the catch-up pass, reported in the post-scan phase: `total` grows above `discovered` by the pass's size and
-/// `processed` advances by what it has done, so the counters only ever grow.
+/// Progress of the catch-up pass, reported in the post-scan phase. The scan's own counts stay as the walk left them; the
+/// pass's work is `post_scan_owed` and `post_scan_done`.
 struct CatchUpProgress {
     sink: Sink,
     session_id: String,
@@ -1182,16 +1179,15 @@ impl CatchUpProgress {
 
     fn snapshot(&self, state: &(u64, u64, Instant)) -> ScanProgress {
         let (owed, done, started) = *state;
-        let (total, processed) = catch_up_counters(self.discovered, self.processed, owed, done);
+        let total = self.discovered.max(self.processed);
         let seconds = started.elapsed().as_secs_f64();
         let rate = if seconds > 0.0 { done as f64 / seconds } else { 0.0 };
         let mut progress = ScanProgress {
             session_id: self.session_id.clone(),
             phase: ScanPhase::PostScan,
             total,
-            // The pass adds work the walk never found, so the files seen grow with the total and never fall behind what is processed.
             discovered: total,
-            processed,
+            processed: self.processed,
             failed: self.failed,
             files_per_second: rate,
             eta_seconds: (rate > 0.01).then(|| (owed - done) as f64 / rate),
@@ -1202,12 +1198,6 @@ impl CatchUpProgress {
         };
         self.lift.apply(&mut progress);
         progress
-    }
-
-    /// The counts the last snapshot showed, which the scan's closing snapshot must not fall below.
-    fn closing_counts(&self) -> (u64, u64) {
-        let snapshot = self.snapshot(&self.state.lock());
-        (snapshot.total, snapshot.processed)
     }
 }
 
@@ -1227,10 +1217,6 @@ fn terminal_progress(session_id: &str, phase: ScanPhase, total: u64, discovered:
         post_scan_owed: None,
         post_scan_done: None,
     }
-}
-
-fn catch_up_counters(discovered: u64, processed: u64, owed: u64, done: u64) -> (u64, u64) {
-    (discovered.max(processed) + owed, processed + done.min(owed))
 }
 
 /// Throttle state for progress emission. The DBWriter callback fires per batch (every 100 files or 200 ms); this throttles further into the IPC sink to at most ~10 Hz.
@@ -2389,15 +2375,6 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_progress_only_grows_past_the_scans_own_counts() {
-        assert_eq!(catch_up_counters(100, 100, 40, 0), (140, 100));
-        assert_eq!(catch_up_counters(100, 100, 40, 25), (140, 125));
-        assert_eq!(catch_up_counters(100, 100, 40, 99), (140, 140));
-        // A rescan that found nothing new but still owes an earlier scan's files.
-        assert_eq!(catch_up_counters(0, 0, 12, 4), (12, 4));
-    }
-
-    #[test]
     fn the_last_snapshot_carries_the_terminal_phase_and_the_final_counts() {
         for phase in [ScanPhase::Completed, ScanPhase::Cancelled, ScanPhase::Failed] {
             let progress = terminal_progress("s1", phase, 959, 959, 930, 2);
@@ -3226,12 +3203,12 @@ mod tests {
         assert!(seen.len() >= 8, "a progress event about every tick, got {}", seen.len());
         assert!(seen.iter().all(|p| p.session_id == "one-session" && p.phase == ScanPhase::PostScan && p.failed == 2 && p.discovered == p.total));
         for pair in seen.windows(2) {
-            assert!(pair[1].total >= pair[0].total, "total never shrinks: {} then {}", pair[0].total, pair[1].total);
-            assert!(pair[1].processed >= pair[0].processed, "processed never shrinks: {} then {}", pair[0].processed, pair[1].processed);
+            assert!(pair[1].post_scan_owed >= pair[0].post_scan_owed, "owed never shrinks: {:?} then {:?}", pair[0].post_scan_owed, pair[1].post_scan_owed);
+            assert!(pair[1].post_scan_done >= pair[0].post_scan_done, "done never shrinks: {:?} then {:?}", pair[0].post_scan_done, pair[1].post_scan_done);
         }
         let last = seen.last().unwrap();
-        assert_eq!((last.total, last.processed), (130, 110), "a smaller later estimate does not shrink the total");
-        assert!(seen.iter().all(|p| p.processed <= p.total));
+        assert_eq!((last.post_scan_owed, last.post_scan_done), (Some(30), Some(10)), "a smaller later estimate does not shrink the work owed");
+        assert!(seen.iter().all(|p| (p.total, p.processed) == (100, 100)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3271,14 +3248,14 @@ mod tests {
         }
         assert!(seen.len() >= 1600);
         for pair in seen.windows(2) {
-            assert!(pair[1].processed >= pair[0].processed, "processed went back: {} then {}", pair[0].processed, pair[1].processed);
-            assert!(pair[1].total >= pair[0].total);
+            assert!(pair[1].post_scan_done >= pair[0].post_scan_done, "done went back: {:?} then {:?}", pair[0].post_scan_done, pair[1].post_scan_done);
+            assert!(pair[1].post_scan_owed >= pair[0].post_scan_owed);
         }
-        assert_eq!(seen.last().unwrap().processed, 10 + 1600);
+        assert_eq!(seen.last().unwrap().post_scan_done, Some(1600));
     }
 
     #[tokio::test]
-    async fn the_post_scan_totals_count_the_work_the_walk_never_found_and_close_at_the_same_numbers() {
+    async fn the_post_scan_keeps_the_scans_totals_and_reports_its_own_work_as_owed_and_done() {
         let (sink, mut events) = Sink::channel_for_test(256);
         let report = CatchUpProgress {
             sink,
@@ -3296,8 +3273,9 @@ mod tests {
         while let Ok(event) = events.try_recv() {
             seen.push(post_scan_progress(event));
         }
-        assert!(seen.iter().all(|p| p.processed <= p.discovered && p.discovered == p.total), "processed never passes the files counted: {seen:?}");
-        assert_eq!(report.closing_counts(), (206_328, 143_108));
+        assert!(seen.iter().all(|p| (p.total, p.discovered, p.processed) == (130_108, 130_108, 130_108)), "the library size stays put: {seen:?}");
+        let last = seen.last().unwrap();
+        assert_eq!((last.post_scan_owed, last.post_scan_done), (Some(76_220), Some(13_000)));
     }
 
     #[test]
@@ -3351,7 +3329,7 @@ mod tests {
         assert_eq!((first.post_scan_owed, first.post_scan_done), (Some(30), Some(0)));
         let second = post_scan_progress(events.recv().await.unwrap());
         assert_eq!((second.post_scan_owed, second.post_scan_done), (Some(30), Some(12)));
-        assert_eq!((second.total, second.processed), (530, 492));
+        assert_eq!((second.total, second.processed), (500, 480));
     }
 
     #[tokio::test]

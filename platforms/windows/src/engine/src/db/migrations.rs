@@ -54,6 +54,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v37_files_size_index", include_str!("../../../../../../shared/catalog/v37.sql")),
         ("v38_files_name_sort", include_str!("../../../../../../shared/catalog/v38.sql")),
         ("v39_files_search_fts", include_str!("../../../../../../shared/catalog/v39.sql")),
+        ("v40_library_roots_capture_dates", include_str!("../../../../../../shared/catalog/v40.sql")),
     ]
 }
 
@@ -521,7 +522,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 39, "expected 39 applied migrations");
+        assert_eq!(n, 40, "expected 40 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -591,7 +592,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 39);
+        assert_eq!(n, 40);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox) key must still resolve to the current face after a
@@ -672,7 +673,7 @@ mod tests {
     /// against a catalog the Swift engine wrote (see `catalog_the_swift_engine_wrote_matches_the_migrations`).
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 39] = [
+        const CANONICAL: [&str; 40] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -712,6 +713,7 @@ mod tests {
             "v37_files_size_index",
             "v38_files_name_sort",
             "v39_files_search_fts",
+            "v40_library_roots_capture_dates",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
