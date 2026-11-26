@@ -273,10 +273,10 @@ where
     best.filter(|(_, rate)| *rate > baseline.1 * 1.05)
 }
 
-/// The Swift engine's store: one `ModelBenchmark` per model id, each carrying its hardware; only this machine's entries
-/// are returned.
+/// One `ModelBenchmark` per model id, each carrying its hardware; only this machine's entries are returned.
 type Store = BTreeMap<String, ModelBenchmark>;
 
+/// The `results` list the Swift engine wrote; `import_legacy` converts it.
 #[derive(serde::Deserialize)]
 struct LegacyStore {
     results: Vec<LegacyEntry>,
@@ -295,7 +295,7 @@ pub(crate) fn store_path() -> Result<PathBuf> {
     Ok(crate::paths::root()?.join("model-benchmarks.json"))
 }
 
-/// The Mac-hosted engine uses the Swift engine's wording so both see each other's results.
+/// The Mac-hosted engine uses the Swift engine's wording so results the Swift engine saved still match this machine.
 pub fn hardware() -> String {
     #[cfg(target_os = "macos")]
     if crate::paths::APP_HOSTED {
@@ -378,7 +378,7 @@ pub fn load_in(path: &Path, hardware: &str) -> BTreeMap<String, ModelBenchmark> 
     load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect()
 }
 
-/// Results from other hardware are dropped, as in the Swift engine.
+/// Results from other hardware are dropped.
 pub fn save_in(path: &Path, model: &str, benchmark: ModelBenchmark, hardware: &str) -> Result<()> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store: Store = load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect();

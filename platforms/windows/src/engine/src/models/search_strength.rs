@@ -1,7 +1,6 @@
 //! Judges CLIP text search hits: a photo is a good match when its score for "a photo of <words>." beats its
 //! generic-photo score by the shared margin (a fixed cosine floor fails because some photos score high for every
-//! query). Values come from shared/models/clip-search-baseline.json (calibration in DECISIONS.md) and mirror Swift
-//! `SearchStrength`.
+//! query). Values come from shared/models/clip-search-baseline.json (calibration in DECISIONS.md).
 
 use std::sync::OnceLock;
 
@@ -47,7 +46,7 @@ pub fn live_encoder(text: &str) -> Option<Vec<f32>> {
         .flatten()
 }
 
-/// (cosine, margin over the baseline), summed in index order as Swift does.
+/// (cosine, margin over the baseline), summed in index order.
 pub fn score(query: &[f32], embedding: &[f32]) -> (f32, f32) {
     let base = &baseline().baseline;
     let mut cosine = 0f32;

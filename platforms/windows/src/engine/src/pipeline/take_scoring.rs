@@ -1,7 +1,6 @@
 //! Model-free Best Takes scoring: subject sharpness, motion blur, exposure,
 //! faces/eyes/framing and, for clips, steadiness and action. Pure functions on
-//! 8-bit luma; mirror of the macOS `TakeScoring.swift` with the same
-//! thresholds, weights and reasons. Change both together.
+//! 8-bit luma.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -320,8 +319,7 @@ pub struct Tile {
 
 /// Wide group shots: faces 15–30 px across at the analysis size go unseen.
 /// Look again in tiles only when the frame is large and the first pass found
-/// no faces, a face too small for an eyes check, or more people than faces
-/// (Swift `TakeScoring.wantsTiles`).
+/// no faces, a face too small for an eyes check, or more people than faces.
 pub fn wants_tiles(source_long_side: u32, width: usize, height: usize, faces: &[Face], people: Option<&[Box2]>) -> bool {
     if source_long_side < TILE_LONG_SIDE {
         return false;

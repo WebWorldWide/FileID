@@ -60,8 +60,8 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
     Some(out)
 }
 
-/// The macOS engine's alignment (`FaceAlign.align112`): RGBA8 in/out, no off-frame rejection. Kept bit-identical to
-/// Swift so embeddings land in the `macos-landmark-overlap-v3-orientation` space (`face-alignment.json` pins it).
+/// Alignment used on Mac: RGBA8 in/out, no off-frame rejection. Its output defines the
+/// `macos-landmark-overlap-v3-orientation` embedding space (`face-alignment.json` pins it), so it must not change.
 pub fn align_112_rgba(rgba: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5]) -> Option<Vec<u8>> {
     let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
     if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 || rgba.len() != expected {
@@ -277,7 +277,7 @@ mod tests {
         (fit, crop.map(|bytes| hex::encode(sha2::Sha256::digest(&bytes))))
     }
 
-    /// Bit for bit with the Swift engine's `FaceAlign` (FaceLandmarkMatchTests checks the same fixture).
+    /// Bit for bit with the pinned fixture.
     #[test]
     fn shared_aligned_crops_match_bit_for_bit() {
         let cases = aligned_fixtures();

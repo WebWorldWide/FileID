@@ -281,8 +281,8 @@ pub struct DetectedFace {
     pub crop_rgb_112: Option<Vec<u8>>,
 }
 
-// Face-quality limits mirror macOS DBWriter.swift (pose in radians). No quality floor: `det.score * geom_conf` never drops below 0.045. FACE_MIN_BBOX_MIN_DIM_PX is the real size gate; the area fraction only backstops degenerate detections.
-// The floor is in decode-space pixels and video keyframes decode ~3x smaller than stills; one shared constant is deliberate because a per-kind floor would need an exact Swift mirror.
+// Face-quality limits (pose in radians). No quality floor: `det.score * geom_conf` never drops below 0.045. FACE_MIN_BBOX_MIN_DIM_PX is the real size gate; the area fraction only backstops degenerate detections.
+// The floor is in decode-space pixels and video keyframes decode ~3x smaller than stills; one shared constant is deliberate.
 const FACE_MIN_BBOX_AREA_FRACTION: f32 = 0.0002;
 const FACE_MIN_BBOX_MIN_DIM_PX: f32 = 40.0;
 const FACE_MAX_YAW_RADIANS: f32 = 50.0 * std::f32::consts::PI / 180.0;
@@ -1854,7 +1854,7 @@ fn jpeg_scaled_decode_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_SCALED_DECODE").map_or(true, |v| v.trim() != "0"))
 }
 
-/// A camera JPEG's MPF large preview, decoded in place of the full frame (the Mac engine's `JPEGPreview.decode` rules): full image ≥ a third larger than `floor`, tagged sRGB, upright, whole frame, long side ≥ two thirds of `floor`.
+/// A camera JPEG's MPF large preview, decoded in place of the full frame: full image ≥ a third larger than `floor`, tagged sRGB, upright, whole frame, long side ≥ two thirds of `floor`.
 /// Native size up to a third above `floor`, DCT-scaled above. The caller applies the primary orientation; `None` keeps the existing paths. `FILEID_JPEG_MPF_PREVIEW=0` disables it.
 #[cfg(test)]
 pub(crate) fn decode_mpf_preview(bytes: &[u8], primary_w: u32, primary_h: u32, floor: u32) -> Option<(Vec<u8>, u32, u32)> {
@@ -2529,7 +2529,7 @@ async fn process_file_predecoded(
                 }
     }
 
-    // Enriched extras: Year + camera family from existing signals (no inference), filling the chip row when scene tags missed the threshold; mirrors macOS `Tagging.swift::extraTags`. Year and camera belong to images only; every other kind starts with its kind tag.
+    // Enriched extras: Year + camera family from existing signals (no inference), filling the chip row when scene tags missed the threshold. Year and camera belong to images only; every other kind starts with its kind tag.
     let extras = if file.kind == FileKind::Image {
         enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref())
     } else {
@@ -2761,14 +2761,14 @@ fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32,
     false
 }
 
-/// Year + camera-family chips from signals already on hand (no inference, no I/O), matching macOS `Tagging.swift::extraTags`.
+/// Year + camera-family chips from signals already on hand (no inference, no I/O).
 /// `Year_2024` keeps the underscore (the Library formatter strips it). Orientation and capability tags (Has Faces/Text/Location) are deliberately not emitted: they read as noise.
 fn push_enriched_extras(tagged: &mut TaggedFile) {
     let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
     tagged.tags.extend(extras.into_iter().map(|tag| (tag, None)));
 }
 
-/// The tag every non-image file starts with, as Swift stores it (`Doc`, `PDF`, `Audio`, `Video`, `3D Model`, `Other`).
+/// The tag every non-image file starts with (`Doc`, `PDF`, `Audio`, `Video`, `3D Model`, `Other`).
 fn kind_tag(kind: FileKind) -> Option<&'static str> {
     match kind {
         FileKind::Image => None,
@@ -2784,7 +2784,7 @@ fn kind_tag(kind: FileKind) -> Option<&'static str> {
 fn enriched_extras(created_unix: Option<f64>, modified_unix: f64, camera_model: Option<&str>) -> Vec<String> {
     let mut extras = Vec::new();
     // Order matters: the Library card's `TopTwoTags` takes the first two tags, so the most informative signals go first.
-    // Year_: creation date when present, else modification date; local timezone; strictly inside (1990, 2100), per macOS `extraTags`. Camera family follows.
+    // Year_: creation date when present, else modification date; local timezone; strictly inside (1990, 2100). Camera family follows.
     let now = crate::util::unix_now();
     let year_source = created_unix.filter(|&c| c > 0.0).and_then(|c| crate::util::not_in_the_future(c, now));
     let year_source = year_source.or_else(|| crate::util::not_in_the_future(modified_unix, now)).unwrap_or(0.0);
@@ -2995,7 +2995,7 @@ pub(crate) fn exif_datetime_to_unix(text: &str, offset: Option<&str>, now_unix: 
     exif_datetime_in(text, offset, now_unix, &chrono::Local)
 }
 
-/// Like macOS `Tagging.exifCaptureDate`: a wall time that occurs twice when
+/// A wall time that occurs twice when
 /// clocks fall back reads as the later (standard-time) instant, and one that
 /// never occurs when they spring forward is rejected.
 fn exif_datetime_in<Tz: chrono::TimeZone>(text: &str, offset: Option<&str>, now_unix: f64, zone: &Tz) -> Option<f64> {
@@ -3009,7 +3009,7 @@ fn exif_datetime_in<Tz: chrono::TimeZone>(text: &str, offset: Option<&str>, now_
     (unix >= 631_152_000.0 && unix <= now_unix + 86_400.0).then_some(unix)
 }
 
-/// `±HH:MM`, the only OffsetTime* form macOS accepts.
+/// `±HH:MM`, the only OffsetTime* form accepted.
 fn exif_offset(text: &str) -> Option<chrono::FixedOffset> {
     let text = text.trim();
     let sign = match text.as_bytes() {
@@ -3198,7 +3198,7 @@ pub fn compute_dhash_for_path(path: &std::path::Path) -> anyhow::Result<i64> {
     ))
 }
 
-/// Difference hash: 9×8 grayscale → 64 bits, one per horizontal-adjacent comparison; matches macOS dHash.
+/// Difference hash: 9×8 grayscale → 64 bits, one per horizontal-adjacent comparison.
 pub fn compute_dhash(rgb: &[u8], width: usize, height: usize) -> i64 {
     if width == 0 || height == 0 || rgb.len() < width * height * 3 {
         return 0;
@@ -3222,7 +3222,7 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
     let r = rgb[i] as u32;
     let g = rgb[i + 1] as u32;
     let b = rgb[i + 2] as u32;
-    // Rec. 601 luma — same coefficients macOS uses.
+    // Rec. 601 luma.
     ((299 * r + 587 * g + 114 * b) / 1000) as u8
 }
 
@@ -4308,7 +4308,7 @@ mod tests {
         }
     }
 
-    /// Values macOS `Tagging.exifCaptureDate` returns in America/Chicago: the
+    /// Values returned in America/Chicago: the
     /// repeated 01:30 on 2026-11-01 is the CST instant, the skipped 02:30 on
     /// 2026-03-08 is no date, and its neighbours are unchanged.
     #[test]

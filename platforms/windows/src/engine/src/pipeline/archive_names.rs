@@ -1,5 +1,4 @@
 //! Zip entry names read from the central directory only; nothing is extracted or decompressed.
-//! Mirrors the Swift engine's `ArchiveNames`.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

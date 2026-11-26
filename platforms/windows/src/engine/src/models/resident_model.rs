@@ -1,5 +1,5 @@
 //! Which resident vision-language model serves Deep Analyze, Chat, selection checks, goal ranking and timelines:
-//! llama.cpp GGUF weights, or in the Mac-hosted engine the Swift engine's MLX sessions (`crate::apple::vlm`).
+//! llama.cpp GGUF weights, or in the Mac-hosted engine MLX sessions (`crate::apple::vlm`).
 
 pub(crate) const MLX: bool = cfg!(all(target_os = "macos", feature = "apple-adapters"));
 

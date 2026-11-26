@@ -107,7 +107,7 @@ fn same_final_name(folder: &Path, root: &Path) -> bool {
     }
 }
 
-/// Drops every move whose source folder classified [`FolderClassification::Anchor`]: the macOS reference emits NO proposals for anchor folders, so their moves must never reach the plan. The anchor COUNT for the "Keep" tile is the caller's job, computed from `classified` BEFORE stripping. Test-only: production calls [`strip_anchor_folder_moves_except`] so the butler's claimed files survive.
+/// Drops every move whose source folder classified [`FolderClassification::Anchor`]: anchor folders get no proposals. The caller counts anchors for the "Keep" tile from `classified` before stripping. Test-only: production calls [`strip_anchor_folder_moves_except`].
 #[cfg(test)]
 pub fn strip_anchor_folder_moves(
     moves: Vec<ProposedMove>,
@@ -116,7 +116,7 @@ pub fn strip_anchor_folder_moves(
     strip_anchor_folder_moves_except(moves, classified, &std::collections::HashSet::new())
 }
 
-/// Like [`strip_anchor_folder_moves`], but never strips a move whose file ID is in `exempt_file_ids`. A homogeneous source folder routing to one destination classifies Anchor, but when that is the semantic butler relocating every file into a new content group, stripping would eat the highest-confidence proposals; the caller passes the files the butler claimed.
+/// Like [`strip_anchor_folder_moves`], but keeps every move whose file ID is in `exempt_file_ids`. A folder whose files all go to one destination classifies Anchor even when the semantic butler is relocating them into a new content group; the caller passes the butler's claimed files so those proposals survive.
 pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
     moves: Vec<ProposedMove>,
     classified: &[ClassifiedFolder],
@@ -139,7 +139,7 @@ pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
         .collect()
 }
 
-/// Priority-based restructure matching macOS Restructure.swift, first match wins: named person → People/<Name>/<Year>/, GPS → Places/<bucket>/<Year>/, Document → Documents/<Year>/, Image → Photos/<Year>/<MonthName>/, Video → Videos/<Year>/, Audio → Audio/<Year>/ (flat without a date), 3D model → 3D Models/, else Misc/.
+/// Priority-based restructure, first match wins: named person → People/<Name>/<Year>/, GPS → Places/<bucket>/<Year>/, Document → Documents/<Year>/, Image → Photos/<Year>/<MonthName>/, Video → Videos/<Year>/, Audio → Audio/<Year>/ (flat without a date), 3D model → 3D Models/, else Misc/.
 /// A zero/missing timestamp is not a real date (FAT32 zero-epoch, corrupt mtime): it yields Ask confidence and a dateless folder, so a file is never filed into a 1970 bucket.
 pub fn classify(
     files: &[FileForClassify],
@@ -236,7 +236,7 @@ pub fn classify(
              Confidence::Ask, "No strong signal — left for you to decide".to_string())
         };
 
-        // The VLM name is already slug-sanitized; the extension is capped separately from the stem so a long basename never loses its suffix (macOS parity).
+        // The VLM name is already slug-sanitized; the extension is capped separately from the stem so a long basename never loses its suffix.
         let name = proposed_filename(f);
         out.push(ProposedMove {
             file_id: f.file_id,
@@ -285,7 +285,7 @@ pub struct FileForClassify {
     pub location_lat: Option<f64>,
     pub location_lon: Option<f64>,
     pub has_text: bool,
-    /// Deep Analyze's smart-name proposal; macOS applies it during restructure, so Windows must too.
+    /// Deep Analyze's smart-name proposal, applied as the new filename.
     pub vlm_proposed: Option<String>,
     /// The source identity when the plan was built, so apply binds the move to THIS file rather than whatever lives at `source` now.
     pub identity: Option<PlannedIdentity>,
@@ -307,7 +307,7 @@ pub struct PlannedIdentity {
 }
 
 fn sanitize_path_component(s: &str) -> String {
-    // Byte-faithful with macOS componentSafe: replace illegal and control chars with `_`, handle reserved names, trailing dots, length and empty.
+    // Replaces illegal and control chars with `_` and handles reserved names, trailing dots, length and empty.
     crate::util::path_safety::safe_filename_component(s)
 }
 
@@ -335,7 +335,7 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
         .into_iter()
         .map(|(category, count)| CategorySummary { category: category.to_string(), count })
         .collect();
-    // Count desc, then category asc: the source is a HashMap, so ties must be ordered deterministically to match macOS.
+    // Count desc, then category asc: the source is a HashMap, so ties need a deterministic order.
     out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.category.cmp(&b.category)));
     out
 }
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn anchor_folder_moves_are_stripped_from_plan() {
-        // Three same-month photos in one well-named folder classify Anchor; the macOS reference leaves anchor folders untouched, so their moves must be dropped before the plan reaches the app.
+        // Three same-month photos in one well-named folder classify Anchor; anchor folders are left untouched, so their moves must be dropped before the plan reaches the app.
         let ts = 1_710_504_000.0;
         let files = vec![
             img(1, "D:/Library/Vacation2019/a.jpg", ts),
@@ -748,7 +748,7 @@ mod tests {
         assert_eq!(cats[1].count, 1);
     }
 
-    /// macOS parity: a zero/corrupt timestamp must yield Ask confidence and a dateless folder, never a 1970 bucket.
+    /// A zero/corrupt timestamp must yield Ask confidence and a dateless folder, never a 1970 bucket.
     #[test]
     fn dateless_file_is_ask_and_flat() {
         let m = classify(&[img(1, "C:/scan/mystery.jpg", 0.0)], Path::new("D:/Library"));
@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn dateless_document_reason_matches_macos() {
+    fn dateless_document_reason_is_no_date_signal() {
         let mut f = img(1, "C:/scan/notes.pdf", 0.0);
         f.kind = FileKind::Pdf;
         let m = classify(&[f], Path::new("D:/Library"));
@@ -797,7 +797,7 @@ mod tests {
         );
     }
 
-    /// macOS caps the extension at 16 scalars separately from the 200-scalar stem; capping the whole `stem.ext` cut the suffix off, so the file stopped opening and dropped out of the next scan.
+    /// The extension is capped at 16 scalars separately from the 200-scalar stem; capping the whole `stem.ext` cut the suffix off, so the file stopped opening and dropped out of the next scan.
     #[test]
     fn long_extension_is_capped_separately_from_the_stem() {
         let stem = "a".repeat(250);

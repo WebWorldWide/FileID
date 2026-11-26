@@ -1,5 +1,4 @@
-//! Stage 5 convergence path: the scan's per-file work when the Mac app hosts the engine. Each stored result follows the Swift engine's `Tagging.processFile`, so either engine reads the other's library.
-//! Vision faces are stored without vectors (box, quality, clustering hold) and get their vectors in the Mac face space later; this path never writes `rust-align112-v1` faces. `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
+//! The scan's per-file work when the Mac app hosts the engine. //! Vision faces are stored without vectors (box, quality, clustering hold) and get their vectors in the Mac face space later; this path never writes `rust-align112-v1` faces. `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
@@ -14,9 +13,9 @@ use crate::pipeline::audio_meta::AudioTags;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-/// The Swift engine's `Tagging.storedTextChars`.
+/// Cap on the document text stored per file.
 const STORED_TEXT_CHARS: usize = 256 * 1024;
-/// `DocText.embeddingChars`: the BGE input.
+/// Cap on the document text fed to BGE.
 const EMBEDDING_CHARS: usize = 4000;
 const VIDEO_KEYFRAME_EDGE: u32 = 512;
 const VIDEO_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(6);
@@ -367,8 +366,7 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     row
 }
 
-/// A copy of an analyzed image, as the Swift engine's `Tagging.twinCopy`
-/// builds it: the twin's model output (copied by the writer, with the camera
+/// A copy of an analyzed image: the twin's model output (copied by the writer, with the camera
 /// and location the same bytes carry) under this file's own dates and Year tag.
 fn twin_row(row: &mut TaggedFile, file: &DiscoveredFile, exif: Option<ExifFields>) {
     let captured = exif.and_then(|(_, _, _, captured)| captured);
@@ -594,8 +592,7 @@ impl catch_up::Analyzer for CatchUp {
                     faces: Vec::new(),
                 };
                 let ram = ram_plus_tags(&image, &pass, &self.models);
-                // A marker the Swift engine wrote carries no extras: work them
-                // out as the scan does, from the capture time or the file's birth.
+                // A marker written by the Swift engine carries no extras; derive them from the capture time or the file's birth.
                 let extras = context.x.clone().unwrap_or_else(|| {
                     let born = std::fs::metadata(&file.path).ok().and_then(|meta| meta.created().ok()).and_then(crate::util::catalog_unix_seconds);
                     extra_tags(image.info.captured_at.or(born), image.info.camera_model.as_deref())

