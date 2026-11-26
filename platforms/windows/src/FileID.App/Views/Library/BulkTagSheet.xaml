@@ -1,11 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    BulkTagSheet — modal that takes a comma-separated tag list and
-    applies it to a set of files via engine `applyTags`. Confirms when
-    the count is >= 50 (typo guard). Tags persist via the engine sidecar
-    JSON + the DB `tags` table; Explorer Details column reads the
-    sidecar via the macOS-cross-platform contract.
--->
+<!-- BulkTagSheet: applies a comma-separated tag list to the selected files via the engine's applyTags, confirming at 50 or more files. -->
 <UserControl
     x:Class="FileID.Views.Library.BulkTagSheet"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

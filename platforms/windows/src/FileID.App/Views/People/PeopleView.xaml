@@ -1,9 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    PeopleView — face cluster cards in a wrap layout. Cards show the
-    cluster's anchor face crop + a caption. Drag-merge + person-detail
-    sheet are in progress.
--->
+<!-- PeopleView: face cluster cards in a wrap layout, each with the anchor face crop and a caption. -->
 <UserControl
     x:Class="FileID.Views.People.PeopleView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -88,9 +84,7 @@
                     </StackPanel>
                 </Grid>
             </StackPanel>
-            <!-- header action buttons in a horizontal-scroll
-                 wrapper so on narrow windows they scroll instead of
-                 overflowing the title's * column. -->
+            <!-- Scrolls horizontally on narrow windows instead of overflowing the title's * column. -->
             <ScrollViewer Grid.Column="1"
                           HorizontalScrollMode="Auto"
                           HorizontalScrollBarVisibility="Hidden"
@@ -123,9 +117,7 @@
                         AutomationProperties.Name="Suggested merges"
                         AutomationProperties.HelpText="Find pairs of cards that might be the same person">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <!-- sparkle glyph mirrors macOS sparkles SF Symbol;
-                             previously a link icon (E8B6) which read as "merge",
-                             not "AI suggestion". -->
+                        <!-- Sparkle glyph: reads as an AI suggestion rather than a merge. -->
                         <FontIcon FontSize="13" Glyph="&#xE945;" Foreground="{ThemeResource AiBrush}" />
                         <TextBlock Text="Suggested merges" />
                     </StackPanel>
@@ -144,7 +136,7 @@
             </ScrollViewer>
         </Grid>
 
-        <!-- FEAT-CRIT-1: bulk-action toolbar, only visible in select mode. -->
+        <!-- Bulk-action toolbar, visible only in select mode. -->
         <Grid x:Name="BulkActionBar"
               Grid.Row="2"
               Visibility="Collapsed"
@@ -272,9 +264,7 @@
                                            TextAlignment="Center"
                                            TextTrimming="CharacterEllipsis" />
                             </Button>
-                            <!-- FEAT-CRIT-1: per-card selection checkbox.
-                                 Visibility driven from PeopleView code-behind
-                                 (UpdateSelectionVisibility on each Loaded). -->
+                            <!-- Per-card selection checkbox; visibility is set from code-behind (UpdateSelectionVisibility). -->
                             <CheckBox Grid.Row="0"
                                       Visibility="Collapsed"
                                       HorizontalAlignment="Right"
@@ -292,11 +282,7 @@
         </ScrollViewer>
 
         <StackPanel Grid.Row="3" Spacing="6">
-            <!-- Item 2: positive "keep moving" affordance — once at least one
-                 cluster is named, advance to Deep Analyze (which uses those
-                 names in captions + smart filenames). Mirror of the macOS
-                 PeopleView continueToDeepAnalyzeRow. The "skip" counterpart is
-                 the Deep Analyze tab's non-blocking Analyze All + gate banner. -->
+            <!-- Once a cluster is named, offers to continue to Deep Analyze, which uses the names in captions and smart filenames. -->
             <Border x:Name="ContinueToDeepAnalyzeBanner"
                     Visibility="Collapsed"
                     Padding="14,12"
@@ -336,11 +322,7 @@
                     </Button>
                 </Grid>
             </Border>
-            <!-- "N hidden unknowns" footer with show/hide toggle. Mirrors
-                 macOS PeopleView's bottom strip: when the global Hide-
-                 unknowns toggle is on, an unobtrusive count + one-tap
-                 reveal lives here so the user remembers what's filtered
-                 out. Collapses cleanly when count==0. -->
+            <!-- "N hidden unknowns" footer with a show/hide toggle; collapsed when the count is 0. -->
             <Grid x:Name="HiddenUnknownsFooter"
                   Visibility="Collapsed"
                   ColumnSpacing="10"

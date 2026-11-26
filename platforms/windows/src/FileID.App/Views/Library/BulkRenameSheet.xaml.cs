@@ -1,6 +1,4 @@
-﻿// BulkRenameSheet code-behind. Uses a virtualized XAML ItemTemplate for rows.
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -170,7 +168,7 @@ public sealed partial class BulkRenameSheet : UserControl
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // Catch + log so a failed alert never escalates.
+        // Catch and log so a failed alert never escalates.
         try
         {
             if (XamlRoot is null) return;

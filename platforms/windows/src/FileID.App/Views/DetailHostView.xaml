@@ -1,11 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    DetailHostView — the right-hand pane. Switches between the active tab's
-    view and the onboarding splash when no folder is picked.
-
-    Tab crossfade animation (0.22s easeInOut) is a future polish item.
-    For now: snap.
--->
+<!-- DetailHostView: the right-hand pane, showing the active tab's view or the onboarding splash. -->
 <UserControl
     x:Class="FileID.Views.DetailHostView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -16,7 +10,6 @@
     mc:Ignorable="d">
 
     <Grid x:Name="Host">
-        <!-- Code-behind swaps Host's child based on AppViewModel.HasFolder
-             + AppViewModel.ActiveTab. Initial child loaded in OnLoaded. -->
+        <!-- Code-behind swaps Host's child based on AppViewModel.HasFolder and ActiveTab. -->
     </Grid>
 </UserControl>
