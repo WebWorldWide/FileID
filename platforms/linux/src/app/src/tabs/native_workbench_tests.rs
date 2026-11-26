@@ -97,7 +97,9 @@ fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
 #[ignore = "requires Xvfb/display and FILEID_ENGINE pointing to an offline built real engine; run alone"]
 fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     assert!(Path::new(&std::env::var("FILEID_ENGINE").expect("FILEID_ENGINE required")).is_file());
-    adw::init().unwrap();
+    if !crate::display_test::init() {
+        return;
+    }
     workbenches::run_review_regressions();
     let fixture = std::env::temp_dir().join(super::workbench_state::request_id());
     let old_xdg = std::env::var_os("XDG_DATA_HOME");
