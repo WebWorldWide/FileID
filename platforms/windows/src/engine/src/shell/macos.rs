@@ -1,6 +1,5 @@
 // macOS Trash and Finder tags for the Mac-hosted engine (`apple-adapters`): FileManager.trashItem and Finder tag names
-// run in FileIDAppleKit (`crate::apple`); identity checks, the write-ahead journal and inode recovery stay here, as in
-// the Swift `trashFiles` and `TrashJournal`.
+// run in FileIDAppleKit (`crate::apple`); identity checks, the write-ahead journal and inode recovery stay here.
 //
 // Test-only Trash root: with the `test-trash-root` feature (never shipped; `assemble_app.sh` refuses such a binary) and
 // in unit tests, items move to `$FILEID_TEST_TRASH_ROOT` instead of the user's Trash, and only when the catalog is an

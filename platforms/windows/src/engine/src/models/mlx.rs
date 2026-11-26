@@ -561,7 +561,7 @@ pub fn catalog_record_is_valid(dir: &Path, repo: &Repo) -> bool {
         && entry.files.iter().all(|expected| weights.iter().any(|file| file.path == expected.path && file.sha256 == expected.sha256 && file.size == expected.size))
 }
 
-/// A record that no longer verifies is removed, as in the Swift engine, so the next fetch re-proves every file.
+/// A record that no longer verifies is removed so the next fetch re-proves every file.
 pub fn installed(repo: &Repo) -> bool {
     let Some(dir) = model_dir(repo) else {
         return false;

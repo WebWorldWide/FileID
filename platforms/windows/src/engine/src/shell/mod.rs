@@ -1947,12 +1947,9 @@ pub mod trash {
             let expected = crate::platform::file_identity(&original);
             trash_into(&original, &trash).unwrap();
             let trash_file = trash.join("files/file.bin");
-            // Substitute the trashed file with different content under a
-            // GUARANTEED-distinct identity. Allocating the replacement beside the
-            // still-present original and renaming it into place prevents an
-            // inode-reusing filesystem (tmpfs on CI, unlike ext4 under WSL) from
-            // handing the replacement the freed original's inode, which would make
-            // the (dev, inode) identity spuriously match and defeat the check.
+            // Allocate the replacement beside the still-present original, then rename it into place, so an
+            // inode-reusing filesystem (tmpfs) cannot hand it the freed original's inode and make the
+            // (dev, inode) identity match.
             let substitute = trash.join("files/file.bin.substitute");
             std::fs::write(&substitute, b"substitute").unwrap();
             std::fs::rename(&substitute, &trash_file).unwrap();
@@ -2299,8 +2296,8 @@ pub mod video {
     }
     /// Keyframe at ~25% of duration. The Mac app's engine takes it from
     /// AVFoundation through FileIDAppleKit (there is no FFmpeg runtime on the
-    /// Mac), as the Swift engine does; elsewhere it is FileID's vetted FFmpeg
-    /// runtime (`FILEID_FFMPEG_DIR`, or `media/` beside the engine), as on Linux.
+    /// Mac); elsewhere it is FileID's vetted FFmpeg runtime (`FILEID_FFMPEG_DIR`,
+    /// or `media/` beside the engine).
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         use anyhow::Context;

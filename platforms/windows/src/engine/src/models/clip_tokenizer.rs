@@ -105,7 +105,7 @@ fn normalize(s: &str) -> String {
     lower.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// OpenAI CLIP's pre-tokenization (Swift `CLIPTokenizer`'s regex), so "dog." splits as "dog" then ".".
+/// OpenAI CLIP's pre-tokenization regex, so "dog." splits as "dog" then ".".
 fn split_words(s: &str) -> Vec<&str> {
     let mut words = Vec::new();
     let mut rest = s;

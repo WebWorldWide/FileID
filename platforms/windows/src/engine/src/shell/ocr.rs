@@ -1,4 +1,4 @@
-// OCR via Windows.Media.Ocr (WinRT): built in since 1809, no install or model download, runs entirely on-device. Locale is picked per call, falling back to English if the requested one isn't installed.
+// OCR via Windows.Media.Ocr (WinRT): built in, no model download, fully on-device.
 
 use anyhow::{Context, Result};
 
@@ -7,8 +7,8 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-/// Gives the calling thread a COM apartment for the WinRT activations below. OCR runs on tokio blocking-pool threads with no apartment, so without this the first activation failed CO_E_NOTINITIALIZED and the swallowed error made OCR produce nothing.
-/// MTA, not STA: these threads pump no message loop and the blocking `RecognizeAsync(..).join()` would risk an STA deadlock (same as `shell::heic`/`shell::video`); OcrEngine/SoftwareBitmap are agile. `is_ok()` is true for S_OK/S_FALSE (uninit to balance), false for RPC_E_CHANGED_MODE (another apartment owns the thread; leave it).
+/// Gives the calling thread a COM apartment for the WinRT activations below; blocking-pool threads have none, and the resulting failure would silently produce no OCR text.
+/// MTA, not STA: these threads pump no message loop, so the blocking `RecognizeAsync(..).join()` would risk an STA deadlock. `is_ok()` is false on RPC_E_CHANGED_MODE, where another apartment owns the thread and it must be left alone.
 fn with_com<R>(body: impl FnOnce() -> R) -> R {
     unsafe {
         let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -23,9 +23,7 @@ fn with_com<R>(body: impl FnOnce() -> R) -> R {
 
 /// Runs OCR on a tightly-packed RGB buffer; empty text means nothing matched.
 pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<String> {
-    // Cap each side at 16384 so `width * height * 4` cannot overflow u32 and
-    // `SoftwareBitmap::CreateCopyFromBuffer` (which takes i32 dims) stays in
-    // range. Windows.Media.Ocr tops out well below this in practice.
+    // Caps each side so `width * height * 4` cannot overflow u32 and the i32 dimensions of `CreateCopyFromBuffer` stay in range.
     const MAX_DIM: u32 = 16384;
     if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
         anyhow::bail!("OCR.recognize: dimensions out of range ({width}x{height})");
@@ -37,10 +35,10 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<String> {
 
     let mut bgra = Vec::with_capacity(pixels * 4);
     for chunk in rgb.as_chunks::<3>().0 {
-        bgra.push(chunk[2]); // B
-        bgra.push(chunk[1]); // G
-        bgra.push(chunk[0]); // R
-        bgra.push(255);      // A
+        bgra.push(chunk[2]);
+        bgra.push(chunk[1]);
+        bgra.push(chunk[0]);
+        bgra.push(255);
     }
 
     with_com(|| -> Result<String> {

@@ -1,6 +1,6 @@
-//! Deep Analyze in the Mac-hosted engine: the batch loop of `run_deep_analyze_batch` with the Swift MLX analysis
-//! (`crate::apple::vlm`) as the only backend. Events follow `DeepAnalyzeRunner.run`: loading, per-file progress with
-//! the live caption, one `deepAnalyzeFileDone` per file and a single terminal complete.
+//! Deep Analyze in the Mac-hosted engine: the batch loop of `run_deep_analyze_batch` with the MLX analysis
+//! (`crate::apple::vlm`) as the only backend. Events: loading, per-file progress with the live caption, one
+//! `deepAnalyzeFileDone` per file and a single terminal complete.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-/// What Swift sends before resolving targets: the refusal of an unknown kind, or "Queued" then "Finding files to
+/// What is sent before resolving targets: the refusal of an unknown kind, or "Queued" then "Finding files to
 /// analyze…". False when refused (terminal event sent).
 pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     if refuse_unknown_kind(sink, model_kind).await {
@@ -194,7 +194,7 @@ fn caption_stream(sink: &Sink, model_kind: &str, processed: u64, total: u64, eta
     }
 }
 
-/// Keeps proposed names unique per folder, as Swift does (`RESERVES_PROPOSED_NAMES`).
+/// Keeps proposed names unique per folder.
 fn reserve_name(
     db: &Arc<Mutex<rusqlite::Connection>>,
     file_id: i64,
@@ -334,7 +334,7 @@ pub(crate) async fn run_batch(
         }))))
         .await;
 
-        // A queued Chat answer gets the model between files (Swift's ChatYield); weights stay loaded.
+        // A queued Chat answer gets the model between files; weights stay loaded.
         if Resident::shared().has_waiters() {
             drop(lease);
             tokio::task::yield_now().await;

@@ -1,6 +1,5 @@
 //! Durable face refresh backlog: a `faceRefresh` catalog job re-embedding faces whose stored vector is missing or from
-//! another model, processing or file version, one namespace at a time. Keep states, SQL and messages in step with macOS
-//! `FaceRefreshJob.swift`.
+//! another model, processing or file version, one namespace at a time.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,8 +51,8 @@ const OUTDATED: &str = "FROM face_prints fp JOIN files f ON f.id=fp.file_id LEFT
        OR fp.processing_version IS NULL OR fp.processing_version<>?2 OR fp.source_revision IS NULL OR r.revision IS NULL \
        OR fp.source_revision<>r.revision)";
 
-/// The Mac-hosted engine keeps the Swift engine's namespace so a Swift catalog shows no refresh backlog; elsewhere the
-/// portable pipeline's.
+/// The Mac-hosted engine keeps the namespace the retired Swift engine used, so older catalogs show no refresh backlog;
+/// elsewhere the portable pipeline's.
 pub(crate) fn processing() -> &'static str {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -366,7 +365,7 @@ pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &
     for (face, outcome) in outcomes {
         let Some(item) = batch.iter().find(|item| item.face == *face) else { continue };
         let (state, reason) = match outcome {
-            // The Mac face space saves through `FaceAnalysisCache.persist`, as Swift's `FaceRefreshJob`.
+            // The Mac face space saves through `FaceAnalysisCache.persist`.
             Outcome::Embedded(vector) if processing.starts_with(super::face_clustering_mac::MAC_PREFIX) => {
                 let input = super::face_extract_mac::Input {
                     id: item.face,

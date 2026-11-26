@@ -278,7 +278,7 @@ fn video_verify(recipe: &ToolRecipe, source: &Path, stage: &Path) -> Result<()> 
     }
 }
 
-/// Swift's video export rules and capability text, as the Mac engine runs the same AVFoundation export.
+/// Video export rules and capability text for the Mac engine's AVFoundation export.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 mod apple_video {
     use crate::ipc::{ToolCapability, ToolRecipe};

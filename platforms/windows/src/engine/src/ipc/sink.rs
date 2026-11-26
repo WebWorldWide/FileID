@@ -1,4 +1,4 @@
-//! Bounded mpsc channel that drains to stdout one frame per line (mirror of `IPCSink.swift`). A single writer task
+//! Bounded mpsc channel that drains to stdout one frame per line. A single writer task
 //! serializes and writes atomically; when the channel fills, senders block so the engine slows down rather than
 //! dropping events.
 
@@ -16,7 +16,7 @@ const CHANNEL_CAPACITY: usize = 16384;
 // awaiting the reply (e.g. a huge restructurePlan), so the sink substitutes a small `ipc_frame_too_large` error.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
-/// When not stdout: the macOS app-hosted engine writes events on fd 2, like the Swift engine (see
+/// When not stdout: the macOS app-hosted engine writes events on fd 2 (see
 /// [`route_events_to_stderr`]).
 static EVENT_WIRE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
 

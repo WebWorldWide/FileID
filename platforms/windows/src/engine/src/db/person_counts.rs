@@ -1,5 +1,4 @@
-//! `persons.file_count`: distinct files holding a counted face (`excluded` unset); same expressions as Swift
-//! `Storage/PersonCounts.swift`.
+//! `persons.file_count`: distinct files holding a counted face (`excluded` unset).
 
 use rusqlite::{Connection, params};
 

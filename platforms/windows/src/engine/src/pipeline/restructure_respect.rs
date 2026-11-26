@@ -1,6 +1,5 @@
 //! Final Restructure stage: keep what the user already organized.
-//! Port of macOS `RestructureRespect.swift` (see shared/docs/RESTRUCTURE.md,
-//! 2026-10-15). Files in named folders stay; no move crosses events or lands in
+//! See shared/docs/RESTRUCTURE.md. Files in named folders stay; no move crosses events or lands in
 //! another format's folder; folder names never come from camera filenames or
 //! tag identifiers; misfiled RAW/JPEG/video files move to their sibling format
 //! folder; loose files captured during an event join it.

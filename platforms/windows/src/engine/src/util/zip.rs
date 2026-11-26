@@ -80,7 +80,7 @@ fn extract_archive(
                 max_entry_bytes
             );
         }
-        // Cheap early-out on an honest header; the AUTHORITATIVE cap is charged the ACTUAL bytes after the copy.
+        // Cheap early-out on an honest header; the authoritative cap is charged the actual bytes after the copy.
         if total_bytes.saturating_add(entry_size) > max_bytes {
             anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", max_bytes);
         }
@@ -95,9 +95,8 @@ fn extract_archive(
             .create_new(true)
             .open(&dest)
             .with_context(|| format!("creating staged entry {}", dest.display()))?;
-        // Bound the ACTUAL decompressed output, not the attacker-controlled declared size (a lying central directory
-        // would otherwise inflate past the caps). The cap shrinks to the remaining budget; +1 so an entry exactly at
-        // the cap copies fully while an over-cap one is still detected.
+        // Bound the actual decompressed output, not the declared size, which a lying central directory controls. The extra
+        // byte lets an entry exactly at the cap copy fully while an over-cap one is still detected.
         let entry_cap = max_entry_bytes.min(max_bytes.saturating_sub(total_written));
         let mut limited = std::io::Read::take(&mut entry, entry_cap.saturating_add(1));
         let written = std::io::copy(&mut limited, &mut out)

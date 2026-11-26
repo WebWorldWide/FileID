@@ -1,5 +1,4 @@
-//! `proposeNames`: preview smart names from stored catalog evidence only (no model call, nothing written). Lockstep
-//! with macOS `CatalogNameProposals.swift`.
+//! `proposeNames`: preview smart names from stored catalog evidence only (no model call, nothing written).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

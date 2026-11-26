@@ -118,7 +118,7 @@ pub(super) fn search(
         let seen: std::collections::HashSet<i64> = hits.iter().map(|h| h.file_id).collect();
         hits.extend(tag_hits(conn, query, filters, (&kinds, &people, &events, root))?.into_iter().filter(|h| !seen.contains(&h.file_id)));
         // Handwriting (Vision's accurate tier or a VLM transcription) is its own hit kind so results can say
-        // "Handwritten text" (CatalogStore.ocrHitKindSQL).
+        // "Handwritten text".
         const OCR_KIND: &str = "(SELECT CASE WHEN o.handwritten=1 THEN 'handwrittenText' ELSE 'ocrText' END FROM ocr_text o WHERE o.file_id=f.id)";
         for (table, kind) in [("doc_fts", "'documentText'"), ("ocr_fts", OCR_KIND)] {
             let sql = format!(
@@ -135,7 +135,7 @@ pub(super) fn search(
 }
 
 /// Each word matches the start of a tag word ("grass" hits "grassland"), and only files matching the most words are
-/// kept so a filler word can't hide a real match. Mirrors `CatalogStore.tagHits`.
+/// kept so a filler word can't hide a real match.
 fn tag_hits(
     conn: &Connection,
     query: &str,
@@ -182,7 +182,7 @@ fn tag_hits(
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// The word plus its singular stems, so "dogs" and "beaches" reach singular scan tags (`CatalogStore.wordForms`).
+/// The word plus its singular stems, so "dogs" and "beaches" reach singular scan tags.
 pub(super) fn word_forms(word: &str) -> Vec<String> {
     if word.chars().count() < 4 {
         return vec![word.to_owned()];

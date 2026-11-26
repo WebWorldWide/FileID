@@ -799,7 +799,7 @@ fn mark_persons_different_bulk_result_matches_schema() {
     );
 }
 
-/// The checker must reject the L1 drift class (`fileId` for `fileID`), or this suite guards nothing.
+/// The checker must reject key-casing drift (`fileId` for `fileID`), or this suite guards nothing.
 #[test]
 #[should_panic(expected = "wire-format drift")]
 fn checker_rejects_wrong_cased_key() {

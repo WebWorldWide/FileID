@@ -364,8 +364,7 @@ pub(super) fn detail(kind: &str) -> &'static str {
     }
 }
 
-/// FileIDAppleKit AVFoundation: the Swift engine's `CommonMediaTools` with its summaries and capability details;
-/// exports run in process.
+/// FileIDAppleKit AVFoundation tools with their summaries and capability details; exports run in process.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(super) struct AppleRuntime;
 

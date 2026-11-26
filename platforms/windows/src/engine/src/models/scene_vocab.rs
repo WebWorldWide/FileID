@@ -8,11 +8,8 @@ use anyhow::{Context, Result};
 
 use super::clip_text::ClipText;
 
-// Generated CLIP scene-vocab embeddings (one f32×512 row per SCENE_LABELS
-// entry, precomputed offline). Floats are kept at the full PyTorch print
-// width so the matrix is byte-faithful with the source notebook — clippy's
-// excessive_precision lint would have us truncate them for "readability"
-// but precision is the point here.
+// Generated CLIP scene-vocab embeddings (one f32×512 row per SCENE_LABELS entry, precomputed offline), kept at the full
+// PyTorch print width so the matrix stays byte-faithful with its source.
 #[allow(clippy::excessive_precision)]
 mod scene_embeddings {
     include!("../../scene_embeddings_precomputed.rs");

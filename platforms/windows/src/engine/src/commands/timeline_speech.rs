@@ -1,6 +1,6 @@
-//! Speech pass with an on-device recogniser needing no model install (Apple Speech in the Mac-hosted engine). Rows
-//! match Swift's `TimelineAnalysis.transcribeSpeech` byte for byte: one coverage row per file and per overlapping
-//! chunk, so a job resumed by either engine skips verified chunks and an unreadable chunk stays incomplete.
+//! Speech pass with an on-device recogniser needing no model install (Apple Speech in the Mac-hosted engine). One
+//! coverage row per file and per overlapping chunk, so a resumed job skips verified chunks and an unreadable chunk
+//! stays incomplete.
 
 use super::{
     blocking, interrupted_or, publish, running_source, set_progress, upsert_coverage, while_running, with_db,
@@ -21,7 +21,7 @@ pub(super) trait Recognizer: Send + Sync + 'static {
     fn transcribe(&self, source: &Path, start: f64, end: f64, cancel: &AtomicBool) -> Result<Vec<Segment>>;
 }
 
-/// On in the Mac-hosted engine unless FILEID_TIMELINE_SPEECH=0 (Swift's switch).
+/// On in the Mac-hosted engine unless FILEID_TIMELINE_SPEECH=0.
 pub(super) fn enabled() -> bool {
     cfg!(all(target_os = "macos", feature = "apple-adapters")) && std::env::var("FILEID_TIMELINE_SPEECH").as_deref() != Ok("0")
 }
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(statuses.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), ["incomplete", "verified", "incomplete", "verified"]);
         let extract: (f64, f64) = database.lock().query_row(
             "SELECT start_seconds,end_seconds FROM catalog_coverage WHERE id LIKE '%:chunk:1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(extract, (43.5, 91.5), "chunk coverage spans the overlapping extract, as in the Swift engine");
+        assert_eq!(extract, (43.5, 91.5), "chunk coverage spans the overlapping extract");
 
         resumed.chunks.lock()[1] = Some(words("Blow out the candles", 5.0));
         transcribe_with(resumed.clone(), probe_100s, &id, &job, &cancel, &sink, &database, 0.8).await.unwrap();

@@ -1,5 +1,5 @@
 //! Prewarm and benchmark for the MLX models the Mac-hosted engine runs (`crate::apple::vlm`). MLX downloads are not
-//! served here yet (Stage 9): prewarm of an uninstalled model fails without touching the network.
+//! served here yet: prewarm of an uninstalled model fails without touching the network.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,8 +21,7 @@ fn progress_event(kind: &str, fraction: f64, message: String, bytes_done: Option
     })))
 }
 
-/// Loads it and reports as the Swift engine does: load progress, then "<name> ready.", or `prewarm_cancelled` /
-/// `prewarm_failed`.
+/// Loads it and reports load progress, then "<name> ready.", or `prewarm_cancelled` / `prewarm_failed`.
 pub(crate) async fn prewarm(sink: Sink, kind: String, cancel: Arc<AtomicBool>) {
     let display = display_name(&kind);
     if crate::models::license::policy_for(&kind).is_some() && vlm::model_spec(&kind).is_ok_and(|spec| spec["licenseAccepted"] != true) {
@@ -69,7 +68,7 @@ pub(crate) async fn prewarm(sink: Sink, kind: String, cancel: Arc<AtomicBool>) {
     }
 }
 
-/// The Swift benchmark (cold load, fixed prompts, test card, peak footprint), stored like the Rust one.
+/// Cold load, fixed prompts, test card and peak footprint, stored like the Rust benchmark.
 pub(crate) async fn benchmark(kind: &str, cancel: Arc<AtomicBool>, mut progress: impl FnMut(&str, usize, usize)) -> anyhow::Result<ModelBenchmark> {
     if !vlm::installed(kind) {
         anyhow::bail!("{} isn't downloaded. Benchmarks only run on installed models and never download.", display_name(kind));

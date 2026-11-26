@@ -346,7 +346,7 @@ fn select_tags_from(
     named
 }
 
-/// Collapse redundancy before the cap (the Mac's `RamPlusService.refine`): a one-word tag that ends another present tag
+/// Collapse redundancy before the cap: a one-word tag that ends another present tag
 /// ("bat" vs "baseball bat") goes, `REDUNDANT_WITH` pairs collapse, only the strongest people word survives. `hits` is
 /// sorted by score.
 pub fn refine_tags(hits: &mut Vec<(String, f32)>) {

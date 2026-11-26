@@ -1,6 +1,4 @@
-//! Decides when a file's text deserves a careful read; mirrors macOS `TextReading.swift` rule for rule.
-//! (macOS adds Vision's accurate tier in the scan; this engine's OCR has no
-//! handwriting tier, so the VLM transcription is its handwriting path).
+//! Decides when a file's text deserves a careful read. This engine's OCR has no handwriting tier, so the VLM transcription is its handwriting path.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -42,7 +40,7 @@ pub(crate) fn is_document_shape(width: u32, height: u32, has_camera: bool) -> bo
     (ratio - 11.0 / 8.5).abs() < 0.015 || (ratio - std::f64::consts::SQRT_2).abs() < 0.015
 }
 
-/// Latin, Latin-1, Latin Extended and Latin Extended Additional: the scripts where five consonants in a row means a mangled read. Lockstep with the Mac adapter's TextReading.isLatinLetter.
+/// Latin, Latin-1, Latin Extended and Latin Extended Additional: the scripts where five consonants in a row means a mangled read. Keep in step with the Mac adapter's TextReading.isLatinLetter.
 fn is_latin_letter(c: char) -> bool {
     c.is_alphabetic() && (u32::from(c) < 0x0250 || (0x1E00..=0x1EFF).contains(&u32::from(c)))
 }

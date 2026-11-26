@@ -51,7 +51,7 @@ unsafe extern "C" {
         count: usize,
         out_error: *mut *mut c_char,
     ) -> i32;
-    // Decode a photo for face extraction (FaceClustering.loadCGImage) and, with `landmarks`, run Vision's face landmarks on it. Returns an image handle (0 on failure) and `out_json` (free it): width, height, orientation, faces [{bounds: 4 f64 bit patterns, points: 10 f32 bit patterns}].
+    // Decode a photo for face extraction and, with `landmarks`, run Vision's face landmarks on it. Returns an image handle (0 on failure) and `out_json` (free it): width, height, orientation, faces [{bounds: 4 f64 bit patterns, points: 10 f32 bit patterns}].
     pub fn fileid_apple_faces_open(path: *const c_char, max_pixel_size: u32, landmarks: bool, out_json: *mut *mut c_char) -> u64;
     /// The open image as tightly packed device-RGB RGBA8 (free `out_rgba`).
     pub fn fileid_apple_faces_pixels(
@@ -133,7 +133,7 @@ unsafe extern "C" {
     pub fn fileid_apple_image_decode(path: *const c_char, size_bytes: i64, max_pixel_size: u32, out_image: *mut u64) -> *mut c_char;
     /// AVFoundation keyframe at a quarter of the duration. JSON info.
     pub fn fileid_apple_video_keyframe(path: *const c_char, max_pixel_size: u32, timeout_ms: u32, out_image: *mut u64) -> *mut c_char;
-    /// The Swift scan's dHash; after Vision and CLIP have read the image.
+    /// The scan's 9x8 CoreGraphics dHash; call after Vision and CLIP have read the image.
     pub fn fileid_apple_image_dhash(image: u64) -> u64;
     /// Packed sRGB RGB8 of an image; free `out_pixels` with `fileid_apple_free`.
     pub fn fileid_apple_image_rgb(
@@ -157,7 +157,7 @@ unsafe extern "C" {
     pub fn fileid_apple_ocr_warmed() -> bool;
     /// Whether repeated failures have paused the accurate text tier.
     pub fn fileid_apple_ocr_paused() -> bool;
-    /// Document text as the Swift engine extracts it; `out_handled` false for
+    /// Document text; `out_handled` false for
     /// types the caller extracts itself.
     pub fn fileid_apple_document_text(path: *const c_char, max_chars: usize, out_handled: *mut bool) -> *mut c_char;
     pub fn fileid_apple_clip_load(onnx_path: *const c_char) -> bool;

@@ -1019,7 +1019,7 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
         // kept separate via the preserve set); keeping the pair would make the blocked-set build and
         // validate_protected_clusters fail closed on a face that legitimately left the partition, permanently breaking
         // the People tab since clustering re-fires after every scan. Retain only pairs whose BOTH endpoints remain in
-        // the pool. Mirrors FaceClustering.swift's tolerant validate.
+        // the pool.
         let verdict_pairs: HashSet<(i64, i64)> = verdict_pairs
             .into_iter()
             .filter(|&(a, b)| {
@@ -1330,7 +1330,7 @@ fn run_portable(db: &parking_lot::Mutex<rusqlite::Connection>) -> anyhow::Result
         })
 }
 
-/// Faces wait for a person (Swift `autoEnqueueFaceClusteringIfNeeded`) and the catalog is not exactly as the last
+/// Faces wait for a person and the catalog is not exactly as the last
 /// finished pass left it, so a rescan that found nothing new starts nothing.
 #[cfg(any(test, all(target_os = "macos", feature = "apple-adapters")))]
 pub(crate) fn needed_after_scan(db: &parking_lot::Mutex<rusqlite::Connection>) -> bool {
@@ -1387,7 +1387,7 @@ pub(crate) fn interrupted_pass_to_resume(db: &parking_lot::Mutex<rusqlite::Conne
     })
 }
 
-/// The Swift engine's answer to a pass that cannot embed faces: the model is not installed or does not start. Only said
+/// The answer to a pass that cannot embed faces: the model is not installed or does not start. Only said
 /// while some face still has no vector (a fully embedded catalog clusters without the model).
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn embedder_problem(db: &parking_lot::Mutex<rusqlite::Connection>) -> Option<(&'static str, String)> {

@@ -26,7 +26,7 @@ use crate::pipeline::restructure_semantic;
 const RESTRUCTURE_PREVIEW_CAP: usize = 5_000;
 const LARGE_PLAN_CHUNK: usize = 4_096;
 
-/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path, which also drops the respect-organized-folders stage. Measured on generated libraries (release, Balanced tier, load 15-20): 200,000 files plan in 34 s at 1.6 GB resident (the streaming path: 11 s, 0.5 GB) and 400,000 in 74 s at 2.6 GB, about 7 KB a file, so the ceiling follows the memory tier: Low keeps 150,000, Balanced covers 400,000, High 750,000. A 190,000-file library keeps the semantic planner and the respect stage on every tier but Low. `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it for benchmarking.
+/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path, which also drops the respect-organized-folders stage. The ceiling follows the memory tier (Low 150,000, Balanced 400,000, High 750,000) because the semantic path costs about 7 KB a file resident. `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it for benchmarking.
 fn large_plan_stream_threshold_for(tier: crate::platform::MemoryTier) -> i64 {
     match tier {
         crate::platform::MemoryTier::Low => 150_000,
@@ -361,7 +361,7 @@ fn inspect_stored_plan(
     Ok(Some(tiers))
 }
 
-/// The terminal reply for an apply or undo that stopped before moving anything, sent ahead of its error so clients waiting on a result (the Mac app's Restructure tab) release, as the Swift engine does for an unreadable journal or a refused move.
+/// The terminal reply for an apply or undo that stopped before moving anything, sent ahead of its error so clients waiting on a result (the Mac app's Restructure tab) release.
 fn refused_apply_result(failed: usize) -> ipc::RestructureApplyResult {
     ipc::RestructureApplyResult {
         applied: 0,
@@ -1124,7 +1124,7 @@ pub(crate) async fn handle_plan_restructure(
             }
         };
 
-    // Butler P1: semantic + learn-your-style classification for images with a CLIP embedding; everything else (and density-clustering noise) falls back to the rule cascade (pipeline/restructure_semantic.rs). CLIP embeddings are the heavy transient (~2 KiB each), so cap the load by memory tier: above Low it is effectively uncapped. Files past the cap fall through to the rule cascade like files with no embedding. Tags are loaded only for the ids kept, so neither map grows unbounded.
+    // Semantic and learn-your-style classification for images with a CLIP embedding (pipeline/restructure_semantic.rs); everything else (and density-clustering noise) falls back to the rule cascade. CLIP embeddings are the heavy transient (~2 KiB each), so the load is capped by memory tier; files past the cap fall through to the rule cascade. Tags are loaded only for the ids kept.
     let embedding_cap = embedding_load_cap(crate::platform::memory_tier());
     let signal_bounds = plan_root_bounds(&library_root);
     let signal_cancel = std::sync::Arc::clone(&cancel);
@@ -1172,7 +1172,7 @@ pub(crate) async fn handle_plan_restructure(
                     );
                 }
                 let (id, tag) = r?;
-                // Load tags for ALL files, not just embedded images: the non-image semantic pass uses them for documents/video/audio too (as the macOS engine does). Tags are short, so this stays cheap.
+                // Load tags for ALL files, not just embedded images: the non-image semantic pass uses them for documents/video/audio too. Tags are short, so this stays cheap.
                 tags.entry(id).or_default().push(tag);
             }
             Ok((embeddings, tags, text_embeddings))
@@ -1215,7 +1215,7 @@ pub(crate) async fn handle_plan_restructure(
                 file_id: f.file_id,
                 source: f.source.clone(),
                 clip,
-                // Read tags non-destructively: an image the CLIP pass examined but didn't cluster (a density-noise singleton) falls through to the non-image pass, which must still see its tags. Only the heavy CLIP blob is drained. Matches macOS's non-consuming lookup.
+                // Read tags non-destructively: an image the CLIP pass examined but didn't cluster (a density-noise singleton) falls through to the non-image pass, which must still see its tags. Only the heavy CLIP blob is drained.
                 tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
                 time_unix: f.created_unix.unwrap_or(f.modified_unix),
             })
@@ -1242,7 +1242,7 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Butler R3: document-content pass. Cluster documents by their BGE text embedding from `text_embeddings`, far stronger than the filename-token fallback (owner A/B: nearest-neighbour-same-folder 49%→57%). Docs without an embedding fall through to the bag-of-words pass below; this runs first so it claims the text-bearing docs.
+    // Document-content pass: cluster documents by their BGE text embedding from `text_embeddings`, far stronger than the filename-token fallback. Docs without an embedding fall through to the bag-of-words pass below; this runs first so it claims the text-bearing docs.
     if restructure_semantic::non_image_enabled() {
         let doc_files: Vec<restructure_semantic::SemanticFile> = files
             .iter()
@@ -1266,7 +1266,7 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Butler R1: non-image semantic pass. Clusters everything the doc and image passes didn't claim (video, audio, docs without an embedding, any embedding-less file) by a filename+tag bag-of-words signature so a mixed library groups by content instead of dumping into <Year>. Additive and separately tuned (non_image_profile); the rule cascade catches the remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
+    // Non-image semantic pass: clusters everything the doc and image passes didn't claim (video, audio, docs without an embedding) by a filename+tag bag-of-words signature, so a mixed library groups by content instead of dumping into <Year>. Separately tuned (non_image_profile); the rule cascade catches the remainder. FILEID_RESTRUCTURE_NONIMAGE=0 turns it off.
     if restructure_semantic::non_image_enabled() {
         let non_image_files: Vec<restructure_semantic::SemanticFile> = files
             .iter()
@@ -1297,7 +1297,7 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Learn-from-corrections: upgrade planned moves toward a folder the user previously filed similar files into (v18 restructure_feedback memory, written on each apply). Additive: only raises confidence on moves the planner already produced, never re-routes. Runs on the full proposal set, before the anchor strip carries the upgraded confidence into the emitted plan.
+    // Learn-from-corrections: upgrade planned moves toward a folder the user previously filed similar files into (restructure_feedback, written on each apply). Only raises confidence on moves the planner already produced, never re-routes; runs before the anchor strip so the upgraded confidence reaches the emitted plan.
     restructure_feedback::boost(&db_for_boost, &mut proposed);
 
     let mut kept_organized_folders = std::collections::HashSet::new();

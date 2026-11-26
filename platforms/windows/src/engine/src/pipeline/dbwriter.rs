@@ -579,7 +579,7 @@ impl DbWriter {
                         let arcface_bytes = floats_to_le_bytes(&face.embedding);
                         let norm = face.embedding.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
                         let model = face.embedding_model.as_deref().filter(|value| !value.is_empty() && value.len() <= 150 && face.embedding.len() == 128 && face.embedding.iter().all(|v| v.is_finite()) && (0.95..=1.05).contains(&norm));
-                        // print_data legacy: same bytes as arcface_embedding so old code keeps working.
+                        // `print_data` carries the same bytes as `arcface_embedding` for readers of the older column.
                         face_stmt
                             .execute(params![
                                 file_id,
@@ -2151,7 +2151,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The v15 sync triggers own ocr_fts/doc_fts; the writer touches only content tables (explicit DELETE + INSERT). FTS must follow insert → re-process → update → delete with no stale postings. A manual FTS statement once double-fired against a macOS trigger set → SQLITE_CORRUPT on every re-process.
+    /// The v15 sync triggers own ocr_fts/doc_fts; the writer touches only content tables (explicit DELETE + INSERT). FTS must follow insert → re-process → update → delete with no stale postings. A manual FTS statement would double-fire against the triggers and corrupt the index on re-process.
     #[test]
     fn fts_follows_content_tables_via_triggers() {
         let conn = crate::db::test_support::memory_db();

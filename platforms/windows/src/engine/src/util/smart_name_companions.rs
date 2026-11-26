@@ -1,6 +1,5 @@
 //! Files that keep one name stem when smart names rename them: a RAW and its JPEG/HEIC, a Live Photo's HEIC/JPEG and
-//! MOV, and `.xmp`/`.aae` sidecars (`IMG_1.xmp` or darktable's `IMG_1.ARW.xmp`). Lockstep with macOS
-//! `SmartNameCompanions.swift`.
+//! MOV, and `.xmp`/`.aae` sidecars (`IMG_1.xmp` or darktable's `IMG_1.ARW.xmp`).
 
 use std::collections::HashSet;
 

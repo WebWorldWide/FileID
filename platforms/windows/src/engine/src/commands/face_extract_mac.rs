@@ -1,7 +1,7 @@
-//! Pending face vectors in a macOS face space, as Swift's `FaceAnalysisCache` / `FaceClustering.extractPendingPrints`:
-//! a face needs a vector when it has none or one from another model, processing or file version; a vector is saved only
-//! while the face, box and photo size/time are unchanged; a failing face backs off (1 min doubling to 1 h). The
-//! extractor is behind [`Extractor`] (`apple::faces`), so this file stays portable and testable.
+//! Pending face vectors in a macOS face space: a face needs a vector when it has none or one from another model,
+//! processing or file version; a vector is saved only while the face, box and photo size/time are unchanged; a failing
+//! face backs off (1 min doubling to 1 h). The extractor is behind [`Extractor`] (`apple::faces`), so this file stays
+//! portable and testable.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -106,7 +106,7 @@ pub fn pending(conn: &Connection, model: &str, processing: &str, limit: usize, a
     Ok(out)
 }
 
-/// `FaceAnalysisCache.persist`: true when the row was updated.
+/// True when the row was updated.
 pub fn persist(conn: &Connection, input: &Input, embedding: &[f32], model: &str, processing: &str, now: f64) -> rusqlite::Result<bool> {
     let blob: Vec<u8> = embedding.iter().flat_map(|v| v.to_le_bytes()).collect();
     if model.is_empty() || model.chars().count() > 150 || !normalized(Some(&blob)) {
@@ -144,8 +144,7 @@ pub fn persist(conn: &Connection, input: &Input, embedding: &[f32], model: &str,
     Ok(changed == 1)
 }
 
-/// `FaceAnalysisCache.recordFailure`: retry after 1 min, doubling per attempt up to 1 h, while photo and box stay the
-/// same.
+/// Retry after 1 min, doubling per attempt up to 1 h, while the photo and box stay the same.
 pub fn record_failure(conn: &Connection, input: &Input, model: &str, processing: &str, reason: &str, now: f64) -> rusqlite::Result<()> {
     if !now.is_finite() || model.is_empty() || model.chars().count() > 150 || !["source_unavailable_or_changed", "no_embedding"].contains(&reason) {
         return Ok(());
@@ -236,7 +235,7 @@ pub struct Summary {
 }
 
 /// Photos are read on a few threads outside the catalog lock, vectors saved and failures recorded per batch, crops
-/// written for saved faces; stops between photos once `cancelled` is true (`FaceClustering.extractPendingPrints`).
+/// written for saved faces; stops between photos once `cancelled` is true.
 pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
     database: &Arc<Mutex<Connection>>,
     extractor: &dyn Extractor,
@@ -279,8 +278,7 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
         let results = Mutex::new(Vec::<FileResult>::new());
         std::thread::scope(|scope| {
             for _ in 0..extraction_threads().min(files.max(1)) {
-                // User-initiated QoS, as Swift's `extractOneFile`: Vision and the HEVC decoder schedule by the caller's
-                // QoS.
+                // User-initiated QoS: Vision and the HEVC decoder schedule by the caller's QoS.
                 scope.spawn(|| {
                     crate::util::qos::interactive(|| {
                         loop {

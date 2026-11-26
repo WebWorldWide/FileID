@@ -52,8 +52,7 @@ pub struct SessionResult {
     /// Files this pass stored as failed only because a read timed out and that the follow-up pass reads again;
     /// the follow-up's totals replace theirs.
     pub timed_out: u64,
-    /// Every photo's stored date already came from its EXIF in this scan (a
-    /// forced rescan, or a root with no catalog rows when it started).
+    /// Every photo's stored date already came from its EXIF in this scan (a forced rescan, or a root with no catalog rows when it started).
     pub capture_dates_current: bool,
     pub progress_floor: ProgressFloor,
 }
@@ -103,11 +102,9 @@ pub struct ScanSession {
     worker_count: usize,
     sink: Sink,
     models: Arc<ModelSource>,
-    /// When true, skip the incremental-rescan skip set and reprocess
-    /// every file.
+    /// When true, skip the incremental-rescan skip set and reprocess every file.
     rescan: bool,
-    /// User-excluded folders, raw as received from the app. Resolved
-    /// against the root at run() time.
+    /// User-excluded folders, raw as received from the app; resolved against the root at run() time.
     excluded_paths: Vec<String>,
     /// False for the follow-up pass, so a folder that keeps changing cannot loop.
     allow_follow_up: bool,
@@ -216,15 +213,13 @@ impl ScanSession {
         ProgressLift { carried_processed: self.carried.0, carried_failed: self.carried.1, floor: self.progress_floor }
     }
 
-    /// Run an end-to-end scan against `root`. Returns when DBWriter has
-    /// drained the final batch, every worker has exited, and the
+    /// Runs an end-to-end scan against `root`. Returns when DBWriter has drained the final batch, every worker has exited, and the
     /// `scanComplete` IPC event has been emitted.
     pub async fn run<F>(self, root: &Path, mut on_phase: F) -> Result<SessionResult>
     where
         F: FnMut(SessionPhase),
     {
-        // Boost process priority + prevent sleep for the lifetime of the
-        // scan. Both are RAII so a panic / cancel still releases them.
+        // Boost process priority and prevent sleep for the scan's lifetime; both are RAII, so a panic or cancel releases them.
         stop_late_careful_reads();
         let _priority = PriorityBoost::acquire();
         let _sleep = SleepGuard::acquire();
@@ -235,24 +230,14 @@ impl ScanSession {
         let sink = self.sink.clone();
 
         let emit_phase = |phase: SessionPhase| {
-            // Intentional try_send + drop-on-overflow. Phase changes are
-            // low-frequency (a few per scan) so the drop is unlikely
-            // in practice, but a spawn(async { send.await }) pattern
-            // could pile up unbounded tasks waiting on a full sink.
-            // try_send bounds the engine's worst-case memory.
-            //
-            // This droppable path is for NON-terminal phases only.
-            // Terminal phases (Cancelled / Failed / Completed) MUST go through
-            // `emit_phase_guaranteed` below — a dropped terminal PhaseChanged
-            // makes the app render a cancelled/failed scan as Completed and
-            // auto-fire face clustering. The engine's "terminal events must
-            // not drop" rule.
+            // try_send, dropping on overflow: phase changes are rare, and a spawned `send.await` could pile up unbounded tasks on a full sink.
+            // Terminal phases (Cancelled / Failed / Completed) must use `emit_phase_guaranteed` below; a dropped terminal PhaseChanged would make
+            // the app render a cancelled or failed scan as Completed and auto-fire face clustering.
             let p = phase.as_ipc_phase();
             let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
         };
 
-        // Awaits channel capacity rather than dropping, so a cancelled/failed
-        // terminal state can never be silently lost under sink backpressure.
+        // Awaits channel capacity rather than dropping, so a terminal state cannot be lost under sink backpressure.
         let emit_phase_guaranteed = |sink: &Sink, phase: SessionPhase| {
             let p = phase.as_ipc_phase();
             let sink = sink.clone();
@@ -266,9 +251,7 @@ impl ScanSession {
         // would show the app two phase changes for one scan.
         on_phase(SessionPhase::Discovering);
 
-        // Persist a scan_sessions row so Settings → Recent scans can list
-        // past scans + offer Re-scan. Uses the engine's single-writer
-        // connection — same one DBWriter holds.
+        // Persist a scan_sessions row so Settings > Recent scans can list past scans and offer Re-scan, using the engine's single-writer connection.
         let started_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
@@ -298,9 +281,7 @@ impl ScanSession {
             self.rescan || !crate::pipeline::capture_date_backfill::catalog_has_rows(&self.db_conn.lock(), root)
         });
 
-        // Resolve user exclusions against this root, then purge already-
-        // cataloged rows beneath them BEFORE the skip-set preload so a
-        // stale excluded row can never enter the skip set.
+        // Resolve user exclusions against this root and purge already-cataloged rows beneath them before the skip-set preload, so a stale excluded row cannot enter the skip set.
         let exclusions = crate::util::path_safety::resolve_exclusions(root, &self.excluded_paths);
         if !exclusions.is_empty() {
             let conn = self.db_conn.lock();
@@ -310,18 +291,13 @@ impl ScanSession {
             }
         }
 
-        // Pre-load the "already current" set from DB so Discovery can skip
-        // files whose `scanned_at >= modified_at`. For a 1M-file repeat
-        // scan this turns an 8-hour redo into ~1-second startup + ~0
-        // discovery walk. The rescan flag forces a full rescan.
+        // Pre-load the "already current" set from the DB so discovery can skip files whose `scanned_at >= modified_at`; the rescan flag forces a full rescan.
         let skip_paths = if self.rescan {
             tracing::info!("[SCAN] rescan=true; processing every file regardless of prior scan state");
             std::sync::Arc::new(std::collections::HashMap::new())
         } else {
             let conn = self.db_conn.lock();
-            // Carry (size_bytes, modified_at) per path so discovery can
-            // revalidate against the LIVE file mtime — a bare path set skipped any
-            // file edited after its last scan.
+            // Carries (size_bytes, modified_at) per path so discovery can revalidate against the live file mtime; a bare path set would skip files edited after their last scan.
             let mut set =
                 std::collections::HashMap::<SkipFingerprint, (i64, Option<f64>)>::new();
             let root_prefix = root.to_string_lossy().to_string();
@@ -329,12 +305,8 @@ impl ScanSession {
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
             let lo = root_descendant_prefix(root);
-            // A BINARY range seek (`>= lo AND < hi`) is sargable on the
-            // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
-            // non-sargable because LIKE defaults to case-insensitive and forces
-            // a full table scan). Stored paths derive from THIS root so they
-            // share its exact casing; the skip set is an optimization that fails
-            // safe (a miss just re-scans the file).
+            // A BINARY range seek (`>= lo AND < hi`) is sargable on the implicit UNIQUE index on path_text; `LIKE 'lo%'` is case-insensitive and forces a full table scan.
+            // Stored paths derive from this root and share its casing; a miss just re-scans the file.
             let hi = prefix_upper_bound(&lo);
             let prefix_match: i64 = {
                 match &hi {
@@ -347,32 +319,18 @@ impl ScanSession {
                 }
                 .unwrap_or(0)
             };
-            // failed=0 excludes prior failures (they must retry every scan).
-            // modified_at IS NULL rows fall out automatically: NULL comparisons
-            // are NULL → treated as false in WHERE, so the row is omitted from
-            // the skip set and gets reprocessed.
+            // failed=0 excludes prior failures, which retry every scan. Rows with modified_at NULL fall out of the comparison and are reprocessed.
             //
-            // A content-bearing file scanned as an online-only
-            // (dehydrated OneDrive Files-On-Demand) placeholder records
-            // content_hash=NULL — the tagger skips the content read so it
-            // never triggers a network hydration. Hydration does NOT bump
-            // modified_at, so the bare `scanned_at >= modified_at` predicate
-            // would strand the now-local file in the skip set forever. Exclude
-            // any content-bearing kind that lacks a content_hash so a
-            // dehydrated→hydrated file is reprocessed; a transient hash failure
-            // re-scans too, which is the skip set's documented fail-safe.
+            // A content-bearing file scanned as an online-only (dehydrated OneDrive) placeholder records content_hash=NULL, because the tagger skips the content read to avoid a network hydration.
+            // Hydration does not bump modified_at, so `scanned_at >= modified_at` alone would keep the now-local file in the skip set forever;
+            // excluding content-bearing kinds that lack a content_hash reprocesses it (a transient hash failure re-scans too, which fails safe).
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
-            // Lockstep with macOS Discovery: when BGE is installed, keep
-            // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
-            // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
-            // isn't on disk (no doc could embed → don't force a perpetual re-walk).
+            // When BGE is installed, keep embeddingless docs/pdfs out of the skip set so an install-then-rescan backfills the BGE embedding.
+            // Empty when BGE is not on disk, since no doc could embed and the walk would repeat forever.
             let text_embed_gate = text_embed_gate(bge_installed());
-            // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
-            // to backfill its rendered-shape CLIP vector (lockstep with macOS).
+            // CLIP ships by default, so an embeddingless `.obj` always stays in the pipeline to backfill its rendered-shape CLIP vector.
             let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
-            // Images catalogued while CLIP was missing stay in the pipeline once
-            // it is installed so a rescan backfills their embeddings (and faces,
-            // which run in the same pass) — lockstep with macOS Discovery.
+            // Images catalogued while CLIP was missing stay in the pipeline once it is installed, so a rescan backfills their embeddings and faces.
             let image_clip_gate = if clip_can_embed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
             let video_clip_gate = video_clip_gate();
     // Both columns are stored at scan time, so `scanned_at >= modified_at` holds for every
@@ -392,8 +350,7 @@ impl ScanSession {
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
-                // One closure literal shared across both arms — two separate
-                // closures are distinct types and `match` can't unify them.
+                // One closure literal shared by both arms: separate closures are distinct types and `match` cannot unify them.
                 let row_to_entry = |r: &rusqlite::Row| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -412,21 +369,15 @@ impl ScanSession {
                 }
             }
 
-            // Files that failed on enough scans, unchanged since, stay failed
-            // rows (the Library still lists them) but are not attempted again.
+            // Files that failed on enough scans and are unchanged since stay as failed rows (the Library still lists them) but are not attempted again.
             let given_up = add_given_up_failures(&conn, &mut set, &lo, hi.as_deref());
             if given_up > 0 {
                 tracing::info!(given_up, "[SCAN] files that keep failing are left alone until they change");
             }
 
-            // Crash self-heal: face crops are written post-commit outside the
-            // writer tx, so a mid-scan kill can leave committed face_prints
-            // rows with no on-disk crop JPEG. Those files are size+mtime
-            // unchanged, so they'd be skipped forever and show gray faces in
-            // the People tab. Only after an unclean prior shutdown, pull the
-            // affected files back out of the skip set so they reprocess and
-            // re-emit their crops. Bounded to face-bearing files under the
-            // scan root; clean shutdowns skip this entirely.
+            // Crash self-heal: face crops are written after the writer commit, so a mid-scan kill can leave face_prints rows with no crop JPEG.
+            // Those files are unchanged by size and mtime and would be skipped forever, leaving gray faces in People. After an unclean prior shutdown,
+            // pull face-bearing files under the scan root back out of the skip set so they re-emit their crops.
             if crash_self_heal_due(&lo) {
                 let removed = reconcile_missing_face_crops(&conn, &mut set, &lo, hi.as_deref());
                 if removed > 0 {
@@ -446,15 +397,11 @@ impl ScanSession {
             std::sync::Arc::new(set)
         };
 
-        // Capture the skip-set size before it moves into Discovery: a count==0
-        // result with a non-empty skip set means "incremental rescan, all files
-        // already current" — NOT an empty/unsupported folder.
+        // Capture the skip-set size before it moves into Discovery: a count of 0 with a non-empty skip set means every file was already current, not an empty or unsupported folder.
         let skip_count = skip_paths.len();
         let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
-        // Windows catalogs a cloud placeholder from its metadata; the content-hash
-        // gate above keeps it out of the skip set so a download is noticed. Hand
-        // discovery those rows so a file that is still a placeholder is not
-        // re-emitted and re-written on every scan.
+        // Windows catalogs a cloud placeholder from its metadata, and the content-hash gate keeps it out of the skip set so a download is noticed.
+        // Hand discovery those rows so a file that is still a placeholder is not re-emitted and re-written on every scan.
         let known_placeholders = if cfg!(windows) && !self.rescan {
             known_placeholders(&self.db_conn.lock(), root)
         } else {
@@ -524,11 +471,8 @@ impl ScanSession {
             Ok((applied, rejected))
         });
 
-        // Emit a live Progress event every 250 ms while discovery walks
-        // the tree. Without this, the sidebar stays on "Discovering…" with
-        // every stat row reading "—" until the first DBWriter batch flushes
-        // (often >1 s on cold cache; never if every file was filtered out).
-        // Also surfaces an empty-folder event so the UI doesn't hang.
+        // Emit a live Progress event every 250 ms while discovery walks, so the sidebar does not sit on "Discovering..." with empty stats until the first DBWriter batch flushes.
+        // Also surfaces an empty-folder event so the UI does not hang.
         let sink_for_tick = sink.clone();
         let session_id_for_tick = session_id.clone();
         let coord_for_tick = self.coordinator.clone();
@@ -537,20 +481,13 @@ impl ScanSession {
         let cloud_only_for_tick = discovered_cloud_only.clone();
         let discovered_count_for_tick = discovered_count.clone();
         let lift_for_tick = self.progress_lift();
-        // Single-shot guard shared with the post-drain fallback below: the tick
-        // sleeps 250 ms before its first wake-up, so a folder that discovers and
-        // drains faster than that (empty folder / fully-current rescan) would be
-        // aborted before the tick emits its notice. Whichever path wins the swap
-        // emits; the other skips.
+        // Single-shot guard shared with the post-drain fallback below: the tick sleeps 250 ms before its first wake-up, so a folder that drains faster
+        // would abort it before it emits its notice. Whichever path wins the swap emits; the other skips.
         let notice_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let notice_emitted_for_tick = notice_emitted.clone();
-        // discoveryComplete must fire EXACTLY ONCE on every scan terminal path
-        // (normal, empty, sub-250 ms drain, cancel-during-discovery) — the IPC
-        // parity invariant the app's progress bar depends on for its file total.
-        // The tick emits it on the normal path; the post-drain backstop below
-        // covers the paths where the tick is aborted mid-sleep or returns early
-        // on cancel. This shared single-shot flag keeps the two from double-
-        // emitting.
+        // discoveryComplete must fire exactly once on every terminal path (normal, empty, sub-250 ms drain, cancel during discovery); the app's progress bar
+        // depends on it for its file total. The tick emits it on the normal path, the post-drain backstop covers the paths where the tick is aborted
+        // or returns early, and this shared flag prevents a double emit.
         let discovery_complete_emitted =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let discovery_complete_emitted_for_tick = discovery_complete_emitted.clone();
@@ -580,11 +517,7 @@ impl ScanSession {
                 lift_for_tick.apply(&mut progress);
                 let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
                 if finished {
-                    // IPC parity with macOS (FileIDEngineMain.swift:486):
-                    // announce the discovery total once the walk ends —
-                    // macOS emits it even for a cancel-truncated walk. Swap the
-                    // shared flag first so the post-drain backstop never re-emits
-                    // what the tick already sent.
+                    // Announce the discovery total once the walk ends, even for a cancel-truncated walk. Swap the shared flag first so the post-drain backstop never re-emits what the tick already sent.
                     if !discovery_complete_emitted_for_tick
                         .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
@@ -594,22 +527,14 @@ impl ScanSession {
                             ),
                         ));
                     }
-                    // Empty-folder path: tagging would wait forever on its
-                    // input channel if discovery produced zero files.
-                    // Close out cleanly with a "no supported files found"
-                    // error so the user knows what happened.
+                    // Empty folder: tagging would wait forever on its input channel if discovery produced zero files, so close out with a "no supported files found" error.
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
-                    // Build the notice this tick would emit (None when there's
-                    // nothing to say) so the single-shot flag is only CLAIMED
-                    // when a notice is actually delivered.
+                    // Build the notice this tick would emit (None when there is nothing to say), so the single-shot flag is claimed only when a notice is delivered.
                     let cloud_only = cloud_only_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     let reachable = count != 0 || scan_root_reachable(Path::new(&root_for_tick));
                     let notice = discovery_notice(count, skip_count, errs, cloud_only, &root_for_tick, reachable);
                     if let Some(err) = notice {
-                        // Claim the single-shot, but RELEASE it if the droppable
-                        // try_send drops under sink backpressure — otherwise a
-                        // dropped notice would also suppress the reliable
-                        // post-drain .await fallback, losing it entirely.
+                        // Claim the single-shot, but release it if the droppable try_send drops under sink backpressure; otherwise the reliable post-drain fallback would be suppressed too.
                         if !notice_emitted_for_tick.swap(true, std::sync::atomic::Ordering::SeqCst)
                             && sink_for_tick
                                 .try_send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
@@ -644,17 +569,13 @@ impl ScanSession {
             tokio::task::JoinHandle<()>,
         ) = tagger.spawn(discovered_rx);
 
-        // Throttle progress emission: at most one event per 100 ms OR
-        // every 1000 files (whichever first). Without throttling, a fast
-        // scan floods the IPC channel and the app dispatcher.
+        // Throttle progress emission to at most one event per 100 ms or every 1000 files, whichever comes first, so a fast scan cannot flood the IPC channel.
         let progress_state = Arc::new(Mutex::new(ProgressState::new()));
 
         let sink_for_batch = sink.clone();
         let session_id_for_batch = session_id.clone();
         let progress_state_for_batch = progress_state.clone();
-        // Clone the discovery counter for the tagging callback so Progress
-        // events during tagging report the real discovered total — else
-        // the sidebar progress bar pegs at 100 % during tagging.
+        // Clone the discovery counter for the tagging callback so Progress events report the real discovered total instead of pegging the bar at 100 %.
         let discovered_count_for_batch = discovered_count.clone();
         let discovered_heavy_for_batch = discovered_heavy.clone();
         let discovered_done_for_batch = discovered_done_post.clone();
@@ -666,8 +587,7 @@ impl ScanSession {
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
-                // The Swift engine's resume cursor: files written so far, which Settings ▸ Recent
-                // scans shows as "N files" even for a scan that never finished.
+                // Files written so far, the resume cursor Settings > Recent scans shows as "N files" even for a scan that never finished.
                 record_scan_cursor(&cursor_db.lock(), &cursor_session, stats.processed_total + cursor_carried);
                 if should_emit_batch_summary(stats.batch_index, stats.processed_total, last_summary_processed) {
                     emit_batch_summary(&sink_for_batch, &stats);
@@ -693,12 +613,8 @@ impl ScanSession {
             self.coordinator.request_cancel();
         }
 
-        // Tick exits on its own once discovery's `done` flips true; this
-        // abort is belt-and-suspenders for the rare case where DBWriter
-        // returns before tick observes the done flag (cancel mid-walk).
-        // Must run BEFORE the error propagation below, or a failed writer
-        // leaves the tick emitting Discovering progress after the caller's
-        // PhaseChanged(Failed).
+        // The tick exits on its own once discovery's `done` flips, so this abort covers the rare case where DBWriter returns first (cancel mid-walk).
+        // It must run before the error propagation below, or a failed writer leaves the tick emitting Discovering progress after PhaseChanged(Failed).
         tick.abort();
 
         let decoder_wait = if self.coordinator.is_cancelled() {
@@ -737,8 +653,7 @@ impl ScanSession {
             (Err(err), _, _, _) | (_, _, Err(err), _) => Err(err),
             (_, Err(err), _, _) | (_, _, _, Err(err)) => Err(err),
         };
-        // The models could not be loaded: nothing was analysed, and the caller
-        // reports the reason instead of a cancelled scan.
+        // The models could not be loaded: nothing was analysed, and the caller reports the reason instead of a cancelled scan.
         let pipeline_outcome = match self.models.failure() {
             Some(failure) => Err(anyhow::Error::new(failure)),
             None => pipeline_outcome,
@@ -746,9 +661,7 @@ impl ScanSession {
         let (total, failed, zero_byte_applied, zero_byte_rejected) = match pipeline_outcome {
             Ok(result) => result,
             Err(err) => {
-                // Stamp the row 'failed' so Settings → Recent scans doesn't
-                // show it as 'running' forever. Best-effort: the failure may be
-                // the DB itself (SQLITE_FULL / unreachable).
+                // Stamp the row 'failed' so Settings > Recent scans does not show it as 'running' forever. Best-effort: the failure may be the DB itself.
                 let conn = self.db_conn.lock();
                 let completed_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -781,14 +694,8 @@ impl ScanSession {
             .await;
         }
 
-        // discoveryComplete backstop: the 250 ms tick emits this
-        // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
-        // rescan) aborts the tick mid-first-sleep, and a cancel-during-discovery
-        // returns the tick early — both BEFORE it emits. The walk has ended by
-        // here (writer.run drained tagged_rx), so `discovered_count` is final.
-        // Emit unconditionally w.r.t. cancel to match the macOS reference, which
-        // announces the total even on a cancel-truncated walk; the shared single-
-        // shot flag the tick also swaps guarantees exactly-once across both paths.
+        // discoveryComplete backstop: the tick emits this on a normal scan, but a sub-250 ms drain aborts the tick mid-first-sleep and a cancel during discovery
+        // returns it early, both before it emits. The walk has ended here, so `discovered_count` is final. Emitted even after a cancel, and the shared single-shot flag guarantees exactly once.
         if !discovery_complete_emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
             sink.send(IpcEvent::now(EventPayload::DiscoveryComplete(
@@ -797,11 +704,8 @@ impl ScanSession {
             .await;
         }
 
-        // Post-drain fallback for the empty/rescan/partial notice: if discovery
-        // finished but the tick was aborted before it could emit (drained inside
-        // its 250 ms first sleep — empty folder or fully-current rescan), emit it
-        // here so the UI never silently hangs on "Discovering…". Single-shot via
-        // the shared flag so we never double-emit what the tick already sent.
+        // Post-drain fallback for the empty/rescan/partial notice, when the tick was aborted before it could emit (empty folder or fully-current rescan),
+        // so the UI never hangs on "Discovering...". Single-shot via the shared flag.
         if !self.coordinator.is_cancelled()
             && discovered_done_post.load(std::sync::atomic::Ordering::Acquire)
             && !notice_emitted.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -841,10 +745,8 @@ impl ScanSession {
         let files_changed =
             clean_walk && self.allow_follow_up && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started);
         if files_changed || timed_out > 0 {
-            // Rows of files deleted after they were processed are in the seen set,
-            // and renamed files were never visited, so the missing-file pass below
-            // would be wrong. Hand over to the follow-up pass, which owns the
-            // scan_sessions row, the missing-file pass and the terminal events.
+            // Rows of files deleted after they were processed are in the seen set, and renamed files were never visited, so the missing-file pass below would be wrong.
+            // Hand over to the follow-up pass, which owns the scan_sessions row, the missing-file pass and the terminal events.
             let _ = self
                 .db_conn
                 .lock()
@@ -865,10 +767,8 @@ impl ScanSession {
                 .raised_to(self.progress_floor),
             });
         }
-        // A root that is gone, empty or an unmounted drive's leftover folder lists nothing,
-        // which a walk cannot tell from a library whose files were all deleted. Hiding rows
-        // (and later deleting the hidden ones) on that evidence would wipe the library of an
-        // unplugged drive; the Swift engine's `ScanRootGuard.isReachable` keeps them too.
+        // A root that is gone, empty or an unmounted drive's leftover folder lists nothing, which a walk cannot tell from a library whose files were all deleted.
+        // Hiding rows (and later deleting them) on that evidence would wipe the library of an unplugged drive.
         let clean_walk = clean_walk && {
             let reachable = scan_root_reachable(root);
             if !reachable {
@@ -965,10 +865,8 @@ impl ScanSession {
             }
         }
 
-        // What the main pass left owed (RAM++ tags in deferred mode, careful
-        // text reads), and what an earlier cancelled or interrupted scan of
-        // this folder still owes. A cancel here ends the scan as cancelled; the
-        // rest stays owed.
+        // What the main pass left owed (RAM++ tags in deferred mode, careful text reads), and what an earlier cancelled or interrupted scan of this folder still owes.
+        // A cancel here ends the scan as cancelled; the rest stays owed.
         if !self.coordinator.is_cancelled() && !self.coordinator.is_gpu_dead() {
             if self.rescan {
                 crate::pipeline::catch_up::forget_careful_reader_failures();
@@ -1047,9 +945,7 @@ impl ScanSession {
 
         let elapsed = started.elapsed().as_secs_f64();
 
-        // Stamp the scan_sessions row with completed_at + status. gpu-dead
-        // wins over cancelled: a TDR-aborted scan emits PhaseChanged(Failed)
-        // below and must not be recorded as completed/cancelled.
+        // Stamp the scan_sessions row with completed_at and status. gpu-dead wins over cancelled: a TDR-aborted scan emits PhaseChanged(Failed) below and must not be recorded as completed or cancelled.
         {
             let conn = self.db_conn.lock();
             let final_status = if self.coordinator.is_gpu_dead() {
@@ -1071,10 +967,7 @@ impl ScanSession {
         }
 
         if self.coordinator.is_gpu_dead() {
-            // Distinct error kind so the C# app can show a
-            // "GPU device suspended — restart the app to recover" banner
-            // instead of the generic cancelled state. Emit BEFORE
-            // PhaseChanged(Failed) so IPC consumers see the cause first.
+            // A distinct error kind lets the C# app show a "GPU device suspended" banner instead of the generic cancelled state; emitted before PhaseChanged(Failed) so consumers see the cause first.
             sink.send(crate::ipc::EngineError::event(
                 "gpu_device_removed",
                 crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
@@ -1090,16 +983,9 @@ impl ScanSession {
                 failed + self.carried.1,
             )))))
             .await;
-            // Terminal Failed phase via the guaranteed (backpressuring)
-            // path — a drop here would render the TDR-aborted scan as Completed
-            // and auto-fire face clustering on a half-scanned library.
-            //
-            // Failed emits NO terminal ScanComplete. The app's
-            // ScanCompleteEvent handler only suppresses the Phase overwrite for
-            // Cancelled, so a ScanComplete on this branch would immediately
-            // clobber phaseChanged(Failed) back to Completed (relabeling a failed
-            // scan as Completed). The guaranteed phaseChanged(Failed) is the SOLE
-            // terminal frame for a failed scan.
+            // Terminal Failed phase through the guaranteed (backpressuring) path: a drop would render the TDR-aborted scan as Completed and auto-fire face clustering.
+            // No terminal ScanComplete follows: the app only suppresses the phase overwrite for Cancelled, so a ScanComplete here would turn phaseChanged(Failed) back into Completed.
+            // The guaranteed phaseChanged(Failed) is the only terminal frame for a failed scan.
             emit_phase_guaranteed(&sink, SessionPhase::Failed).await;
         } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
@@ -1112,17 +998,10 @@ impl ScanSession {
                 failed + self.carried.1,
             )))))
             .await;
-            // Terminal Cancelled phase via the guaranteed path — a drop
-            // makes the app treat a cancelled scan as Completed.
+            // Terminal Cancelled phase through the guaranteed path; a drop would make the app treat a cancelled scan as Completed.
             emit_phase_guaranteed(&sink, SessionPhase::Cancelled).await;
-            // IPC parity with macOS (markSessionFinal emits scanComplete
-            // unconditionally, pinned by ScanCancellationTests): cancelled
-            // scans still get the terminal scanComplete carrying the final
-            // counts. Terminal STATE stays the preceding
-            // phaseChanged(cancelled) — consumers must not infer
-            // "completed" from this event.
-            // totalFiles = discovered (can exceed processed when the
-            // cancel landed mid-tagging) — macOS emits the same split.
+            // Cancelled scans still get the terminal scanComplete carrying the final counts. The terminal state stays the preceding phaseChanged(cancelled);
+            // consumers must not infer "completed" from this event. totalFiles is the discovered count, which can exceed processed when the cancel landed mid-tagging.
             self.coordinator.release_slot();
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
@@ -1155,8 +1034,7 @@ impl ScanSession {
                 failed + self.carried.1,
             )))))
             .await;
-            // Terminal Completed phase via the guaranteed path so the
-            // app's terminal state can never be lost under backpressure.
+            // Terminal Completed phase through the guaranteed path, so the app's terminal state cannot be lost under backpressure.
             emit_phase_guaranteed(&sink, SessionPhase::Completed).await;
             self.coordinator.release_slot();
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
@@ -1251,8 +1129,7 @@ fn spawn_late_careful_reads(
     });
 }
 
-/// Progress of the catch-up pass, reported in the post-scan phase the way the
-/// Swift engine does: `total` grows above `discovered` by the pass's size and
+/// Progress of the catch-up pass, reported in the post-scan phase: `total` grows above `discovered` by the pass's size and
 /// `processed` advances by what it has done, so the counters only ever grow.
 struct CatchUpProgress {
     sink: Sink,
@@ -1334,8 +1211,7 @@ impl CatchUpProgress {
     }
 }
 
-/// The last progress snapshot of a scan, sent before its terminal events as the
-/// Swift engine does: the terminal phase and the final counts, no rate, no ETA.
+/// The last progress snapshot of a scan, sent before its terminal events: the terminal phase and the final counts, no rate, no ETA.
 fn terminal_progress(session_id: &str, phase: ScanPhase, total: u64, discovered: u64, processed: u64, failed: u64) -> ScanProgress {
     ScanProgress {
         session_id: session_id.into(),
@@ -1357,26 +1233,17 @@ fn catch_up_counters(discovered: u64, processed: u64, owed: u64, done: u64) -> (
     (discovered.max(processed) + owed, processed + done.min(owed))
 }
 
-/// Throttle state for progress emission. The DBWriter callback fires per
-/// batch (every 100 files or 200 ms), so we further throttle into the
-/// IPC sink to at most ~10 Hz.
+/// Throttle state for progress emission. The DBWriter callback fires per batch (every 100 files or 200 ms); this throttles further into the IPC sink to at most ~10 Hz.
 struct ProgressState {
     last_emit: Instant,
     last_total: u64,
-    // Rolling throughput for the ETA, measured from the processed-count delta
-    // over REAL wall-clock time between emits. This replaces the per-batch
-    // `files_in_batch / flush_wall` rate, which measured only the DB-INSERT
-    // speed (hundreds–thousands of files/s) and produced absurd ETAs — e.g.
-    // "13s" for an hour of actual work. EMA-smoothed, mirroring the macOS
-    // ScanCoordinator (0.7 old / 0.3 new).
+    // Rolling throughput for the ETA, measured from the processed-count delta over real wall-clock time between emits; the per-batch DB-insert rate
+    // would give absurdly short ETAs. EMA-smoothed (0.7 old / 0.3 new).
     rate_anchor: Instant,
     rate_anchor_total: u64,
     rolling_fps: f64,
-    // Split heavy (Image/Video/Model — the vision path) vs light rates for
-    // the ETA. The blended rate swings an order of magnitude between photo
-    // bursts (~tens/s) and hash-only stretches (hundreds/s) on mixed
-    // libraries, so an ETA computed from it oscillated wildly; each class
-    // rate is stable, and remaining work is estimated per class.
+    // Heavy (Image/Video/Model, the vision path) and light rates are kept apart: the blended rate swings by an order of magnitude on mixed libraries
+    // and made the ETA oscillate, while each class rate is stable and remaining work is estimated per class.
     rate_anchor_heavy: u64,
     rolling_heavy_fps: f64,
     rolling_light_fps: f64,
@@ -1386,9 +1253,7 @@ impl ProgressState {
     fn new() -> Self {
         let now = Instant::now();
         Self {
-            // -60 s forces the first batch callback past the throttle so the
-            // sidebar fills immediately; the rate anchor below uses the real
-            // `now` so the first measured interval is honest.
+            // -60 s forces the first batch callback past the throttle so the sidebar fills at once; the rate anchor below uses the real `now`.
             last_emit: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
             last_total: 0,
             rate_anchor: now,
@@ -1400,10 +1265,8 @@ impl ProgressState {
         }
     }
 
-    /// Fold a new processed-count sample into the rolling files/sec and return
-    /// it. Re-samples only after `MIN_RATE_DT` so a burst of file-triggered
-    /// emits a few ms apart can't divide by a near-zero interval; between
-    /// re-samples it returns the last rolling value unchanged.
+    /// Folds a new processed-count sample into the rolling files/sec and returns it. Re-samples only after `MIN_RATE_DT`, so emits a few ms apart
+    /// cannot divide by a near-zero interval; in between it returns the last value.
     fn observe_rate(&mut self, processed_total: u64, processed_heavy: u64, now: Instant) -> f64 {
         const MIN_RATE_DT: f64 = 0.5;
         let dt = now.duration_since(self.rate_anchor).as_secs_f64();
@@ -1414,9 +1277,7 @@ impl ProgressState {
                 if rolling <= 0.0 { instant } else { 0.7 * rolling + 0.3 * instant }
             };
             self.rolling_fps = ema(self.rolling_fps, delta / dt);
-            // Only fold a class sample when that class made progress this
-            // window — an all-light stretch must not decay the heavy rate
-            // toward zero (that's the oscillation this split exists to fix).
+            // Fold a class sample only when that class made progress this window, so an all-light stretch does not decay the heavy rate toward zero.
             if delta_heavy > 0.0 {
                 self.rolling_heavy_fps = ema(self.rolling_heavy_fps, delta_heavy / dt);
             }
@@ -1431,10 +1292,8 @@ impl ProgressState {
         self.rolling_fps
     }
 
-    /// Kind-aware ETA: seconds for the remaining heavy (vision-path) files at
-    /// the heavy rate plus the remaining light files at the light rate.
-    /// Falls back to the blended rate for any class whose own rate is still
-    /// unknown, and to a plain blended estimate before any split data exists.
+    /// Kind-aware ETA: seconds for the remaining heavy (vision-path) files at the heavy rate plus the remaining light files at the light rate.
+    /// Falls back to the blended rate for a class whose own rate is unknown, and to a plain blended estimate before any split data exists.
     fn eta_seconds(&self, remaining_heavy: u64, remaining_light: u64) -> Option<f64> {
         let blended = self.rolling_fps;
         if remaining_heavy + remaining_light == 0 {
@@ -1453,9 +1312,7 @@ impl ProgressState {
     }
 }
 
-/// Single source for the empty/rescan/partial discovery notice: the 250 ms
-/// tick and the post-drain backstop must emit byte-identical IPC, so the kind
-/// codes + messages live here once.
+/// Single source for the empty/rescan/partial discovery notice: the 250 ms tick and the post-drain backstop must emit byte-identical IPC.
 fn changed_while_scanning_message(files: u64) -> String {
     format!(
         "{} changed while FileID was scanning {}. {} picked up on the next scan.",
@@ -1474,7 +1331,6 @@ fn discovery_notice(
     root_reachable: bool,
 ) -> Option<crate::ipc::EngineError> {
     let (kind, message) = if cloud_only > 0 {
-        // The Swift engine's `Discovery.shortfallNotice`, word for word.
         let mut parts = Vec::new();
         if errs > 0 {
             parts.push(format!(
@@ -1546,19 +1402,16 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
-    // Intentional try_send. Summaries are sampled every ~100 processed files;
-    // progress and terminal events carry the authoritative lifecycle. Dropping
-    // a diagnostic sample is preferable to backpressuring the scan.
+    // try_send: summaries are sampled every ~100 processed files, and dropping a diagnostic sample beats backpressuring the scan.
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
 static CRASH_HEALED_ROOTS: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// The crash self-heal runs until one scan of the root walks it to the end, then stops for this process. A build
-/// that writes face crops after the scan (the Mac adapters path) never has a crop to find, so without the stop every
-/// scan after a crash reprocessed every face-bearing file; a cancelled scan leaves the root due so the repair is
-/// not lost.
+/// The crash self-heal runs until one scan of the root walks it to the end, then stops for this process. A build that writes face crops after
+/// the scan (the Mac adapters path) never has a crop to find, so without the stop every scan after a crash would reprocess every face-bearing
+/// file; a cancelled scan leaves the root due so the repair is not lost.
 fn crash_self_heal_due(root_prefix: &str) -> bool {
     heal_due(
         crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
@@ -1575,21 +1428,12 @@ fn mark_heal_done(healed: &Mutex<std::collections::HashSet<String>>, root_prefix
     healed.lock().insert(root_prefix.to_string());
 }
 
-/// skip-set guard: drop any content-bearing row that was scanned
-/// without a content_hash (the signature of an online-only OneDrive
-/// placeholder, whose content read is skipped to avoid a network hydration).
-/// Because hydration doesn't bump `modified_at`, this is the only durable
-/// signal that a now-local file still needs ML processing.
-/// Crash self-heal (only after an unclean shutdown — see `UNCLEAN_PRIOR_SHUTDOWN`).
-/// Face-crop JPEGs are written post-commit outside the writer tx, so a kill can
-/// leave committed `face_prints` rows with no on-disk crop. Such a file is
-/// size+mtime unchanged, so the skip set would drop it forever and the People
-/// tab shows gray faces. This pulls every affected file (any face missing its
-/// `<face_id>.jpg`) back OUT of `set` so the next scan reprocesses it and
-/// re-emits the crops. Bounded to face-bearing files under the scan root;
-/// returns how many files were reopened for reprocessing. Best-effort: a query
-/// or FS error just leaves the skip set as-is (the file stays gray, no worse
-/// than before).
+/// Skip-set guard: drops any content-bearing row scanned without a content_hash (an online-only OneDrive placeholder, whose content read is skipped).
+/// Hydration does not bump `modified_at`, so this is the only durable signal that a now-local file still needs processing.
+///
+/// Crash self-heal (only after an unclean shutdown, see `UNCLEAN_PRIOR_SHUTDOWN`): face-crop JPEGs are written after the writer commit, so a kill can
+/// leave `face_prints` rows with no crop on disk, and the unchanged file would stay in the skip set forever. This pulls every file with a face missing its
+/// `<face_id>.jpg` back out of `set`, bounded to the scan root, and returns how many were reopened. Best-effort: a query or filesystem error leaves the set as is.
 fn reconcile_missing_face_crops(
     conn: &rusqlite::Connection,
     set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
@@ -1645,12 +1489,9 @@ fn reconcile_missing_face_crops_in(
     removed
 }
 
-/// Whether a row stamped with a pre-SHA-256 content hash can still be in the
-/// catalog, checked once per scan. The rename heal probes the frozen BLAKE3
-/// recipes only for such rows, and computing them costs a second hash of every
-/// image. Rows carry no recipe marker, so the state folder records when this
-/// engine (which stamps SHA-256, as the Swift engine does) first scanned: any
-/// hash on a row scanned before then may be a legacy one. Unknown means yes.
+/// Whether a row stamped with a pre-SHA-256 content hash can still be in the catalog, checked once per scan. The rename heal probes the frozen BLAKE3
+/// recipes only for such rows, since computing them costs a second hash of every image. Rows carry no recipe marker, so the state folder records when this
+/// engine (which stamps SHA-256) first scanned: any hash on a row scanned before then may be a legacy one. Unknown means yes.
 fn legacy_hash_rows_possible(conn: &Connection, state_dir: Option<&Path>) -> bool {
     let Some(marker) = state_dir.map(|dir| dir.join("sha256-content-hash-since")) else {
         return true;
@@ -1737,46 +1578,31 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
     "AND NOT (content_hash IS NULL \
       AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
 
-/// Lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`: keep any
-/// doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set, so an
-/// install-then-rescan re-emits it and the tagger backfills its BGE embedding. BGE is
-/// opt-in, so the first scan usually predates it — without this, those docs would be
-/// stranded on the weaker filename-bag-of-words clustering forever (the doc-content
-/// pass has no plan-time fallback). Appended ONLY when BGE is on disk (see
-/// `bge_installed`); leading space because it concatenates after the content gate.
-/// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-extracted
-/// but yielded no embeddable text (image-only PDF, iWork, empty file) — otherwise such a
-/// doc, never able to get a `text_embeddings` row, would re-walk forever.
+/// Keeps any doc/pdf that still lacks a `text_embeddings` row out of the skip set, so an install-then-rescan re-emits it and the tagger backfills its BGE embedding.
+/// BGE is opt-in, so the first scan usually predates it, and those docs would otherwise stay on the weaker filename clustering. Appended only when BGE is on disk
+/// (see `bge_installed`); the leading space is for concatenation after the content gate.
+/// The `text_stage_done = 0` clause stops the re-walk once a doc was text-extracted but yielded no embeddable text (image-only PDF, iWork, empty file).
 pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
     " AND NOT (kind IN ('doc', 'pdf') AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM text_embeddings \
                       WHERE text_embeddings.file_id = files.id))";
 
-/// Lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`: keep a `.obj`
-/// 3D model still LACKING a `clip_embeddings` row OUT of the skip set so its rendered-shape
-/// CLIP vector backfills on a rescan after the render→CLIP feature shipped. Limited to
-/// `extension = 'obj'` (the only format `obj_render` rasterizes). The `text_stage_done = 0`
-/// clause stops the re-walk once a render has been ATTEMPTED but failed (a corrupt /
-/// geometry-less .obj) — otherwise that .obj would re-walk forever. CLIP ships by default,
-/// so this is appended unconditionally; leading space concatenates after the content gate.
+/// Keeps a `.obj` 3D model that still lacks a `clip_embeddings` row out of the skip set, so its rendered-shape CLIP vector backfills on a rescan.
+/// Limited to `extension = 'obj'`, the only format `obj_render` rasterizes. The `text_stage_done = 0` clause stops the re-walk once a render was attempted
+/// and failed (a corrupt or geometry-less .obj). Appended unconditionally because CLIP ships by default; the leading space is for concatenation after the content gate.
 pub(crate) const SKIP_SET_MODEL_CLIP_GATE: &str =
     " AND NOT (kind = 'model' AND extension = 'obj' AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                       WHERE clip_embeddings.file_id = files.id))";
 
-/// macOS `DBWriter.skipSetClipBackfillExclusionSQL`: keep an image that still
-/// LACKS a `clip_embeddings` row OUT of the skip set while CLIP is installed, so a
-/// scan run before the model was installed is backfilled by the next rescan.
+/// Keeps an image that still lacks a `clip_embeddings` row out of the skip set while CLIP is installed, so a scan run before the model was installed is backfilled by the next rescan.
 pub(crate) const SKIP_SET_IMAGE_CLIP_GATE: &str =
     " AND NOT (kind = 'image' AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                                             WHERE clip_embeddings.file_id = files.id))";
 
-/// A macOS video catalogued while FileID's FFmpeg runtime was absent has no
-/// frame and no CLIP vector; keep it out of the skip set once frames are
-/// available so a rescan backfills it. Appended only on macOS (see `video_clip_gate`).
-/// The `text_stage_done = 0` clause ends the re-walk once a frame was attempted and the
-/// container gave none (mkv, wmv, mpg: 465 of 14,494 videos on the owner's drive), so an
-/// unchanged library rescans without them.
+/// A macOS video catalogued while FileID's FFmpeg runtime was absent has no frame and no CLIP vector; keep it out of the skip set once frames are available
+/// so a rescan backfills it. Appended only on macOS (see `video_clip_gate`).
+/// The `text_stage_done = 0` clause ends the re-walk once a frame was attempted and the container gave none (mkv, wmv, mpg), so an unchanged library rescans without them.
 pub(crate) const SKIP_SET_VIDEO_CLIP_GATE: &str =
     " AND NOT (kind = 'video' AND text_stage_done = 0 AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                                             WHERE clip_embeddings.file_id = files.id))";
@@ -1801,10 +1627,8 @@ fn clip_installed() -> bool {
     crate::models::mobileclip::default_weights_path().is_ok_and(|p| p.exists())
 }
 
-/// True once the BGE document embedder's weights are on disk — the same probe the
-/// tagger uses to decide whether to build the embedder (tagging.rs). Gates
-/// `SKIP_SET_TEXT_EMBED_GATE`: with no model installed no doc could embed, so forcing
-/// embeddingless docs out of the skip set would re-walk every doc on every scan.
+/// True once the BGE document embedder's weights are on disk, the same probe the tagger uses (tagging.rs). Gates `SKIP_SET_TEXT_EMBED_GATE`:
+/// with no model installed no doc could embed, so forcing embeddingless docs out of the skip set would re-walk every doc on every scan.
 fn bge_installed() -> bool {
     crate::models::bge_text::default_weights_path()
         .map(|p| p.exists())
@@ -1820,8 +1644,7 @@ fn text_embed_gate(installed: bool) -> &'static str {
     }
 }
 
-/// `scan_sessions.last_file_index` is the Swift engine's resume cursor: files written so far.
-/// The Mac app shows it as "N files" under Settings ▸ Recent scans.
+/// `scan_sessions.last_file_index` is the count of files written so far, which the Mac app shows as "N files" under Settings > Recent scans.
 fn record_scan_cursor(conn: &Connection, session_id: &str, files_written: u64) {
     let _ = conn.execute(
         "UPDATE scan_sessions SET last_file_index = ?1 WHERE id = ?2",
@@ -1848,9 +1671,8 @@ fn should_reconcile_missing_rows(
     !cancelled && !gpu_dead && discovery_done && discovery_errors == 0 && test_file_cap == 0
 }
 
-/// False when the scan root cannot be trusted to reflect the library: missing, not a
-/// directory, empty or unreadable, or (macOS) a leftover `/Volumes/<name>` folder on the
-/// boot volume after the drive was unplugged. Port of the Swift `ScanRootGuard.isReachable`.
+/// False when the scan root cannot be trusted to reflect the library: missing, not a directory, empty or unreadable, or (macOS) a leftover
+/// `/Volumes/<name>` folder on the boot volume after the drive was unplugged.
 pub fn scan_root_reachable(root: &Path) -> bool {
     root_is_trustworthy(root, &device_of)
 }
@@ -1939,16 +1761,11 @@ fn soft_hide_missing_rows(
     Ok(marked)
 }
 
-/// Days a row hidden by [`soft_hide_missing_rows`] is kept before a later clean
-/// scan of its location removes it. A file that comes back before then (same path,
-/// or found again by rename-heal) re-binds to its row and keeps its tags and people.
-/// A rescan does not touch the `scanned_at` of an unchanged file, so it means "last
-/// analysed", not "last seen"; hiding therefore stamps `scanned_at` with the hide time
-/// (the file was there at the scan before), and that is what the retention counts from.
-/// Rows hidden by builds before this one keep their old `scanned_at` and are removed by
-/// the first clean scan of their location after the upgrade.
-/// `FILEID_HIDDEN_RETENTION_DAYS` overrides it (tests and the soak; 0 removes at the
-/// end of the scan that hid the row, as the Swift engine does).
+/// Days a row hidden by [`soft_hide_missing_rows`] is kept before a later clean scan of its location removes it. A file that comes back before then
+/// (same path, or found again by rename-heal) re-binds to its row and keeps its tags and people.
+/// A rescan does not touch the `scanned_at` of an unchanged file, so it means "last analysed", not "last seen"; hiding therefore stamps `scanned_at`
+/// with the hide time, and the retention counts from that. Rows hidden by older builds keep their old `scanned_at` and are removed by the first clean scan after the upgrade.
+/// `FILEID_HIDDEN_RETENTION_DAYS` overrides it (tests and the soak; 0 removes at the end of the scan that hid the row).
 pub(crate) const HIDDEN_ROW_RETENTION_DAYS: f64 = 30.0;
 const HIDDEN_PURGE_BATCH: usize = 200;
 pub(crate) const HIDDEN_ROW_MESSAGE: &str = "File is no longer present under the completed scan root.";
@@ -1996,15 +1813,11 @@ pub(crate) struct HiddenPurge {
     pub skipped_for_clock: bool,
 }
 
-/// Remove rows under `root` hidden as "no longer present" whose file was last seen
-/// (`scanned_at`) more than `retention_days` before `now`. Call only after a walk of
-/// `root` that was complete and clean. Nothing is removed when any row under `root`
-/// was last seen in the future (a wrong clock). Batches of `HIDDEN_PURGE_BATCH`
-/// rows, each in its own transaction with the writer lock released between them.
-/// Tags, text, embeddings, faces and the other child rows go through the
-/// foreign-key cascades (as in `purge_excluded_rows` and Trash); face crop files are
-/// deleted after the commit and each affected person's count and representative are
-/// recomputed in the same transaction, as the Swift engine's missing-file sweep does.
+/// Removes rows under `root` hidden as "no longer present" whose file was last seen (`scanned_at`) more than `retention_days` before `now`.
+/// Call only after a complete, clean walk of `root`. Nothing is removed when any row under `root` was last seen in the future (a wrong clock).
+/// Works in batches of `HIDDEN_PURGE_BATCH` rows, each in its own transaction with the writer lock released between them.
+/// Child rows go through the foreign-key cascades (as in `purge_excluded_rows` and Trash); face crop files are deleted after the commit, and each
+/// affected person's count and representative are recomputed in the same transaction.
 pub(crate) fn purge_expired_hidden_rows(
     db: &Mutex<Connection>,
     root: &Path,
@@ -2092,13 +1905,10 @@ pub(crate) fn purge_expired_hidden_rows(
     out
 }
 
-/// Delete cataloged rows under each excluded folder. Child rows
-/// (tags / face prints / captions / embeddings) go via ON DELETE CASCADE
-/// (`PRAGMA foreign_keys = ON` on every engine connection); face-crop JPEGs
-/// are pruned best-effort after each delete. Range-matches `path_text` with
-/// the exclusion's original casing — same walk-derived casing contract as
-/// the skip-set preload above; a mismatch fails safe (rows survive until a
-/// future exact-cased scan). Returns the number of `files` rows purged.
+/// Deletes cataloged rows under each excluded folder. Child rows (tags / face prints / captions / embeddings) go via ON DELETE CASCADE
+/// (`PRAGMA foreign_keys = ON` on every engine connection); face-crop JPEGs are pruned best-effort after each delete.
+/// Range-matches `path_text` with the exclusion's original casing, the same walk-derived casing contract as the skip-set preload;
+/// a mismatch fails safe (rows survive until a later exact-cased scan). Returns the number of `files` rows purged.
 pub(crate) fn purge_excluded_rows(
     conn: &Connection,
     exclusions: &[crate::util::path_safety::ResolvedExclusion],
@@ -2154,7 +1964,7 @@ pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
     while let Some(last) = chars.pop() {
         let mut cp = last as u32 + 1;
-        // Jump the UTF-16 surrogate gap — those code points aren't scalars.
+        // Jump the UTF-16 surrogate gap; those code points are not scalars.
         if (0xD800..=0xDFFF).contains(&cp) {
             cp = 0xE000;
         }
@@ -2206,20 +2016,9 @@ fn maybe_emit_progress(
         };
         (fps, eta)
     };
-    // Progress payload fields:
-    //   total            = 0 until the discovery walk completes (the IPC
-    //                      schema contract: "0 until discovery completes"),
-    //                      then the final discovered count. Emitting the
-    //                      still-climbing counter as `total` made both the
-    //                      progress-bar denominator and the ETA moving
-    //                      targets — the overnight "17.0h → 16.4h after 10
-    //                      hours" symptom.
-    //   files_per_second = the ROLLING wall-clock rate (real end-to-end
-    //                      throughput), NOT the per-batch DB-flush rate.
-    //   eta_seconds      = (total - processed) / rolling_fps when known;
-    //                      None during ramp-up or while total is unknown.
-    //   failed           = cumulative failed-file count from DBWriter.
-    //   resident_mb      = process RSS via Win32 GetProcessMemoryInfo.
+    // Progress payload: `total` stays 0 until the discovery walk completes (the IPC schema contract), then is the final discovered count; a still-climbing
+    // counter would make the progress-bar denominator and the ETA moving targets. `files_per_second` is the rolling wall-clock rate, not the per-batch DB-flush rate.
+    // `eta_seconds` is (total - processed) / rolling_fps when known, None during ramp-up or while total is unknown.
     let total = if discovery_done {
         discovered_total.max(stats.processed_total)
     } else {
@@ -2241,9 +2040,7 @@ fn maybe_emit_progress(
         post_scan_done: None,
     };
     lift.apply(&mut progress);
-    // Intentional try_send. Progress events are throttled to 10 Hz / 1k
-    // files, so dropping is rare in practice — and the next emit (≤100ms
-    // later) brings the UI back in sync.
+    // try_send: progress events are throttled to 10 Hz / 1k files, so a drop is rare and the next emit (within 100 ms) resyncs the UI.
     let _ = sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
 }
 
@@ -2639,10 +2436,8 @@ mod tests {
         assert!(should_emit_batch_summary(40, 205, 105));
     }
 
-    /// Kind-aware ETA: the heavy and light classes each use their own rate,
-    /// so a hash-only stretch (light files flying by at hundreds/s) must not
-    /// collapse the ETA for tens of thousands of remaining images — the
-    /// "ETA jumping everywhere" regression on mixed libraries.
+    /// Kind-aware ETA: the heavy and light classes each use their own rate, so a hash-only stretch (light files at hundreds/s) cannot collapse the ETA
+    /// for tens of thousands of remaining images.
     #[test]
     fn eta_uses_per_class_rates() {
         let mut st = ProgressState::new();
@@ -2659,9 +2454,7 @@ mod tests {
         assert!(st.eta_seconds(0, 0).is_none());
     }
 
-    /// The rolling fps must measure real wall-clock throughput, not the
-    /// per-batch DB-flush rate — the regression that produced "13s" ETAs for
-    /// an hour of work.
+    /// The rolling fps must measure real wall-clock throughput, not the per-batch DB-flush rate.
     #[test]
     fn rolling_fps_measures_wallclock_throughput() {
         let mut st = ProgressState::new();
@@ -2683,9 +2476,7 @@ mod tests {
         assert!(eta > 3000.0, "eta should be ~hours ({eta}s)");
     }
 
-    /// The prefix upper bound must select exactly the rows `LIKE
-    /// 'prefix%'` would under BINARY collation — i.e. lo <= x < hi iff x starts
-    /// with prefix.
+    /// The prefix upper bound must select exactly the rows `LIKE 'prefix%'` would under BINARY collation, i.e. lo <= x < hi iff x starts with prefix.
     #[test]
     fn prefix_upper_bound_brackets_the_prefix() {
         let lo = r"C:\Users\a\Photos";
@@ -2969,9 +2760,8 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(30));
     }
 
-    /// purge_excluded_rows deletes exactly the rows strictly under each
-    /// excluded folder (BINARY prefix range) and cascades child rows; a
-    /// sibling folder sharing the excluded name as a prefix survives.
+    /// purge_excluded_rows deletes exactly the rows strictly under each excluded folder (BINARY prefix range) and cascades child rows;
+    /// a sibling folder sharing the excluded name as a prefix survives.
     #[test]
     fn purge_excluded_rows_deletes_subtree_and_cascades() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3071,9 +2861,8 @@ mod tests {
         assert!(heal_due(true, &healed, "/b/"), "another root still gets its own pass");
     }
 
-    /// Crash self-heal: after an unclean shutdown, a file with committed
-    /// face_prints rows but a missing crop JPEG must be pulled OUT of the skip
-    /// set (so it reprocesses), while a file whose crops all exist stays in it.
+    /// Crash self-heal: after an unclean shutdown, a file with committed face_prints rows but a missing crop JPEG must be pulled out of the skip set
+    /// (so it reprocesses), while a file whose crops all exist stays in it.
     #[test]
     fn reconcile_missing_face_crops_reopens_only_crop_missing_files() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3116,13 +2905,9 @@ mod tests {
         assert!(set.contains_key(&path_fingerprint_text("C:\\Lib\\b.jpg")), "b.jpg stays skipped");
     }
 
-    /// The incremental skip-set must NOT skip a file whose
-    /// reparse/placeholder state changed (dehydrated→hydrated). A OneDrive
-    /// online-only placeholder is recorded with `content_hash = NULL` and
-    /// `scanned_at >= modified_at`; after the user hydrates it, the modified
-    /// time is unchanged, so the bare `scanned_at >= modified_at` predicate
-    /// would strand it forever. The content_hash gate must drop it from the
-    /// skip set while keeping fully-scanned files in it.
+    /// The incremental skip set must not skip a file whose placeholder state changed (dehydrated to hydrated). An online-only placeholder is recorded with
+    /// `content_hash = NULL` and `scanned_at >= modified_at`, and hydration leaves modified_at unchanged; the content_hash gate must drop it from the skip set
+    /// while keeping fully-scanned files in it.
     #[test]
     fn skip_set_excludes_hydrated_placeholder_keeps_scanned_file() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3137,9 +2922,7 @@ mod tests {
              );",
         )
         .unwrap();
-        // A dehydrated image scanned as an online-only placeholder: no
-        // content_hash, scanned_at >= modified_at, failed=0. After hydration
-        // modified_at is unchanged — the row below is exactly that state.
+        // A dehydrated image scanned as an online-only placeholder: no content_hash, scanned_at >= modified_at, failed=0. Hydration leaves modified_at unchanged.
         conn.execute(
             "INSERT INTO files (path_text, kind, modified_at, scanned_at, failed, content_hash) \
              VALUES ('C:\\OneDrive\\dehydrated.jpg', 'image', 100.0, 200.0, 0, NULL)",
@@ -3190,10 +2973,8 @@ mod tests {
         );
     }
 
-    /// Lockstep with macOS `skipSetTextBackfillExclusionSQL`: the BGE-text gate
-    /// must keep a doc/pdf still lacking a `text_embeddings` row OUT of the skip set
-    /// (so an install-then-rescan backfills it), while leaving docs that already have
-    /// one — and non-doc kinds entirely — in the skip set.
+    /// The BGE-text gate must keep a doc/pdf still lacking a `text_embeddings` row out of the skip set (so an install-then-rescan backfills it),
+    /// while leaving docs that already have one, and non-doc kinds, in the skip set.
     #[test]
     fn text_embed_gate_reprocesses_embeddingless_docs_only() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3215,9 +2996,8 @@ mod tests {
              );",
         )
         .unwrap();
-        // All rows carry a content_hash so the content gate keeps them all — isolating
-        // the text gate's effect. id=5 is a text-less doc whose text stage already ran
-        // (text_stage_done=1) — it must NOT be re-walked (no embeddable text to find).
+        // All rows carry a content_hash so the content gate keeps them all, isolating the text gate. id=5 is a text-less doc whose text stage already ran
+        // (text_stage_done=1) and must not be re-walked.
         conn.execute(
             "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
                  (1, 'C:\\Docs\\no_embed.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
@@ -3271,10 +3051,8 @@ mod tests {
         );
     }
 
-    /// Lockstep with macOS `skipSetModelClipBackfillExclusionSQL`: the model-CLIP
-    /// gate must keep a `.obj` still lacking a `clip_embeddings` row OUT of the skip set
-    /// (so a rescan backfills its rendered-shape vector), while leaving an embedded `.obj`,
-    /// a non-`.obj` 3D format (not renderable), and non-model kinds in the skip set.
+    /// The model-CLIP gate must keep a `.obj` still lacking a `clip_embeddings` row out of the skip set (so a rescan backfills its rendered-shape vector),
+    /// while leaving an embedded `.obj`, a non-`.obj` 3D format (not renderable), and non-model kinds in the skip set.
     #[test]
     fn model_clip_gate_reprocesses_embeddingless_obj_only() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3297,9 +3075,8 @@ mod tests {
              );",
         )
         .unwrap();
-        // All rows carry a content_hash so the content gate keeps them — isolating the
-        // model gate's effect. id=5 is an un-renderable .obj whose render already ran
-        // (text_stage_done=1) — it must NOT be re-walked (no CLIP vector to ever produce).
+        // All rows carry a content_hash so the content gate keeps them, isolating the model gate. id=5 is an un-renderable .obj whose render already ran
+        // (text_stage_done=1) and must not be re-walked.
         conn.execute(
             "INSERT INTO files (id, path_text, kind, extension, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
                  (1, 'C:\\M\\no_embed.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \

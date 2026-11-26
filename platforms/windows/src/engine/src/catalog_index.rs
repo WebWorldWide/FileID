@@ -34,7 +34,7 @@ const MAX_PENDING: usize = MAX_FILES / 10 + MIN_PENDING_BEFORE_REBUILD;
 const MAX_DELTA_BYTES: u64 = snapshot::max_delta_bytes(clip_space::DIMENSION, MAX_PENDING, MAX_PENDING);
 const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 /// A catalog this small answers a search with no graph yet by comparing every vector (the graph builds in the
-/// background), so the first search after a scan ranks like the Swift engine's.
+/// background), so the first search after a scan ranks exactly.
 const EXACT_SEARCH_MAX: usize = 50_000;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Revision {
@@ -314,7 +314,7 @@ impl CatalogIndex {
         response.hits.retain(|hit| inside.contains(&hit.file_id));
         response.hits.truncate(limit);
         // Ranking keeps the best hundred overall; files beyond them come from every file the words describe, newest
-        // first (Swift `CatalogSearch.handle`).
+        // first.
         let query = request.query.as_deref().map(str::trim).unwrap_or_default();
         if response.hits.len() < limit
             && !query.is_empty()

@@ -1,5 +1,5 @@
-// Thumbnail via IShellItemImageFactory::GetImage: the IThumbnailProvider chain Explorer uses, so any format the user has a provider for (Office, RTF, .pages, psd, dwg, …) renders.
-// Output is tightly packed RGBA8; the HBITMAP-backed BGRA is swapped on extraction.
+// Thumbnail via IShellItemImageFactory::GetImage, the provider chain Explorer uses, so any format with an installed provider renders.
+// Output is tightly packed RGBA8.
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -43,9 +43,7 @@ fn render_at_with_flags(path: &Path, dim: i32, flags: SIIGBF) -> Result<Thumbnai
     }
 
     unsafe {
-        // Initialize COM apartment for this call. CoUninitialize on every
-        // exit path. RPC_E_CHANGED_MODE means the apartment is already set
-        // (the caller initialized it MTA), which we accept silently.
+        // RPC_E_CHANGED_MODE means the caller already initialised an MTA apartment, which is accepted.
         let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let _com_guard = ComGuard {
             initialized: init.is_ok(),
@@ -98,7 +96,7 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width as i32,
-            // Negative height = top-down DIB; matches our RGBA expectation.
+            // Negative height requests a top-down DIB.
             biHeight: -(height as i32),
             biPlanes: 1,
             biBitCount: 32,
@@ -128,7 +126,7 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
         anyhow::bail!("GetDIBits returned 0");
     }
 
-    // BGRA → RGBA swap; the shell HBITMAP may be premultiplied.
+    // BGRA to RGBA; the shell bitmap may be premultiplied.
     let mut rgba = bgra;
     for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);

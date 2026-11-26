@@ -1,7 +1,6 @@
-//! `runFaceClustering` over macOS face spaces (Vision boxes and landmarks, Swift alignment): a port of the Swift
-//! clustering, persistence, stable person ids, holdout and review so a Swift catalog keeps the same people, ids, names,
-//! verdicts and queues. Keep in step with those Swift files; the portable `face_clustering.rs` handles every other face
-//! space.
+//! Face clustering over macOS face spaces (Vision boxes and landmarks): clustering, persistence, stable person ids,
+//! holdout and review. Catalogs written by the retired Swift engine keep the same people, ids, names, verdicts and
+//! queues. The portable `face_clustering.rs` handles every other face space.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -520,7 +519,7 @@ fn nearest_lists(vectors: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
     ordered.into_iter().flat_map(|(_, rows)| rows).collect()
 }
 
-/// Through the shared identity pipeline with the Swift calibration (exact nearest neighbours at every size).
+/// Through the shared identity pipeline with exact nearest neighbours at every size.
 fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     let (params, mutual) = hyperparameters();
     let k = params.k_nn + 1;
@@ -820,8 +819,7 @@ fn cap(
     Ok((kept, truncated))
 }
 
-/// `StablePersonAssignments.resolve`: a cluster keeps the person that owned at least half of that person's faces,
-/// largest overlap first.
+/// A cluster keeps the person that owned at least half of that person's faces, largest overlap first.
 fn stable_ids(priors: &[(i64, Vec<i64>)], clusters: &[(Vec<i64>, i64)], fixed: &[Option<i64>], preserved: &HashSet<i64>) -> Result<Vec<Option<i64>>> {
     ensure!(fixed.len() == clusters.len(), "invalid partition");
     let mut owner: HashMap<i64, i64> = HashMap::new();

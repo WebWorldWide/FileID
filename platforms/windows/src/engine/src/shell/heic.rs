@@ -1,6 +1,5 @@
-// HEIC / HEIF decode via Windows.Graphics.Imaging.BitmapDecoder (WinRT).
-// image-rs has no HEIC decoder and libheif's licence/system dep breaks "download and run". Windows ships a HEIF codec (HEIF Image Extensions: preinstalled on Windows 11, free on the Store for Windows 10 1809+).
-// Fallback only: `decode_image_sync` in tagging.rs tries image-rs first and routes .heic/.heif here on error. When the codec is absent the error says so rather than blaming the file; never panics or blocks. Output matches `decode_image_sync`: tightly packed RGB8 + (w,h).
+// HEIC/HEIF fallback decode through Windows.Graphics.Imaging.BitmapDecoder; image-rs has no HEIC decoder.
+// Needs the HEIF Image Extensions codec; when it is missing the error says so. Output is tightly packed RGB8 plus (w, h).
 
 use anyhow::{Context, Result};
 use std::os::windows::ffi::OsStrExt;
@@ -11,8 +10,8 @@ use windows::Graphics::Imaging::BitmapDecoder;
 use windows::Storage::{FileAccessMode, StorageFile};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-/// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop, scoping the COM apartment to one `decode` call. The decoder-pool and Deep Analyze blocking threads are recycled and arrive with no COM init, so without this the first WinRT activation failed CO_E_NOTINITIALIZED and was misreported as "HEIF codec not installed", dropping every HEIC from tagging/faces/CLIP/thumbnails.
-/// MTA because these threads pump no message loop and the blocking `.join()` waits would risk an STA deadlock. `did_init` is true only when we initialised (S_OK/S_FALSE); on RPC_E_CHANGED_MODE an outer caller owns the apartment and we must not uninit. Mirrors `shell::video::ComScope`.
+/// Scopes a COM apartment to one `decode` call. Recycled worker threads arrive without COM initialised, which would otherwise surface as a false "HEIF codec not installed".
+/// MTA, because these threads pump no message loop. `did_init` is false on RPC_E_CHANGED_MODE, where an outer caller owns the apartment and it must not be uninitialised.
 struct ComScope {
     did_init: bool,
 }
@@ -66,7 +65,7 @@ fn decoder_creation_error(error: windows::core::Error) -> anyhow::Error {
 }
 
 pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
-    // Held for the whole function: the decoder and pixel-data async ops need the apartment live.
+    // Held for the whole function: the async decoder ops need the apartment live.
     let _com = ComScope::enter();
     let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     if wide.is_empty() {
@@ -94,7 +93,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     if pw == 0 || ph == 0 {
         anyhow::bail!("heic decode: zero-dimension image");
     }
-    // Same per-worker decode budget as the rest of the pipeline (50 MP ≈ 150 MB RGB8, MAX_DECODED_PIXELS in tagging.rs/deep_analyze). HEIC has no image-rs decoder, so this is its only size guard; a larger cap would bust the per-worker RAM budget and the read-ahead channel's per-frame sizing.
+    // Same per-worker decode budget as the rest of the pipeline (50 MP is about 150 MB of RGB8); HEIC's only size guard.
     const MAX_PIXELS: u64 = 50_000_000;
     if (pw as u64) * (ph as u64) > MAX_PIXELS {
         anyhow::bail!(
@@ -102,7 +101,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         );
     }
 
-    // GetPixelDataAsync returns the decoder's default format (BGRA8 for HEIF Image Extensions), applying EXIF orientation and any ICC profile to sRGB, matching Explorer and Photos.
+    // The default pixel format is BGRA8, with EXIF orientation and the ICC profile already applied.
     let pixel_provider = decoder
         .GetPixelDataAsync()
         .context("GetPixelDataAsync")?
@@ -125,9 +124,9 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
 
     let mut rgb = Vec::with_capacity((pw as usize) * (ph as usize) * 3);
     for chunk in bgra.as_chunks::<4>().0.iter().take((pw as usize) * (ph as usize)) {
-        rgb.push(chunk[2]); // R from BGRA[2]
-        rgb.push(chunk[1]); // G from BGRA[1]
-        rgb.push(chunk[0]); // B from BGRA[0]
+        rgb.push(chunk[2]);
+        rgb.push(chunk[1]);
+        rgb.push(chunk[0]);
     }
     Ok((rgb, pw, ph))
 }

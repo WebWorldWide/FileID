@@ -1,4 +1,4 @@
-//! What a scan still owes a file after its main pass, and what it remembers about files it could not read. Both live in `scan_catchup` (catalog v34), shared with the Swift engine's `ScanCatchUp`, so either engine can finish the other's work.
+//! What a scan still owes a file after its main pass, and what it remembers about files it could not read. Both live in `scan_catchup` (catalog v34), also read by older Swift-engine catalogs, so work left owed by either is finished.
 
 use parking_lot::Mutex;
 
@@ -61,13 +61,13 @@ pub fn failure_is_about_the_file(path: &std::path::Path) -> bool {
 }
 
 
-/// A file's catch-up is given up after this many failed attempts
-/// (`ScanCatchUp.maxAttempts`); it keeps the tags the scan stored.
+/// A file's catch-up is given up after this many failed attempts; it keeps the
+/// tags the scan stored.
 pub const MAX_ATTEMPTS: i64 = 3;
 
 /// Whether RAM++ runs after the main pass instead of inside it. On the Mac
-/// (the adapters path) that is the default, as in the Swift engine, and
-/// `FILEID_RAMPLUS_INLINE=1` is the control. Elsewhere RAM++ is GPU-bound and
+/// (the adapters path) that is the default, and `FILEID_RAMPLUS_INLINE=1` is
+/// the control. Elsewhere RAM++ is GPU-bound and
 /// deferring only changes when tags appear, so it is opt-in with
 /// `FILEID_RAMPLUS_DEFERRED=1`.
 pub fn ram_plus_deferred(apple_scan: bool) -> bool {
@@ -90,9 +90,8 @@ fn deferred_mode(apple_scan: bool, inline: Option<&str>, deferred: Option<&str>)
     !on(inline) && (apple_scan || on(deferred))
 }
 
-/// What the scan saw, kept for the later RAM++ pass: the Swift engine's
-/// `ScanCatchUp.VisionContext` (`k`, `c`, `u`, `t`), which either engine can
-/// read, plus optional keys the Swift decoder ignores.
+/// What the scan saw, kept for the later RAM++ pass. Keys `k`, `c`, `u`, `t`
+/// are the original catalog format; the other keys are optional extras.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Context {
     /// The tags the scan stored in place of RAM++'s: the Vision classifier's
@@ -135,7 +134,7 @@ impl Context {
 
     /// The confidence table for the agreement. An empty table means "the
     /// classifier did not answer", so an answer with nothing kept still gets
-    /// one (meaningless) entry, as in the Swift engine.
+    /// one (meaningless) entry.
     pub fn confidences(&self) -> std::collections::BTreeMap<String, f64> {
         let mut out: std::collections::BTreeMap<String, f64> =
             self.c.iter().map(|label| (label.n.clone(), f64::from(f32::from_bits(label.b)))).collect();
@@ -186,8 +185,7 @@ pub struct TextRead {
     pub ran: bool,
     pub text: Option<String>,
     pub handwritten: bool,
-    /// The careful read was wanted and its reader was not available
-    /// (`ScanCatchUp.TextOutcome.carefulOwed`).
+    /// The careful read was wanted and its reader was not available.
     pub careful_owed: bool,
 }
 
@@ -216,7 +214,7 @@ pub fn portable_update(
     Update { tags, text, stages: file.stages & !TAGS_OWED, vision: file.vision.clone() }
 }
 
-/// The Mac rules (`ScanCatchUp.process`, tags phase) once RAM++ has answered:
+/// The Mac rules once RAM++ has answered:
 /// `ram` is the agreed RAM++ output. The text is read again whenever the new
 /// tags could change the read (or it was not read, or a careful read is owed);
 /// a read that runs replaces the scan's text and settles the careful read.
@@ -325,8 +323,8 @@ pub trait Analyzer: Sync {
         self.parallelism()
     }
     fn analyse(&self, file: &Pending, phase: Phase, context: Option<&Context>) -> Outcome;
-    /// How long a reader that is still warming up may be waited on after the scan ended
-    /// (`Readers.carefulWaitSeconds`); a scan itself never waits for it.
+    /// How long a reader that is still warming up may be waited on after the scan ended;
+    /// a scan itself never waits for it.
     fn ready_wait(&self, _phase: Phase) -> std::time::Duration {
         std::time::Duration::ZERO
     }

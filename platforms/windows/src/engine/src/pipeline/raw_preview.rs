@@ -1,4 +1,4 @@
-//! Largest embedded JPEG preview in a camera RAW. Decoding it is far cheaper than demosaicing, and on Linux it is the only way to read these files. Mirrors the macOS scan's embedded preview.
+//! Largest embedded JPEG preview in a camera RAW. Decoding it is far cheaper than demosaicing, and on Linux it is the only way to read these files.
 
 const RAW_EXTENSIONS: &[&str] = &[
     "arw", "srf", "sr2", "nef", "nrw", "cr2", "cr3", "orf", "pef", "dng", "raf", "rw2", "rwl", "raw", "3fr", "erf",

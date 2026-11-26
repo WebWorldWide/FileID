@@ -1,4 +1,4 @@
-//! Learn-from-corrections: token→folder co-occurrence memory over `restructure_feedback`. Additive confidence hint only; never re-routes a move. Lockstep with macOS `RestructureFeedback`.
+//! Learn-from-corrections: token→folder co-occurrence memory over `restructure_feedback`. Additive confidence hint only; never re-routes a move.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -9,9 +9,7 @@ use rusqlite::{params, Connection};
 use super::restructure::{Confidence, ProposedMove};
 use super::restructure_semantic::filename_tokens;
 
-/// Largest feedback weight of any one of a move's filename tokens toward its destination
-/// folder (each applied file adds one per token, so it counts files) at/above which the destination is treated as the user's learned habit and
-/// the move is upgraded to auto-confidence. Lockstep with the Swift constant.
+/// Feedback weight (one per applied file, per token) at which a move's destination counts as the user's learned habit and the move is upgraded to auto-confidence.
 pub(crate) const FEEDBACK_AUTO_WEIGHT: i64 = 3;
 
 fn dest_folder(dest: &Path) -> Option<String> {
@@ -22,7 +20,7 @@ fn dest_folder(dest: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Best-effort: a feedback write never fails an apply. Call ONLY on a forward apply (never undo).
+/// Best-effort: a feedback write never fails an apply. Call only on a forward apply, never on undo.
 pub(crate) fn record<'a>(
     conn: &Arc<Mutex<Connection>>,
     moves: impl Iterator<Item = (&'a Path, &'a Path)>,
@@ -44,10 +42,7 @@ pub(crate) fn record<'a>(
     }
 }
 
-/// Additive confidence boost: a planned move whose filename tokens were previously
-/// filed into the SAME destination folder is upgraded to Auto (with a note), because
-/// the user has demonstrably filed files like this there before. Only touches
-/// confidence on the moves the planner already produced — never re-routes.
+/// Upgrades a planned Review move to Auto (with a note) when its filename tokens were filed into the same destination folder often enough. Never re-routes.
 pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
     if moves.is_empty() {
         return;
@@ -161,11 +156,7 @@ mod tests {
 
     #[test]
     fn boost_never_upgrades_an_ask_tier_move() {
-        // The butler marked this move Ask (explicitly unsure — "leave in place,
-        // needs consent"). Even with overwhelming filing history toward the
-        // destination, boost() must NOT rewrite it to Auto, or it would ride
-        // the bulk stored-plan apply without the per-file consent the Ask tier
-        // exists to require.
+        // Even with heavy filing history, an Ask move must stay Ask, or it would ride the bulk stored-plan apply without the per-file consent that tier requires.
         let db = db();
         let applied: Vec<(PathBuf, PathBuf)> = (0..5)
             .map(|i| {

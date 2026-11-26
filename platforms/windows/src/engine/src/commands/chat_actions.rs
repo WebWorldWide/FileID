@@ -1,4 +1,4 @@
-//! Turns parsed intents into proposed actions with exact counts (mirrors macOS `ChatActions.swift`). Every action maps
+//! Turns parsed intents into proposed actions with exact counts. Every action maps
 //! to an existing command; nothing here changes files or the catalog.
 
 use super::catalog_retrieval::{KnownEvents, KnownPeople};

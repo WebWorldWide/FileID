@@ -1,6 +1,5 @@
 //! Splits a video's low-resolution frame pool into visual scenes (CLIP cosine) and
-//! activity windows (luma change). Mirror of the macOS `VideoSceneSelection.swift`
-//! with the same thresholds; change both together.
+//! activity windows (luma change).
 
 use super::near_duplicate_grouping::cosine;
 

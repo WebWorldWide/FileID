@@ -274,7 +274,7 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
     Ok(())
 }
 
-/// Serde encodes a unit struct as `null`; an empty struct encodes as `{}` like Swift.
+/// Serde encodes a unit struct as `null`; an empty struct encodes as `{}`, as the Swift app expects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Empty {}
 
@@ -508,7 +508,7 @@ mod tests {
     }
 
     /// A schema-conformant `deepAnalyzeAll` omitting `tagsOnly`/`proposeRenames` must decode with `tags_only=false`,
-    /// `propose_renames=true` (the Swift mirror must match).
+    /// `propose_renames=true`.
     #[test]
     fn deep_analyze_all_decodes_with_optional_fields_omitted() {
         let json = r#"{"id":"c-1","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":true}}}"#;
@@ -726,15 +726,13 @@ mod tests {
         assert_eq!(payload.moves.iter().map(|entry| entry.file_id).collect::<Vec<_>>(), vec![1, 2]);
     }
 
-    /// Every CommandPayload variant must round-trip through serde without
-    /// losing its discriminant. Catches:
-    ///   - `#[serde(rename = "…")]` drift between Rust + Swift schema
-    ///   - Empty-struct vs unit-variant mistakes (Swift expects `{}`, not `null`)
+    /// Every CommandPayload variant must round-trip through serde without losing its discriminant. Catches:
+    ///   - `#[serde(rename = "…")]` drift from the schema
+    ///   - Empty-struct vs unit-variant mistakes (the app expects `{}`, not `null`)
     ///   - Field renames inside a payload that break decode
     ///   - Missing `#[serde(default)]` on an optional that becomes required
     ///
-    /// When you add a CommandPayload variant you MUST add a case below or
-    /// the test loses coverage silently.
+    /// Add a case below for every new CommandPayload variant, or the test loses coverage silently.
     #[test]
     fn every_command_variant_round_trips() {
         let cases: Vec<CommandPayload> = vec![

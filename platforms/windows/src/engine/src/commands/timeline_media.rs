@@ -42,8 +42,8 @@ pub(crate) fn frame_jpeg(source: &Path, seconds: f64, size: (u32, u32), output: 
     }
 }
 
-/// The Mac engine samples a whole video once, as Swift does: half-second signatures for activity windows and small
-/// JPEGs for moment windows, from one sequential hardware decode.
+/// The Mac engine samples a whole video once: half-second signatures for activity windows and small JPEGs for
+/// moment windows, from one sequential hardware decode.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) const FRAME_POOL: bool = true;
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
@@ -86,7 +86,7 @@ pub(crate) fn pool(_: &Path, _: f64, _: &Path, _: &AtomicBool) -> Result<Pool> {
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) const POOL_MAX_SIDE: u32 = 448;
 
-/// MLX through FileIDAppleKit in the Mac-hosted engine (Swift's `CLIPVisionMLX`), tract elsewhere. `None` when neither
+/// MLX through FileIDAppleKit in the Mac-hosted engine, tract elsewhere. `None` when neither
 /// can load; callers fall back to luma.
 enum ClipEncoder {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -135,7 +135,7 @@ impl ClipEncoder {
     }
 }
 
-/// Swift's `TimelineAnalysis.poolFrames`: a CLIP vector per pool frame when the image encoder is installed, else the
+/// A CLIP vector per pool frame when the image encoder is installed, else the
 /// luma signature minus its mean; `change` is the luma change from the previous frame. Scenes cut on the vectors;
 /// activity windows read `change`.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
@@ -224,8 +224,7 @@ mod tests {
         assert_eq!(pool.nearest(0.2), Some(std::path::Path::new("0.jpg")));
     }
 
-    // Without the CLIP image encoder (tests install none), scene vectors are luma signatures minus their mean, as in
-    // Swift.
+    // Without the CLIP image encoder (tests install none), scene vectors are luma signatures minus their mean.
     #[test]
     fn scene_frames_fall_back_to_centred_luma_with_luma_change() {
         let missing = std::path::PathBuf::from("/nonexistent/frame.jpg");

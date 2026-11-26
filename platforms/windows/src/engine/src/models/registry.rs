@@ -453,8 +453,7 @@ mod tests {
         }
     }
 
-    /// Both spellings of every VLM kind resolve to the same bundle under the dotted dir the installer writes; the
-    /// snake-vs-dotted split once made `vlm::find_weights` report installed VLMs as missing.
+    /// Both spellings of every VLM kind resolve to the same bundle under the dotted dir the installer writes.
     #[test]
     #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), ignore = "the Mac app registers MLX models, not GGUF bundles")]
     fn vlm_kind_aliases_and_dirs_agree() {

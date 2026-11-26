@@ -227,7 +227,7 @@ pub(crate) async fn handle_prewarm_model(
     http_client: Arc<reqwest::Client>,
 ) {
     crate::pipeline::catch_up::forget_careful_reader_failures();
-    // The Mac app's engine prewarms an MLX model as the Swift engine did: verify or download the repo, write its install records, then load it through FileIDAppleKit.
+    // The Mac app's engine prewarms an MLX model by verifying or downloading the repo, writing its install records, then loading it through FileIDAppleKit.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if crate::apple::vlm::model_spec(&model_kind).is_ok() {
         let cancel = prewarm_cancel_flag(&model_kind);

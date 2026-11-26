@@ -1,8 +1,8 @@
-//! Write-ahead journal for Library renames in the Swift engine's `PathMoveJournal` format (`path-moves.ndjson`): a
+//! Write-ahead journal for Library renames in the `PathMoveJournal` format (`path-moves.ndjson`): a
 //! synced intent line before each move and a "done" line once the catalog row names the new path. A kill in between
 //! leaves the intent; at next start the row is pointed at the destination when the file there is provably the same
-//! (same inode) and the source is gone, then the intent is removed. The app-hosted Mac engine shares the file with
-//! Swift, so either engine repairs a rename the other left half done.
+//! (same inode) and the source is gone, then the intent is removed. The retired Swift engine wrote the same format, so
+//! a rename it left half done is repaired too.
 //!
 //! A recovery hint checked against the inode, not an authority to move files, so it is not HMAC-signed (like
 //! `rename_recover.ndjson`).
@@ -93,7 +93,7 @@ pub(crate) fn finish(id: &str) {
     }
 }
 
-/// Startup repair (`PathMoveJournal.reconcile`): an intent without "done", source gone, destination holding the same
+/// Startup repair: an intent without "done", source gone, destination holding the same
 /// inode, row still naming the source → point the row at the destination. Returns rows repaired.
 pub(crate) fn repair(journal: &Path, conn: &rusqlite::Connection) -> usize {
     let raw = {

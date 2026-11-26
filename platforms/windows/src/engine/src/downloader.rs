@@ -1,4 +1,4 @@
-// HuggingFace 12-way parallel range-GET downloader, mirroring the macOS app's `HFDownloader.swift`: a HEAD discovers Content-Length + ETag, 12 concurrent ranged GETs stream into `<file>.part-N` (each chunk verified against Content-Range), the parts are concatenated, the final SHA256 is checked against MODELS.md, and the result is atomically renamed into place. On cancellation the part files stay on disk so resume is cheap.
+// HuggingFace 12-way parallel range-GET downloader: a HEAD discovers Content-Length + ETag, 12 concurrent ranged GETs stream into `<file>.part-N` (each chunk verified against Content-Range), the parts are concatenated, the final SHA256 is checked against MODELS.md, and the result is atomically renamed into place. On cancellation the part files stay on disk so resume is cheap.
 // Privacy: this is the **only** network code in the engine. Every URL comes from the canonical SHA256-pinned manifest in `shared/docs/MODELS.md`; there is no telemetry and nothing to opt out of.
 
 use anyhow::{Context, Result};
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 pub const PARALLEL_PARTS: usize = 12;
 const PROGRESS_REPORT_INTERVAL_BYTES: u64 = 1024 * 1024; // 1 MB
 const MIN_BYTES_FOR_PARALLEL: u64 = 5 * 1024 * 1024;     // 5 MB
-// 4 Hz: each event crosses IPC → JSON parse → PropertyChanged → x:Bind re-eval across every bound row on the app's UI thread. At 20 Hz a 15 GB VLM is ~19,000 events of pure UI churn (the Welcome sheet visibly glitched and app.log grew megabytes of [INSTALL] spam). 4×/s is indistinguishable to the eye; the EMA rate uses its own 500 ms sampler.
+// 4 Hz: each event crosses IPC → JSON parse → PropertyChanged → x:Bind re-eval across every bound row on the app's UI thread. At 20 Hz a 15 GB VLM is ~19,000 events of pure UI churn. 4×/s is indistinguishable to the eye; the EMA rate uses its own 500 ms sampler.
 const PROGRESS_THROTTLE_MS: u64 = 250;
 const MAX_UNSIZED_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 

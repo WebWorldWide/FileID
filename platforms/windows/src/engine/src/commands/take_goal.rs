@@ -1,5 +1,5 @@
 //! Best Takes "rank by a goal": the installed description model sees one numbered contact sheet of up to six shots and
-//! names the best for the goal (`CatalogTakeAuto.rankWithGoal`, `TakeMediaAnalysis`).
+//! names the best for the goal.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;

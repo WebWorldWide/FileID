@@ -1,5 +1,5 @@
 //! Safe wrappers over the FileIDAppleKit scan adapters. Images stay in the adapter as decoded CGImages behind a handle
-//! so the scan sees the same pixels as the Swift engine; results cross as JSON. Policy (which stages run, what is
+//! so every stage sees the same pixels; results cross as JSON. Policy (which stages run, what is
 //! stored) stays in `pipeline::tagging`.
 
 use super::ffi;
@@ -146,7 +146,7 @@ pub struct PdfRead {
 }
 
 impl Image {
-    /// The Swift engine's 9x8 CoreGraphics dHash, stored bit for bit. Call after Vision and CLIP: a 9x8 draw first
+    /// The 9x8 CoreGraphics dHash, stored bit for bit. Call after Vision and CLIP: a 9x8 draw first
     /// would leave CLIP a coarse decode of a JPEG-backed image.
     pub fn dhash(&self) -> i64 {
         // SAFETY: plain handle argument.
@@ -246,8 +246,8 @@ pub fn ocr_paused() -> bool {
     unsafe { ffi::fileid_apple_ocr_paused() }
 }
 
-/// Compile the accurate text tier once the engine is idle, as the Swift engine
-/// does: after three seconds, and not while a scan is decoding. A scan that
+/// Compile the accurate text tier once the engine is idle: after three
+/// seconds, and not while a scan is decoding. A scan that
 /// starts first keeps its fast reads until the compile finishes.
 pub fn start_ocr_warmup_when_idle() {
     let spawned = std::thread::Builder::new().name("fileid-ocr-warmup".into()).spawn(|| {

@@ -1,5 +1,5 @@
 //! Library-wide related-take proposals: a durable `takeGrouping` catalog job grouping tries by capture session, CLIP
-//! similarity and user-named people. Keep thresholds, keys and evidence in step with macOS `CatalogTakeGrouping.swift`.
+//! similarity and user-named people.
 
 use super::catalog_take_auto::{self as auto, apply_decisions, rank};
 use crate::ipc::sink::Sink;

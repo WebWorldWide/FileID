@@ -69,7 +69,7 @@ pub(crate) trait FrameModel: Sync {
         tokens: u32,
         cancel: Arc<AtomicBool>,
     ) -> impl Future<Output = Result<String>> + Send;
-    /// `sequence` plus the frames' times, which Swift's MLX path needs to label frames itself.
+    /// `sequence` plus the frames' times, which the MLX path needs to label frames itself.
     fn moment(
         &self,
         images: &[&Path],
@@ -82,8 +82,7 @@ pub(crate) trait FrameModel: Sync {
     }
 }
 
-/// Swift's MLX scene captions (`DeepAnalyze.analyze(sceneCaption:)`) and moment sequences (`analyzeMomentSequence`),
-/// which build their own prompts.
+/// MLX scene captions and moment sequences, which build their own prompts.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) struct MlxFrames(tokio::sync::Mutex<crate::apple::vlm::MlxLease>);
 
@@ -220,8 +219,8 @@ pub fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The Mac-hosted engine runs Swift's scene-pool timeline (one caption per CLIP scene, versioned with the pinned model
-/// revision) so either engine resumes the other's coverage; other builds sample a frame every interval.
+/// The Mac-hosted engine runs a scene-pool timeline (one caption per CLIP scene, versioned with the pinned model
+/// revision); other builds sample a frame every interval.
 const SCENE_PREFIX: &str = analysis::SCENE_VERSION_PREFIX;
 
 fn frame_model_version(model: &str) -> String {
@@ -447,7 +446,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         publish(id, sink, database).await;
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         if crate::apple::vlm::model_spec(&job.recipe.model_kind).is_ok() {
-            // Speech on the Mac is Apple Speech (Stage 8), not the GGUF ASR model: visual pass then speech pass, with
+            // Speech on the Mac is Apple Speech, not the GGUF ASR model: visual pass then speech pass, with
             // the lease released before speech so other model users can run.
             let apple_speech = apple_speech::enabled();
             let visual_share = if apple_speech { 0.8 } else { 1.0 };
@@ -1016,8 +1015,7 @@ impl<F: FnMut(u64)> Drop for TimingOnDrop<F> {
     }
 }
 
-/// Swift's `analyzeScenes`: CLIP scenes over the frame pool, one caption of each scene's representative frame covering
-/// the scene, with Swift's evidence ids so either engine skips the other's.
+/// CLIP scenes over the frame pool, one caption of each scene's representative frame covering the scene.
 #[allow(clippy::too_many_arguments)]
 async fn scene_captions<M: FrameModel>(
     id: &str,
@@ -1075,8 +1073,7 @@ async fn scene_captions<M: FrameModel>(
     Ok(())
 }
 
-/// Decodes in the background for the job's next video so its hardware decode overlaps this video's captions (Swift's
-/// `nextPool`).
+/// Decodes in the background for the job's next video so its hardware decode overlaps this video's captions.
 struct PoolTask {
     handle: tokio::task::JoinHandle<Result<timeline_media::Pool>>,
     stop: Arc<AtomicBool>,
@@ -1099,7 +1096,7 @@ fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTas
     let (path, directory) = (source.to_owned(), folder.to_owned());
     spawn_stoppable(cancel, move |stop| {
         let _ = std::fs::remove_dir_all(&directory);
-        // The duration is only the worker's time limit (Swift: one hour). CLIP vectors are not computed here: they
+        // The duration is only the worker's time limit. CLIP vectors are not computed here: they
         // would compete with this video's captions.
         timeline_media::pool(&path, 3_600.0, &directory, stop)
     })

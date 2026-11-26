@@ -1,5 +1,4 @@
-//! Which detected landmark set belongs to a stored face box, as the macOS engine decides it (`FaceLandmarkMatch.swift`,
-//! `FaceBBox.parseNormalized`, `FaceClustering.parseBBox`). A face is aligned only when one detection clearly overlaps
+//! Which detected landmark set belongs to a stored face box. A face is aligned only when one detection clearly overlaps
 //! its stored box; otherwise it falls back to the padded box crop. Rects are normalized with a bottom-left origin, like
 //! Vision's `boundingBox`.
 
@@ -154,7 +153,7 @@ fn parse_json(text: &str, image_width: u32, image_height: u32, orientation: u8) 
     Some(NormRect::new(min_x, 1.0 - max_y, max_x - min_x, max_y - min_y))
 }
 
-/// The padded crop the macOS engine embeds when no landmarks match (`FaceClustering.cropFaceCGImage`): 15% padding
+/// The padded crop embedded when no landmarks match: 15% padding
 /// clamped to the frame, then `CGRect.integral`; `None` below 8 px.
 pub fn padded_crop_rect(text: &str, image_width: u32, image_height: u32, orientation: u8) -> Option<[i64; 4]> {
     let b = parse_normalized(text, image_width, image_height, orientation)?;

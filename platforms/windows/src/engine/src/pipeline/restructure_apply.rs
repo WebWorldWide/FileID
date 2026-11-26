@@ -1,9 +1,9 @@
 // Restructure apply: executes a `Vec<ProposedMove>` on disk.
-// Real move (default): handle-relative, no-replace rename; the source handle stays open from identity verification through mutation and an occupied destination fails instead of being overwritten. The DB `path_text` is updated by a SEPARATE statement AFTER the move (it can't be one transaction with the filesystem). A crash in that window leaves the file relocated with `path_text` stale; the next scan self-heals via rename-heal on the NTFS `file_ref`, and a failed update is also recorded to a recovery sidecar.
+// Real move (default): handle-relative, no-replace rename; the source handle stays open from identity verification through mutation and an occupied destination fails instead of being overwritten. The DB `path_text` is updated by a separate statement after the move (it can't be one transaction with the filesystem). A crash in that window leaves the file relocated with `path_text` stale; the next scan self-heals via rename-heal on the NTFS `file_ref`, and a failed update is also recorded to a recovery sidecar.
 // Symlink (advanced): `CreateSymbolicLinkW`, needing SeCreateSymbolicLinkPrivilege (admin) or Developer Mode; previews the structure without moving.
-// COLLISION SAFETY: many sources share a basename and the rule cascade funnels them into one folder, so each real-move destination is uniquified within its parent (`name (2).ext`) and nothing is clobbered.
-// STALE-PLAN / IDENTITY GUARD: a plan is built from a DB snapshot and applied after an arbitrary delay, so before each move the live DB row for `file_id` must still name `source`; the payload `source` string is not authoritative.
-// PATH-TRAVERSAL GUARD: every destination MUST canonicalize inside `library_root`, even if the planner is buggy or a payload is forged.
+// Collisions: many sources share a basename and the rule cascade funnels them into one folder, so each real-move destination is uniquified within its parent (`name (2).ext`) and nothing is clobbered.
+// Stale plans: a plan is built from a DB snapshot and applied after an arbitrary delay, so before each move the live DB row for `file_id` must still name `source`; the payload `source` string is not authoritative.
+// Path traversal: every destination must canonicalize inside `library_root`, even if the planner is buggy or a payload is forged.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
@@ -391,7 +391,7 @@ impl Iterator for UndoJournalIter {
     }
 }
 
-/// Write-ahead undo journal: every inverse entry is appended, flushed and fsync'd BEFORE the move it describes, and rolled back to the prior offset if that move fails, so the journal never claims a move that didn't happen nor misses one that did. Mirrors the macOS engine's journal discipline.
+/// Write-ahead undo journal: every inverse entry is appended, flushed and fsync'd before the move it describes, and rolled back to the prior offset if that move fails, so the journal never claims a move that didn't happen nor misses one that did.
 struct UndoJournal {
     file: File,
     len: u64,
@@ -542,9 +542,8 @@ impl UndoJournal {
 
 /// Makes a write-ahead entry durable before the move it describes. On macOS
 /// `sync_data` is `F_FULLFSYNC`, a drive-cache flush per moved file that made an
-/// apply about 4x slower than the Swift engine (which uses `fsync`);
-/// `F_BARRIERFSYNC` still guarantees the entry reaches storage before the rename
-/// that follows, which is the ordering the journal relies on.
+/// apply about 4x slower; `F_BARRIERFSYNC` still guarantees the entry reaches
+/// storage before the rename that follows, which is the ordering the journal relies on.
 fn sync_ahead_of_move(file: &File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -596,10 +595,10 @@ fn prior_undo_journal_backups(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(backups)
 }
 
-/// The root a journal without a header belongs to. The macOS Swift engine wrote
-/// headerless journals before it adopted this format (convergence Stage 3); on macOS
-/// such a journal is read as the requested library's, and undo still refuses any entry
-/// outside that root. Elsewhere a headerless journal is an old Rust one and is refused.
+/// The root a journal without a header belongs to. Journals written by older Mac
+/// builds have no header; on macOS such a journal is read as the requested library's,
+/// and undo still refuses any entry outside that root. Elsewhere a headerless journal
+/// is refused.
 fn headerless_journal_root(library_root: &Path) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -733,12 +732,6 @@ fn recover_prior_undo_journal(path: &Path, library_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// One forward pass over the journal collecting its root binding and each
-/// entry's byte span. Returns None if the journal does not exist.
-/// Tolerates exactly a torn TRAILING entry: under write-ahead ordering an
-/// entry is fsync'd before its move starts, so a torn tail means that move
-/// never executed and skipping it is safe. Corruption anywhere earlier fails
-/// closed — an explicit error beats a partial undo that reorders dependents.
 fn default_undo_journal_path(library_root: &Path) -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -760,6 +753,12 @@ pub(crate) fn undo_pending(library_root: &Path) -> bool {
     !scan.spans.is_empty() && validate_owned_undo_scan(&scan, library_root).is_ok()
 }
 
+/// One forward pass over the journal collecting its root binding and each
+/// entry's byte span. Returns None if the journal does not exist.
+/// Tolerates exactly a torn trailing entry: under write-ahead ordering an
+/// entry is fsync'd before its move starts, so a torn tail means that move
+/// never executed and skipping it is safe. Corruption anywhere earlier fails
+/// closed, since an explicit error beats a partial undo that reorders dependents.
 fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -1256,10 +1255,10 @@ fn cleanup_shortcut_staging_dir(
     Ok(())
 }
 
-/// Streams journal entries NEWEST-FIRST via pre-scanned byte spans. Dependent
+/// Streams journal entries newest-first via pre-scanned byte spans. Dependent
 /// moves (A→X then B→A) must be restored newest-first or the older inverse
-/// (X→A) finds A occupied by B and uniquifies into "A (2)" — silent
-/// corruption. Holds only the span table, never the journal contents.
+/// (X→A) finds A occupied by B and uniquifies into "A (2)", silently
+/// corrupting the layout. Holds only the span table, never the journal contents.
 struct ReverseUndoIter {
     file: File,
     spans: Vec<(u64, u32)>,
@@ -1838,13 +1837,13 @@ impl RestructureApply {
 
         let mut applied = 0u32;
         let mut failed = 0u32;
-        // WRITE-AHEAD undo journal: each inverse entry is appended + fsync'd BEFORE its move executes and rolled back if the move fails. Opened LAZILY at the first journaled move, so a batch that never journals (symlink mode, all no-ops) can't truncate the prior run's journal, and an unopenable journal aborts before ANY file moves.
+        // Write-ahead undo journal: each inverse entry is appended and fsync'd before its move executes and rolled back if the move fails. Opened lazily at the first journaled move, so a batch that never journals (symlink mode, all no-ops) can't truncate the prior run's journal, and an unopenable journal aborts before any file moves.
         let mut journal: Option<UndoJournal> = None;
         let mut shortcut_manifest: Option<ShortcutUndoManifest> = None;
-        // (source, final destination) of every successful real move, fed to the learn-from-corrections memory in ONE lock acquisition after the loop. Forward-applies-only (empty on an undo run, record_undo=false).
+        // (source, final destination) of every successful real move, fed to the learn-from-corrections memory in one lock acquisition after the loop. Forward applies only (empty on an undo run, record_undo=false).
         let mut applied_pairs: Vec<(String, PathBuf)> =
             Vec::with_capacity(APPLY_PROGRESS_INTERVAL);
-        // Destinations claimed earlier in THIS batch, so two sources with the same basename don't collide before either touches disk. Keyed by the LOWERCASED path: NTFS and APFS are case-insensitive by default, so "Photo.jpg" and "photo.jpg" are the same file and case-folding makes the second move uniquify instead of clobbering the first. Mirrors the `ci_starts_with` full-Unicode fold and the macOS `Restructure.swift` claimed set.
+        // Destinations claimed earlier in this batch, so two sources with the same basename don't collide before either touches disk. Keyed by the lowercased path: NTFS and APFS are case-insensitive by default, so "Photo.jpg" and "photo.jpg" are the same file and case-folding makes the second move uniquify instead of clobbering the first. Folds like `ci_starts_with`.
         let mut claimed = DestinationClaims::default();
         let mut existing_shortcuts = ExistingShortcutIndex::default();
 
@@ -1853,7 +1852,7 @@ impl RestructureApply {
         let mut processed = 0usize;
         let mut cancelled = false;
         for (idx, m) in moves.into_iter().enumerate() {
-            // A failed stream read (corrupt / vanished spooled plan) must NOT discard the partial result via `?`: every move already applied is real and journaled, and an Err reply would tell the app "your files are unchanged" with no Undo. Stop, count the unread remainder as failed, and return the truthful partial.
+            // A failed stream read (corrupt or vanished spooled plan) must not discard the partial result via `?`: every move already applied is real and journaled, and an Err reply would tell the app "your files are unchanged" with no Undo. Stop, count the unread remainder as failed, and return the truthful partial.
             let m = match m {
                 Ok(m) => m,
                 Err(err) => {
@@ -1870,7 +1869,7 @@ impl RestructureApply {
                     break;
                 }
             };
-            // Cancel is polled at the TOP of every iteration; completed moves are durable, so stopping BETWEEN moves preserves per-move atomicity.
+            // Cancel is polled at the top of every iteration; completed moves are durable, so stopping between moves preserves per-move atomicity.
             if self.cancel.load(Ordering::Relaxed) {
                 cancelled = true;
                 tracing::info!(applied, failed, processed = idx, total, "[RESTRUCTURE] apply cancelled by user");
@@ -1993,7 +1992,7 @@ impl RestructureApply {
                 continue;
             }
             // Path-traversal guard: the destination's parent must exist or be createable under library_root; canonicalize the closest existing ancestor and verify containment.
-            // Skipped on an UNDO replay (record_undo=false): undo_last validates the whole journal against the caller's canonical library root before any inverse move, so repeating the walk only widens the per-file TOCTOU surface. Forward destinations still require the check immediately before mutation.
+            // Skipped on an undo replay (record_undo=false): undo_last validates the whole journal against the caller's canonical library root before any inverse move, so repeating the walk only widens the per-file TOCTOU surface. Forward destinations still require the check immediately before mutation.
             if record_undo
                 && let Err(err) = ensure_inside_root(&dest, &canonical_root) {
                     tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
@@ -2010,7 +2009,7 @@ impl RestructureApply {
             }
 
             if let Some(parent) = dest.parent() {
-                // SEC-5 TOCTOU defense, pass 1: check the EXISTING ancestor chain BEFORE create_dir_all extends it; an attacker may have planted a junction in a pre-existing folder under library_root that redirects the write outside the root.
+                // Check the existing ancestor chain before create_dir_all extends it; an attacker may have planted a junction in a pre-existing folder under library_root that redirects the write outside the root.
                 if has_reparse_point_in_chain(parent, &canonical_root) {
                     tracing::warn!(
                         parent=%crate::platform::redact_path_for_log(parent),
@@ -2024,7 +2023,7 @@ impl RestructureApply {
                     failed += 1;
                     continue;
                 }
-                // SEC-5 TOCTOU defense, pass 2: re-check after create_dir_all (the window is small but non-zero).
+                // Re-check after create_dir_all: a junction could be planted in the gap.
                 if has_reparse_point_in_chain(parent, &canonical_root) {
                     tracing::warn!(
                         parent=%crate::platform::redact_path_for_log(parent),
@@ -2062,12 +2061,12 @@ impl RestructureApply {
                 }
             }
 
-            // Skip a no-op (file already at its PLANNED destination) BEFORE uniquifying; otherwise `unique_destination` sees the file occupying `dest`, bumps to " (2)" and renames an already-placed file, churning an organized library (silently in auto-file mode). A no-op is not "applied": reporting it would make the app offer Undo for an older journal this run did not create.
+            // Skip a no-op (file already at its planned destination) before uniquifying; otherwise `unique_destination` sees the file occupying `dest`, bumps to " (2)" and renames an already-placed file, churning an organized library (silently in auto-file mode). A no-op is not "applied": reporting it would make the app offer Undo for an older journal this run did not create.
             if !self.use_symlinks && paths_equal(&m.source, &dest.to_string_lossy()) {
                 continue;
             }
 
-            // Real moves never clobber: `move_file` is a no-replace handle-relative rename, and we also resolve a collision-free name within the SAME parent so containment and the reparse checks still hold. Symlink mode keeps the requested name and fails naturally if taken.
+            // Real moves never clobber: `move_file` is a no-replace handle-relative rename, and we also resolve a collision-free name within the same parent so containment and the reparse checks still hold. Symlink mode keeps the requested name and fails naturally if taken.
             let final_dest = if self.use_symlinks {
                 dest.clone()
             } else {
@@ -2077,7 +2076,7 @@ impl RestructureApply {
                             file_id = m.file_id,
                             "[RESTRUCTURE] planned destination became occupied after preflight"
                         );
-                        // `reserve` always claims the name it returns, so the bumped alternative is held even though this row is skipped. Release it, or a LATER row that planned that exact name (the planner emits "a.jpg" + "a (2).jpg" pairs) is bumped again and fails: one raced file silently unfiling two.
+                        // `reserve` always claims the name it returns, so the bumped alternative is held even though this row is skipped. Release it, or a later row that planned that exact name (the planner emits "a.jpg" + "a (2).jpg" pairs) is bumped again and fails: one raced file silently unfiling two.
                         claimed.release(&destination);
                         failed += 1;
                         continue;
@@ -2105,7 +2104,7 @@ impl RestructureApply {
                 continue;
             }
 
-            // WRITE-AHEAD: the inverse entry (final → original) is durable BEFORE the move executes. If the journal can't open, abort now with nothing moved. If a later append fails, stop BEFORE the unrecorded move: completed moves stay undoable and the remainder is reported failed.
+            // The inverse entry (final → original) is durable before the move executes. If the journal can't open, abort now with nothing moved. If a later append fails, stop before the unrecorded move: completed moves stay undoable and the remainder is reported failed.
             let mut journal_entry_offset: Option<u64> = None;
             if record_undo && !self.use_symlinks {
                 if journal.is_none() {
@@ -2227,7 +2226,7 @@ impl RestructureApply {
                             &final_dest,
                         );
                         if !db_updated {
-                            // The file DID move; this is a DB-bookkeeping failure only (a live path_text UNIQUE conflict), recorded for recovery and self-healed by reconcile_pending_path_updates at engine start (main.rs). Don't also count it failed: macOS parity and it avoids double-counting one row past `total`.
+                            // The file did move; this is a DB-bookkeeping failure only (a live path_text UNIQUE conflict), recorded for recovery and self-healed by reconcile_pending_path_updates at engine start. Counting it failed too would double-count one row past `total`.
                             applied += 1;
                             continue;
                         }
@@ -2276,7 +2275,7 @@ impl RestructureApply {
             }
         }
 
-        // Every entry is already durable (write-ahead); one final sync_all covers file metadata on a clean finish. None during an undo run, so a CANCELLED undo leaves the ORIGINAL journal intact for a re-run.
+        // Every entry is already durable (write-ahead); one final sync_all covers file metadata on a clean finish. None during an undo run, so a cancelled undo leaves the original journal intact for a re-run.
         if let Some(mut journal) = journal {
             if journal.first_move_committed && !journal.committed {
                 journal
@@ -2328,7 +2327,7 @@ impl RestructureApply {
 
     /// Undoes the most recent `apply` by replaying the inverse moves through `apply` itself (same stale-check / containment / no-clobber / DB-update safety), then clears the journal so a run can't be undone twice.
     ///
-    /// Replay is NEWEST-FIRST: with dependent moves (A→X then B→A) forward order restores A into the slot B occupies and uniquifies it into "A (2)", silent corruption. A torn TRAILING entry (crash before its fsync, so its move never executed) is skipped; torn data anywhere else fails closed.
+    /// Replay is newest-first: with dependent moves (A→X then B→A) forward order restores A into the slot B occupies and uniquifies it into "A (2)", silently corrupting the layout. A torn trailing entry (crash before its fsync, so its move never executed) is skipped; torn data anywhere else fails closed.
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
         crate::util::read_only::require_writable(&self.library_root)?;
         let Some(path) = self.undo_journal_path() else {
@@ -2404,7 +2403,7 @@ impl RestructureApply {
         let file = File::open(&path)
             .with_context(|| format!("reopening undo journal {}", path.display()))?;
         let inverse = ReverseUndoIter { file, spans, next: total, db: Some(self.db_conn.clone()) };
-        // record_undo:false so the undo's own moves DON'T overwrite the journal: a cancelled undo must leave the original intact so the user can re-run it (already-restored files stale-skip). Only a fully-completed undo clears it.
+        // record_undo:false so the undo's own moves don't overwrite the journal: a cancelled undo must leave the original intact so the user can re-run it (already-restored files stale-skip). Only a fully-completed undo clears it.
         let result = self.apply_iter_with(
             inverse,
             Some(total),
@@ -2417,7 +2416,7 @@ impl RestructureApply {
         {
             self.cancel.store(true, Ordering::Relaxed);
         }
-        // Clear the journal ONLY on a fully-completed undo (not cancelled AND every inverse move succeeded). Deleting it on partial failure (a locked file, a privilege error) would permanently strand the un-restored files with no inverse-move record.
+        // Clear the journal only on a fully-completed undo (not cancelled and every inverse move succeeded). Deleting it on partial failure (a locked file, a privilege error) would permanently strand the un-restored files with no inverse-move record.
         if !result.cancelled && result.failed == 0 {
             // Re-read the journal for bounded-memory empty-directory cleanup before deleting it; repeated parents are harmless since remove_dir is empty-only.
             self.cleanup_empty_dirs_from_journal();
@@ -2577,7 +2576,7 @@ impl RestructureApply {
         })
     }
 
-    /// Removes the empty group folders an apply created, after undo restored the files. `remove_dir` only succeeds on an EMPTY dir, so user files are never at risk; stays strictly inside the library root and never touches the root. Deepest-first so nested empties collapse. Best-effort.
+    /// Removes the empty group folders an apply created, after undo restored the files. `remove_dir` only succeeds on an empty dir, so user files are never at risk; stays strictly inside the library root and never touches the root. Deepest-first so nested empties collapse. Best-effort.
     fn cleanup_empty_dirs_from_journal(&self) {
         if crate::util::read_only::require_writable(&self.library_root).is_err() {
             return;
@@ -3450,12 +3449,12 @@ fn make_symlink(
 
 fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Path) -> Result<()> {
     let conn = conn.lock();
-    // Keep path_hash in sync with path_text (as the rename command and dbwriter inserts do), else a move leaves a stale hash that breaks lookup/dedup and cross-platform DB parity.
+    // Keep path_hash in sync with path_text (as the rename command and dbwriter inserts do), else a move leaves a stale hash that breaks lookup and dedup.
     let path_text = new_path.to_string_lossy();
     let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
-    // prepare_cached: a plan can issue thousands of moves, so cache the parse on the long-lived writer connection. NFC-normalize path_search like dbwriter and macOS so an NFD-accented name stays findable by the app's NFC search query (the v16 contract).
+    // prepare_cached: a plan can issue thousands of moves, so cache the parse on the long-lived writer connection. NFC-normalize path_search like dbwriter so an NFD-accented name stays findable by the app's NFC search query (the v16 contract).
     let path_search = crate::pipeline::dbwriter::nfc_path_search(&path_text);
-    // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE, so a PLAIN update colliding with a LIVE row at the new path (after a transient update failure left a file's DB path stale, or an external rename desynced a row) would silently REPLACE-delete that row and cascade its user tags/person assignments. OR ABORT raises instead, and record_path_update_failure reconciles it on the next scan.
+    // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE, so a plain update colliding with a live row at the new path (after a transient update failure left a file's DB path stale, or an external rename desynced a row) would silently replace-delete that row and cascade its user tags/person assignments. OR ABORT raises instead, and record_path_update_failure reconciles it on the next scan.
     let changed = conn
         .prepare_cached("UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, name_sort = ?5 WHERE id = ?3")?
         .execute(params![path_text, path_hash, file_id, path_search, crate::db::name_sort::name_sort_key(&path_text)])
@@ -3644,7 +3643,7 @@ fn record_feedback_batch(
 
 /// Consumes `restructure_recover.ndjson` once at engine startup: for each recorded (file_id → dst) whose DB row still names the exact recorded source and whose durable file identity matches both the row and the live destination, realigns the stale `path_text` to `dst`. Fails closed when identity is unavailable (exFAT/network volumes) rather than letting a stale or tampered sidecar repoint a row to unrelated bytes; the write-ahead Undo journal and a re-scan's rename-heal remain the recovery routes then.
 ///
-/// Records are RETAINED for the next startup in two transient cases: the library volume not mounted, and the DB write still losing to the same live `path_text` UNIQUE conflict that created the record. Every other give-up (torn line, file moved again, path outside the root, row gone) is terminal and dropped. The sidecar is deleted only once nothing is left to retry. Returns the number of rows realigned.
+/// Records are retained for the next startup in two transient cases: the library volume not mounted, and the DB write still losing to the same live `path_text` UNIQUE conflict that created the record. Every other give-up (torn line, file moved again, path outside the root, row gone) is terminal and dropped. The sidecar is deleted only once nothing is left to retry. Returns the number of rows realigned.
 pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
     let Ok(trash) = crate::paths::trash_log_path() else {
         return 0;
@@ -3681,7 +3680,7 @@ pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
             continue;
         };
         let Ok(canonical_root) = canonicalize_safely(Path::new(root)) else {
-            // The library root is unreachable (an external/USB volume not mounted this launch). That is TRANSIENT, unlike the terminal give-ups below, so retain the record: reconcile runs once per engine start and dropping would silently discard every pending repair for an offline library. Self-bounding, since records are only appended by an apply, which requires the volume mounted.
+            // The library root is unreachable (an external/USB volume not mounted this launch). That is transient, unlike the terminal give-ups below, so retain the record: reconcile runs once per engine start and dropping would silently discard every pending repair for an offline library. Self-bounding, since records are only appended by an apply, which requires the volume mounted.
             still_pending.push(line);
             continue;
         };
@@ -3825,20 +3824,20 @@ fn ensure_inside_root(dest: &Path, canonical_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// SEC-5: walks every ancestor of `path` up to (excluding) `root` and returns true if any is a reparse point (junction or symlink). TOCTOU defense: even if the CANONICAL path checks out, a junction planted in the destination's parent BETWEEN canonicalize and the handle-bound rename would redirect the write outside library_root.
+/// Walks every ancestor of `path` up to (excluding) `root` and returns true if any is a reparse point (junction or symlink). Even if the canonical path checks out, a junction planted in the destination's parent between canonicalize and the handle-bound rename would redirect the write outside library_root.
 #[cfg(windows)]
 fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     use crate::util::path_safety::strip_extended_length;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    // `parent` is the raw destination parent from the IPC plan but `root` arrives canonicalized (a verbatim `\\?\C:\…` path on Windows). Comparing the two prefix forms made `cur.starts_with(root)` false on the first iteration, silently reducing the SEC-5 defense to one level. Normalize BOTH with strip_extended_length, which removes the prefix WITHOUT resolving the link (std::fs::canonicalize would follow the junction and defeat detection).
+    // `parent` is the raw destination parent from the IPC plan but `root` arrives canonicalized (a verbatim `\\?\C:\…` path on Windows). Comparing the two prefix forms made `cur.starts_with(root)` false on the first iteration, silently reducing the check to one level. Normalize both with strip_extended_length, which removes the prefix without resolving the link (std::fs::canonicalize would follow the junction and defeat detection).
     let root_norm = strip_extended_length(root);
     let mut cur = parent.to_path_buf();
     loop {
         if let Ok(meta) = std::fs::symlink_metadata(&cur) && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
             return true;
         }
-        // Stop once we reach the root, compared CASE-INSENSITIVELY and component-wise: NTFS is case-insensitive, so a raw IPC parent differing only in casing from the canonical root must still be recognized as inside it; case-sensitive `Path::starts_with` broke the walk after one level.
+        // Stop once we reach the root, compared case-insensitively and component-wise: NTFS is case-insensitive, so a raw IPC parent differing only in casing from the canonical root must still be recognized as inside it; case-sensitive `Path::starts_with` broke the walk after one level.
         let cur_norm = strip_extended_length(&cur);
         let under = ci_starts_with(&cur_norm, &root_norm);
         let at_root = under && ci_starts_with(&root_norm, &cur_norm);
@@ -3852,7 +3851,7 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
 
 /// Component-wise, case-insensitive prefix test (NTFS). Respects component boundaries so `…\PhotosBackup` cannot prefix-match `…\Photos`.
 ///
-/// Folds with full Unicode `to_lowercase`, not `eq_ignore_ascii_case`: an ASCII-only fold compared `Café` vs `CAFÉ` byte-exact, so the SEC-5 reparse walk broke after the leaf parent and left intermediate ancestors unchecked. Unicode folding only ever makes the walk continue further, the safe direction.
+/// Folds with full Unicode `to_lowercase`, not `eq_ignore_ascii_case`: an ASCII-only fold compared `Café` vs `CAFÉ` byte-exact, so the reparse walk broke after the leaf parent and left intermediate ancestors unchecked. Unicode folding only ever makes the walk continue further, the safe direction.
 #[cfg(windows)]
 fn ci_starts_with(p: &Path, prefix: &Path) -> bool {
     let mut pc = p.components();
@@ -3940,7 +3939,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A mid-stream plan read error (corrupt/vanished spool during a paged apply) must return the truthful PARTIAL result, with applied moves counted (so the app surfaces Undo) and the unread remainder failed, instead of Err, which the app maps to "your files are unchanged".
+    /// A mid-stream plan read error (corrupt/vanished spool during a paged apply) must return the truthful partial result, with applied moves counted (so the app surfaces Undo) and the unread remainder failed, instead of Err, which the app maps to "your files are unchanged".
     #[test]
     fn stream_error_mid_apply_returns_partial_result() {
         let root = std::env::temp_dir().join(format!(
@@ -3972,7 +3971,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `update_path_in_db` must NOT REPLACE-delete a LIVE row already occupying the destination path: `path_text` is UNIQUE ON CONFLICT REPLACE, so a plain UPDATE would silently delete the occupant and FK-cascade its user data (possible mid-restructure after a transient update failure desyncs a row).
+    /// `update_path_in_db` must not replace-delete a live row already occupying the destination path: `path_text` is UNIQUE ON CONFLICT REPLACE, so a plain UPDATE would silently delete the occupant and FK-cascade its user data (possible mid-restructure after a transient update failure desyncs a row).
     #[test]
     fn update_path_in_db_aborts_instead_of_clobbering_a_live_row() {
         let conn = crate::db::test_support::memory_db();
@@ -4034,7 +4033,7 @@ mod tests {
             )])
             .unwrap();
 
-        // A DB-only reconciliation failure is not a move failure (macOS parity): don't double-count one row as applied and failed.
+        // A DB-only reconciliation failure is not a move failure: don't double-count one row as applied and failed.
         assert_eq!((result.applied, result.failed), (1, 0));
         assert!(!source.exists(), "the filesystem move already completed");
         assert!(destination.exists());
@@ -4198,7 +4197,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// DATA-INTEGRITY: NTFS/APFS are case-insensitive by default, so "photo.jpg" claimed earlier in the batch and a later move to "Photo.jpg" name the SAME file. The case-folded `claimed` key must make the second move uniquify instead of clobbering the first.
+    /// NTFS/APFS are case-insensitive by default, so "photo.jpg" claimed earlier in the batch and a later move to "Photo.jpg" name the same file. The case-folded `claimed` key must make the second move uniquify instead of clobbering the first.
     #[test]
     fn unique_destination_detects_case_only_claimed_collision() {
         let dir = std::env::temp_dir().join(format!("fileid-uniqdest-ci-{}", std::process::id()));
@@ -4448,7 +4447,7 @@ mod tests {
         ))
     }
 
-    /// Dependent moves (A→Albums/X, then B→A's vacated slot) must undo NEWEST-FIRST, else forward replay uniquifies A into "A (2).txt", silent corruption.
+    /// Dependent moves (A→Albums/X, then B→A's vacated slot) must undo newest-first, else forward replay uniquifies A into "A (2).txt", silently corrupting the layout.
     #[test]
     fn undo_restores_dependent_moves_in_reverse_order() {
         let root = undo_fixture_root("undo-reverse");
@@ -4543,7 +4542,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Fail-closed: if the undo journal cannot open, a recorded apply must abort BEFORE any file moves; undo protection is a precondition.
+    /// Fail-closed: if the undo journal cannot open, a recorded apply must abort before any file moves; undo protection is a precondition.
     #[test]
     fn unopenable_undo_journal_aborts_apply_before_any_move() {
         let root = undo_fixture_root("undo-noopen");
@@ -4567,7 +4566,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A move that fails AFTER its write-ahead entry landed must roll the entry back so undo never replays a phantom; later entries continue at the rolled-back offset.
+    /// A move that fails after its write-ahead entry landed must roll the entry back so undo never replays a phantom; later entries continue at the rolled-back offset.
     #[test]
     fn failed_move_rolls_back_its_journal_entry() {
         let root = undo_fixture_root("undo-rollback");
@@ -5058,8 +5057,7 @@ mod tests {
 
     const SWIFT_RESTRUCTURE_FOLDER: &str = "/private/tmp/fileid-conformance-fixture/swift-written-restructure-apply/tree";
 
-    // One line of the undo journal older Swift-engine app versions wrote before the
-    // library-root header existed.
+    // One line of a journal written by older Mac builds, before the library-root header existed (fixture).
     #[cfg(target_os = "macos")]
     fn headerless_swift_line(root: &Path, to: &Path) -> String {
         let text = std::fs::read_to_string(crate::db::test_support::swift_written("journals/restructure_undo-headerless.ndjson")).unwrap();
@@ -5102,9 +5100,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // The undo journal the Swift engine wrote for a restructure (library-root
-    // header, `source_identity` per entry) undoes here once the entries'
-    // identities are those of the files the test moved.
+    // A journal written by older Mac builds (library-root header, `source_identity` per entry) undoes here once the entries' identities are those of the files the test moved.
     #[test]
     fn undo_reads_the_journal_the_swift_engine_wrote() {
         let root = undo_fixture_root("undo-owner-swift-written");
@@ -5295,7 +5291,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// ci_starts_with must fold NON-ASCII case (NTFS is case-insensitive for accented letters), or the SEC-5 reparse walk breaks early on a root with a case-differing accented component. Component-wise structure must still reject a sibling prefix.
+    /// ci_starts_with must fold non-ASCII case (NTFS is case-insensitive for accented letters), or the reparse walk breaks early on a root with a case-differing accented component. Component-wise structure must still reject a sibling prefix.
     #[test]
     #[cfg(windows)]
     fn ci_starts_with_folds_non_ascii_and_respects_boundaries() {
@@ -5385,7 +5381,7 @@ mod tests {
         assert!(identity_matching_db_ref(Some(100), None).is_none());
     }
 
-    /// A real same-path swap (the DB recorded one file_ref for the planned file but a DIFFERENT file now occupies that path) must be skipped. Windows-only: needs a live NTFS file_ref (the non-Windows `platform::file_ref` stub returns None, leaving the guard inert).
+    /// A real same-path swap (the DB recorded one file_ref for the planned file but a different file now occupies that path) must be skipped. Windows-only: needs a live NTFS file_ref (the non-Windows `platform::file_ref` stub returns None, leaving the guard inert).
     #[test]
     #[cfg(windows)]
     fn apply_skips_move_when_file_ref_swapped() {
@@ -5401,7 +5397,7 @@ mod tests {
         };
 
         let conn = crate::db::test_support::memory_db();
-        // DB row names the SAME path but a DIFFERENT file_ref: the planned file was replaced on disk. `real_ref ^ 1` is guaranteed != real.
+        // DB row names the same path but a different file_ref: the planned file was replaced on disk. `real_ref ^ 1` is guaranteed != real.
         conn.execute(
             "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, file_ref) \
              VALUES (1, ?1, 0, 10, 0.0, 'doc', 'pdf', 0, ?2)",

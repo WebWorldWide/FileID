@@ -1,4 +1,4 @@
-//! Mirrors macOS `CaptureDateBackfill`: corrects copy dates to EXIF capture times once per library folder.
+//! Corrects copy dates to EXIF capture times, once per library folder.
 
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,4 @@
-//! Pure timeline logic. Mirrors macOS `TimelineSignalAnalysis`, `TimelineMomentAnalysis` and `TimelineChapterSuggestions`, so both engines propose the same windows, samples and chapters.
+//! Pure timeline logic: the windows, samples and chapters proposed for a video.
 
 use crate::ipc::CatalogChapter;
 use anyhow::Result;
