@@ -117,9 +117,10 @@ pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> boo
     })
 }
 
-/// Connected components of files whose dHashes differ by at most `threshold` bits (transitively chained); ids sorted,
-/// components by smallest id. `None` when no file has a perceptual hash; `phash = 0` means "no hash". A RAW file whose
-/// same-named rendered twin (any folder, within `threshold` bits) is in its component is the same shot, so it never
+/// Groups of files whose dHashes are all within `threshold` bits of one anchor hash; ids sorted, groups by smallest id.
+/// Files linked only through a chain of near neighbours land in different groups, so a long run of loosely similar
+/// images never becomes one group. `None` when no file has a perceptual hash; `phash = 0` means "no hash". A RAW file
+/// whose same-named rendered twin (any folder, within `threshold` bits) is in its group is the same shot, so it never
 /// counts as a look-alike of that twin.
 pub fn similar_groups(conn: &Connection, threshold: u32, cancel: impl Fn() -> bool) -> Result<Option<Vec<Vec<i64>>>> {
     let mut stmt = conn.prepare("SELECT id, phash, path_text FROM files WHERE failed = 0 AND phash IS NOT NULL AND phash != 0 ORDER BY id")?;
@@ -136,9 +137,41 @@ pub fn similar_groups(conn: &Connection, threshold: u32, cancel: impl Fn() -> bo
     if rows.is_empty() {
         return Ok(None);
     }
-    let groups = similar_components(&rows, threshold, &cancel)?.0;
+    let components = similar_components(&rows, threshold, &cancel)?.0;
     let hashes: HashMap<i64, i64> = rows.into_iter().collect();
+    let mut groups: Vec<Vec<i64>> = components.into_iter().flat_map(|ids| anchored_groups(ids, &hashes, threshold)).collect();
+    groups.sort_unstable_by_key(|ids| ids[0]);
     Ok(Some(without_raw_twins(groups, &paths, &hashes, threshold)))
+}
+
+/// Splits one connected component into groups around anchors, most-repeated hash first: each group takes every
+/// still-unassigned file within `threshold` bits of its anchor. Groups of one file are dropped.
+fn anchored_groups(component: Vec<i64>, hashes: &HashMap<i64, i64>, threshold: u32) -> Vec<Vec<i64>> {
+    let mut by_hash: BTreeMap<u64, Vec<i64>> = BTreeMap::new();
+    for id in component {
+        by_hash.entry(hashes[&id] as u64).or_default().push(id);
+    }
+    let mut anchors: Vec<(u64, Vec<i64>)> = by_hash.into_iter().collect();
+    anchors.sort_by_key(|(_, ids)| (std::cmp::Reverse(ids.len()), ids.iter().min().copied()));
+    let mut taken = vec![false; anchors.len()];
+    let mut groups = Vec::new();
+    for anchor in 0..anchors.len() {
+        if taken[anchor] {
+            continue;
+        }
+        let mut ids = Vec::new();
+        for (index, (hash, members)) in anchors.iter().enumerate() {
+            if !taken[index] && (hash ^ anchors[anchor].0).count_ones() <= threshold {
+                taken[index] = true;
+                ids.extend_from_slice(members);
+            }
+        }
+        if ids.len() > 1 {
+            ids.sort_unstable();
+            groups.push(ids);
+        }
+    }
+    groups
 }
 
 fn without_raw_twins(groups: Vec<Vec<i64>>, paths: &HashMap<i64, String>, hashes: &HashMap<i64, i64>, threshold: u32) -> Vec<Vec<i64>> {
@@ -474,6 +507,17 @@ mod tests {
         assert!(similar_groups(&conn, 8, || false).unwrap().unwrap().is_empty());
         conn.execute("UPDATE files SET failed = 0", []).unwrap();
         assert_eq!(similar_groups(&conn, 8, || false).unwrap().unwrap(), vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn a_chain_of_look_alikes_does_not_become_one_group() {
+        let conn = library();
+        let chain = [0u64, 0x3f, 0xfff, 0x3_ffff, 0xff_ffff, 0x3fff_ffff];
+        for (index, phash) in chain.iter().enumerate() {
+            insert(&conn, std::path::Path::new(&format!("/lib/{index}.jpg")), 1, None, Some((*phash | 1 << 63) as i64));
+        }
+        let groups = similar_groups(&conn, 8, || false).unwrap().unwrap();
+        assert_eq!(groups, vec![vec![1, 2], vec![3, 4], vec![5, 6]]);
     }
 
     #[test]
