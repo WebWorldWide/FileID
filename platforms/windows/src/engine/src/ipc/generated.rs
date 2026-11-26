@@ -833,7 +833,8 @@ pub struct CatalogRequest {
     /// only). unlearnNames sends the same entries back after the renames are undone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_edits: Option<Vec<CatalogNameEdit>>,
-    /// similarGroups only (schema 1.29.0): how many groups to skip.
+    /// similarGroups (schema 1.29.0), autoTakeGroups and takeGroupProposals only: how many groups
+    /// to skip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
     /// similarGroups only (schema 1.29.0): the most perceptual-hash bits two images may differ by

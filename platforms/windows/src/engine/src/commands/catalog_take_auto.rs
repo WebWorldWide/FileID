@@ -52,8 +52,17 @@ fn distinct_contents<'a>(members: Vec<&'a Item>, contents: &HashMap<i64, (Vec<u8
     members.into_iter().filter(|m| keep.contains(&m.id)).collect()
 }
 
-pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGroup>> {
-    ensure!((1..=100).contains(&limit), "Invalid take group limit");
+pub const MAX_PAGE: usize = 100;
+
+/// Validates a request's `offset` and `limit` (default one page of 100) for the take-group lists.
+pub fn page_bounds(offset: Option<i64>, limit: Option<usize>) -> Result<(usize, usize)> {
+    let limit = limit.unwrap_or(MAX_PAGE);
+    ensure!((1..=MAX_PAGE).contains(&limit), "Invalid take group limit");
+    let offset = usize::try_from(offset.unwrap_or(0)).map_err(|_| anyhow::anyhow!("Invalid take group offset"))?;
+    Ok((offset, limit))
+}
+
+pub fn discover(conn: &Connection, offset: usize, limit: usize) -> Result<Vec<CatalogTakeAutoGroup>> {
     let mut statement = conn.prepare(
         "SELECT f.id, f.path_text, f.created_at, f.phash, f.kind, f.content_hash, f.size_bytes FROM files f
          WHERE f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
@@ -119,9 +128,7 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
     }
     let visible = apply_decisions(conn, groups)?;
     let newest = visible.iter().map(|g| g.captured_at).fold(0.0, f64::max);
-    let mut ranked = rank(visible, newest);
-    ranked.truncate(limit);
-    Ok(ranked)
+    Ok(rank(visible, newest).into_iter().skip(offset).take(limit).collect())
 }
 
 pub fn apply_decisions(conn: &Connection, groups: Vec<CatalogTakeAutoGroup>) -> Result<Vec<CatalogTakeAutoGroup>> {
@@ -886,7 +893,7 @@ mod tests {
         conn.execute("INSERT INTO catalog_events(id,title) VALUES('e','Event')", []).unwrap();
         conn.execute("INSERT INTO catalog_event_files(event_id,file_id) VALUES('e',11)", []).unwrap();
         conn.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(1,22,'export','{}')", []).unwrap();
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_ids(), vec![1, 2]);
         let plan: Vec<String> = conn
@@ -917,7 +924,7 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         insert_content(&conn, 1, "/c/dup b.jpg", 100.0, 0.0, 7, 5000);
         insert_content(&conn, 2, "/c/dup b again.jpg", 101.0, 0.0, 7, 5000);
-        assert!(discover(&conn, 100).unwrap().is_empty());
+        assert!(discover(&conn, 0, 100).unwrap().is_empty());
     }
 
     #[test]
@@ -926,7 +933,7 @@ mod tests {
         insert_content(&conn, 5, "/c/one.jpg", 100.0, 0.0, 7, 5000);
         insert_content(&conn, 2, "/c/one copy.jpg", 99.0, 0.0, 7, 5000);
         insert_content(&conn, 3, "/c/other.jpg", 101.0, 0.05, 8, 5000);
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_ids(), vec![2, 3]);
         assert_eq!(groups[0].shots.len(), 2);
@@ -937,10 +944,35 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         insert_content(&conn, 1, "/c/a.jpg", 100.0, 0.0, 7, 17 * 1024 * 1024);
         insert_content(&conn, 2, "/c/b.jpg", 101.0, 0.0, 7, 17 * 1024 * 1024);
-        assert_eq!(discover(&conn, 100).unwrap().len(), 1);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 1);
         insert(&conn, 3, "/c/c.jpg", 5000.0, 0.0);
         insert(&conn, 4, "/c/d.jpg", 5001.0, 0.0);
-        assert_eq!(discover(&conn, 100).unwrap().len(), 2);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pages_continue_the_ranked_list_where_the_last_one_stopped() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, time) in [(1, 100.0), (2, 101.0), (3, 5000.0), (4, 5001.0), (5, 9000.0), (6, 9001.0)] {
+            insert(&conn, id, &format!("/c/{id}.JPG"), time, 0.0);
+        }
+        let keys = |offset, limit| -> Vec<String> {
+            discover(&conn, offset, limit).unwrap().into_iter().map(|g| g.group_key).collect()
+        };
+        let all = keys(0, 100);
+        assert_eq!(all.len(), 3);
+        assert_eq!(keys(0, 2), all[..2]);
+        assert_eq!(keys(2, 2), all[2..]);
+        assert!(keys(3, 2).is_empty());
+    }
+
+    #[test]
+    fn page_bounds_default_to_one_full_page_and_refuse_nonsense() {
+        assert_eq!(page_bounds(None, None).unwrap(), (0, MAX_PAGE));
+        assert_eq!(page_bounds(Some(300), Some(50)).unwrap(), (300, 50));
+        assert!(page_bounds(Some(-1), None).is_err());
+        assert!(page_bounds(None, Some(0)).is_err());
+        assert!(page_bounds(None, Some(MAX_PAGE + 1)).is_err());
     }
 
     #[test]
@@ -953,7 +985,7 @@ mod tests {
         insert(&conn, 5, "/c/JPEGs/DSC3.JPG", 103.0, 1.2);
         insert(&conn, 6, "/c/JPEGs/DSC9.JPG", 5000.0, 0.0);
         insert(&conn, 7, "/c/JPEGs/DSC10.JPG", 5001.0, 0.02);
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.len(), 2);
         let burst = groups.iter().find(|g| g.shots.len() == 2 && g.shots[0].primary_file_id == 1).unwrap();
         assert_eq!(burst.shots[0].file_ids, vec![1, 2]);
@@ -964,12 +996,12 @@ mod tests {
 
         let decision = |d: &str, ids: Vec<i64>| CatalogTakeDecision { group_key: burst.group_key.clone(), decision: d.into(), file_ids: ids };
         decide(&conn, &decision("skip", burst.file_ids())).unwrap();
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.last().unwrap().status, "skipped");
         decide(&conn, &decision("keepAll", burst.file_ids())).unwrap();
-        assert_eq!(discover(&conn, 100).unwrap().len(), 1);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 1);
         decide(&conn, &decision("reopen", burst.file_ids())).unwrap();
-        assert_eq!(discover(&conn, 100).unwrap().len(), 2);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 2);
         assert!(decide(&conn, &decision("delete", burst.file_ids())).is_err());
     }
 

@@ -340,7 +340,8 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             return Ok(super::timeline::enqueue(conn, request, model, ffmpeg)?.1);
         }
         "autoTakeGroups" => {
-            result.take_groups = Some(super::catalog_take_auto::discover(conn, request.limit.unwrap_or(100))?);
+            let (offset, limit) = super::catalog_take_auto::page_bounds(request.offset, request.limit)?;
+            result.take_groups = Some(super::catalog_take_auto::discover(conn, offset, limit)?);
         }
         "enqueueTakeGrouping" => return super::take_grouping::enqueue(conn, request),
         "takeGroupProposals" => return super::take_grouping::proposals(conn, request),
