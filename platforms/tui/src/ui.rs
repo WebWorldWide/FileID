@@ -862,6 +862,8 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
             "Suggested moves",
             if app.data.plan_truncated {
                 "No moves in this partial preview."
+            } else if app.data.total_files > 0 {
+                "Already organized — nothing to move."
             } else {
                 "No moves to suggest yet."
             },
@@ -1750,7 +1752,7 @@ fn plan_row(content_w: usize, m: &crate::data::PlanRow) -> Vec<Span<'static>> {
     };
     let cat = truncate(&m.category, 12);
     let catw = cat.chars().count();
-    let dest = rel_dest(&m.destination);
+    let dest = terminal_text(&m.destination);
     let tailw = 2 + dest.chars().count(); // "→ " + dest
     let fixed = 2 + catw + 1; // dot + category + space
     let (name, pad) = name_pad(content_w, fixed, tailw, &basename(&m.source), 2, 6);
@@ -1848,14 +1850,6 @@ fn basename(path: &str) -> String {
     terminal_text(display::basename(path))
 }
 
-/// Show the destination relative to its trailing segments (the category folder +
-/// filename), which is what matters in the plan view.
-fn rel_dest(dest: &str) -> String {
-    let dest = terminal_text(dest);
-    let parts: Vec<&str> = dest.rsplit(['/', '\\']).take(2).collect();
-    parts.into_iter().rev().collect::<Vec<_>>().join("/")
-}
-
 fn truncate(s: &str, max: usize) -> String {
     display::truncate(&terminal_text(s), max)
 }
@@ -1900,12 +1894,6 @@ mod tests {
         assert_eq!(basename("/a/b/c.txt"), "c.txt");
         assert_eq!(basename("C:\\a\\b\\c.txt"), "c.txt");
         assert_eq!(basename("noslash"), "noslash");
-    }
-
-    #[test]
-    fn rel_dest_keeps_two_tail_segments() {
-        assert_eq!(rel_dest("/lib/Images/2021/p.jpg"), "2021/p.jpg");
-        assert_eq!(rel_dest("/lib/Images/2021/p\x1b[2J.jpg"), "2021/p�[2J.jpg");
     }
 
     #[test]
@@ -2001,6 +1989,53 @@ mod tests {
             }
         }
         assert!(text.contains("PARTIAL newest 3000/3005"));
+    }
+
+    fn restructure_screen(plan: Vec<crate::data::PlanRow>, total_files: i64) -> String {
+        use crate::app::{App, Tab};
+        use crate::data::{LoadMsg, Snapshot};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.tab = Tab::Restructure;
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            plan,
+            total_files,
+            ..Snapshot::default()
+        })));
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn restructure_rows_show_the_whole_destination_under_the_library() {
+        let text = restructure_screen(
+            vec![crate::data::PlanRow {
+                source: "/library/a/DSC01692.ARW".into(),
+                destination: "Photos/2026/September/DSC01692.ARW".into(),
+                category: "Photos".into(),
+                confidence: "auto",
+            }],
+            1,
+        );
+        assert!(text.contains("→ Photos/2026/September/DSC01692.ARW"), "{text}");
+    }
+
+    #[test]
+    fn an_organized_library_says_so_instead_of_inviting_a_scan() {
+        let text = restructure_screen(Vec::new(), 36);
+        assert!(text.contains("Already organized"), "{text}");
+        assert!(!restructure_screen(Vec::new(), 0).contains("Already organized"));
     }
 
     #[test]
