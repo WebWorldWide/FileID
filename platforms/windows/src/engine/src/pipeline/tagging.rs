@@ -1015,9 +1015,10 @@ impl Tagger {
                         ));
                         let limit = file_time_limit(crate::platform::load_per_core(), STACK_WARM.load(Ordering::Relaxed));
                         match tokio::time::timeout(limit, fut).await {
-                            Ok(Ok(t)) => {
+                            Ok(Ok(mut t)) => {
                                 if !t.failed {
                                     STACK_WARM.store(true, Ordering::Relaxed);
+                                    use_takeout_capture_date(&mut t);
                                 }
                                 Ok(t)
                             }
@@ -2070,6 +2071,17 @@ fn executable_on_path(name: &str) -> bool {
 fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let frame = shell::video::keyframe_25pct(path)?;
     Ok((frame.rgb, frame.width, frame.height))
+}
+
+/// A photo or video with no embedded capture date takes the one in its Google Takeout sidecar.
+fn use_takeout_capture_date(tagged: &mut TaggedFile) {
+    if tagged.captured_from_exif || !matches!(tagged.kind, FileKind::Image | FileKind::Video) {
+        return;
+    }
+    if let Some(captured) = crate::util::takeout_sidecar::capture_unix(&tagged.path) {
+        tagged.created_unix = Some(captured);
+        tagged.captured_from_exif = true;
+    }
 }
 
 /// Per-file ML body over a pre-decoded image or keyframe: face detect → embed, CLIP embed, dHash, EXIF, each gated on its semaphore and the model being installed. A failing stage is non-fatal (field = None, `failed=0`); only image decode failure marks the row failed.
@@ -3363,6 +3375,39 @@ mod tests {
     fn face_is_excluded_still_gates_on_pose() {
         assert!(face_is_excluded(60.0_f32.to_radians(), 0.0, 1.0, 200.0));
         assert!(face_is_excluded(0.0, 40.0_f32.to_radians(), 1.0, 200.0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_without_an_embedded_date_takes_its_takeout_sidecar_date() {
+        let dir = std::env::temp_dir().join(format!("fileid-takeout-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("IMG_1.png");
+        let bytes = tiny_png();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(dir.join("IMG_1.png.supplemental-metadata.json"), r#"{"photoTakenTime":{"timestamp":"1546300800"}}"#).unwrap();
+        let (tx, rx) = mpsc::channel(4);
+        let tagger = Tagger::new(ScanCoordinator::new(), 2, Arc::new(ModelStack::empty()));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        tx.send(DiscoveredFile {
+            path,
+            kind: FileKind::Image,
+            size_bytes: bytes.len() as u64,
+            modified_unix: 1.0,
+            created_unix: Some(1_700_000_000.0),
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let tagged = tokio::time::timeout(Duration::from_secs(30), out.recv()).await.expect("the file is emitted").expect("channel open");
+        drop(out);
+        decoder_join.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!tagged.failed, "{:?}", tagged.error_message);
+        assert_eq!(tagged.created_unix, Some(1_546_300_800.0));
+        assert!(tagged.captured_from_exif);
     }
 
     /// A catalog search holds an interactive lease for the whole scan and free

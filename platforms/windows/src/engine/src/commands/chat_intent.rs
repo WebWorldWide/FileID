@@ -1471,6 +1471,12 @@ pub fn unreadable_ask(text: &str) -> bool {
         || (has(&words, &["read", "readable", "opened", "open"]) && has(&words, &["couldnt", "cant", "cannot", "unable", "wasnt", "werent", "didnt", "wont", "not"]))
 }
 
+/// A count spelled out before the thing asked for ("the two PDFs that failed"). "one" is skipped: it is mostly a pronoun.
+pub fn spelled_count(text: &str) -> Option<usize> {
+    const SPELLED: [&str; 9] = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    text.split_whitespace().find_map(|word| SPELLED.iter().position(|spelled| *spelled == clean(word)).map(|index| index + 2))
+}
+
 pub fn asks_why(text: &str) -> bool {
     text.split_whitespace().next().is_some_and(|word| clean(word) == "why")
 }
@@ -1485,6 +1491,25 @@ pub fn files_named(text: &str) -> Option<String> {
     let rest_is_filler = words[end + 1..].iter().all(|word| ["do", "i", "we", "have", "are", "there", "got", "in", "my", "library", "total", "altogether"].contains(&word.as_str()));
     (name.len() >= 2 && rest_is_filler && words[lead..end].iter().all(|word| !KIND_WORDS.contains(&word.as_str()) && !FILE_QUALIFIERS.contains(&word.as_str())))
         .then(|| name.join(" "))
+}
+
+/// The words after the last "in", "inside" or "within" when they could name a folder ("PDFs from 2022 in File Cabinet"); the catalog decides whether one exists.
+pub fn trailing_place(text: &str) -> Option<String> {
+    let raw: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
+    let at = words.iter().rposition(|word| ["in", "inside", "within"].contains(&word.as_str()))? + 1;
+    let mut name: Vec<String> = raw.get(at..)?.iter().map(|word| original(word)).filter(|word| !word.is_empty()).collect();
+    if name.first().is_some_and(|word| ["the", "my", "our"].contains(&word.to_lowercase().as_str())) {
+        name.remove(0);
+    }
+    if name.last().is_some_and(|word| ["folder", "directory"].contains(&word.to_lowercase().as_str())) {
+        name.pop();
+    }
+    let sensible = !name.is_empty()
+        && name.len() <= 5
+        && name.iter().any(|word| word.chars().any(char::is_alphabetic))
+        && !KIND_WORDS.contains(&name[0].to_lowercase().as_str());
+    sensible.then(|| name.join(" "))
 }
 
 const FILE_QUALIFIERS: [&str; 11] = ["the", "my", "of", "all", "any", "many", "more", "new", "old", "large", "big"];

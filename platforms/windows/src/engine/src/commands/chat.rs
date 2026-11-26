@@ -1156,7 +1156,13 @@ fn prepare_turn(
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if super::chat_intent::unreadable_ask(&text) {
-        let (message, hits) = if asks_why(&text) { chat_facts::unreadable_reasons(conn, root.as_ref())? } else { chat_facts::unreadable_answer(conn, root.as_ref())? };
+        let kinds = SearchPlan::resolve_known(&question.reduced, None, people, events, false).kinds;
+        let (message, hits) = if asks_why(&text) {
+            chat_facts::unreadable_reasons(conn, root.as_ref(), &kinds)?
+        } else {
+            let limit = question.limit.and_then(|limit| usize::try_from(limit).ok()).or_else(|| super::chat_intent::spelled_count(&text));
+            chat_facts::unreadable_answer(conn, root.as_ref(), &kinds, limit)?
+        };
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if let Some(kinds) = place_ask(&text) {
@@ -1196,6 +1202,17 @@ fn prepare_turn(
     {
         question.folder = Some(folder);
         plan.query.clear();
+    }
+    if question.folder.is_none()
+        && let Some(name) = super::chat_intent::trailing_place(&text)
+        && let Some(folder) = chat_facts::existing_folder(conn, &name, root.as_ref())?
+        && folder.starts_with("named:")
+    {
+        question.folder = Some(folder);
+        let named = name.to_lowercase();
+        if plan.query.split_whitespace().all(|word| named.split_whitespace().any(|part| part == word.to_lowercase())) {
+            plan.query.clear();
+        }
     }
     question.folder = chat_facts::widened_folder(conn, question.folder.take(), root.as_ref())?;
     let camera = camera.map(|ask| ask.pick).or_else(|| {
@@ -2427,6 +2444,42 @@ mod tests {
             assert_eq!(answer.message, "2 files couldn't be read, so they're not in other answers.", "{text}");
             assert_eq!(answer.hits.len(), 2, "{text}");
         }
+    }
+
+    #[test]
+    fn the_failed_files_answer_honours_the_kind_and_the_count_asked_for() {
+        let mut conn = adlon_like();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,error_message) VALUES(22,'/lib/Mail/broken3.pdf',22,10,0,'pdf','pdf',1,'Could not parse the file')",
+            [],
+        )
+        .unwrap();
+        let everything = ask(&mut conn, "Which files failed?");
+        assert_eq!(everything.hits.len(), 3);
+        for text in ["Show me the two PDFs that failed", "Which PDFs failed?"] {
+            let answer = ask(&mut conn, text);
+            assert_eq!(answer.hits.len(), 2, "{text}");
+            assert!(answer.hits.iter().all(|hit| hit.kind == "pdf"), "{text}");
+        }
+        let one = ask(&mut conn, "Show the first 1 files that failed");
+        assert_eq!(one.hits.len(), 1);
+        assert!(one.message.contains("Showing the first 1"), "{}", one.message);
+    }
+
+    #[test]
+    fn a_folder_named_after_in_is_answered_as_that_folder_not_as_a_keyword() {
+        let mut conn = adlon_like_readable();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (30,'/lib/File Cabinet/a.pdf',30,10,1640995200,0,'pdf','pdf'),
+             (31,'/lib/File Cabinet/b.pdf',31,10,1640995300,0,'pdf','pdf'),
+             (32,'/lib/Other/File Cabinet Notes.pdf',32,10,1640995400,0,'pdf','pdf');",
+        )
+        .unwrap();
+        let answer = ask(&mut conn, "How many PDFs are in File Cabinet?");
+        assert_eq!(answer.hits.len(), 2, "{}", answer.message);
+        assert!(!answer.message.contains("matching"), "{}", answer.message);
+        assert!(answer.message.contains("File Cabinet"), "{}", answer.message);
     }
 
     #[test]

@@ -225,9 +225,12 @@ struct SettingsTab: View {
                 HStack(spacing: 12) {
                     Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(s.status.capitalized)
-                    if let n = s.lastFileIndex { Text(n == 1 ? "1 file" : "\(n.formatted()) files") }
+                    if let n = s.lastFileIndex { Text(Plural.noun(n, "file", "files") + (Self.seenText(s.skippedJSON) == nil ? "" : " read")) }
                 }
                 .font(Theme.Font.body(12)).monospacedDigit().foregroundStyle(Theme.text3)
+                if let seen = Self.seenText(s.skippedJSON) {
+                    Text(seen).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+                }
                 if let skipped = Self.skippedText(s.skippedJSON) {
                     Text(skipped).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                 }
@@ -237,16 +240,28 @@ struct SettingsTab: View {
         .padding(.vertical, 1)
     }
 
-    /// "Left out: 24 empty files, 2 hidden files or folders" from the engine's reason-to-count JSON; nil when nothing was left out.
+    /// "Saw 130,108 files; 130,100 are in the library" from the engine's counts JSON; nil for a scan recorded before the engine counted them.
+    nonisolated static func seenText(_ json: String?) -> String? {
+        guard let counts = decodedCounts(json), let seen = counts["seen"], seen > 0 else { return nil }
+        let inLibrary = counts["catalogued"] ?? 0
+        return "Saw \(Plural.noun(seen, "file", "files")); \(inLibrary.formatted()) \(inLibrary == 1 ? "is" : "are") in the library"
+    }
+
+    nonisolated private static func decodedCounts(_ json: String?) -> [String: Int]? {
+        guard let json, let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode([String: Int].self, from: data)
+    }
+
+    /// "Left out: 24 empty files, 2 hidden files, 3 folders" from the engine's reason-to-count JSON; nil when nothing was left out.
     nonisolated static func skippedText(_ json: String?) -> String? {
-        guard let json, let data = json.data(using: .utf8),
-              let counts = try? JSONDecoder().decode([String: Int].self, from: data) else { return nil }
+        guard let counts = decodedCounts(json) else { return nil }
         let wording: [(key: String, one: String, many: String)] = [
             ("empty", "empty file", "empty files"),
-            ("hidden", "hidden file or folder", "hidden files or folders"),
-            ("system", "system or tool file or folder", "system or tool files or folders"),
+            ("hidden", "hidden file", "hidden files"),
+            ("system", "system or tool file", "system or tool files"),
             ("unsupported", "file of a kind FileID does not read", "files of a kind FileID does not read"),
             ("cloudOnly", "file not downloaded from the cloud", "files not downloaded from the cloud"),
+            ("folders", "hidden, system or tool folder", "hidden, system or tool folders"),
         ]
         let parts = wording.compactMap { entry -> String? in
             guard let count = counts[entry.key], count > 0 else { return nil }

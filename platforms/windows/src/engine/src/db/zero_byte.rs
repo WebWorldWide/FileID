@@ -10,7 +10,6 @@ pub const ZERO_BYTE_REASON: &str = "File is zero bytes and has no indexable cont
 #[derive(Debug, Clone)]
 pub struct ZeroByteObservation {
     pub path: PathBuf,
-    pub file_ref: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,11 +52,8 @@ pub fn validate_zero_byte_files(observations: &[ZeroByteObservation]) -> ZeroByt
                 continue;
             }
         };
+        // Some volumes (exFAT via FSKit) hand out file ids to empty files that change between lookups, so a zero-byte file is only "changed" when it stopped being zero bytes.
         let current_ref = crate::platform::file_ref(&fs_path);
-        if observation.file_ref.is_some() && observation.file_ref != current_ref {
-            validation.changed_since_observation += 1;
-            continue;
-        }
         validation.observations.push(ValidatedZeroByteObservation {
             path: observation.path.clone(),
             created_unix: metadata.created().ok().and_then(system_time_to_unix),
@@ -285,7 +281,6 @@ mod tests {
             &conn,
             &[ZeroByteObservation {
                 path: path.clone(),
-                file_ref: crate::platform::file_ref(&path),
             }],
         )
         .unwrap();
@@ -360,12 +355,32 @@ mod tests {
             &conn,
             &[ZeroByteObservation {
                 path: path.clone(),
-                file_ref: crate::platform::file_ref(&path),
             }],
         )
         .unwrap();
         let count: i64 = conn.query_row("SELECT file_count FROM persons WHERE id = 3", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 1, "the excluded face's file is not counted");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unchanged_zero_byte_file_is_not_a_change_even_if_its_volume_file_id_differs() {
+        let (root, path, conn) = fixture("unstable-id");
+        conn.execute(
+            "INSERT INTO files(path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES (?1, 1, 0, 1, 'doc', 'txt')",
+            params![path.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        let summary = deactivate_zero_byte_files(
+            &conn,
+            &[ZeroByteObservation {
+                path: path.clone(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.changed_since_observation, 0);
+        assert_eq!(summary.applied, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -376,7 +391,6 @@ mod tests {
             &conn,
             &[ZeroByteObservation {
                 path: path.clone(),
-                file_ref: crate::platform::file_ref(&path),
             }],
         )
         .unwrap();
@@ -390,13 +404,11 @@ mod tests {
             params![path.to_string_lossy().as_ref()],
         )
         .unwrap();
-        let observed_ref = crate::platform::file_ref(&path);
         std::fs::write(&path, b"not empty").unwrap();
         let changed = deactivate_zero_byte_files(
             &conn,
             &[ZeroByteObservation {
                 path: path.clone(),
-                file_ref: observed_ref,
             }],
         )
         .unwrap();
