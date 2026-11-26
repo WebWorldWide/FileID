@@ -1473,9 +1473,10 @@ pub fn asked_inside(text: &str) -> Option<String> {
     let mut at = match words.first().map(String::as_str)? {
         "whats" => 1,
         "what" if words.get(1).is_some_and(|word| word == "is" || word == "are") => 2,
+        "how" if words.get(1).is_some_and(|word| word == "many") && words.get(2).is_some_and(|word| ["files", "items"].contains(&word.as_str())) => 3,
         _ => return None,
     };
-    while words.get(at).is_some_and(|word| word == "all" || word == "everything") {
+    while words.get(at).is_some_and(|word| ["all", "everything", "are", "is", "do", "i", "we", "have", "there"].contains(&word.as_str())) {
         at += 1;
     }
     if !words.get(at).is_some_and(|word| word == "in" || word == "inside") {
@@ -1697,6 +1698,16 @@ mod tests {
             assert_eq!(question.folder.as_deref(), Some(want), "{text}");
             assert!(!question.reduced.to_lowercase().contains("folder"), "{text} → {}", question.reduced);
         }
+    }
+
+    #[test]
+    fn a_count_of_files_in_a_bare_name_asks_about_that_folder() {
+        assert_eq!(asked_inside("How many files are in File Cabinet?").as_deref(), Some("File Cabinet"));
+        assert_eq!(asked_inside("how many files do I have in the Takeout folder").as_deref(), Some("Takeout"));
+        assert_eq!(asked_inside("how many items are inside Vacation").as_deref(), Some("Vacation"));
+        assert_eq!(asked_inside("how many files are in my library"), None);
+        assert_eq!(asked_inside("how many files are there"), None);
+        assert_eq!(asked_inside("how many videos are in Vacation"), None);
     }
 
     #[test]

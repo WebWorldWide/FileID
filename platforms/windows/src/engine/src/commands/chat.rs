@@ -963,7 +963,7 @@ fn plan_for(
     previous: Option<&Earlier>,
     people: &super::catalog_retrieval::KnownPeople,
     events: &super::catalog_retrieval::KnownEvents,
-) -> (super::chat_intent::Question, SearchPlan) {
+) -> (super::chat_intent::Question, SearchPlan, bool) {
     let mut question = parse_question(text);
     let follow_up = super::chat_intent::follow_up_rest(text);
     if question.date.is_none()
@@ -1008,10 +1008,13 @@ fn plan_for(
         && (question.formats.is_none() || points_back)
         && !words.iter().any(|word| library_wide.contains(&word.as_str()))
     {
+        if let Some(earlier) = previous {
+            question.folder = question.folder.take().or_else(|| earlier.question.folder.clone());
+        }
         let plan = SearchPlan::resolve_known(&question.reduced, previous_plan, people, events, true);
-        return (question, plan);
+        return (question, plan, true);
     }
-    (question, plan)
+    (question, plan, follow_up.is_some() || points_back)
 }
 
 fn folder_asked_about(conn: &Connection, text: &str, root: Option<&super::roots::RootScope>) -> Result<Option<String>> {
@@ -1045,7 +1048,7 @@ fn earlier_turn(
         } else if !answers_without_search(conn, text, root)? {
             let camera = chat_facts::camera_asked_about(conn, text)?;
             let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
-            let (question, plan) = plan_for(planned, earlier.as_ref(), people, events);
+            let (question, plan, _) = plan_for(planned, earlier.as_ref(), people, events);
             earlier = Some(Earlier { question, plan, camera: camera.map(|ask| ask.pick) });
         }
     }
@@ -1174,10 +1177,8 @@ fn prepare_turn(
     let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
     let camera = chat_facts::camera_asked_about(conn, &text)?;
     let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
-    let (question, plan) = plan_for(planned, previous.as_ref(), people, events);
+    let (question, plan, continues) = plan_for(planned, previous.as_ref(), people, events);
     let camera = camera.map(|ask| ask.pick).or_else(|| {
-        let words: Vec<String> = text.to_lowercase().split(|c: char| !c.is_alphabetic()).map(str::to_owned).collect();
-        let continues = super::chat_intent::follow_up_rest(&text).is_some() || super::chat_intent::points_back(&words);
         previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())
     });
     let mut structured = Filter {
@@ -2418,6 +2419,36 @@ mod tests {
         let takeout = ask(&mut conn, "What's in the Takeout folder?");
         assert!(takeout.message.starts_with("Found 1 file in Takeout."), "{}", takeout.message);
         assert!(takeout.message.contains("Folders with “Takeout” in their name: Google Takeout Export (2 files)."), "{}", takeout.message);
+    }
+
+    fn two_folders_with_videos() -> Connection {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES \
+             (1,'/lib/File Cabinet/a.jpg',1,100,0,'image','jpg'),(2,'/lib/File Cabinet/b.mp4',2,200,0,'video','mp4'),\
+             (3,'/lib/File Cabinet/c.mp4',3,5000,0,'video','mp4'),(4,'/lib/Other/d.mov',4,9000,0,'video','mov'),\
+             (5,'/lib/Google Takeout/e.html',5,300,0,'other','html'),(6,'/lib/Google Takeout/f.html',6,300,0,'other','html'),\
+             (7,'/lib/Other/g.txt',7,300,0,'other','txt');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn counting_files_in_a_folder_names_the_same_total_with_or_without_the_word_folder() {
+        let mut conn = two_folders_with_videos();
+        assert_eq!(ask(&mut conn, "How many files are in File Cabinet?").message, "“File Cabinet” holds 3 files (5.3 KB): 2 videos, 1 photo.");
+        assert_eq!(ask(&mut conn, "How many files are in the File Cabinet folder?").message, "Found 3 files in File Cabinet, using 5.3 KB.");
+        assert_eq!(ask(&mut conn, "How many files are in the Google Takeout folder?").message, "Found 2 files in Google Takeout, using 600 bytes.");
+    }
+
+    #[test]
+    fn a_bare_question_after_a_folder_scoped_one_stays_in_that_folder() {
+        let mut conn = two_folders_with_videos();
+        let mut hits = |text: &str| ask_in(&mut conn, "scoped", text).hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>();
+        hits("How many files are in the File Cabinet folder?");
+        assert_eq!(hits("How many of them are videos?").len(), 2);
+        assert_eq!(hits("What are the biggest?"), vec![3, 2]);
     }
 
     #[test]
