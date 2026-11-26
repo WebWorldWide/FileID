@@ -1,7 +1,7 @@
 //! Deep Analyze naming and grounding helpers shared by the CLI and persistent
 //! server paths: metadata names for audio and 3D models, document-text
 //! analysis, the single-call visual prompt, and vetting that rejects generic
-//! or hallucinated filenames. Mirrors macOS `DeepAnalyzeNaming.swift`.
+//! or hallucinated filenames.
 
 use anyhow::Context;
 
@@ -22,7 +22,7 @@ pub(crate) fn is_3d_model_ext(ext: &str) -> bool {
     ext == "obj"
 }
 
-/// "Artist - Title" when both are present, else the title alone, else None (artist-only isn't descriptive enough). Case-preserving and filesystem-safe; lockstep with the Swift `buildAudioName`.
+/// "Artist - Title" when both are present, else the title alone, else None (artist-only isn't descriptive enough). Case-preserving and filesystem-safe.
 pub(crate) fn build_audio_name(title: Option<&str>, artist: Option<&str>) -> Option<String> {
     let title = title.map(str::trim).filter(|s| !s.is_empty());
     let artist = artist.map(str::trim).filter(|s| !s.is_empty());
@@ -35,7 +35,7 @@ pub(crate) fn build_audio_name(title: Option<&str>, artist: Option<&str>) -> Opt
     if safe.is_empty() || safe == "_" { None } else { Some(safe) }
 }
 
-/// Name from embedded object/group names, falling back to material names, skipping generic placeholders ("default", "object", "mesh", pure numbers). None when nothing is usable. Lockstep with `buildObjName`.
+/// Name from embedded object/group names, falling back to material names, skipping generic placeholders ("default", "object", "mesh", pure numbers). None when nothing is usable.
 pub(crate) fn build_obj_name(objects: &[String], materials: &[String]) -> Option<String> {
     let pick = |names: &[String]| -> Option<String> {
         names
@@ -80,7 +80,7 @@ pub(crate) fn push_unique(v: &mut Vec<String>, s: &str) {
 pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
     use std::io::{BufRead, Read};
     const MAX_OBJ_SCAN_LINES: usize = 200_000;
-    // SEC: `lines()` allocates each line up to the next '\n' with no bound, so a newline-sparse file would abort the engine on alloc failure; the line-COUNT caps run only after a line is read, so the bytes pulled from each reader are hard-capped too (like `take(MAX_*_BYTES)` in doc_extract.rs).
+    // `lines()` allocates each line up to the next '\n' with no bound, so a newline-sparse file would abort the engine on alloc failure; the line-COUNT caps run only after a line is read, so the bytes pulled from each reader are hard-capped too (like `take(MAX_*_BYTES)` in doc_extract.rs).
     const MAX_OBJ_SCAN_BYTES: u64 = 16 * 1024 * 1024;
     const MAX_MTL_SCAN_BYTES: u64 = 4 * 1024 * 1024;
     let mut objects: Vec<String> = Vec::new();
@@ -105,7 +105,7 @@ pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<Strin
                 }
         }
     }
-    // `newmtl` names also come from the referenced .mtl (often richer than `usemtl`). SEC: the `mtllib` value is untrusted .obj content, accepted ONLY as a safe single-component filename inside the .obj's folder; an absolute value would REPLACE `parent` via join() and redirect the read to an arbitrary file (OOM bait plus a narrow info-leak of its `newmtl` lines).
+    // `newmtl` names also come from the referenced .mtl (often richer than `usemtl`). The `mtllib` value is untrusted .obj content, accepted ONLY as a safe single-component filename inside the .obj's folder; an absolute value would REPLACE `parent` via join() and redirect the read to an arbitrary file (OOM bait plus a narrow info-leak of its `newmtl` lines).
     let mtllib = mtllib.filter(|m| crate::util::path_safety::is_safe_filename(m));
     if let (Some(mtl), Some(parent)) = (mtllib, path.parent()) {
         let mtl_path = parent.join(&mtl);
@@ -476,7 +476,7 @@ pub(crate) fn vetted_generated_proposed_name(
         .filter(|name| has_minimum_generated_filename_words(name)))
 }
 
-/// Words a generated name needs: the Mac app-hosted engine follows the Swift engine (`DeepAnalyze.hasMinimumGeneratedFilenameWords`, two); other platforms keep three.
+/// Words a generated name needs: two in the Mac app-hosted engine, three on other platforms.
 pub(crate) const MIN_GENERATED_NAME_WORDS: usize = if crate::paths::APP_HOSTED { 2 } else { 3 };
 
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
@@ -486,7 +486,7 @@ pub(crate) fn has_minimum_generated_filename_words(name: &str) -> bool {
     name.split(['-', '_']).filter(|word| !word.is_empty()).count() >= MIN_GENERATED_NAME_WORDS
 }
 
-/// `DeepAnalyzeRunner.reserveProposedName`: the first use of a name in a folder keeps it; later ones get ` (2)`, ` (3)`, ... within 60 characters.
+/// The first use of a name in a folder keeps it; later ones get ` (2)`, ` (3)`, ... within 60 characters.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub(crate) fn reserve_proposed_name(
     name: Option<String>,
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn parse_obj_names_ignores_absolute_mtllib_redirection() {
-        // SEC: an ABSOLUTE `mtllib` path must not be followed; `parent.join(<absolute>)` would replace the parent and leak an arbitrary file's `newmtl` lines.
+        // An ABSOLUTE `mtllib` path must not be followed; `parent.join(<absolute>)` would replace the parent and leak an arbitrary file's `newmtl` lines.
         let base = std::env::temp_dir().join(format!("fileid-obj-absmtl-{}", std::process::id()));
         let objdir = base.join("model");
         let secretdir = base.join("secret");
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn parse_obj_names_ignores_mtllib_path_traversal() {
-        // SEC: a `..`-relative mtllib must not escape the .obj's own folder.
+        // A `..`-relative mtllib must not escape the .obj's own folder.
         let base = std::env::temp_dir().join(format!("fileid-obj-trav-{}", std::process::id()));
         let objdir = base.join("sub");
         let _ = std::fs::remove_dir_all(&base);

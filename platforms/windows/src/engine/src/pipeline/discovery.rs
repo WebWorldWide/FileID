@@ -92,7 +92,7 @@ impl FileKind {
                 FileKind::Video
             }
             "pdf" => FileKind::Pdf,
-            // Office docs, e-books and source/markup cluster by extracted text (BGE), in lockstep with macOS FileTypes. ppt/xls (legacy binary) have no extractor on either engine → text-less docs routed to Documents/ (text_stage_done stops the backfill re-walk).
+            // Office docs, e-books and source/markup cluster by extracted text (BGE). ppt/xls (legacy binary) have no extractor → text-less docs routed to Documents/ (text_stage_done stops the backfill re-walk).
             "docx" | "doc" | "odt" | "rtf" | "txt" | "md" | "pages" | "key" | "numbers"
             | "xlsx" | "pptx" | "xls" | "ppt" | "epub"
             | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "c"
@@ -106,7 +106,7 @@ impl FileKind {
             | "ape" | "wv" => {
                 FileKind::Audio
             }
-            // 3D models: `.obj` clusters by its rendered shape (CLIP); the rest group under 3D Models/ and are named by Deep Analyze. Lockstep with macOS FileTypes.models.
+            // 3D models: `.obj` clusters by its rendered shape (CLIP); the rest group under 3D Models/ and are named by Deep Analyze.
             "obj" | "stl" | "ply" | "glb" | "gltf" | "fbx" | "usdz" | "usd" | "usda"
             | "usdc" | "dae" | "3mf" | "3ds" | "off" => FileKind::Model,
             _ => FileKind::Other,
@@ -123,7 +123,7 @@ fn flags_are_dataless(st_flags: u32) -> bool {
     st_flags & SF_DATALESS != 0
 }
 
-/// macOS leaves a cloud-only file out of the scan (the Swift engine's rule) and reports the count; Windows catalogs it from its metadata.
+/// macOS leaves a cloud-only file out of the scan and reports the count; Windows catalogs it from its metadata.
 const PLACEHOLDERS_LEFT_OUT: bool = cfg!(target_os = "macos");
 
 #[derive(Debug, PartialEq, Eq)]
@@ -189,7 +189,7 @@ pub struct DiscoveredFile {
     pub size_bytes: u64,
     /// Used for incremental rescans: files unchanged since their `scanned_at` row are skipped.
     pub modified_unix: f64,
-    /// Unix seconds when the platform exposes a birth time (for `files.created_at`, macOS parity); `None` when the filesystem records none or the metadata read failed.
+    /// Unix seconds when the platform exposes a birth time (for `files.created_at`); `None` when the filesystem records none or the metadata read failed.
     pub created_unix: Option<f64>,
     /// True for a cloud placeholder (OneDrive Files-On-Demand `OFFLINE` / `RECALL_ON_*`). Reading its content would hydrate it over the network (a surprise download, the only non-model egress), so the pipeline does a metadata-only pass. Windows only: macOS leaves such a file out and Linux has no placeholder flag.
     pub online_only: bool,
@@ -199,7 +199,7 @@ pub struct DiscoveredFile {
     pub moved_from_known_row: bool,
 }
 
-/// Successfully scanned rows by volume-local file id, for spotting a file that only moved (the Swift engine's `Discovery.isMoveOfKnownRow`). Holds 32 bytes per row; paths are read from the catalog only for a candidate.
+/// Successfully scanned rows by volume-local file id, for spotting a file that only moved. Holds 32 bytes per row; paths are read from the catalog only for a candidate.
 pub(crate) struct MoveIndex {
     rows: Vec<(u64, i64, f64, i64)>,
     conn: Arc<Mutex<rusqlite::Connection>>,
@@ -667,7 +667,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         .ok()
         .and_then(crate::util::catalog_unix_seconds)
         .unwrap_or(0.0);
-    // Incremental skip: drop a file only when its DB row is current (same size and on-disk mtime), mirroring macOS Discovery.isAlreadyCurrent. A skipped row's modified_at is never refreshed, so path-only membership would strand edited files.
+    // Incremental skip: drop a file only when its DB row is current (same size and on-disk mtime). A skipped row's modified_at is never refreshed, so path-only membership would strand edited files.
     if let Some(&(db_size, db_modified)) = skip_paths.get(&fingerprint) {
         let unchanged = db_size == size as i64
             && match db_modified {
@@ -810,7 +810,7 @@ fn is_takeout_sidecar(name: &str) -> bool {
     )
 }
 
-/// Other files (archives, installers, unknown types) are cataloged with name, size, dates and a content hash so they count, search and appear in Duplicates, except these transient ones. Mirrors the Swift `FileTypes.neverCataloged`.
+/// Other files (archives, installers, unknown types) are cataloged with name, size, dates and a content hash so they count, search and appear in Duplicates, except these transient ones.
 fn is_cataloged_other(extension: Option<&str>) -> bool {
     !matches!(
         extension,

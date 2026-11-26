@@ -36,7 +36,7 @@ impl AnalyzeMode {
     }
 
     /// The passes the model is asked for. A reviewed label names the file, so
-    /// the rename request is dropped (macOS `proposeFilename: !contextNameAvailable && ...`).
+    /// the rename request is dropped.
     pub(crate) fn asked_of_model(self, context: &NamingContext) -> Self {
         if self == Self::Both && context.label.is_some() { Self::CaptionAndTags } else { self }
     }
@@ -46,7 +46,7 @@ impl AnalyzeMode {
     }
 }
 
-/// Removes the temp rasterized frame on EVERY exit path (`?` error, cancel bail, success). Mirrors the discovery.rs `TempDir` Drop pattern.
+/// Removes the temp rasterized frame on EVERY exit path (`?` error, cancel bail, success).
 struct TempFileGuard(Option<std::path::PathBuf>);
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
@@ -386,8 +386,7 @@ fn persist_vlm_results(
         Some(reviewed) => reviewed.as_deref(),
         None => proposed_name,
     };
-    // A requested output replaces the old one even when it came back empty, as
-    // the Swift runner's persist does; an output not asked for is kept.
+    // A requested output replaces the old one even when it came back empty; an output not asked for is kept.
     let description = description.filter(|text| !text.is_empty());
     let proposed_name = proposed_name.filter(|name| !name.is_empty());
     let (updates_description, updates_name) = (mode.requests_caption(), mode.requests_rename());
@@ -490,7 +489,7 @@ pub(crate) async fn vlm_server_payload_ok(
 const TRANSCRIPTION_MAX_TOKENS: u32 = 320;
 
 /// Text-bearing image (or image-only PDF) whose OCR is missing or mangled — see
-/// `text_reading::needs_transcription`. Mirrors macOS `DeepAnalyzeRunner.transcriptionCandidate`.
+/// `text_reading::needs_transcription`.
 fn transcription_wanted(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>, file_id: i64) -> bool {
     text_reading::transcription_candidate(&db.lock(), file_id).unwrap_or(false)
 }
@@ -656,10 +655,10 @@ pub(crate) async fn analyze_file_via_server(
     })
 }
 
-/// The Mac app's engine: one file through the Swift engine's MLX analysis
+/// The Mac app's engine: one file through the MLX analysis
 /// (`DeepAnalyze.analyze` in FileIDAppleKit), which decodes the file, prompts,
-/// parses and grounds the reply as the Swift engine does. Audio keeps the
-/// metadata path, as on Swift; a 3D model the model can't read falls back to it.
+/// parses and grounds the reply. Audio keeps the metadata path; a 3D model
+/// the model can't read falls back to it.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn analyze_file_via_mlx(
@@ -1027,7 +1026,7 @@ async fn rasterize_pdf_page(_path: &std::path::Path) -> anyhow::Result<std::path
     )
 }
 
-/// Deterministically prefixes the named people onto the VLM proposed filename so they ALWAYS land (the model treats the prompt hint as optional). Each person's first-name token (lowercase ASCII-alphanumeric after folding Latin-1 and Latin Extended-A accents, ≥2 chars, deduped against the name and each other, capped at 3 sorted alphabetically) is prefixed, then the whole name is re-sanitized. Byte-faithful with the Swift `applyPersonPrefix`.
+/// Deterministically prefixes the named people onto the VLM proposed filename so they ALWAYS land (the model treats the prompt hint as optional). Each person's first-name token (lowercase ASCII-alphanumeric after folding Latin-1 and Latin Extended-A accents, ≥2 chars, deduped against the name and each other, capped at 3 sorted alphabetically) is prefixed, then the whole name is re-sanitized.
 pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String {
     if name.is_empty() {
         return name.to_string();
