@@ -156,6 +156,8 @@ struct TakeWorkbench: View {
 
     // MARK: - Groups pane
 
+    private static let showMoreID = "show-more-groups"
+
     private var groupsPane: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
@@ -181,7 +183,7 @@ struct TakeWorkbench: View {
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
                             .id(group.groupKey)
                     }
-                    if autoHasMore { ShowMoreGroupsButton(loading: autoLoadingMore, action: loadMoreAuto) }
+                    if autoHasMore { ShowMoreGroupsButton(loading: autoLoadingMore, action: loadMoreAuto).id(Self.showMoreID) }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
                     ForEach(events, id: \.id) { event in
@@ -211,6 +213,22 @@ struct TakeWorkbench: View {
                 guard let key else { return }
                 withAnimation(Theme.springStandard) { proxy.scrollTo(key, anchor: .center) }
             }
+            #if DEBUG
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+                guard pageActive, let action = note.object as? String else { return }
+                switch action {
+                case "more": proxy.scrollTo(Self.showMoreID, anchor: .center)
+                case "more-press":
+                    loadMoreAuto()
+                    Task {
+                        while autoLoadingMore { try? await Task.sleep(for: .milliseconds(200)) }
+                        proxy.scrollTo(Self.showMoreID, anchor: .center)
+                    }
+                case "top": if let first = autoGroups.first?.groupKey { proxy.scrollTo(first, anchor: .top) }
+                default: break
+                }
+            }
+            #endif
             }
             if !lastTrashBatch.isEmpty {
                 Hairline()
