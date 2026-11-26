@@ -94,11 +94,8 @@ pub(crate) fn current_model() -> Option<String> {
 /// A scan inserts faces with empty vectors and embeds them afterwards; those are waiting to be grouped, not saved by an earlier version.
 const NOT_YET_EMBEDDED: &str = "AND NOT (length(fp.print_data)=0 AND length(COALESCE(fp.arcface_embedding,X''))=0 AND fp.embedding_model IS NULL)";
 
-/// Mac crops written before this instant (Unix seconds) were aligned on landmarks that could be upside down or sideways, and
-/// their vectors were embedded from those crops. Refreshing a face rewrites its crop, which leaves this set.
-const UPRIGHT_ALIGNMENT_SINCE: u64 = 1_795_587_552;
-
-const CROPS_VERIFIED: &str = ".upright-verified";
+/// Left in the crop folder once every crop carries the upright stamp, so later runs skip the walk.
+const CROPS_VERIFIED: &str = ".upright-stamped";
 
 struct OldCrops {
     scanned_at: f64,
@@ -120,13 +117,13 @@ fn crop_space(faces_dir: &Path, model: &str, processing: &str) -> CropSpace {
 }
 
 fn scan_old_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
-    let cutoff = std::time::UNIX_EPOCH + Duration::from_secs(UPRIGHT_ALIGNMENT_SINCE);
     let mut statement = conn.prepare(&format!("SELECT fp.id {ELIGIBLE_FACES} ORDER BY fp.id"))?;
     let faces: Vec<i64> = statement.query_map(params![model, processing], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
     Ok(faces
         .into_iter()
         .filter(|face| {
-            std::fs::metadata(faces_dir.join(format!("{face}.jpg"))).and_then(|crop| crop.modified()).is_ok_and(|written| written < cutoff)
+            let crop = faces_dir.join(format!("{face}.jpg"));
+            crop.is_file() && !crate::util::face_crop_stamp::is_stamped(&crop)
         })
         .collect())
 }
@@ -156,6 +153,8 @@ fn unrefreshable_faces(conn: &Connection, model: &str, processing: &str) -> rusq
     Ok(faces)
 }
 
+/// Mac crops without the upright stamp may be sideways, and their vectors were embedded from those crops. Refreshing a
+/// face rewrites its crop with the stamp, which takes it out of this set.
 fn stale_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
     if !processing.starts_with(super::face_clustering_mac::MAC_PREFIX) || faces_dir.join(CROPS_VERIFIED).exists() {
         return Ok(Vec::new());
@@ -673,16 +672,19 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
 }
 
 fn save_crops(crops: &[(i64, Vec<u8>)], saved: &[i64]) {
-    if crops.is_empty() {
-        return;
+    if let Ok(dir) = crate::paths::faces_dir() {
+        save_crops_in(&dir, crops, saved);
     }
-    let Ok(dir) = crate::paths::faces_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
+}
+
+fn save_crops_in(dir: &Path, crops: &[(i64, Vec<u8>)], saved: &[i64]) {
+    if crops.is_empty() || std::fs::create_dir_all(dir).is_err() {
         return;
     }
     for (face, jpeg) in crops.iter().filter(|(face, _)| saved.contains(face)) {
         let temporary = dir.join(format!(".{face}.jpg.tmp"));
-        if std::fs::write(&temporary, jpeg).is_ok() && std::fs::rename(&temporary, dir.join(format!("{face}.jpg"))).is_err() {
+        let written = std::fs::write(&temporary, crate::util::face_crop_stamp::stamp(jpeg));
+        if written.is_ok() && std::fs::rename(&temporary, dir.join(format!("{face}.jpg"))).is_err() {
             let _ = std::fs::remove_file(&temporary);
         }
     }

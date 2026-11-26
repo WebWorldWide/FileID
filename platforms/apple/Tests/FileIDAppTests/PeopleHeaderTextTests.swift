@@ -19,4 +19,18 @@ struct PeopleHeaderTextTests {
         #expect(!PeopleHeaderText.ungroupedMessage(grouping: true).contains("Press"))
         #expect(PeopleHeaderText.ungroupedMessage(grouping: false).contains("Press Group faces"))
     }
+
+    @Test func theModelPanelSaysGroupedPeopleStayWhenOnlyNewFacesNeedTheModel() {
+        #expect(PeopleHeaderText.modelPanelTitle(hasPeople: true).contains("new faces"))
+        #expect(PeopleHeaderText.modelPanelTitle(hasPeople: true).contains("stay"))
+        #expect(PeopleHeaderText.modelPanelTitle(hasPeople: false).contains("Download"))
+    }
+
+    @Test func groupedPeopleStayVisibleWhenTheFaceModelIsMissing() {
+        #expect(PeopleContent.resolve(modelInstalled: false, people: 1_420, faces: 89_000) == .people(modelMissing: true))
+        #expect(PeopleContent.resolve(modelInstalled: true, people: 3, faces: 40) == .people(modelMissing: false))
+        #expect(PeopleContent.resolve(modelInstalled: false, people: 0, faces: 40) == .modelMissing)
+        #expect(PeopleContent.resolve(modelInstalled: true, people: 0, faces: 40) == .ungrouped)
+        #expect(PeopleContent.resolve(modelInstalled: true, people: 0, faces: 0) == .empty)
+    }
 }
