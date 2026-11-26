@@ -1,4 +1,5 @@
 import Testing
+import FileIDShared
 @testable import FileID
 
 @Suite("Page polish rules")
@@ -54,10 +55,32 @@ struct PagePolishTests {
 }
 
 @Suite struct TakeListLimitTests {
-    @Test func aFullListSaysItMayHideMoreAndAShortOneStaysQuiet() {
-        #expect(TakeProposals.listLimitNote(shown: 100)?.contains("first 100") == true)
-        #expect(TakeProposals.listLimitNote(shown: 99) == nil)
-        #expect(TakeProposals.listLimit == 100)
+    @Test func aFullPageOffersMoreAndAShortOneEndsTheList() {
+        #expect(TakeProposals.hasMore(afterPage: 100))
+        #expect(!TakeProposals.hasMore(afterPage: 99))
+        #expect(!TakeProposals.hasMore(afterPage: 0))
+        #expect(TakeProposals.pageSize == 100)
+    }
+
+    @Test func eachPageIsRequestedFromWhereTheLastStopped() {
+        let auto = TakeProposals.autoRequest(id: "a", offset: 200)
+        #expect(auto.action == "autoTakeGroups" && auto.offset == 200 && auto.limit == 100)
+        let proposals = TakeProposals.proposalsRequest(id: "p", offset: 100)
+        #expect(proposals.action == "takeGroupProposals" && proposals.offset == 100 && proposals.limit == 100)
+        #expect(TakeProposals.autoRequest(id: "a").offset == 0)
+    }
+
+    @Test func aPageThatRepeatsALoadedGroupAddsOnlyTheNewOnes() {
+        func group(_ key: String) -> CatalogTakeAutoGroup {
+            CatalogTakeAutoGroup(groupKey: key, kind: "photos", status: "open", capturedAt: 0, similarity: 1, shots: [])
+        }
+        let merged = TakeProposals.appending([group("b"), group("c")], to: [group("a"), group("b")])
+        #expect(merged.map(\.groupKey) == ["a", "b", "c"])
+    }
+
+    @Test func theCountShowsAPlusWhileMoreGroupsAreUnloaded() {
+        #expect(TakeProposals.countLabel(open: 96, hasMore: true) == "96+")
+        #expect(TakeProposals.countLabel(open: 96, hasMore: false) == "96")
     }
 
     @Test func theOrderTextMatchesTheBlendedRanking() {

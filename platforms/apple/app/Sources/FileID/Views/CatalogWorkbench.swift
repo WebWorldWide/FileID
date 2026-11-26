@@ -944,7 +944,7 @@ struct CatalogJobRow: View {
             }
             GrainProgressBar(progress: job.progress, tone: tone.1, height: 4)
             if let error = job.error, !error.isEmpty {
-                Text(Sidebar.looksTechnical(error) ? "This didn’t finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                Text(Sidebar.looksTechnical(error) ? "This didn’t finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(job.state == "completed" ? Theme.text2 : Theme.danger).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)

@@ -7,7 +7,7 @@ use crate::ipc::{CatalogRequest, CatalogResponse, CatalogTakeAutoGroup, EventPay
 use crate::pipeline::near_duplicate_grouping::Item;
 use crate::pipeline::take_scoring::round4;
 use crate::util::smart_name_style as style;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -200,10 +200,7 @@ fn start_after_scan_with(
 }
 
 pub(crate) fn proposals(conn: &Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
-    let limit = request.limit.unwrap_or(100);
-    if !(1..=100).contains(&limit) {
-        bail!("Invalid take group limit")
-    }
+    let (offset, limit) = super::catalog_take_auto::page_bounds(request.offset, request.limit)?;
     let grouped: HashSet<i64> = ids(conn, "SELECT file_id FROM catalog_event_files UNION SELECT derived_id FROM catalog_assets")?;
     let mut statement = conn.prepare(
         "SELECT group_key,media,relation,file_ids_json,evidence_json,similarity,captured_at FROM take_proposals ORDER BY group_key",
@@ -257,8 +254,7 @@ pub(crate) fn proposals(conn: &Connection, request: &CatalogRequest) -> Result<C
     }
     let visible = apply_decisions(conn, groups)?;
     let newest = visible.iter().map(|g| g.captured_at).fold(0.0, f64::max);
-    let mut ranked = rank(visible, newest);
-    ranked.truncate(limit);
+    let ranked: Vec<_> = rank(visible, newest).into_iter().skip(offset).take(limit).collect();
     let mut response = super::catalog::response(&request.request_id, "ok", None);
     response.take_groups = Some(ranked);
     response.jobs = super::catalog::jobs_of_kind(conn, JOB_KIND)?;

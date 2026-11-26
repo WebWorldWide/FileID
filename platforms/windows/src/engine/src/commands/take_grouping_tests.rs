@@ -257,3 +257,31 @@ async fn the_job_starts_by_itself_once_everything_else_is_idle() {
     let state: String = database.lock().query_row("SELECT state FROM catalog_jobs", [], |r| r.get(0)).unwrap();
     assert_eq!(state, "paused");
 }
+
+fn page_request(action: &str, offset: i64, limit: usize) -> CatalogRequest {
+    serde_json::from_value(serde_json::json!({"requestID": "r", "action": action, "offset": offset, "limit": limit})).unwrap()
+}
+
+fn keys(response: CatalogResponse) -> Vec<String> {
+    response.take_groups.unwrap().into_iter().map(|g| g.group_key).collect()
+}
+
+#[test]
+fn proposal_pages_walk_the_whole_ranked_list_without_overlap() {
+    let mut conn = crate::db::test_support::memory_db();
+    library(&conn);
+    rerun(&mut conn);
+    let all = keys(proposals(&conn, &request("takeGroupProposals")).unwrap());
+    assert_eq!(all.len(), 3);
+    let mut paged = Vec::new();
+    for offset in 0..4 {
+        paged.extend(keys(proposals(&conn, &page_request("takeGroupProposals", offset, 1)).unwrap()));
+    }
+    assert_eq!(paged, all);
+}
+
+#[test]
+fn a_negative_offset_is_refused() {
+    let conn = crate::db::test_support::memory_db();
+    assert!(proposals(&conn, &page_request("takeGroupProposals", -1, 10)).is_err());
+}
