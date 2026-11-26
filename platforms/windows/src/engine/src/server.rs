@@ -1117,6 +1117,21 @@ fn undecodable_tool_request_response(request_id: &str, err: &serde_json::Error) 
     })))
 }
 
+/// Emits command_decode_failed so a slightly newer app learns its command was dropped; the C# app treats it as a non-fatal warning. serde's error carries position, not line content, so no user path can leak.
+async fn refuse_undecodable(d: &Dispatcher, line: &str, err: &serde_json::Error) {
+    tracing::warn!(%err, "ipc decode failed");
+    if let Some(request_id) = tool_request_id(line) {
+        d.sink.send(undecodable_tool_request_response(&request_id, err)).await;
+        return;
+    }
+    d.sink
+        .send(EngineError::event(
+            "command_decode_failed",
+            "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
+        ))
+        .await;
+}
+
 async fn handle_line(d: &Dispatcher, line: &str) {
     // Strip a leading UTF-8 BOM: the C# side sends BOM-less UTF-8, but older installs or wrappers may push `EF BB BF`.
     let line = line.trim_start_matches('\u{FEFF}').trim_start();
@@ -1126,17 +1141,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
     let mut cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
-            // Emit command_decode_failed so a slightly newer app learns its command was dropped; the C# app treats it as a non-fatal warning. serde's error carries position, not line content, so no user path can leak.
-            tracing::warn!(%err, "ipc decode failed");
-            if let Some(request_id) = tool_request_id(line) {
-                d.sink.send(undecodable_tool_request_response(&request_id, &err)).await;
-                return;
-            }
-            d.sink.send(EngineError::event(
-                "command_decode_failed",
-                "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
-            ))
-            .await;
+            refuse_undecodable(d, line, &err).await;
             return;
         }
     };
