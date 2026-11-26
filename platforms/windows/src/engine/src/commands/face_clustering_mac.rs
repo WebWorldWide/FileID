@@ -142,12 +142,19 @@ impl Presence {
         Ok(Self(paths.into_iter().map(|path| (path.clone(), current_source_revision(&path))).collect()))
     }
 
-    pub(crate) fn build(database: &Mutex<Connection>) -> Result<Self> {
+    /// One stat per photo, which takes seconds on a large library on a slow drive; `cancelled` is read between photos.
+    pub(crate) fn build(database: &Mutex<Connection>, cancelled: &dyn Fn() -> bool) -> Result<Self> {
         let paths = match crate::db::reader_for(database)? {
             Some(reader) => Self::paths(&reader)?,
             None => Self::paths(&database.lock())?,
         };
-        Ok(Self(paths.into_iter().map(|path| (path.clone(), current_source_revision(&path))).collect()))
+        let mut revisions = HashMap::with_capacity(paths.len());
+        for path in paths {
+            ensure_running(cancelled)?;
+            let revision = current_source_revision(&path);
+            revisions.insert(path, revision);
+        }
+        Ok(Self(revisions))
     }
 
     fn paths(conn: &Connection) -> rusqlite::Result<Vec<String>> {
@@ -763,6 +770,7 @@ struct Attach<'a> {
     face_ids: &'a [i64],
     different: &'a HashSet<Pair>,
     min_size: usize,
+    cancelled: &'a dyn Fn() -> bool,
 }
 
 impl Attach<'_> {
@@ -794,6 +802,9 @@ impl Attach<'_> {
         let mut ordered = candidates.to_vec();
         ordered.sort_unstable();
         for dense in ordered {
+            if (self.cancelled)() {
+                break;
+            }
             if self.vectors[dense].len() != DIM {
                 continue;
             }
@@ -1099,7 +1110,7 @@ fn persist(
     let candidates: Vec<usize> = (0..face_ids.len())
         .filter(|dense| !assigned.contains(dense) && !excluded.contains(&face_ids[*dense]) && !protected.faces.contains(&face_ids[*dense]))
         .collect();
-    let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size };
+    let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size, cancelled };
     let attached = attach.run(kept, &candidates);
     ensure_running(cancelled)?;
     let (finals, truncated_faces) = cap(attached, &protected_clusters, preserved_count)?;
@@ -1359,7 +1370,7 @@ impl Join<'_> {
     }
 }
 
-fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Result<usize> {
+fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence, cancelled: &dyn Fn() -> bool) -> Result<usize> {
     let partition = load_partition(conn, space, &HashSet::new(), 0.0, MAX_FACES_PER_RUN, presence)?;
     ensure!(!partition.overflowed, "face cache overflow");
     let priors = priors(conn)?;
@@ -1546,6 +1557,7 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
     if targets.is_empty() {
         return Ok(0);
     }
+    ensure_running(cancelled)?;
     let tx = conn.transaction()?;
     require_unchanged(&tx, &partition, space, &HashSet::new(), 0.0, presence)?;
     ensure!(priors == self::priors(&tx)? && verdicts == self::verdicts(&tx, Some(&participants))?, "face evidence changed");
@@ -1887,8 +1899,9 @@ fn result(person_count: u32, face_count: usize, unmatched: usize, started: Insta
 pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Outcome> {
     let started = Instant::now();
     let min_quality = env_double("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0..=1.0);
-    let presence = match Presence::build(database) {
+    let presence = match Presence::build(database, cancelled) {
         Ok(presence) => presence,
+        Err(error) if error.is::<Stopped>() => return None,
         Err(error) => {
             tracing::warn!(?error, "face clustering query failed");
             let count = person_count(&database.lock());
@@ -1905,6 +1918,9 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space, cancelled: &
             Ok((held, skip, partition))
         })()
     };
+    if cancelled() {
+        return None;
+    }
     let (held, skip, partition) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -1970,10 +1986,13 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space, cancelled: &
     if cancelled() {
         return None;
     }
-    let merged = auto_merge(&mut conn, space, &presence).unwrap_or_else(|error| {
+    let merged = auto_merge(&mut conn, space, &presence, cancelled).unwrap_or_else(|error| {
         tracing::warn!(?error, "face auto-merge skipped");
         0
     });
+    if cancelled() {
+        return None;
+    }
     let merged_at = started.elapsed().as_secs_f64();
     let pool: Vec<i64> = partition.rows.iter().map(|row| row.id).collect();
     let queued = finish(&mut conn, &pool, &held, space).map_err(|error| tracing::warn!(?error, "face review failed")).ok();

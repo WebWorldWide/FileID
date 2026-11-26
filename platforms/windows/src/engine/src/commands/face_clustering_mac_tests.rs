@@ -65,7 +65,7 @@ fn presence(conn: &Connection) -> Presence {
 
 fn merge(conn: &mut Connection) -> Result<usize> {
     let presence = presence(conn);
-    auto_merge(conn, &space(), &presence)
+    auto_merge(conn, &space(), &presence, &|| false)
 }
 
 struct Catalog {
@@ -830,6 +830,33 @@ fn a_stop_while_every_face_is_compared_with_every_other_gives_no_grouping() {
     let files: Vec<i64> = (0..vectors.len() as i64).collect();
     let polls = std::sync::atomic::AtomicUsize::new(0);
     assert!(cluster(&vectors, &files, &stops_after(&polls, 20)).is_none());
+}
+
+#[test]
+fn a_stop_while_loose_faces_are_attached_to_people_leaves_them_unattached() {
+    let mut vectors: Vec<Vec<f32>> = (0..6).map(|member| unit_vector(&[(0, 1.0), (10 + member, 0.05)])).collect();
+    vectors.push(unit_vector(&[(0, 1.0), (30, 0.05)]));
+    let (held, files, face_ids): (Vec<bool>, Vec<i64>, Vec<i64>) = (vec![false; 7], (0..7).collect(), (0..7).collect());
+    let different = HashSet::new();
+    let attach = |cancelled: &dyn Fn() -> bool| {
+        let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size: 3, cancelled };
+        attach.run(BTreeMap::from([(0, vec![0, 1, 2, 3, 4, 5])]), &[6])
+    };
+    assert_eq!(attach(&|| false)[&0], vec![0, 1, 2, 3, 4, 5, 6], "the loose face joins the person it looks like");
+    assert_eq!(attach(&|| true)[&0], vec![0, 1, 2, 3, 4, 5], "a stopped pass attaches nothing more");
+}
+
+#[test]
+fn a_stop_while_photos_are_checked_on_disk_is_noticed_between_photos() {
+    let catalog = Catalog::new();
+    for face in 1..=40 {
+        catalog.face(face, (face % 3) as usize, 0.6, None);
+    }
+    let database = Mutex::new(catalog.conn);
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = Presence::build(&database, &stops_after(&polls, 5)).err().expect("the check was stopped");
+    assert!(stopped.is::<Stopped>());
+    assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 6, "no photo was checked after the stop");
 }
 
 #[test]
