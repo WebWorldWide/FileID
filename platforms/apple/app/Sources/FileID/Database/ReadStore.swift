@@ -1078,6 +1078,8 @@ public final class ReadStore: @unchecked Sendable {
         public let startedAt: Date; public let completedAt: Date?
         public let lastFileIndex: Int?; public let totalFiles: Int?
         public let status: String
+        /// What the walk left out, as the engine's JSON object of reason to count; nil when it left nothing out or the catalog predates the record.
+        public var skippedJSON: String? = nil
     }
 
     public func recentSessions(limit: Int = 10) -> [ScanSessionRow] {
@@ -1093,7 +1095,8 @@ public final class ReadStore: @unchecked Sendable {
                     completedAt: (r["completed_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
                     lastFileIndex: r["last_file_index"],
                     totalFiles: r["total_files"],
-                    status: r["status"]
+                    status: r["status"],
+                    skippedJSON: r["skipped"]
                 )
             }
         }) ?? []
