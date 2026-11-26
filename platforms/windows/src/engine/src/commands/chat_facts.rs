@@ -940,12 +940,13 @@ pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&R
     })
 }
 
-/// "Where was DSC02096 taken?": the position stored for the file a question names by its stem, `None` when it names none.
+/// "Where was DSC02096 taken?": the position stored for the file a question names by its stem; `None` when it names no file-like word.
 pub(crate) fn file_location_answer(conn: &Connection, text: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let within = super::roots::clause("f.path_text", "?2");
     let mut statement = conn.prepare(&format!(
         "SELECT f.id,f.path_text,f.location_lat,f.location_lon FROM files f WHERE f.failed=0 AND lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {within} ORDER BY f.path_text LIMIT 20"
     ))?;
+    let mut missing = None;
     for stem in text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')) {
         if stem.len() < 5 || !stem.chars().any(|c| c.is_ascii_digit()) || !stem.chars().any(|c| c.is_alphabetic()) {
             continue;
@@ -955,7 +956,10 @@ pub(crate) fn file_location_answer(conn: &Connection, text: &str, root: Option<&
             .query_map(rusqlite::params![pattern, root.map(RootScope::param)], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let found: Vec<_> = rows.into_iter().filter(|(_, path, _, _)| file_name(path).rsplit_once('.').is_some_and(|(file_stem, _)| file_stem.eq_ignore_ascii_case(stem))).collect();
-        let Some((_, path, _, _)) = found.first() else { continue };
+        let Some((_, path, _, _)) = found.first() else {
+            missing.get_or_insert(stem);
+            continue;
+        };
         let name = file_name(path);
         let position = found.iter().find_map(|(_, _, lat, lon)| lat.zip(*lon));
         let message = match position {
@@ -967,7 +971,7 @@ pub(crate) fn file_location_answer(conn: &Connection, text: &str, root: Option<&
         let (count, _) = totals(conn, &filter)?;
         return Ok(Some((message, listed(conn, &filter, "newest", SHOWN, count)?)));
     }
-    Ok(None)
+    Ok(missing.map(|stem| (format!("I can't find a file called {stem} in your library."), vec![])))
 }
 
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {

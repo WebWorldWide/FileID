@@ -91,6 +91,7 @@ fn where_was_a_named_file_taken_reads_that_files_position() {
     assert_eq!(none.hits.len(), 1);
     let some = ask(&mut conn, "Where was DSC02097 taken?");
     assert_eq!(some.message, "DSC02097.jpg has a location recorded (40.2500, -74.5000), but I can't name places yet.");
+    assert_eq!(ask(&mut conn, "Where was DSC09999 taken?").message, "I can't find a file called DSC09999 in your library.");
     assert!(ask(&mut conn, "Where were my photos taken?").message.contains("of your"), "a question naming no file still reads the library");
 }
 
