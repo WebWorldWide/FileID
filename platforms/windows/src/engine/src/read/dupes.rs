@@ -46,7 +46,7 @@ impl ExactListing {
     }
 }
 
-/// The macOS Cleanup rule: membership is the whole same-size class, because stored hashes are never byte-proof
+/// The Cleanup rule: membership is the whole same-size class, because stored hashes are never byte-proof
 /// (legacy/current recipes, stale or missing hashes). The stored hash only ranks: classes sharing a stored (hash, size)
 /// go first, then the rest by potential reclaim. Classes are taken whole or not at all so a split class can never pair;
 /// [`exact_groups`] re-hashes every admitted file.

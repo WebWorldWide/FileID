@@ -128,9 +128,7 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
         if !word.is_empty() {
             let w = word.to_lowercase();
             word.clear();
-            // Digit-starting tokens (years, IDs, ISO chunks like "02t09") would chain into noise tags like "2026 03
-            // 02t09 01 02 06 00" (seen on a syncthing marker .txt); a one-letter token is no keyword either. All are
-            // phrase boundaries, like stopwords.
+            // Digit-starting tokens (years, IDs, ISO chunks like "02t09") would chain into noise tags, and a one-letter token is no keyword; both end a phrase like a stopword.
             if stops.contains(w.as_str()) || starts_with_digit(&w) || w.chars().count() == 1 {
                 flush(&mut cur, &mut phrases);
             } else {
@@ -240,8 +238,7 @@ mod tests {
 
     #[test]
     fn iso_timestamp_does_not_become_a_tag() {
-        // Regression: a syncthing folder marker .txt produced a phantom "2026 03 02t09 01 02 06 00" tag chip;
-        // "syncthing folder marker" should still be tagged.
+        // A syncthing marker file once produced a "2026 03 02t09 01 02 06 00" tag; "syncthing folder marker" must still tag.
         let text = "folderID: fc881c\ncreated: 2026-03-02T09:01:02.06000Z\n\
                     syncthing folder marker";
         let raw = extract(text);

@@ -23,10 +23,10 @@ use crate::ipc::{
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Max inbound IPC frame, 64 MiB, symmetric with the app's outbound command cap (MaxIpcFrameBytes) and inbound read cap (MaxFrameBytes). A large applyRestructure carries the multi-MB move set the engine emitted in restructurePlan (~200k moves). Still bounded against a runaway line.
+/// Max inbound IPC frame (64 MiB), matching the app's outbound command and inbound read caps. A large applyRestructure carries the multi-MB move set from restructurePlan (~200k moves).
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
-/// Human-readable rejection for an oversized inbound frame, derived from MAX_FRAME_BYTES so the text can't drift from the real limit.
+/// Rejection text for an oversized inbound frame, derived from MAX_FRAME_BYTES so it cannot drift from the limit.
 fn oversized_frame_message(seen: usize) -> String {
     format!(
         "Command frame exceeded {} MiB cap (saw {} bytes before reject).",
@@ -36,7 +36,8 @@ fn oversized_frame_message(seen: usize) -> String {
 }
 
 pub fn run() -> Result<()> {
-    // SEC-3: lock the DLL search FIRST, before tokio spins worker threads, before logging::init() opens file handles, and before anything else that might implicitly LoadLibrary. The default Windows search includes CWD + every PATH entry, so a dropped DLL there gets code exec when a native runtime later loads. SetDefaultDllDirectories restricts to System32 + the engine's directory + AddDllDirectory-registered runtime dirs.
+    // Lock the DLL search first, before worker threads or file handles exist: the default Windows search includes CWD and every PATH entry, so a dropped DLL could run code when a native runtime loads.
+    // SetDefaultDllDirectories restricts it to System32, the engine's directory and AddDllDirectory-registered runtime dirs.
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::LibraryLoader::{
@@ -52,14 +53,15 @@ pub fn run() -> Result<()> {
         ));
     }
 
-    // Suppress hard-error dialogs process-wide (headless engine): a llama.cpp binary loading against a missing/mismatched CUDA DLL would pop a modal box that blocks Deep Analyze forever. Children inherit the mode. No-op on non-Windows (called unconditionally so the stub isn't dead code).
+    // Suppress hard-error dialogs process-wide: a llama.cpp binary loading against a missing CUDA DLL would otherwise pop a modal box that blocks Deep Analyze forever. Children inherit the mode.
     platform::suppress_hard_error_dialogs();
 
-    // Pin the COM MTA for the process lifetime. Shell/WinRT call sites (OCR, HEIC, video) CoInitializeEx/CoUninitialize around their work on blocking-pool threads; when the LAST uninit dropped the process MTA to zero, Windows unloaded the WinRT stack while the `windows` crate's process-wide factory cache still held pointers into it, and the next OCR call died with a native 0xC0000005 (minidump: fault inside unloaded WinTypes.dll; reproduced 4× mid-scan on a 71k-file corpus). CoIncrementMTAUsage keeps the MTA, loaded WinRT DLLs and cached factories alive without initializing this thread's apartment. The cookie is intentionally leaked: decrementing at exit would only re-open the teardown race.
+    // Pin the COM MTA for the process lifetime. Shell/WinRT call sites initialise and uninitialise COM on blocking-pool threads; when the last uninit dropped the MTA to zero, Windows unloaded the WinRT stack while the `windows` crate's cached factories still pointed into it, and the next OCR call crashed.
+    // CoIncrementMTAUsage keeps the MTA alive without initialising this thread's apartment; the cookie is leaked on purpose, since decrementing at exit would only reopen the race.
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::Com::CoIncrementMTAUsage;
-        // The cookie is only for CoDecrementMTAUsage, which we never call; dropping it does not release the pin.
+        // The cookie is only for CoDecrementMTAUsage, which is never called.
         if let Err(e) = CoIncrementMTAUsage() {
             eprintln!("CoIncrementMTAUsage failed: {e} — WinRT unload race unmitigated");
         }
@@ -69,14 +71,14 @@ pub fn run() -> Result<()> {
         .enable_all()
         .build()?;
     let result = rt.block_on(async_main());
-    // Abandon still-running spawn_blocking tasks (e.g. the parent watchdog's INFINITE wait); the OS reaps them, and otherwise they'd hold the runtime drop and block process exit.
+    // Abandon still-running blocking tasks (such as the parent watchdog's INFINITE wait) so they cannot hold up process exit.
     rt.shutdown_timeout(std::time::Duration::from_millis(0));
     result
 }
 
 async fn async_main() -> Result<()> {
     logging::init()?;
-    let _ = paths::ensure_state_dirs()?; // create %LOCALAPPDATA%/FileID/{logs,Models,...}
+    let _ = paths::ensure_state_dirs()?;
     logging::install_panic_hook();
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
@@ -89,7 +91,7 @@ async fn async_main() -> Result<()> {
         tracing::info!("[VRAM] no dedicated GPU detected");
     }
 
-    // Replay AddDllDirectory for llama.cpp runtimes extracted by a prior install (Models\llama.cpp\, Models\llama.cpp-cuda\): after SEC-3 locked the default search path those dirs are invisible until added, so without this they only work on the install run.
+    // Replay AddDllDirectory for llama.cpp runtimes extracted by an earlier install; the locked DLL search path hides them until they are added.
     if let Ok(models_dir) = paths::models_dir() {
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
@@ -100,7 +102,7 @@ async fn async_main() -> Result<()> {
             }
     }
 
-    // Open the DB up front so migrations apply and any failure surfaces before we tell the app we're ready. Shared as Arc<Mutex<…>> so handlers use the single writer; checkpointed and closed on shutdown.
+    // Open the DB up front so migrations apply and any failure surfaces before the app is told the engine is ready. Handlers share it as Arc<Mutex<..>>; it is checkpointed and closed on shutdown.
     let db_path = paths::db_path()?;
     let (db_conn, db_open_error): (Option<std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>, _) =
         match db::open_writer(&db_path) {
@@ -111,7 +113,7 @@ async fn async_main() -> Result<()> {
             }
         };
 
-    // Consume any restructure path-update recovery record left by an apply that moved a file but couldn't update its DB row (a live UNIQUE conflict, or a kill in the move→update window). Realigns the stale path_text before the app reads the library so tags aren't stranded when rename-heal can't fire (exFAT/network volumes with no file_ref). Runs even if no scan follows.
+    // Consume any restructure path-update recovery record left by an apply that moved a file but could not update its DB row (a UNIQUE conflict, or a kill in between). Realigning the stale path before the app reads the library keeps tags from being stranded on volumes where rename-heal cannot fire (exFAT, network).
     if let Some(db) = db_conn.as_ref() {
         pipeline::restructure_apply::reconcile_pending_path_updates(db);
     }
@@ -125,16 +127,16 @@ async fn async_main() -> Result<()> {
     if let Some(err) = &db_open_error {
         sink.send(db_open_error_event(err, &db_path)).await;
         tracing::error!("engine starting without a writable DB — aborting");
-        // Drop the sink so the writer task sees EOF, then await it (with a cap) so the error reaches the app before exit.
+        // Drop the sink so the writer task sees EOF, then await it (capped) so the error reaches the app before exit.
         drop(sink);
         let _ = tokio::time::timeout(Duration::from_secs(2), sink_writer).await;
         return Ok(());
     }
 
-    // Emit `ready` first so the sidebar can leave .starting; the handshake is one-way.
+    // Emit `ready` first so the sidebar can leave .starting.
     commands::hardware::emit_ready(&sink).await;
 
-    // The first search after launch should not wait for the CLIP text model; a few seconds' grace keeps launch itself quick.
+    // Warm the CLIP text model shortly after launch so the first search does not wait for it.
     if let Some(db) = db_conn.clone() {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -142,7 +144,7 @@ async fn async_main() -> Result<()> {
         });
     }
 
-    // Structural integrity check after `ready`, on its own read-only connection so a large library never delays launch. A torn page or truncated file (power loss mid-checkpoint, failing disk) would otherwise surface as opaque per-query failures. Non-fatal: the engine keeps running so the user can wipe + rescan.
+    // Structural integrity check after `ready`, on its own read-only connection so a large library never delays launch. A torn page or truncated file would otherwise surface as opaque per-query failures. Non-fatal: the engine keeps running so the user can wipe and rescan.
     let integrity_check = Arc::new(db::IntegrityCheck::default());
     if db_conn.is_some() {
         let check = integrity_check.clone();
@@ -166,15 +168,15 @@ async fn async_main() -> Result<()> {
         integrity_check.skip();
     }
 
-    // Coordinated shutdown signal, awaited by the stdio loop and the parent watchdog.
+    // Shutdown signal awaited by the stdio loop and the parent watchdog.
     let shutdown = Arc::new(Notify::new());
 
-    // Register the main-task waiter NOW, before any task that could `notify_waiters()` is spawned. A pinned-but-unpolled `Notified` is NOT a waiter, so an early notify_waiters() on empty-stdin EOF would be lost and the engine would hang on .notified().await.
+    // Register the main-task waiter before any task that could call `notify_waiters()` is spawned: an unpolled `Notified` is not a waiter, so an early notify on empty-stdin EOF would be lost and the engine would hang.
     let main_shutdown = shutdown.notified();
     tokio::pin!(main_shutdown);
     main_shutdown.as_mut().enable();
 
-    // Parent watchdog: waits on a handle to the parent. The parent's IDENTITY is pinned by an OpenProcess handle + creation time captured at startup, NOT the bare PID, which an unrelated process can reuse the instant the real parent exits (TOCTOU).
+    // Parent watchdog: waits on a handle to the parent. Identity is pinned by an OpenProcess handle plus creation time captured at startup, not the bare PID, which an unrelated process can reuse the moment the real parent exits.
     let parent_pid = platform::get_parent_pid();
     if let Some(ppid) = parent_pid {
         let s = shutdown.clone();
@@ -185,7 +187,7 @@ async fn async_main() -> Result<()> {
         tracing::warn!("could not determine parent PID; running without watchdog");
     }
 
-    // Stdio loop. SEC: not `BufReader::lines()`, whose `next_line()` buffers the whole line so a hostile no-newline blob could OOM the engine before any cap fires. `read_until(b'\n', ...)` into an in-loop Vec rejects anything crossing MAX_FRAME_BYTES mid-read.
+    // Stdio loop. Not `BufReader::lines()`, which buffers a whole line so a hostile no-newline blob could exhaust memory before any cap fires; `read_until` into an in-loop Vec rejects anything crossing MAX_FRAME_BYTES mid-read.
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
 
@@ -199,45 +201,45 @@ async fn async_main() -> Result<()> {
     // Active scan coordinator: None when idle; set by StartScan, consulted by PauseScan / ResumeScan / CancelScan.
     let scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>> =
         Arc::new(parking_lot::Mutex::new(None));
-    // Reserve scan admission before the task waits on the mutation gate; the coordinator is installed by handle_start_scan right after gate acquisition, and this flag rejects duplicate queued scans.
+    // Reserves scan admission before the task waits on the mutation gate (the coordinator is installed right after the gate is acquired), so duplicate queued scans are rejected.
     let scan_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // CancelScan/wipe set this even when a reserved scan hasn't reached the coordinator slot, so cancellation can't be lost in that queue gap.
+    // CancelScan and wipe set this even when a reserved scan has not reached the coordinator slot, so a cancel cannot be lost in that gap.
     let scan_cancel_requested: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Deep Analyze cancel flag: single-in-flight; deepAnalyzeCancel sets it and the per-file loop polls it between files and during the VLM caption call.
+    // Deep Analyze cancel flag, polled between files and during the VLM caption call.
     let deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Single-in-flight gate: a second Deep Analyze command must bounce cleanly rather than re-arm the shared cancel flag or cross-cancel the running pass. Only a successful acquire resets `cancel`.
+    // Single-in-flight gate: a second Deep Analyze command bounces rather than re-arming the shared cancel flag or cancelling the running pass. Only a successful acquire resets `cancel`.
     let deep_analyze_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Single-flight gate for face clustering: the writer lock is released during cluster()+consolidate(), so a second runFaceClustering must bounce rather than race the persist transaction.
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let restructure_cancellations = RestructureCancelRegistry::default();
-    // Single-flight for apply/undo: overlapping runs would race on-disk moves and the undo journal. Same compare-exchange + RAII-guard shape as Deep Analyze.
+    // Single-flight for apply/undo: overlapping runs would race on-disk moves and the undo journal.
     let restructure_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Every filesystem/DB mutation is serialized. Wipe requests cancellation before taking the same permit, so it sees a fully quiescent library or fails without deleting anything.
+    // Every filesystem and DB mutation is serialized. Wipe requests cancellation, then takes the same permit, so it sees a quiescent library or fails without deleting anything.
     let mutation_gate = Arc::new(tokio::sync::Mutex::new(()));
 
-    // Sidebar job tracker (macOS JobQueue parity): scan / cluster / deep-analyze jobs push on accept and finish via RAII guards, each transition emitting a queueState event for the app's SidebarQueueList.
+    // Sidebar job tracker: scan, cluster and deep-analyze jobs push on accept and finish via RAII guards, each transition emitting a queueState event.
     let jobs = job_queue::JobQueue::new();
     jobs.forward_to(sink.clone());
 
-    // Shared HTTP client (HTTP/2 + connection pool) for the parallel downloader, built once and cloned via Arc into every prewarm task.
+    // Shared HTTP client (HTTP/2 + connection pool) for the parallel downloader, cloned into every prewarm task.
     let http_client = match crate::downloader::build_shared_client() {
         Ok(c) => c,
         Err(err) => {
             tracing::error!(?err, "failed to build shared HTTP client; downloads will fail");
-            // Fail CLOSED: a trust-store-empty client refuses every TLS handshake, so a broken pinned-client build can never degrade into unpinned egress. The builder does no I/O and can't fail here.
+            // Fail closed: a client with an empty trust store refuses every TLS handshake, so a broken pinned-client build cannot degrade into unpinned egress.
             crate::downloader::fail_closed_client()
         }
     };
 
-    // Prewarm cancellation is per-model-kind in a static registry inside commands::prewarm; no global flag to thread through.
+    // Prewarm cancellation is per model kind, in a static registry inside commands::prewarm.
     let dispatcher = Dispatcher {
         sink: sink.clone(),
         shutdown: shutdown.clone(),
@@ -281,7 +283,7 @@ async fn async_main() -> Result<()> {
                 }
                 read = bounded_read::bounded_read_line(&mut reader, &mut buf, MAX_FRAME_BYTES) => {
                     match read {
-                        // Drop empty and BOM-only/whitespace-only lines: .NET's StreamWriter for Process.StandardInput can push a UTF-8 BOM on first init, which trips serde_json ("expected value at line 1 column 1").
+                        // Drop empty and BOM-only lines: .NET's StreamWriter can push a UTF-8 BOM on first write, which trips serde_json.
                         Ok(BoundedRead::Line(text))
                             if text
                                 .trim_start_matches('\u{FEFF}')
@@ -291,7 +293,7 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
                         Ok(BoundedRead::Line(text)) => {
-                            // Panic firewall: handle_line and the serde decode run INSIDE this spawned loop, whose JoinHandle is only abort()ed, never awaited. An uncaught panic in an inline-dispatched arm would silently kill the loop (no more commands, no error frame, the engine a zombie holding the DB writer). Catch it, emit a structured error, keep serving. parking_lot locks don't poison, so continuing is sound.
+                            // Panic firewall: handle_line and the serde decode run inside this spawned loop, whose JoinHandle is only aborted, never awaited, so an uncaught panic would silently kill the loop and leave a zombie engine holding the DB writer. Catch it, emit a structured error and keep serving; parking_lot locks do not poison.
                             let handled = futures_util::FutureExt::catch_unwind(
                                 std::panic::AssertUnwindSafe(handle_line(&d, &text)),
                             )
@@ -307,7 +309,7 @@ async fn async_main() -> Result<()> {
                             }
                         }
                         Ok(BoundedRead::Oversized(seen)) => {
-                            // SEC: rejected mid-read, never allocated past the cap.
+                            // Rejected mid-read, never allocated past the cap.
                             tracing::warn!(bytes_seen = seen, "oversized ipc frame; rejecting");
                             d.sink.send(EngineError::event(
                                 "oversized_ipc_frame",
@@ -421,7 +423,7 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
-/// 64-bit process creation time (FILETIME packed hi:lo) pinning parent identity across a PID-reuse window: two processes that ever share a PID cannot share a creation time.
+/// 64-bit process creation time (FILETIME packed hi:lo); two processes that ever share a PID cannot share one, so it pins parent identity across PID reuse.
 #[cfg(windows)]
 fn process_creation_time(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
     use windows::Win32::Foundation::FILETIME;
@@ -440,7 +442,7 @@ fn process_creation_time(handle: windows::Win32::Foundation::HANDLE) -> Option<u
     Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
 }
 
-/// Watches the parent process for exit and signals `shutdown`. Identity is PINNED: we OpenProcess the PID once, capture the creation time, then re-sample our actual parent PID and confirm it is still `ppid` with the same creation time. The handle refers to a specific kernel object, so even if `ppid` is later reused the wait can't be redirected onto a stranger. If the parent already vanished by the time we open it, the creation-time mismatch signals shutdown immediately.
+/// Watches the parent process for exit and signals `shutdown`. Identity is pinned: the PID is opened once, the creation time captured, and the actual parent PID re-sampled to confirm it still matches, so a reused PID cannot redirect the wait. If the parent already vanished, the creation-time mismatch shuts down immediately.
 #[cfg(windows)]
 async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -448,7 +450,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
         OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
 
-    // SAFETY: ppid is a u32 PID; OpenProcess returns a handle or an error. Reduce the (!Send) Result/HANDLE to a Send-safe usize BEFORE any await: this async fn is `tokio::spawn`ed, so a !Send value across the fallback `.await` would make the future !Send and fail to compile on Windows.
+    // SAFETY: ppid is a u32 PID; OpenProcess returns a handle or an error. The result is reduced to a Send-safe usize before any await, since this future is `tokio::spawn`ed and a !Send value across the fallback `.await` would not compile.
     let pinned_addr: Option<usize> = match unsafe {
         OpenProcess(
             PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -460,7 +462,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
         _ => None,
     };
     let Some(handle_addr) = pinned_addr else {
-        // Couldn't get a pinning handle (e.g. PROCESS_QUERY_LIMITED_INFORMATION denied): fall back to the SYNCHRONIZE-only watcher rather than disabling the watchdog.
+        // Without a pinning handle (for example PROCESS_QUERY_LIMITED_INFORMATION denied), fall back to the SYNCHRONIZE-only watcher rather than disabling the watchdog.
         tracing::warn!(
             "could not open pinning handle (pid={ppid}); falling back to unpinned watch"
         );
@@ -469,9 +471,9 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     };
     let handle = HANDLE(handle_addr as *mut core::ffi::c_void);
 
-    // Pin identity: capture the opened process' creation time, then re-sample who our parent is. Three distinct cases so a TRANSIENT re-sample miss can't shut a live parent down:
-    // * Some(other != ppid): proof the parent exited and its PID was reused between get_parent_pid() and OpenProcess; the handle points at a stranger. Shut down.
-    // * None, or the creation-time probe failed: INCONCLUSIVE (get_parent_pid() uses CreateToolhelp32Snapshot, which can transiently fail, e.g. ERROR_BAD_LENGTH under process churn). Do NOT shut down; fall back to the unpinned SYNCHRONIZE watcher.
+    // Pin identity: capture the opened process' creation time, then re-sample who our parent is. Three cases, so a transient re-sample miss cannot shut down a live parent:
+    // * Some(other != ppid): the parent exited and its PID was reused before OpenProcess; the handle points at a stranger. Shut down.
+    // * None, or the creation-time probe failed: inconclusive (get_parent_pid() uses CreateToolhelp32Snapshot, which can transiently fail under process churn). Fall back to the unpinned SYNCHRONIZE watcher.
     // * Some(ppid): still our parent; continue with the pinned wait.
     let pinned_creation = process_creation_time(handle);
     let resampled = platform::get_parent_pid();
@@ -494,7 +496,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
         return;
     }
 
-    // HANDLE wraps *mut c_void, which the windows crate doesn't mark Send, so we carry it across the closure as the `handle_addr` usize. SAFETY: a Win32 HANDLE is opaque and CloseHandle / WaitForSingleObject may run on any thread; this task is its sole owner.
+    // HANDLE is not Send, so it crosses the closure as the `handle_addr` usize. SAFETY: a Win32 HANDLE is opaque, CloseHandle / WaitForSingleObject may run on any thread, and this task is its sole owner.
     let wait = tokio::task::spawn_blocking(move || {
         let h = HANDLE(handle_addr as *mut core::ffi::c_void);
         // SAFETY: h is the pinned parent handle smuggled across threads.
@@ -503,7 +505,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
         r
     });
 
-    // Race the blocking wait against the shared shutdown signal so EOF / explicit Shutdown can unblock us when the parent stays alive. If we lose, the blocking thread keeps its INFINITE wait until exit; the runtime's shutdown_timeout(0) keeps it from delaying exit.
+    // Race the blocking wait against the shared shutdown signal so EOF or an explicit Shutdown can unblock us while the parent stays alive. If we lose, the blocking thread keeps its INFINITE wait until exit; the runtime's shutdown_timeout(0) keeps it from delaying exit.
     tokio::select! {
         _ = shutdown.notified() => {
             tracing::info!("watch_parent cancelled by shutdown signal");
@@ -519,7 +521,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     }
 }
 
-/// Non-Windows watchdog: the platform getppid poll. No PID-reuse TOCTOU here since POSIX keeps the parent a zombie until waited on.
+/// Non-Windows watchdog: polls getppid. No PID-reuse race here, since POSIX keeps the parent a zombie until waited on.
 #[cfg(not(windows))]
 async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     platform::watch_parent(ppid, shutdown).await;
@@ -697,7 +699,7 @@ async fn emit_scan_busy(sink: &Sink) {
     .await;
 }
 
-/// What the Mac-hosted engine does after a scan ends normally: the Swift engine starts "Group faces" itself (`autoEnqueueFaceClusteringIfNeeded`) and the Mac app has no trigger; the Windows app sends the command after `scanComplete`.
+/// What the Mac-hosted engine does after a scan ends normally: it starts "Group faces" itself, because the Mac app has no trigger; the Windows app sends the command after `scanComplete`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 struct AfterScan {
     sink: Sink,
@@ -838,7 +840,7 @@ async fn spawn_mutation_with_interval<F>(
         })
         .await;
 
-        // The registration handshake below stops dispatch processing a later wipe until this lock future has entered the mutex FIFO. Timeouts borrow that same pinned future, keeping its position while checking whether an unbounded paused scan should reject the action.
+        // The registration handshake below stops dispatch from processing a later wipe until this lock future has entered the mutex FIFO. Timeouts borrow that same pinned future, keeping its position while checking whether an unbounded paused scan should reject the action.
         let _permit = match initial_permit {
             Some(permit) => permit,
             None => loop {
@@ -1027,7 +1029,7 @@ impl Dispatcher {
             self.sink.send(EngineError::event(kind, message)).await;
             return;
         };
-        // Single-flight: a second apply (or an undo) while one runs would share the cancel flag and race on-disk moves and the undo journal; reject it loudly.
+        // Single-flight: a second apply (or an undo) would share the cancel flag and race on-disk moves and the undo journal; reject it loudly.
         if self
             .restructure_active
             .compare_exchange(
@@ -1097,7 +1099,7 @@ impl Dispatcher {
 }
 
 async fn handle_line(d: &Dispatcher, line: &str) {
-    // Strip a leading UTF-8 BOM defensively: the C# side ships BOM-less UTF-8, but legacy installs or wrappers may push `EF BB BF`.
+    // Strip a leading UTF-8 BOM: the C# side sends BOM-less UTF-8, but older installs or wrappers may push `EF BB BF`.
     let line = line.trim_start_matches('\u{FEFF}').trim_start();
     if line.is_empty() {
         return;
@@ -1105,7 +1107,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
     let mut cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
-            // IPC parity with macOS: emit command_decode_failed so a slightly-newer app learns its command was dropped. The C# app treats it as a non-fatal warning. serde's error carries position info, not line content, so no user path can leak.
+            // Emit command_decode_failed so a slightly newer app learns its command was dropped; the C# app treats it as a non-fatal warning. serde's error carries position, not line content, so no user path can leak.
             tracing::warn!(%err, "ipc decode failed");
             d.sink.send(EngineError::event(
                 "command_decode_failed",
@@ -1220,7 +1222,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
-            // Reset THIS kind's cancel flag SYNCHRONOUSLY before the spawn, so a CancelPrewarm dispatched right after (the serial stdio loop runs this before the next frame) lands on an existing flag, closing the lazy-create race.
+            // Reset this kind's cancel flag synchronously before the spawn, so a CancelPrewarm dispatched right after (the serial stdio loop runs this before the next frame) lands on an existing flag.
             commands::prewarm::reset_prewarm_cancel(&payload.model_kind);
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
@@ -1228,7 +1230,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             spawn_guarded(&sink.clone(), commands::prewarm::handle_prewarm_model(sink, model_kind, http_client));
         }
         CommandPayload::CancelPrewarm(payload) => {
-            // Per-model when modelKind is set (one row's Cancel), all in-flight when None.
+            // Per model when modelKind is set (one row's Cancel), all in-flight when None.
             commands::prewarm::cancel_prewarm(payload.model_kind.as_deref());
         }
         CommandPayload::PlanRestructure(payload) => {
@@ -1387,7 +1389,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             d.dispatch_mutation(action, &ids, "People could not be marked unknown", payload, commands::bulk::handle_mark_persons_as_unknown).await;
         }
         CommandPayload::FindMergeSuggestions(_) => {
-            // Availability guard (no DB → no read connection); the handler opens its own read-only connection from db_path so it never contends on the writer mutex.
+            // No DB means no read connection; the handler opens its own read-only connection from db_path so it never contends on the writer mutex.
             let Some(_db) = db else {
                 emit_db_unavailable(sink, "findMergeSuggestions").await;
                 sink.send(EngineError::event(
@@ -1447,7 +1449,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 .await;
                 return;
             };
-            // Single-flight: the handler drops the writer lock during cluster()+consolidate(), so overlapping runs could race the persist transaction; bounce a second request.
+            // Single-flight: the handler drops the writer lock during cluster()+consolidate(), so overlapping runs could race the persist transaction.
             if face_cluster_active
                 .compare_exchange(
                     false,
@@ -1831,7 +1833,7 @@ mod tests {
         assert!(!later.token().load(std::sync::atomic::Ordering::Acquire));
     }
 
-    // The oversize-frame rejection text must report the REAL cap (MAX_FRAME_BYTES, 64 MiB), not a stale hardcoded "1 MB".
+    // The oversize-frame rejection text must report the real cap (MAX_FRAME_BYTES, 64 MiB).
     #[test]
     fn oversize_frame_error_text_matches_max_frame_bytes() {
         let msg = oversized_frame_message(99_999);
@@ -2158,7 +2160,7 @@ mod tests {
         .expect("queued mutation should retain cancellation set after enqueue");
     }
 
-    // Parent identity is pinned by an OpenProcess handle + creation time, not a bare PID: two processes that ever share a PID cannot share a creation time, closing the PID-reuse TOCTOU. This proves the primitive is stable for a known-live process (ours).
+    // Two processes that ever share a PID cannot share a creation time; this proves the primitive is stable for a known-live process (ours).
     #[cfg(windows)]
     #[test]
     fn parent_identity_pinned_by_creation_time_not_bare_pid() {

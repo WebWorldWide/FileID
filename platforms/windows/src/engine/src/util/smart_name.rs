@@ -84,5 +84,4 @@ mod tests {
         assert_eq!(readable_stem("alex-and-sunrise", &["Alex".into()]).as_deref(), Some("Alex - And Sunrise"));
         assert_eq!(readable_stem("alex-mira-baseball-hit", &["Alex Jones".into(), "Mira Smith".into()]).as_deref(), Some("Alex Jones & Mira Smith - Baseball Hit"));
     }
-
 }

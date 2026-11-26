@@ -1,9 +1,8 @@
-// File tags via sidecar JSON + IPropertyStore PKEY_Keywords (System.Keywords, shown in Explorer's Details column and indexed by search). macOS keeps tags in `xattr com.apple.metadata:_kMDItemUserTags`.
+// File tags via sidecar JSON + IPropertyStore PKEY_Keywords (System.Keywords, shown in Explorer's Details column and indexed by search).
 // Two tiers, both written on every `write_tags`:
 // 1. Sidecar (`.fileid-tags.json` next to the file): works for every file type with no Win32 interop or property-handler risk (Office / RAW / HEIC).
 // 2. IPropertyStore: writes PKEY_Keywords through the system property handler; silently skipped when the file type has none (.swift / .md / unknown).
-// Multi-tag PKEY_Keywords is canonically VT_VECTOR
-// VT_LPWSTR, but windows-rs 0.58 lacks `InitPropVariantFromStringVector`, so one VT_LPWSTR of tags joined by "; " is written (the shape Explorer's Details pane writes); it roundtrips cleanly.
+// PKEY_Keywords is canonically a VT_VECTOR of VT_LPWSTR, but windows-rs 0.58 lacks `InitPropVariantFromStringVector`, so one VT_LPWSTR of tags joined by "; " is written (the shape Explorer writes).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,8 +15,7 @@ struct SidecarTags {
 
 fn sidecar_path(file: &Path) -> PathBuf {
     let parent = file.parent().unwrap_or_else(|| Path::new("."));
-    // Built from the OS name: a lossy or placeholder stem would let two files
-    // with non-Unicode names share one sidecar.
+    // Built from the OS name: a lossy stem would let two files with non-Unicode names share one sidecar.
     let mut name = std::ffi::OsString::from(".");
     name.push(file.file_name().unwrap_or_else(|| std::ffi::OsStr::new("untitled")));
     name.push(".fileid-tags.json");
@@ -173,8 +171,7 @@ mod windows_ipropertystore {
             let pv = store
                 .GetValue(&PKEY_KEYWORDS)
                 .context("IPropertyStore::GetValue(PKEY_Keywords)")?;
-            // PROPVARIANT::to_string() handles VT_LPWSTR/VT_BSTR; for VT_VECTOR
-            // VT_LPWSTR (never written by us) windows-rs 0.58 returns an empty string, so the sidecar tier still owns those tags.
+            // windows-rs 0.58 returns an empty string for VT_VECTOR of VT_LPWSTR, so the sidecar tier owns those tags.
             let joined = pv.to_string();
             if joined.is_empty() {
                 return Ok(Vec::new());
@@ -219,9 +216,7 @@ mod tests {
         let f = temp_file_with_name("rt.txt");
         write_tags(&f, &["holiday".into(), "2024".into()]).unwrap();
         let read = read_tags(&f).unwrap();
-        // .txt may or may not roundtrip through IPropertyStore depending
-        // on the system property handler, but sidecar must always
-        // produce the original two tags.
+        // .txt may or may not roundtrip through IPropertyStore, but the sidecar must always produce the original two tags.
         assert!(read.contains(&"holiday".to_string()));
         assert!(read.contains(&"2024".to_string()));
         cleanup_temp_file(&f);

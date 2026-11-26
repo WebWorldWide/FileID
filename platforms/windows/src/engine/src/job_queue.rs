@@ -103,8 +103,8 @@ impl JobQueue {
     }
 
     /// RAII guards call this on Drop so a panicking task can't wedge the sidebar queue. Cross-category jobs can
-    /// genuinely overlap on this engine; the single-running model is a sidebar approximation matching macOS's
-    /// serialized JobQueue and always converges as jobs finish.
+    /// genuinely overlap on this engine; the single-running model is a sidebar approximation of a serialized
+    /// queue and always converges as jobs finish.
     pub fn finish(&self, id: &str) {
         let mut inner = self.inner.lock();
         if inner.running.as_ref().is_some_and(|r| r.id == id) {

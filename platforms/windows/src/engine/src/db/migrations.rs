@@ -1,8 +1,8 @@
-//! SQLite migration stack, tracked in `grdb_migrations` (same table + identifier format as GRDB) so a database built by
-//! either engine opens in the other.
+//! SQLite migration stack, tracked in `grdb_migrations` (same table + identifier format as GRDB) so catalogs written by
+//! the Swift engine still open.
 //!
-//! Registered identifiers MUST match macOS byte-for-byte, and migrations are append-only: never edit one once
-//! committed, add vN+1.
+//! Registered identifiers must match the canonical list byte-for-byte, and migrations are append-only: never edit one
+//! once committed, add vN+1.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -594,10 +594,8 @@ mod tests {
         assert_eq!(n, 39);
     }
 
-    /// A "different people" verdict's churn-stable (file_id, bbox)
-    /// key must still resolve to the CURRENT face after a faces_evaluated re-scan
-    /// DELETE+re-INSERTs face_prints with fresh ids (the legacy face_a/face_b id is
-    /// then dangling). macOS mirror: MigrationParityTests.verdictSurvivesFaceChurn.
+    /// A "different people" verdict's churn-stable (file_id, bbox) key must still resolve to the current face after a
+    /// faces_evaluated re-scan DELETE+re-INSERTs face_prints with fresh ids (the face_a/face_b id is then dangling).
     #[test]
     fn verdict_stable_key_survives_face_print_churn() {
         let conn = Connection::open_in_memory().unwrap();
@@ -652,9 +650,8 @@ mod tests {
         assert_eq!(new_b, 202, "stable key B must resolve to the re-scanned face");
     }
 
-    /// A DB stamped by a newer engine must refuse to open
-    /// rather than silently write into a schema this build doesn't know.
-    /// macOS mirror: MigrationParityTests.newerDatabaseRefusesToOpen.
+    /// A DB stamped by a newer engine must refuse to open rather than silently write into a schema this build doesn't
+    /// know.
     #[test]
     fn newer_db_with_unknown_migration_is_refused() {
         let conn = Connection::open_in_memory().unwrap();
@@ -670,12 +667,9 @@ mod tests {
         assert!(err.downcast_ref::<NewerThanEngine>().is_some());
     }
 
-    /// The migration chains forked at v14 (macOS registered
-    /// "v14_fts_sync_triggers" while this engine registered
-    /// "v14_files_kind_scanned_index"), which made a macOS-touched library
-    /// fail every Windows scan with SQLITE_CORRUPT. The canonical list is
-    /// pinned here and against a catalog the Swift engine wrote (see
-    /// `catalog_the_swift_engine_wrote_matches_the_migrations`).
+    /// The migration chains once forked at v14 ("v14_fts_sync_triggers" vs "v14_files_kind_scanned_index"), which made a
+    /// library touched on macOS fail every Windows scan with SQLITE_CORRUPT. The canonical list is pinned here and
+    /// against a catalog the Swift engine wrote (see `catalog_the_swift_engine_wrote_matches_the_migrations`).
     #[test]
     fn migration_identifiers_match_canonical_list() {
         const CANONICAL: [&str; 39] = [

@@ -1,5 +1,5 @@
 // Trash via IFileOperation::DeleteItem with FOF_ALLOWUNDO: deletes go to the Recycle Bin so Explorer's "Restore" can undo them.
-// Each worker thread owns its own STA COM apartment (the IFileOperation contract); the caller builds the pool and the Cleanup tab uses 8 workers.
+// Each worker thread owns its own STA COM apartment, as IFileOperation requires.
 
 use anyhow::Result;
 #[cfg(windows)]
@@ -33,8 +33,7 @@ fn trash_path_checked(
     use std::os::windows::ffi::OsStrExt;
     crate::util::read_only::require_source_mutation(path)?;
 
-    // Verbatim (\\?\) probe: a bare `path.exists()` misses >260-char paths the
-    // verbatim discovery walk indexed, silently no-opping the delete (#28).
+    // A bare `path.exists()` misses paths over 260 characters, which would silently skip the delete; probe the verbatim form.
     let probe = crate::util::path_safety::to_extended_length(path);
     if std::fs::symlink_metadata(&probe).is_err() {
         if expected.is_some() {
@@ -89,9 +88,9 @@ fn trash_path_checked(
         if must_uninit {
             CoUninitialize();
         }
-        // SHCreateItemFromParsingName / IShellItem don't reliably honor a >260-char path, even with \\?\, so a long path the verbatim probe found can fail with a cryptic HRESULT. Surface a clear error instead; a longPathAware exe manifest is the real fix but needs a build change.
+        // The shell items do not reliably accept paths over 260 characters even in verbatim form; report that instead of a cryptic HRESULT.
         if let Err(e) = result {
-            let path_len = wide.len().saturating_sub(1); // wide units, excluding NUL
+            let path_len = wide.len().saturating_sub(1);
             if path_len > 260 {
                 anyhow::bail!(
                     "Path is too long for the Recycle Bin ({path_len} chars > 260); Windows shell \
@@ -126,7 +125,7 @@ pub(crate) fn trash_path_as(
     }
 }
 
-/// Batch wrapper: one bool per input (true = success), order preserved. An 8-wide STA worker pool initialises COM once per thread, amortizing the ~1-2 ms CoInitialize cost; matches macOS's 8-way async trash.
+/// Trashes each path and returns one bool per input (true = success), in order. A pool of STA workers initialises COM once per thread.
 pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
     if paths.is_empty() {
         return Vec::new();
@@ -164,12 +163,12 @@ pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
             }
         });
     }
-    drop(output_tx); // workers hold the only senders now
+    drop(output_tx);
 
     for (i, p) in paths.iter().enumerate() {
         let _ = input_tx.send((i, p.clone()));
     }
-    drop(input_tx); // workers will see channel close + exit
+    drop(input_tx);
 
     let mut result = vec![false; n];
     while let Ok((idx, ok)) = output_rx.recv() {

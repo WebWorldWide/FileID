@@ -1,15 +1,13 @@
 //! Content-identity hashing for rename/move detection.
 //!
-//! A path is not a stable identity: a rename or move orphans the catalog row (tags, embeddings, faces) and forces a recompute. A content hash survives moves, so a moved file re-binds to its existing row. The recipe is SHA-256 so databases written by the Rust engine and the macOS Swift engine agree byte-for-byte; large files hash head + interior samples + tail + size rather than the whole file.
+//! A path is not a stable identity: a rename or move orphans the catalog row (tags, embeddings, faces). A content hash survives moves, so a moved file re-binds to its existing row. Large files hash head + interior samples + tail + size rather than the whole file; catalogs written by the retired Swift engine use the same SHA-256 recipe.
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use sha2::Digest;
 
-/// Files at or below this size are hashed in full; larger files use the
-/// head+tail+size composite (reads 2 MB instead of the whole file). 16 MB
-/// matches the research recommendation and keeps full-hash cost bounded.
+/// Files at or below this size are hashed in full; larger files use the sampled composite.
 pub(crate) const FULL_HASH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 const INTERIOR_SAMPLES: u64 = 4;
@@ -168,8 +166,7 @@ pub fn group_exact_duplicates(
     group_exact_duplicates_until(candidates, || false)
 }
 
-/// Exact-duplicate hashing is IO-bound; a few readers saturate an SSD without
-/// turning a spinning disk into seek thrash.
+/// Hashing is IO-bound; a few readers saturate an SSD without seek-thrashing a spinning disk.
 const EXACT_HASH_WORKERS: usize = 4;
 
 fn exact_hash_pool() -> &'static rayon::ThreadPool {
@@ -243,11 +240,7 @@ fn hash_in_pool<T: Sync>(
     hashes.into_inner()
 }
 
-/// Full-file SHA-256 grouping. Only files sharing an indexed size can be
-/// duplicates, so singleton sizes are never read; among large same-size files,
-/// only those whose head and tail samples also agree are read in full. Groups
-/// are always formed from the full digest. `should_cancel` is polled on the
-/// calling thread; once it fires, unread files count as skipped.
+/// Full-file SHA-256 grouping. Singleton sizes are never read, and large same-size files are read in full only when their head and tail samples agree. `should_cancel` is polled on the calling thread; once it fires, unread files count as skipped.
 pub fn group_exact_duplicates_until(
     candidates: Vec<ExactDuplicateCandidate>,
     should_cancel: impl Fn() -> bool,
@@ -317,19 +310,13 @@ pub fn matches_known_hash_hex(path: &Path, size: u64, expected_hex: &str) -> std
         .any(|hash| hash.as_slice() == expected.as_slice()))
 }
 
-/// Every BLAKE3 digest a pre-SHA-256 build could have stamped for this file.
-/// Rows written by those builds (released v0.0.1 stamped BLAKE3) only
-/// rename-heal if the lookup reproduces the exact digest they hold; the heal
-/// upsert then re-stamps the current SHA-256 recipe, retiring the probe per row.
+/// Every BLAKE3 digest a pre-SHA-256 build could have stamped for this file. Rows from those builds only rename-heal if the lookup reproduces their digest; the heal then re-stamps SHA-256.
 #[derive(Clone, Debug)]
 pub struct LegacyHashes {
     /// The digest v0.0.1 stamped: full-file BLAKE3 at or under the cap,
     /// blake3(head ‖ interior samples ‖ tail ‖ size_le) over it.
     pub v2: [u8; 32],
-    /// blake3(head ‖ tail ‖ size_le) — the pre-interior-sample composite that
-    /// pre-v0.0.1 dev builds stamped for over-cap files (rows never rescanned
-    /// since may still hold it). `None` at or under the cap, where every
-    /// legacy build stamped the same full-file BLAKE3 as `v2`.
+    /// blake3(head ‖ tail ‖ size_le), stamped by pre-v0.0.1 dev builds for over-cap files. `None` at or under the cap, where every legacy build stamped the same full-file BLAKE3 as `v2`.
     pub v1: Option<[u8; 32]>,
 }
 
@@ -389,19 +376,13 @@ fn hash_with_threshold(
             v1.update(bytes);
         }
     };
-    // Clamp to the file size so a file between `full_max` and CHUNK doesn't
-    // seek before the start (the head+tail overlap on such files is harmless —
-    // the hash stays deterministic).
+    // Clamped so a file smaller than CHUNK doesn't seek before the start; head and tail may overlap.
     let span = size.min(CHUNK as u64) as usize;
     let mut chunk = vec![0u8; span];
     let n = read_fill(&mut f, &mut chunk)?;
     feed(&chunk[..n], false);
 
-    // Interior samples: a few evenly-spaced 64 KB chunks so two DISTINCT
-    // same-size files that happen to share their head+tail (camera bursts,
-    // container formats with identical headers/footers, padded archives) don't
-    // collide and trigger a false rename-heal. Deterministic offsets; skipped on
-    // files too small for interior reads to clear head/tail.
+    // Evenly spaced interior chunks keep distinct same-size files that share head and tail (camera bursts, padded archives) from colliding into a false rename-heal.
     let mut mid = vec![0u8; INTERIOR_CHUNK];
     for off in interior_offsets(size, span) {
         if f.seek(SeekFrom::Start(off)).is_ok() {
@@ -430,8 +411,7 @@ fn interior_offsets(size: u64, span: usize) -> impl Iterator<Item = u64> {
         })
 }
 
-/// Read until `buf` is full or EOF; returns bytes filled. A single `read`
-/// may return fewer bytes than requested even mid-file, so loop.
+/// Reads until `buf` is full or EOF, since a single `read` can return short mid-file.
 fn read_fill(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -769,5 +749,4 @@ mod tests {
         );
         let _ = std::fs::remove_file(&p);
     }
-
 }

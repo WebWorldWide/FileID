@@ -1,6 +1,6 @@
 //! Local learning of smart-name style corrections: each sample pairs the proposal without learning (`base`) with the
-//! name the user applied; preferences are what a clear majority of the newest samples show. Lockstep with macOS
-//! `SmartNameLearning.swift` (both run `shared/test-corpus/naming/learning-cases.json`).
+//! name the user applied; preferences are what a clear majority of the newest samples show. Cases live in
+//! `shared/test-corpus/naming/learning-cases.json`.
 
 use std::collections::{BTreeMap, HashSet};
 

@@ -1,8 +1,8 @@
 //! Per-OS state directory layout; never transmitted off-device.
-//! - Windows: `%LOCALAPPDATA%\FileID\` (mirror of macOS `AppSupportPath.swift`).
+//! - Windows: `%LOCALAPPDATA%\FileID\` (the Mac app uses `~/Library/Application Support/FileID/`).
 //! - Linux/BSD, and macOS for the CLI/TUI: `$XDG_DATA_HOME/FileID/` → `~/.local/share/FileID/`.
 //! - macOS app-hosted engine (`apple-adapters`): `~/Library/Application Support/FileID/` (the container when sandboxed),
-//!   or the folder of `FILEID_DATABASE_PATH` when set, exactly like the Swift engine.
+//!   or the folder of `FILEID_DATABASE_PATH` when set.
 
 use std::path::{Path, PathBuf};
 
@@ -21,11 +21,10 @@ fn resolve_root() -> Result<PathBuf> {
     anyhow::bail!("could not resolve %LOCALAPPDATA% or %USERPROFILE% for FileID state dir")
 }
 
-/// Its state is the Swift engine's; CLI and TUI builds never enable `apple-adapters`, so their state never merges with
-/// the app's.
+/// CLI and TUI builds never enable `apple-adapters`, so their state never merges with the Mac app's.
 pub const APP_HOSTED: bool = cfg!(all(target_os = "macos", feature = "apple-adapters"));
 
-/// `FILEID_DATABASE_PATH` (the Swift engine's variable), then `FILEID_DB`; empty values are ignored.
+/// `FILEID_DATABASE_PATH`, then `FILEID_DB`; empty values are ignored.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 fn app_database_override() -> Option<PathBuf> {
     ["FILEID_DATABASE_PATH", "FILEID_DB"]
@@ -92,8 +91,7 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(root()?.join("fileid.sqlite"))
 }
 pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
-// `models_dir` is the single resolution point for every model artifact (registry destinations, install sentinels,
-// per-model loaders).
+/// The single resolution point for every model artifact (registry destinations, install sentinels, per-model loaders).
 /// `FILEID_MODELS_DIR` overrides the per-OS default (highest priority). The `fileid` CLI points it at
 /// [`engine_models_dir`] so downloads never land in the macOS app's read-only CoreML dir and a spawned engine inherits
 /// the same path.
@@ -105,7 +103,7 @@ pub fn models_dir() -> Result<PathBuf> {
     default_models_dir()
 }
 
-/// Always `<root>/Models`, ignoring `FILEID_MODELS_DIR` and the macOS desktop-app preference; distinct from the Swift
+/// Always `<root>/Models`, ignoring `FILEID_MODELS_DIR` and the macOS desktop-app preference; distinct from the Mac
 /// app's read-only CoreML `~/Library/Application Support/FileID/Models`. The CLI exports it as `FILEID_MODELS_DIR`.
 /// Used by the CLI (an external lib consumer), never by the engine binary.
 pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
@@ -118,7 +116,7 @@ pub fn runtime_dir() -> Result<PathBuf> { Ok(root()?.join("runtime")) }
 #[cfg(not(target_os = "macos"))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-/// macOS with `FILEID_MODELS_DIR` UNSET only: prefer the Swift app's `~/Library/Application Support/FileID/Models` when
+/// macOS with `FILEID_MODELS_DIR` UNSET only: prefer the Mac app's `~/Library/Application Support/FileID/Models` when
 /// it exists, else the XDG default. Read-only by construction; the CLI/TUI pin `FILEID_MODELS_DIR` to
 /// [`engine_models_dir`] so they never reach this branch.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -140,14 +138,14 @@ fn default_models_dir() -> Result<PathBuf> {
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
 /// ONNX weights the Mac app installs under other names (same manifest artifact, same SHA-256): Rust-layout path,
-/// Swift-layout path, both relative to the models folder.
+/// Mac-layout path, both relative to the models folder.
 pub const SWIFT_MODEL_LAYOUT: &[(&str, &str)] = &[
     ("sface/face_recognition_sface_2021dec.onnx", "face_recognition_sface_2021dec.onnx"),
     ("mobileclip/mobileclip_s2_image.onnx", "mobileclip_image/clip_vitb32_image.onnx"),
 ];
 
 /// On macOS a model file missing from the layout asked for falls back to the same artifact under the other layout
-/// (Rust or Swift), so models installed once serve both engines.
+/// (engine or Mac app), so models installed once serve both.
 pub fn installed_model_file(path: &Path) -> PathBuf {
     if cfg!(target_os = "macos")
         && !path.exists()

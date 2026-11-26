@@ -155,7 +155,7 @@ mod redaction_tests {
         }
     }
 
-    /// #26: a USER path that merely CONTAINS `AppData\Local\FileID` but lives outside this engine's resolved root (e.g. a backup on another volume) is NOT the app's state tree and MUST be redacted; the old unanchored `contains` fallback leaked these.
+    /// A user path that merely CONTAINS `AppData\Local\FileID` but lives outside this engine's resolved root (e.g. a backup on another volume) is NOT the app's state tree and must be redacted.
     #[test]
     #[cfg(windows)]
     fn redacts_user_backup_path_containing_appdata_local_fileid() {
@@ -164,7 +164,7 @@ mod redaction_tests {
         assert!(!r.contains("Backups"), "backup path leaked: {r}");
     }
 
-    /// ENG-97: a USER path that merely contains a folder named "FileID" (dev checkout, backup dir) is NOT the app's state tree and MUST be redacted; the old broad `\fileid\` substring match leaked these with the username.
+    /// A user path that merely contains a folder named "FileID" (dev checkout, backup dir) is NOT the app's state tree and must be redacted.
     #[test]
     #[cfg(windows)]
     fn redacts_user_path_merely_containing_fileid() {
@@ -377,7 +377,7 @@ fn top_capacity_count(capacities: &[u32]) -> Option<usize> {
     (max != min).then(|| capacities.iter().filter(|&&c| c == max).count())
 }
 
-/// Default number of tagging workers: the macOS-parity formula P + E + max(1, P/2) capped at logical cores and [2, 32] (the old `physical * 1.7` mis-sized hybrid CPUs, e.g. treating an i9-13900K's 8P+16E like an 8-core).
+/// Default number of tagging workers: the formula P + E + max(1, P/2) capped at logical cores and [2, 32].
 pub fn default_worker_cap() -> u32 {
     cpu_topology().worker_cap()
 }
@@ -414,8 +414,7 @@ pub fn available_memory_mb() -> u64 {
     sys.available_memory() / (1024 * 1024)
 }
 
-/// Matches the Swift engine: sysinfo's macOS figure subtracts compressor pages,
-/// so also credit the kernel's availability level (what `memory_pressure`
+/// sysinfo's macOS figure subtracts compressor pages, so also credit the kernel's availability level (what `memory_pressure`
 /// reports), which counts compressible and file-backed memory the pager can
 /// reclaim.
 #[cfg(target_os = "macos")]
@@ -865,7 +864,7 @@ pub fn power_status() -> (PowerSource, Option<u8>) {
     (PowerSource::Unknown, None)
 }
 
-/// Current process RSS in MiB. Mirrors macOS `Hardware.swift::residentMemoryMB`; feeds the sidebar Memory stat (which showed "Memory: 0 MB" mid-scan while ML inference held 600 MB-1.2 GB).
+/// Current process RSS in MiB. Feeds the sidebar Memory stat (which showed "Memory: 0 MB" mid-scan while ML inference held 600 MB-1.2 GB).
 #[cfg(windows)]
 pub fn process_memory_mb() -> u64 {
     use windows::Win32::System::ProcessStatus::{
@@ -1184,7 +1183,7 @@ mod sleep_guard_linux_tests {
     }
 }
 
-// Process priority: default NORMAL (was ABOVE_NORMAL). Higher priority fights DWM for CPU during scans, and when a GPU driver hits TDR the high-priority workers spam retries faster than DWM can recover the GPU → full system hang. `FILEID_PROCESS_PRIORITY=above_normal` overrides to outrank background services (Defender, OneDrive).
+// Process priority: default NORMAL. Higher priority fights DWM for CPU during scans, and when a GPU driver hits TDR the high-priority workers spam retries faster than DWM can recover the GPU → full system hang. `FILEID_PROCESS_PRIORITY=above_normal` overrides to outrank background services (Defender, OneDrive).
 
 /// RAII guard. While alive, the process priority follows FILEID_PROCESS_PRIORITY (default NORMAL); Drop restores NORMAL.
 pub struct PriorityBoost {
@@ -1229,7 +1228,7 @@ impl Drop for PriorityBoost {
     }
 }
 
-// llama.cpp runtime DLL search: SEC-3 locked the DLL search path to System32 + the engine binary's directory, but the llama.cpp runtimes extract into %LOCALAPPDATA%\FileID\Models\llama.cpp[-cuda]\, outside both. AddDllDirectory adds one trusted dir to the per-process list; we walk a few levels deep so DLLs at the root or in `bin/` are reachable.
+// llama.cpp runtime DLL search: The DLL search path is locked to System32 + the engine binary's directory, but the llama.cpp runtimes extract into %LOCALAPPDATA%\FileID\Models\llama.cpp[-cuda]\, outside both. AddDllDirectory adds one trusted dir to the per-process list; we walk a few levels deep so DLLs at the root or in `bin/` are reachable.
 
 /// Registers every directory under `root` (up to MAX_DEPTH deep) that contains a .dll as an additional DLL search path. Idempotent (the loader dedupes); returns the directories for which `AddDllDirectory` returned null.
 #[cfg(windows)]
