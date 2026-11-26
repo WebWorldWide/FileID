@@ -399,7 +399,10 @@ fn engine_label(state: &EngineState) -> Option<String> {
 
 pub fn advanced(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let expander = gtk::Expander::builder()
-        .label("Advanced (troubleshooting: background helper, storage, scan history, logs)")
+        .label_widget(&v3::wrapped(
+            "Advanced (troubleshooting: background helper, storage, scan history, logs)",
+            &[],
+        ))
         .build();
     let body = v3::vbox(14);
     body.set_margin_top(10);
