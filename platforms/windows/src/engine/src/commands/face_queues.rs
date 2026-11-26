@@ -106,7 +106,7 @@ fn centroid<'a>(vectors: impl IntoIterator<Item = &'a [f32]>) -> Option<Vec<f32>
     normalize(sum?)
 }
 
-fn people(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<Vec<Person>> {
+fn people(conn: &Connection, model: &str, processing: &str, only: Option<&[i64]>) -> rusqlite::Result<Vec<Person>> {
     let mut out: Vec<Person> = Vec::new();
     let mut statement = conn.prepare(&format!(
         "WITH sizes AS (SELECT person_id, COUNT(*) AS faces FROM face_prints WHERE person_id IS NOT NULL GROUP BY person_id) \
@@ -114,9 +114,11 @@ fn people(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<
                 fp.id, COALESCE(fp.face_quality,0), fp.arcface_embedding \
          FROM face_prints fp JOIN persons p ON p.id=fp.person_id JOIN sizes ON sizes.person_id=p.id \
          WHERE COALESCE(p.is_unknown,0)=0 AND COALESCE(fp.excluded,0)=0 AND length(fp.arcface_embedding)=512 \
-           AND fp.embedding_model=?1 AND fp.processing_version=?2 ORDER BY p.id, fp.id"
+           AND fp.embedding_model=?1 AND fp.processing_version=?2 AND (?3 IS NULL OR p.id IN (SELECT value FROM json_each(?3))) \
+         ORDER BY p.id, fp.id"
     ))?;
-    let mut rows = statement.query(params![model, processing])?;
+    let only = only.map(|ids| serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()));
+    let mut rows = statement.query(params![model, processing, only])?;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let blob: Vec<u8> = row.get(6)?;
@@ -285,6 +287,53 @@ fn oversized(person: &Person, total: usize, settings: &QueueSettings) -> bool {
         || (faces >= settings.oversized_large_faces && share >= settings.oversized_large_share)
 }
 
+/// A chained person this many faces over `LOOK_ALIKE_GROUP_FACES` is cut into several look-alike groups, not two halves.
+const LOOK_ALIKE_GROUP_FACES: usize = 1500;
+const MAX_LOOK_ALIKE_GROUPS: usize = 8;
+const KMEANS_ROUNDS: usize = 12;
+
+/// Spherical k-means seeded farthest-first from the face least like the whole person, so the cells are the same on every run.
+fn look_alike_groups(vectors: &[&[f32]], k: usize) -> Option<(Vec<usize>, Vec<Vec<f32>>)> {
+    let whole = centroid(vectors.iter().copied())?;
+    let mut seeds = vec![vectors.iter().enumerate().min_by(|a, b| dot(a.1, &whole).total_cmp(&dot(b.1, &whole)))?.0];
+    let mut nearest_seed: Vec<f64> = vectors.iter().map(|vector| dot(vector, vectors[seeds[0]])).collect();
+    while seeds.len() < k {
+        let next = nearest_seed.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1))?.0;
+        seeds.push(next);
+        for (best, vector) in nearest_seed.iter_mut().zip(vectors) {
+            *best = best.max(dot(vector, vectors[next]));
+        }
+    }
+    let mut centers: Vec<Vec<f32>> = seeds.iter().map(|seed| vectors[*seed].to_vec()).collect();
+    let mut groups = vec![usize::MAX; vectors.len()];
+    for _ in 0..KMEANS_ROUNDS {
+        let next: Vec<usize> = vectors
+            .iter()
+            .map(|vector| (0..k).max_by(|a, b| dot(vector, &centers[*a]).total_cmp(&dot(vector, &centers[*b]))).unwrap_or(0))
+            .collect();
+        if next == groups {
+            break;
+        }
+        groups = next;
+        for (group, center) in centers.iter_mut().enumerate() {
+            if let Some(moved) = centroid(vectors.iter().zip(&groups).filter(|(_, g)| **g == group).map(|(vector, _)| *vector)) {
+                *center = moved;
+            }
+        }
+    }
+    Some((groups, centers))
+}
+
+/// The look-alike group whose centroid is least like any other group's, with every group's centroid.
+fn most_isolated_group(vectors: &[&[f32]], k: usize) -> Option<(usize, Vec<Vec<f32>>)> {
+    let (_, centers) = look_alike_groups(vectors, k)?;
+    let closest_other = |cell: usize| {
+        (0..k).filter(|other| *other != cell).map(|other| dot(&centers[cell], &centers[other])).fold(f64::MIN, f64::max)
+    };
+    let peeled = (0..k).min_by(|a, b| closest_other(*a).total_cmp(&closest_other(*b)))?;
+    Some((peeled, centers))
+}
+
 fn split_of(person: &Person, big: bool, settings: &QueueSettings) -> Option<SplitRow> {
     let members: Vec<&Member> = person.members.iter().collect();
     let n = members.len();
@@ -292,7 +341,21 @@ fn split_of(person: &Person, big: bool, settings: &QueueSettings) -> Option<Spli
         return None;
     }
     let vectors: Vec<&[f32]> = members.iter().map(|member| member.vector.as_slice()).collect();
-    let (groups, first, second) = if n <= MAX_SPLIT_FACES {
+    let look_alike_groups = (n / LOOK_ALIKE_GROUP_FACES).min(MAX_LOOK_ALIKE_GROUPS);
+    let (groups, first, second) = if big && look_alike_groups > 2 {
+        let sampled = n.min(MAX_SPLIT_FACES);
+        let sample: Vec<&[f32]> = (0..sampled).map(|index| vectors[index * n / sampled]).collect();
+        let (peeled, centers) = most_isolated_group(&sample, look_alike_groups)?;
+        let groups: Vec<usize> = vectors
+            .iter()
+            .map(|vector| {
+                let nearest = (0..centers.len()).max_by(|a, b| dot(vector, &centers[*a]).total_cmp(&dot(vector, &centers[*b])));
+                usize::from(nearest == Some(peeled))
+            })
+            .collect();
+        let rest = centroid(vectors.iter().zip(&groups).filter(|(_, g)| **g == 0).map(|(vector, _)| *vector))?;
+        (groups, rest, centers[peeled].clone())
+    } else if n <= MAX_SPLIT_FACES {
         two_groups(&vectors)?
     } else {
         let sample: Vec<&[f32]> = (0..MAX_SPLIT_FACES).map(|index| vectors[index * n / MAX_SPLIT_FACES]).collect();
@@ -383,6 +446,56 @@ fn split_blocks(conn: &Connection) -> rusqlite::Result<(Vec<(i64, i64)>, HashSet
     Ok((linked, dismissed))
 }
 
+fn offerable_splits<'a>(
+    conn: &Connection,
+    people: impl Iterator<Item = &'a Person>,
+    total_faces: usize,
+    settings: &QueueSettings,
+) -> rusqlite::Result<Vec<SplitRow>> {
+    let (linked, dismissed) = split_blocks(conn)?;
+    Ok(people
+        .filter(|person| !dismissed.contains(&person.id))
+        .filter_map(|person| split_of(person, oversized(person, total_faces, settings), settings))
+        .filter(|row| {
+            let keep: HashSet<i64> = row.keep.iter().copied().collect();
+            let split: HashSet<i64> = row.split.iter().copied().collect();
+            !linked.iter().any(|(a, b)| (keep.contains(a) && split.contains(b)) || (keep.contains(b) && split.contains(a)))
+        })
+        .collect())
+}
+
+fn store_split(conn: &Connection, row: &SplitRow, namespace: &str, created_at: f64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            row.person,
+            row.score,
+            serde_json::to_string(&row.keep).unwrap_or_else(|_| "[]".into()),
+            serde_json::to_string(&row.split).unwrap_or_else(|_| "[]".into()),
+            namespace,
+            created_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// After a split is confirmed, a person that is still oversized is offered its next group right away instead of
+/// waiting for the next grouping run.
+fn offer_next_splits(conn: &Connection, namespace: &str, persons: &[i64], at: f64) -> rusqlite::Result<()> {
+    let Some((model, processing)) = namespace.split_once('|') else { return Ok(()) };
+    let total_faces: usize = conn.query_row(
+        "SELECT COUNT(*) FROM face_prints fp JOIN persons p ON p.id=fp.person_id WHERE COALESCE(p.is_unknown,0)=0 AND COALESCE(fp.excluded,0)=0 \
+         AND length(fp.arcface_embedding)=512 AND fp.embedding_model=?1 AND fp.processing_version=?2",
+        params![model, processing],
+        |row| row.get::<_, i64>(0),
+    )? as usize;
+    let people = people(conn, model, processing, Some(persons))?;
+    for row in offerable_splits(conn, people.iter(), total_faces, &QueueSettings::from_env())? {
+        store_split(conn, &row, namespace, at)?;
+    }
+    Ok(())
+}
+
 /// Called by runFaceClustering after the review assessment, inside its transaction.
 pub(crate) fn refresh(conn: &Connection, model: &str, processing: &str, settings: &QueueSettings, at: f64) -> rusqlite::Result<(usize, usize)> {
     let namespace = format!("{model}|{processing}");
@@ -396,7 +509,7 @@ pub(crate) fn refresh(conn: &Connection, model: &str, processing: &str, settings
     };
     conn.execute("DELETE FROM face_merge_suggestions", [])?;
     conn.execute("DELETE FROM face_split_suggestions", [])?;
-    let people = people(conn, model, processing)?;
+    let people = people(conn, model, processing, None)?;
     let rows = merges(&people, &blocked_pairs(conn)?, &files_by_person(conn)?, settings);
     for row in &rows {
         conn.execute(
@@ -405,31 +518,11 @@ pub(crate) fn refresh(conn: &Connection, model: &str, processing: &str, settings
         )?;
     }
     let total_faces: usize = people.iter().map(|person| person.members.len()).sum();
-    let (linked, dismissed) = split_blocks(conn)?;
-    let mut splits: Vec<SplitRow> = people
-        .iter()
-        .filter(|person| !dismissed.contains(&person.id))
-        .filter_map(|person| split_of(person, oversized(person, total_faces, settings), settings))
-        .filter(|row| {
-            let keep: HashSet<i64> = row.keep.iter().copied().collect();
-            let split: HashSet<i64> = row.split.iter().copied().collect();
-            !linked.iter().any(|(a, b)| (keep.contains(a) && split.contains(b)) || (keep.contains(b) && split.contains(a)))
-        })
-        .collect();
+    let mut splits = offerable_splits(conn, people.iter(), total_faces, settings)?;
     splits.sort_by(|x, y| x.score.total_cmp(&y.score).then(x.person.cmp(&y.person)));
     splits.truncate(MAX_SPLITS);
     for row in &splits {
-        conn.execute(
-            "INSERT INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                row.person,
-                row.score,
-                serde_json::to_string(&row.keep).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(&row.split).unwrap_or_else(|_| "[]".into()),
-                namespace,
-                split_created.get(&row.person).copied().unwrap_or(at)
-            ],
-        )?;
+        store_split(conn, row, &namespace, split_created.get(&row.person).copied().unwrap_or(at))?;
     }
     Ok((rows.len(), splits.len()))
 }
@@ -804,6 +897,7 @@ fn split_in(conn: &Connection, request: &str, person: i64) -> rusqlite::Result<F
     recount(conn, created_person)?;
     write_verification(conn, (person, created_person), (&keep_anchor, &split_anchor), 0, "user-verified", at)?;
     conn.execute("DELETE FROM face_split_suggestions WHERE person_id=?1", [person])?;
+    offer_next_splits(conn, &namespace, &[person, created_person], at)?;
     let before = serde_json::json!({
         "resolution": "split",
         "personID": person,
