@@ -61,8 +61,8 @@ struct PagePolishTests {
     }
 
     @Test func theOrderTextMatchesTheBlendedRanking() {
-        #expect(!TakeProposals.possibleGroupsOrder.contains("Biggest and newest"))
-        #expect(TakeProposals.possibleGroupsOrder.contains("Bigger groups and more recent"))
+        #expect(!TakeProposals.possibleGroupsOrder.contains("come first"))
+        #expect(TakeProposals.possibleGroupsOrder.contains("Recent groups and groups with more shots"))
     }
 }
 
