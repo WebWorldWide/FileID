@@ -75,7 +75,7 @@ In progress / not done: butler restructure P2–P4 (VLM group naming, confidence
 
 - **Edition 2024, MSRV 1.98** (toolchain pinned in `rust-toolchain.toml`, both Windows targets).
 - **No new dependencies without asking.** Locked set in `Cargo.toml`; new crates need a `DECISIONS.md` justification.
-- **No telemetry.** `engine/src/downloader.rs` permits only user-triggered Hugging Face model downloads. Optional CUDA runtimes must be installed locally by the user; FileID does not fetch vendor runtime archives.
+- **No telemetry.** `engine/src/downloader.rs` permits only user-triggered Hugging Face model downloads. FileID fetches no vendor runtime archives (there is no CUDA or DirectML path; inference is tract on the CPU).
 - **Path redaction.** `redact_path_for_log(path)` before any `tracing::*!()` that includes a user path.
 - **Default to no comments** — only a non-obvious *why* (workaround, invariant, perf pitfall).
 - **Sync mirrors for cancellation.** Hot loops check `AtomicBool::load(Relaxed)` instead of `await`-ing the coordinator (no per-file actor hop).

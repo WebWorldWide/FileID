@@ -11,12 +11,12 @@ What the portable path measured (acceptance lane F, 2026-11-18): the portable pi
 Not release-ready, and closer than it has been. What is true today:
 
 - **Code.** All three desktop apps, the CLI and the TUI are on `main`, and every workflow is green on `main` itself, including `Windows app (.NET)` on the self-hosted runner, which had failed on every push since at least 2026-11-07.
-- **Mac, engine.** A Developer ID build starts the shared Rust engine first and keeps the Swift engine as the fallback. The app has now been seen running on the Rust engine, with the pinned ONNX Runtime 1.22.0 bundled (faces and search by meaning work); that run found and fixed a scan that never ended in the app, an app killed by an engine that exits at once, and five smaller gaps against the Swift engine. App Store builds still run the Swift engine only; the Rust engine passed a local App Sandbox check, and the gate stays shut until a TestFlight build confirms it.
+- **Mac, engine.** The Mac app runs only the shared Rust engine; the Swift engine and ONNX Runtime are deleted, and App Store builds bundle `fileidd` too. The evidence-backed checklist for the Mac release, with its open owner steps, is `MAC_PRODUCTION_CHECKLIST.md`. The App Store build still needs a TestFlight sandbox run (it passed a local App Sandbox check).
 - **Mac, package.** A Developer ID signed release candidate of the current source exists (`v0.2.0-rc1`, not notarized) and passes every signature, privacy and layout check. Notarization needs the owner's notary credentials; the TestFlight build needs the App Store Connect key and the provisioning profile.
 - **Not seen.** Nothing on Windows or on a Linux desktop has been seen on a screen since the 2026-11-12 audits; the WinUI app is only compiled by CI. On the Mac, sheets, hover states, playback and drag and drop have not been seen, and nothing has been seen on the signed build.
 - **Not signed.** No signed package exists for Windows.
 
-The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)"; the Mac's move to one engine is its Stage 10 checklist. The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
+The single list of what is left, split into owner-only and agent-doable work, is `NEXT.md` "Production to-do (2026-11-14)"; the Mac's release steps are in `MAC_PRODUCTION_CHECKLIST.md`. The dated checkpoints below are history; where they disagree with this section or with NEXT, the newer text is right.
 
 ## 2026-11-06 Linux llama.cpp runtime packaging
 
@@ -138,15 +138,15 @@ An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rena
 tens of thousands of files locally. Three desktop apps, plus a CLI and a TUI:
 
 - **macOS** — SwiftUI app, the visual + UX reference. Developer ID builds run the
-  shared Rust engine by default since 2026-11-11 (Apple ML through in-process Swift
-  adapters, MLX inference), with the Swift engine bundled as the fallback; App Store
-  builds run the Swift engine.
+  shared Rust engine only (Apple ML through in-process Swift adapters, MLX inference,
+  tract for ONNX models); there is no Swift engine. App Store builds bundle the same
+  engine.
 - **Windows** — shared Rust engine (`fileid-engine`) + WinUI 3 / .NET 10 C# app.
 - **Linux** — shared Rust engine + GTK4 / libadwaita app (Flatpak first).
 
-App and engine talk newline-delimited JSON over stdio (IPC 1.28.0); the engine owns
-a SQLite WAL catalog (schema v36, the same in the Swift GRDB and Rust rusqlite
-stores, so a library opens in either engine).
+App and engine talk newline-delimited JSON over stdio (IPC 1.31.0); the engine owns
+a SQLite WAL catalog (schema v41, written by the
+shared Rust engine through rusqlite).
 
 ## Non-negotiables
 

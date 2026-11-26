@@ -1,5 +1,8 @@
 # Converging macOS onto the shared Rust engine
 
+> **Status: complete.** The Mac app runs only the shared Rust engine (`fileidd`); the Swift engine was deleted in `fa8460e6` (2026-11-18) and tract replaced ONNX Runtime on every platform. Apple ML (Vision, ImageIO, AVFoundation, Speech, PDFKit) and MLX run through the in-process `FileIDAppleKit` adapters. There is no engine switch, fallback or `engine.backend` setting. The plan and stage logs below are history; the retirement audit is `SWIFT_ENGINE_RETIREMENT.md`.
+
+
 Plan for moving the macOS app from the Swift engine (`platforms/apple/engine`) to the shared Rust engine (`platforms/windows/src/engine`), drafted 2026-11-08 from `main` @ `8939acd6` (IPC 1.25.0, catalog v33). Counts come from STATE.md; nothing here was measured for the plan itself. NEXT.md tracks progress against these stages.
 
 ## Findings that shape the plan
@@ -77,14 +80,9 @@ Swift adapters for MLX (VLM generation, chat, selection checks, goal ranking, be
 
 ## 3. Order of migration
 
-### How the app switches
+### How the app switched
 
-Whole engine at spawn, one process at a time.
-
-- **Dev dogfood (no digest change):** put the Rust binary at `Contents/MacOS/fileidd`; add a macOS mode to `ipc/sink.rs` that writes events on fd 2 and sends library stderr to the log. The Swift engine stays as `FileIDEngine`.
-- **Shipping flag (one owner-approved `EngineClient.swift` refresh, Stage 0):** an `engine.backend` = `swift|rust` setting (Developer ID builds) plus an env override; it picks the binary and the event stream and restarts through the existing single-flight `start()`.
-- **Gaps under the Rust host** answer with the existing `unsupported` / `ToolCapability.available=false` replies the app already handles. Users stay on Swift by default until Stage 10.
-- **Engine identity in tests:** add an optional `engine` (`"swift"|"rust"`) field to `ready` `EngineInfo` (schema first, minor IPC bump); `conformance.py` keys `$engine` and `knownDivergences` on it and falls back to stream detection.
+The app started the Rust engine from `Contents/MacOS/fileidd` behind an `engine.backend` setting while both engines existed. That setting, the Swift fallback and the `engine` identity field in tests are gone.
 
 ### Gates for every stage
 
@@ -247,11 +245,7 @@ Stages 1–4 can overlap once Stage 0 lands; Stages 5–8 depend on the adapter 
 
 ## 4. Retiring the Swift engine
 
-**Done 2026-11-18** (branch `agent/lean-rs`; details in `SWIFT_ENGINE_RETIREMENT.md` §7). `platforms/apple/engine`, `Tests/EngineTests`, `CatalogSchema.swift`, the ONNX Runtime package and the engine-only shared code are deleted; conformance runs one engine against fixtures the Swift engine wrote (`shared/test-corpus/conformance/fixtures/swift-written`); the Rust importers for `trash-journal.json`, `path-moves.ndjson` and headerless `restructure_undo.ndjson` stay and are tested against those fixtures. The text below is the original plan.
-
-Retire when Rust has been the default for a release (or several weeks of the owner's daily use) without rollback; every conformance case passes on Rust on Mac with no darwin divergences; a copy of the owner's real catalog has been opened, mutated and undone by Rust and reopened by the last Swift engine without loss of names, identities, corrections or Undo; every Stage 5–8 metric is within tolerance on the M1 Pro 16 GB, an 8 GB Mac and a newer M-series Mac; the private eval sets are no worse; notarized DMG and App Store sandbox acceptance pass with the privacy and egress gates green.
-
-Then delete the Swift engine code not moved into `FileIDAppleKit`, its GRDB writer and migrations (Rust migrations and `shared/catalog/*.sql` become the only source; `check_catalog_schema.py` keeps checking it), the Swift conformance CI step, and the Swift journal writers once dual-write ends. What stays Swift: the SwiftUI app, `FileIDShared` DTOs, the read-only `ReadStore`, QuickLook thumbnails, the Spotlight indexer, and `FileIDAppleKit` (Vision, ImageIO/VideoToolbox/HEIF, AVFoundation, Speech, PDFKit/textutil, MLX sessions, Trash, Finder tags, bookmarks, FSEvents, IOPM).
+**Done** (`fa8460e6`; branch `agent/lean-rs`, details in `SWIFT_ENGINE_RETIREMENT.md` section 8). `platforms/apple/engine`, `Tests/EngineTests`, `CatalogSchema.swift`, the ONNX Runtime package and the engine-only shared code are deleted. Conformance runs one engine against fixtures the Swift engine wrote (`shared/test-corpus/conformance/fixtures/swift-written`). The Rust importers for `trash-journal.json`, `path-moves.ndjson` and headerless `restructure_undo.ndjson` stay and are tested against those fixtures. What stays Swift: the SwiftUI app, `FileIDShared` DTOs, the read-only `ReadStore`, QuickLook thumbnails, the Spotlight indexer and `FileIDAppleKit`.
 
 ## 5. Risks and owner decisions
 
