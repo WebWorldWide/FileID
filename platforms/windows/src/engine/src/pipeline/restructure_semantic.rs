@@ -119,6 +119,8 @@ fn file_hyperparams() -> Hyperparameters {
         pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
         pass3_max_splits: 5,
         k_nn: 12,
+        oversized_faces: usize::MAX,
+        oversized_min_mean_cosine: 0.0,
     }
 }
 
@@ -474,6 +476,8 @@ fn doc_hyperparams() -> Hyperparameters {
         pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P3", 0.74) + d,
         pass3_max_splits: 5,
         k_nn: 12,
+        oversized_faces: usize::MAX,
+        oversized_min_mean_cosine: 0.0,
     }
 }
 

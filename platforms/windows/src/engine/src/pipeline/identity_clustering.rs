@@ -16,6 +16,25 @@ pub struct Hyperparameters {
     pub pass3_min_mean_cosine: f32,
     pub pass3_max_splits: usize,
     pub k_nn: usize,
+    /// A cluster of at least this many faces has to hold together more tightly than a small one, because a chain of look-alike faces grows large while its centroid drifts to the average face.
+    pub oversized_faces: usize,
+    /// The mean cosine to its centroid a cluster of `oversized_faces` needs to stay whole; the bar rises with size.
+    pub oversized_min_mean_cosine: f32,
+}
+
+/// How much the cohesion bar rises for each tenfold growth of an oversized cluster.
+const COHESION_RISE_PER_DECADE: f32 = 0.05;
+
+impl Hyperparameters {
+    /// The mean cosine to its centroid a cluster of `faces` must keep. A pure identity spreads out as it grows, but a chain
+    /// of look-alikes spreads out faster, so the bar rises with size.
+    pub fn required_mean_cosine(&self, faces: usize) -> f32 {
+        if faces < self.oversized_faces {
+            return self.pass3_min_mean_cosine;
+        }
+        let decades = (faces as f32 / self.oversized_faces as f32).log10();
+        self.pass3_min_mean_cosine.max(self.oversized_min_mean_cosine + COHESION_RISE_PER_DECADE * decades)
+    }
 }
 
 impl Default for Hyperparameters {
@@ -47,6 +66,11 @@ impl Default for Hyperparameters {
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .map(|v| v.clamp(4, 256))
                 .unwrap_or(32),
+            oversized_faces: std::env::var("FILEID_FACE_OVERSIZED_FACES")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .map_or(300, |v| v.max(2)),
+            oversized_min_mean_cosine: env_cos("FILEID_FACE_OVERSIZED_MEAN_COSINE", 0.72),
         }
     }
 }
@@ -391,7 +415,7 @@ fn validate_and_split(
     }
     variance /= cluster.len() as f32;
 
-    let mean_ok = mean >= params.pass3_min_mean_cosine;
+    let mean_ok = mean >= params.required_mean_cosine(cluster.len());
     let var_ok = variance <= params.pass3_variance_threshold;
     if mean_ok && var_ok {
         return vec![cluster];
@@ -557,6 +581,8 @@ mod tests {
             pass3_min_mean_cosine: 0.0,
             pass3_max_splits: 1,
             k_nn: 32,
+            oversized_faces: usize::MAX,
+            oversized_min_mean_cosine: 0.0,
         }
     }
 
@@ -569,6 +595,42 @@ mod tests {
                 .map(|&(idx, similarity)| Neighbor { idx, similarity })
                 .collect()
         }
+    }
+
+    /// Faces all `tilt_degrees` away from one axis and spread evenly around it: neighbours chain into one ring, yet every
+    /// face sits at the same cosine from the centroid, so the spread test never fires.
+    fn ring(count: usize, tilt_degrees: f32) -> Vec<Vec<f32>> {
+        let tilt = tilt_degrees.to_radians();
+        (0..count)
+            .map(|i| {
+                let around = std::f32::consts::TAU * i as f32 / count as f32;
+                unit(vec![tilt.cos(), tilt.sin() * around.cos(), tilt.sin() * around.sin()])
+            })
+            .collect()
+    }
+
+    fn ring_clusters(faces: &[Vec<f32>]) -> usize {
+        let searcher = |i: usize| {
+            let mut hits: Vec<Neighbor> = (0..faces.len())
+                .filter(|&j| j != i)
+                .map(|j| Neighbor { idx: j, similarity: dot(&faces[i], &faces[j]) })
+                .collect();
+            hits.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
+            hits.truncate(17);
+            hits
+        };
+        cluster_with_options(faces, searcher, Hyperparameters::default(), &[], true).cluster_count
+    }
+
+    #[test]
+    fn a_large_chain_of_look_alike_faces_is_split_while_a_tight_one_of_the_same_size_stays_whole() {
+        assert!(ring_clusters(&ring(400, 45.0)) > 1, "a 400-face ring 45 degrees off its axis must split");
+        assert_eq!(ring_clusters(&ring(400, 25.0)), 1, "a tight 400-face identity stays whole");
+    }
+
+    #[test]
+    fn the_same_chain_below_the_oversized_size_is_left_alone() {
+        assert_eq!(ring_clusters(&ring(200, 45.0)), 1);
     }
 
     #[test]
