@@ -161,8 +161,8 @@ pub(crate) fn sample_pool(source: &Path, interval: f64, max_side: u32, directory
 pub(crate) enum SpeechStatus {
     Ready,
     Unavailable,
-    /// The host bundle has no speech usage description, so macOS would end the process on a request (bare engine binary
-    /// outside FileID.app).
+    /// A request would make macOS end the process: the engine is not inside FileID.app, or the app was started from a
+    /// terminal or script, which becomes the process responsible for the request.
     CannotAsk,
 }
 
