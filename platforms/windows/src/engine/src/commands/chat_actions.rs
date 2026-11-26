@@ -485,12 +485,13 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 }
                 action(context, "describeFiles", format!("Describe {things}"), detail)
             } else {
-                let mut proposed = action(
-                    context,
-                    "exportFiles",
-                    format!("Export {things}…"),
-                    format!("Opens File Tools with {things}{qualifiers} selected. Pick a format there; FileID writes new copies and never changes the originals."),
-                );
+                let mut detail = format!("Opens File Tools with {things}{qualifiers} selected. Pick a format there; FileID writes new copies and never changes the originals.");
+                let mut title = format!("Export {things}…");
+                if count > taken {
+                    title = format!("Export the newest {} of {} {}…", count_label(taken), count_label(count), noun(&filter.kinds, count));
+                    let _ = write!(detail, " An export covers at most {} files at a time, so this is the newest {} of {}; ask again for the rest.", count_label(MAX_IDS as i64), count_label(taken), count_label(count));
+                }
+                let mut proposed = action(context, "exportFiles", title, detail);
                 proposed.undo = Some("Originals stay as they are; delete the new copies to undo.".into());
                 proposed
             };
@@ -823,6 +824,24 @@ mod tests {
         let context = context(None, &people, &events, "beach photos");
         let scope = scope(&conn, Some("beach photos"), &context).unwrap().unwrap();
         assert_eq!(scope.filter.ids.as_ref().map(Vec::len), Some(150));
+    }
+
+    #[test]
+    fn an_export_card_for_more_files_than_one_export_takes_says_how_many_it_covers() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10050) \
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) SELECT i,'/lib/p'||i||'.jpg',i,1,0,'image','jpg' FROM n",
+            [],
+        )
+        .unwrap();
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let context = context(None, &people, &events, "Export my photos");
+        let intent = Intent { kind: "exportFiles".into(), scope: Some("my photos".into()), ..Intent::default() };
+        let card = resolve(&conn, &intent, &context).unwrap().actions.remove(0);
+        assert_eq!(card.title, "Export the newest 10,000 of 10,050 photos…");
+        assert!(card.detail.contains("at most 10,000 files at a time"), "{}", card.detail);
+        assert_eq!(card.file_ids.map(|ids| ids.len()), Some(10_000));
     }
 
     #[test]

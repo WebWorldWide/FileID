@@ -703,7 +703,7 @@ pub fn parse_question(text: &str) -> Question {
         question.max_bytes = maximum;
         used.extend(range);
     }
-    let named_folder = question_folder(&words, &raw);
+    let named_folder = question_folder(&words, &raw, !(words.first().is_some_and(|word| word == "whats" || word == "what") && asked_inside(text).is_some()));
     let outside_folder: Vec<String> = words
         .iter()
         .enumerate()
@@ -756,7 +756,7 @@ const COUNT_PEOPLE_TAIL: &[&str] = &[
 const WHO_WORDS: &[&str] = &[
     "who", "whos", "is", "are", "in", "on", "my", "our", "the", "this", "all", "photos", "pictures", "images", "library", "collection", "files",
     "there", "here", "appear", "appears", "appearing", "featured", "shown", "do", "i", "we", "have", "got", "people", "persons", "everyone", "anyone",
-    "named", "unnamed",
+    "named", "unnamed", "most", "often", "frequently", "commonly", "regularly",
 ];
 const LIST_LEADS: &[&str] = &["which", "what", "whats", "list", "show", "give", "tell"];
 
@@ -777,7 +777,7 @@ fn people_ask(words: &[String]) -> Option<&'static str> {
         }
         return (words.get(at).is_some_and(|word| is_people(word)) && words[at + 1..].iter().all(|word| COUNT_PEOPLE_TAIL.contains(word))).then_some("count");
     }
-    let place = words.iter().any(|word| PLACE_WORDS.contains(word)) || words.iter().any(|word| ["everyone", "anyone"].contains(word));
+    let place = words.iter().any(|word| PLACE_WORDS.contains(word) || ["everyone", "anyone", "most", "often", "frequently", "commonly", "regularly"].contains(word));
     if words.iter().any(|word| ["who", "whos", "everyone", "anyone"].contains(word)) && place && words.iter().all(|word| WHO_WORDS.contains(word)) {
         return Some("who");
     }
@@ -995,7 +995,8 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     None
 }
 
-fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::Range<usize>)> {
+/// `name_before_folder_word` lets any name stand before the word folder; "what's in X folder" asks leave that to `asked_inside`.
+fn question_folder(words: &[String], raw: &[&str], name_before_folder_word: bool) -> Option<(String, std::ops::Range<usize>)> {
     for (index, word) in words.iter().enumerate() {
         if !["in", "inside", "under", "from", "of"].contains(&word.as_str()) {
             continue;
@@ -1010,7 +1011,7 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             return Some((cased, index..at + 1));
         }
         let folder_after = words.get(at + 1).is_some_and(|word| word == "folder" || word == "directory");
-        if !folder_after && KNOWN_FOLDERS.contains(&target.as_str())
+        if !folder_after && (name_before_folder_word || KNOWN_FOLDERS.contains(&target.as_str()))
             && let Some(close) = (at + 2..words.len()).take_while(|&k| !FOLDER_NAME_BOUNDARIES.contains(&words[k].as_str())).find(|&k| words[k] == "folder" || words[k] == "directory") {
             let name = raw[at..close].iter().map(|part| original(part)).collect::<Vec<_>>().join(" ");
             return Some((format!("named:{name}"), index..close + 1));
@@ -1421,6 +1422,25 @@ const FILE_WORDS: [&str; 20] = [
     "folder", "folders", "library", "screenshots",
 ];
 
+/// "Summarize what my videos show", "what are they mostly about": a request to digest a whole set, which Chat cannot do.
+/// Returns the leading part that can still be answered ("how many photos do I have") when there is one.
+pub fn summary_ask(text: &str) -> Option<DigestAsk> {
+    let lower = text.to_lowercase();
+    let words: Vec<String> = lower.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|word| !word.is_empty()).map(str::to_owned).collect();
+    let digest = has(&words, &["summarize", "summarise", "summary", "overview"]) || lower.contains("mostly about") || lower.contains("are they about");
+    if !digest {
+        return None;
+    }
+    let split = [" and what ", " and which ", " and tell ", ", and what ", ", what "].iter().filter_map(|marker| lower.find(marker)).min();
+    let head = split.map(|at| text[..at].trim().to_owned()).filter(|head| head.to_lowercase().starts_with("how many"));
+    Some(DigestAsk { answerable_head: head })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DigestAsk {
+    pub answerable_head: Option<String>,
+}
+
 /// A general-assistant question ("what's the weather", "tell me a joke") that names nothing in the library.
 pub fn off_topic(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -1473,9 +1493,10 @@ pub fn asked_inside(text: &str) -> Option<String> {
     let mut at = match words.first().map(String::as_str)? {
         "whats" => 1,
         "what" if words.get(1).is_some_and(|word| word == "is" || word == "are") => 2,
+        "how" if words.get(1).is_some_and(|word| word == "many") && words.get(2).is_some_and(|word| ["files", "items"].contains(&word.as_str())) => 3,
         _ => return None,
     };
-    while words.get(at).is_some_and(|word| word == "all" || word == "everything") {
+    while words.get(at).is_some_and(|word| ["all", "everything", "are", "is", "do", "i", "we", "have", "there"].contains(&word.as_str())) {
         at += 1;
     }
     if !words.get(at).is_some_and(|word| word == "in" || word == "inside") {
@@ -1684,6 +1705,37 @@ mod tests {
         assert_eq!(parse_question("how many files in the Pictures Backup folder").folder.as_deref(), Some("named:Pictures Backup"));
         assert_eq!(parse_question("how many files in the Pictures folder").folder.as_deref(), Some("named:Pictures"));
         assert_eq!(parse_question("how many files in Downloads").folder.as_deref(), Some("named:Downloads"));
+    }
+
+    #[test]
+    fn a_multi_word_folder_name_before_the_word_folder_drops_that_word() {
+        for (text, want) in [
+            ("How many files are in the Google Takeout folder?", "named:Google Takeout"),
+            ("how many photos in my Ryan Homecoming folder", "named:Ryan Homecoming"),
+            ("how many files in the Old Trip Photos directory from 2020", "named:Old Trip Photos"),
+        ] {
+            let question = parse_question(text);
+            assert_eq!(question.folder.as_deref(), Some(want), "{text}");
+            assert!(!question.reduced.to_lowercase().contains("folder"), "{text} → {}", question.reduced);
+        }
+    }
+
+    #[test]
+    fn a_count_of_files_in_a_bare_name_asks_about_that_folder() {
+        assert_eq!(asked_inside("How many files are in File Cabinet?").as_deref(), Some("File Cabinet"));
+        assert_eq!(asked_inside("how many files do I have in the Takeout folder").as_deref(), Some("Takeout"));
+        assert_eq!(asked_inside("how many items are inside Vacation").as_deref(), Some("Vacation"));
+        assert_eq!(asked_inside("how many files are in my library"), None);
+        assert_eq!(asked_inside("how many files are there"), None);
+        assert_eq!(asked_inside("how many videos are in Vacation"), None);
+    }
+
+    #[test]
+    fn a_request_to_digest_a_set_of_files_is_recognised_with_its_answerable_head() {
+        assert_eq!(summary_ask("Summarize what my videos show").map(|ask| ask.answerable_head), Some(None));
+        assert_eq!(summary_ask("How many photos do I have and what are they mostly about?").and_then(|ask| ask.answerable_head).as_deref(), Some("How many photos do I have"));
+        assert_eq!(summary_ask("How many photos do I have?"), None);
+        assert_eq!(summary_ask("What does DSC01691 show?"), None);
     }
 
     #[test]
