@@ -6,11 +6,17 @@ use std::path::Path;
 const SIDECAR_MAX_BYTES: u64 = 1024 * 1024;
 const EARLIEST_CAPTURE_UNIX: f64 = 631_152_000.0;
 
-/// `photoTakenTime` from `<name>.json` or `<name>.supplemental-metadata.json` beside the photo.
+/// `photoTakenTime` from `<name>.json` or `<name>.supplemental-metadata.json` beside the photo. An edited copy (`IMG_1-edited.jpg`) shares the sidecar of the original.
 pub(crate) fn capture_unix(photo: &Path) -> Option<f64> {
     let name = photo.file_name()?.to_str()?;
-    [format!("{name}.supplemental-metadata.json"), format!("{name}.json")]
-        .into_iter()
+    let mut names = vec![name.to_owned()];
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
+    if let Some(original) = stem.strip_suffix("-edited") {
+        names.push(if extension.is_empty() { original.to_owned() } else { format!("{original}.{extension}") });
+    }
+    names
+        .iter()
+        .flat_map(|name| [format!("{name}.supplemental-metadata.json"), format!("{name}.json")])
         .map(|sidecar| photo.with_file_name(sidecar))
         .find_map(|sidecar| photo_taken_time(&sidecar))
 }
@@ -45,6 +51,8 @@ mod tests {
         std::fs::write(dir.join("b.png.json"), r#"{"photoTakenTime":{"timestamp":"1262304000","formatted":"x"}}"#).unwrap();
         assert_eq!(capture_unix(&dir.join("a.png")), Some(1_546_300_800.0));
         assert_eq!(capture_unix(&dir.join("b.png")), Some(1_262_304_000.0));
+        std::fs::write(dir.join("a-edited.png"), b"x").unwrap();
+        assert_eq!(capture_unix(&dir.join("a-edited.png")), Some(1_546_300_800.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
