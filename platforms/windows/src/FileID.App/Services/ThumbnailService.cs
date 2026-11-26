@@ -1,4 +1,4 @@
-﻿// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with an in-process LRU cache and a disk-backed cache under thumbs.cache/. Cache keys hash path+modified-time so a file edit invalidates its thumb; a background queue drains requests so the UI thread never pays the shell-thumbnail cost.
+﻿// Shell thumbnails via IShellItemImageFactory, with an in-process LRU cache over a disk cache under thumbs.cache/. Keys hash path+modified-time so an edit invalidates; a background queue keeps shell-thumbnail cost off the UI thread.
 
 using System;
 using System.Collections.Generic;
@@ -60,7 +60,7 @@ internal sealed class ThumbnailService : IDisposable
         return output.ToArray();
     }
 
-    // Decoded-BitmapImage L1 cache, bounded by a real BYTE budget (not an entry count): each cached BitmapImage holds a DECODED bitmap (~ThumbnailRequestPx² × 4 bytes), so an entry-count cap would really be hundreds of MB of live bitmaps on a large library. Sizing each entry by its decoded cost and capping the total holds the working set bounded across a 50K-file scroll; LRU evicts the coldest thumbnails and a miss just re-decodes (no correctness hit).
+    // Decoded-BitmapImage cache bounded by a byte budget, not an entry count: each entry holds a decoded bitmap (~ThumbnailRequestPx² × 4 bytes), so an entry cap could pin hundreds of MB. LRU evicts the coldest; a miss just re-decodes.
     private const long L1CacheByteBudget = 128L * 1024 * 1024;
     private const long L1CacheByteBudgetHighDpi = 256L * 1024 * 1024;
     /// <summary>Shell and disk work runs on this many drains at once; every BitmapImage is still built on the UI dispatcher.</summary>
@@ -92,7 +92,8 @@ internal sealed class ThumbnailService : IDisposable
     /// <summary>captured at construction time on the UI thread so the worker (running on a thread-pool thread) always has a reliable dispatcher to marshal BitmapImage.SetSourceAsync back to.</summary>
     private readonly Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
 
-    /// <summary>VIDEO thumbnails are NOT produced in-process (the shell / Media Foundation chain native-fast-fails the whole app — see <see cref="VideoExtensions"/>). On an L1+L2 miss for a video we ask the engine to extract a keyframe out-of-process and complete the tile when the <c>thumbnailGenerated</c> event arrives. <see cref="_pendingVideo"/> maps CacheKey to the request's TCS, completed by the engine event (or the timeout) instead of null in <see cref="DrainAsync"/>; <see cref="_requestedVideo"/> holds CacheKeys already asked for this session so a re-scroll never re-sends the (expensive) command, cleared per key once the event lands so a later file edit (new modifiedAt → new key) can re-request. Both are guarded by <see cref="_videoLock"/> (the worker thread enqueues, the engine-event handler on the UI thread completes — two threads).</summary>
+    /// <summary>Videos are never thumbnailed in-process (the shell and Media Foundation chain native-fast-fails the app; see <see cref="VideoExtensions"/>). On an L1+L2 miss the engine extracts a keyframe out-of-process and the <c>thumbnailGenerated</c> event completes the tile.
+    /// <see cref="_pendingVideo"/> maps CacheKey to the request's TCS; <see cref="_requestedVideo"/> holds keys already requested this session so re-scrolling never re-sends the expensive command (cleared per key once the event lands, so an edited file re-requests). Both are guarded by <see cref="_videoLock"/> because the worker thread enqueues and the UI-thread event handler completes.</summary>
     private readonly Dictionary<string, TaskCompletionSource<BitmapImage?>> _pendingVideo = new();
     private readonly HashSet<string> _requestedVideo = new();
     private readonly object _videoLock = new();
@@ -115,7 +116,7 @@ internal sealed class ThumbnailService : IDisposable
             SizeLimit = _requestPx > TilePx ? L1CacheByteBudgetHighDpi : L1CacheByteBudget,
         });
         _queue = CreateRequestChannel();
-        // attach a fault sink so a DrainAsync exception leaves a forensic trail instead of becoming an UnobservedTaskException at GC time.
+        // Fault sink so a DrainAsync exception is logged instead of surfacing as an UnobservedTaskException at GC time.
         for (var i = 0; i < WorkerCount; i++)
         {
             var worker = Task.Run(() => DrainAsync(_cts.Token));
@@ -159,7 +160,7 @@ internal sealed class ThumbnailService : IDisposable
             }
             try
             {
-                // Honor the PER-REQUEST token (a scrolled-away tile cancels its own request), linked with the service token, so the full shell+disk+ decode doesn't run for a tile the user already scrolled past.
+                // Honor the per-request token (a scrolled-away tile cancels its own request) so the shell, disk and decode work doesn't run for a tile the user already passed.
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, req.Cancellation);
                 // No ConfigureAwait(false): the returned BitmapImage is a UI-thread DispatcherObject, so keep the continuation (and the caller's, which sets tile.Thumbnail) on the UI thread.
                 var bmp = await RenderAsync(req.Path, req.ModifiedAt, _videoPixelSize, _requestPx, _uiDispatcher, linked.Token);
@@ -198,7 +199,7 @@ internal sealed class ThumbnailService : IDisposable
         }
     }
 
-    /// <summary>For a VIDEO file that missed L1+L2: registers the request's TCS as PENDING (unresolved until the engine event or the timeout), dedupes per (path,modifiedAt) so the expensive out-of-process extract is requested at most once per session, fires the <c>generateVideoThumbnail</c> command fire-and-forget, and arms a timeout that completes the tile null (placeholder) if no keyframe arrives. Returns true when the request was taken over (caller must NOT complete it); false for non-video, or when the service is disposed.</summary>
+    /// <summary>For a video that missed L1+L2: registers the request's TCS as pending until the engine event or a timeout, requests the out-of-process extract at most once per (path, modifiedAt) per session, and fires <c>generateVideoThumbnail</c> without awaiting it. Returns true when the request was taken over (the caller must not complete it); false for non-video or a disposed service.</summary>
     private bool TryBeginVideoThumbnailRequest(ThumbnailRequest req)
     {
         if (_disposed) return false;
@@ -223,7 +224,7 @@ internal sealed class ThumbnailService : IDisposable
             }
         }
 
-        // Timeout: if no keyframe lands in VideoThumbTimeoutMs, complete the tile null (placeholder) and unregister so the dictionary doesn't grow unbounded. The dedupe set intentionally KEEPS the key so we don't re-hammer the engine for a video it couldn't extract this session.
+        // On timeout complete the tile null (placeholder) and unregister so the dictionary can't grow unbounded. The dedupe set keeps the key so a video the engine couldn't extract isn't re-requested this session.
         _ = ArmVideoTimeoutAsync(key, req.Completion);
         return true;
     }

@@ -1,5 +1,5 @@
-﻿// Shared install-sentinel probe. The engine writes one sentinel per
-// installed model bundle under `%LOCALAPPDATA%\FileID\Models\.sentinels\` as either flat `{id}.installed` or content-hashed `{id}-{hash}.installed` (atomic temp+rename; see engine main.rs handle_prewarm_model). Every app-side "is it installed?" check must match BOTH forms: flat-only probes never saw the hashed sentinels, so an already-installed CUDA runtime pack re-dispatched its prewarm on every Settings load / engine Ready (repeated 0%→100% progress spam with outcome=already_installed).
+﻿// Shared install-sentinel probe. The engine writes one sentinel per model bundle under `%LOCALAPPDATA%\FileID\Models\.sentinels\`, either flat `{id}.installed` or content-hashed `{id}-{hash}.installed`.
+// Every app-side "is it installed?" check must match both forms, or an installed pack re-dispatches its prewarm on every Settings load.
 
 using System;
 using System.IO;
@@ -69,9 +69,9 @@ internal static class SentinelProbe
             "llama_runtime_x64" => TreeContains("llama.cpp", 20_000, "llama-server.exe")
                 && TreeContains("llama.cpp", 20_000, "llama-mtmd-cli.exe")
                 && TreeContains("llama.cpp", 20_000, "mtmd.dll"),
-            // cudnn64_9.dll is the small cuDNN 9 dispatch shim (~260 KB); the real ops live in cudnn_ops64_9.dll / cudnn_cnn64_9.dll. A 1 MB floor made this probe report an installed cuDNN pack as missing (same bug shape as cudart64_12.dll below).
+            // cudnn64_9.dll is a small dispatch shim (~260 KB); a 1 MB floor would report an installed pack as missing.
             "cudnn_runtime_x64" => TreeContains("cudnn", 100_000, "cudnn64_9.dll"),
-            // The CUDA pack also ships the CUDA math runtime the CUDA EP hard-imports (cudart / cublas + cublasLt / cuFFT) plus NVRTC, matching registry.rs's runtime_required_names for the pack. Require all five under packs\cuda or a half-extracted pack reads "installed" and the CUDA EP fails to bind at scan time. cudart64_12.dll is CUDA's small dispatch shim (~540 KB), so a low 100 KB floor guards a truncated stub without rejecting the real one.
+            // The CUDA pack also ships the runtime the CUDA EP hard-imports (cudart, cublas + cublasLt, cuFFT, NVRTC), matching registry.rs's runtime_required_names. Require all five so a half-extracted pack doesn't read as installed. The 100 KB floor rejects truncated stubs without rejecting cudart64_12.dll (~540 KB).
             "ort_cuda_x64" => TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime.dll")
                 && TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime_providers_cuda.dll")
                 && TreeContains(Path.Combine("packs", "cuda"), 100_000, "cudart64_12.dll")
@@ -81,7 +81,7 @@ internal static class SentinelProbe
                 && TreeContains(Path.Combine("packs", "cuda"), 100_000, "nvrtc64_120_0.dll"),
             "ort_openvino_x64" => TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime.dll")
                 && TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime_providers_openvino.dll"),
-            // cudart64_12.dll is CUDA's small runtime shim (~540 KB), NOT a multi-MB math lib: a 1 MB floor here made SentinelProbe report the fully-installed CUDA pack as missing, so the app re-dispatched its prewarm forever (0%→100% "already_installed" spam, then the "installer stopped reporting progress" timeout). Guard against a truncated stub without rejecting the real file.
+            // cudart64_12.dll is a small shim (~540 KB); a 1 MB floor would report an installed pack as missing and re-dispatch its prewarm forever.
             "llama_runtime_cuda_x64" => TreeContains("llama.cpp-cuda", 20_000, "llama-server.exe")
                 && TreeContains("llama.cpp-cuda", 20_000, "llama-mtmd-cli.exe")
                 && TreeContains("llama.cpp-cuda", 20_000, "mtmd.dll")

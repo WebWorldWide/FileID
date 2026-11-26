@@ -1,5 +1,4 @@
-﻿// PathRedactor — strips PII from file paths before they're logged.
-// PRIVACY: every log call site that emits a user file path passes it through here first. Reviewed in every PR per shared/docs/PRIVACY.md.
+﻿// Strips user names from file paths before they are logged; every log site that emits a user path goes through here.
 
 namespace FileID.Services;
 
@@ -22,7 +21,7 @@ internal static class PathRedactor
         {
             return path;
         }
-        // Require an exact-home or separator boundary after the prefix — otherwise `C:\Users\bob` would match `C:\Users\bobby\…` and leak a DIFFERENT user's name as `~by\…`.
+        // Match only at an exact home or separator boundary: `C:\Users\bob` must not match `C:\Users\bobby\…` and leak another user's name.
         if (normalized.StartsWith(s_userProfileNormalized, StringComparison.OrdinalIgnoreCase)
             && (normalized.Length == s_userProfileNormalized.Length
                 || normalized[s_userProfileNormalized.Length] == '\\'))

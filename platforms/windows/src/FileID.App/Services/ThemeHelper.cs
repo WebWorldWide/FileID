@@ -1,6 +1,6 @@
-﻿// ThemeHelper — crash-safe resource lookups from code-behind.
-// WHY: `Application.Current.Resources[key]` (the ResourceDictionary INDEXER) does a full merged-dictionary + active-theme-dictionary traversal and throws KeyNotFoundException when the key is genuinely absent. In code-behind that is a NATIVE FAST-FAIL waiting to happen (it killed SuggestedMergesSheet on theme brushes like TextFillColor*/SubtleFill*, resolved per-element via {ThemeResource}, that are NOT reliably present in Application.Current.Resources). These helpers wrap the indexer so a present resource returns UNCHANGED (full traversal, no visual regression) and a genuine miss yields the fallback plus a one-time warning (so a real missing CUSTOM brush still surfaces in logs). Do NOT use ResourceDictionary.TryGetValue here: it does not traverse merged/theme dictionaries, so it would falsely miss resolvable brushes and regress color.
-// Call on the UI thread (the fallback constructs a DispatcherObject on a genuine miss).
+﻿// Crash-safe resource lookups from code-behind. Application.Current.Resources[key] throws KeyNotFoundException on a genuine miss, which is a native fast-fail in code-behind (it killed SuggestedMergesSheet on theme brushes that are not reliably in Application.Resources).
+// These helpers keep the full merged-dictionary traversal and return a fallback plus a one-time warning on a miss. ResourceDictionary.TryGetValue is not used because it skips merged and theme dictionaries.
+// Call on the UI thread; the fallback constructs a DispatcherObject.
 
 using System;
 using System.Collections.Concurrent;

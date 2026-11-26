@@ -1,5 +1,4 @@
-﻿// ClipSearchService — orchestrates CLIP semantic search.
-// FTS5 fallback returns matching results when the CLIP embedding path isn't available; otherwise the engine reply lights up real semantic search via the IPC round-trip.
+﻿// Orchestrates CLIP semantic search; callers fall back to FTS5 when the embedding path is unavailable.
 
 using System;
 using System.Collections.Concurrent;
@@ -58,7 +57,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("ClipSearchService.OnEngineClientChanged", () =>
         {
-            // This handler can fire after Dispose() — Dispose() detaches the subscription, but a notification already in flight on another thread (tab-nav disposal racing an engine state change) can land here with _disposed already true.
+            // A notification already in flight can arrive after Dispose() detached the subscription.
             if (_disposed) return;
             if (e.PropertyName == nameof(EngineClient.State))
             {
@@ -112,7 +111,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         catch (OperationCanceledException)
         {
             _inflight.TryRemove(queryId, out _);
-            throw; // user-initiated; let it propagate
+            throw;
         }
         catch (Exception ex)
         {
@@ -144,11 +143,11 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
         catch (OperationCanceledException)
         {
-            throw; // user-initiated cancellation
+            throw;
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("respawned", StringComparison.Ordinal))
         {
-            // Surface a clear banner; the caller (LibraryView search) treats null as "fall through to FTS5" so the user still gets results.
+            // The caller (Library search) treats null as "fall through to FTS5", so the user still gets results.
             DebugLog.Warn("[CLIP] embed-await: engine respawned; returning null.");
             LastSearchError = "Search paused while FileID restarts. Try again in a moment.";
             return null;
@@ -248,7 +247,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             {
                 rows.Add(r.Row);
             }
-            // If the store never opened (DB locked/permission/corrupt — see ReadStore.LastOpenError) the query above returns empty with no signal.
+            // An unopened store (see ReadStore.LastOpenError) returns empty with no other signal.
             if (rows.Count == 0 && _store.LastOpenError is { Length: > 0 } storeErr)
             {
                 LastSearchError = storeErr;

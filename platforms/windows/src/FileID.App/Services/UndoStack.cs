@@ -1,4 +1,4 @@
-﻿// UndoStack — command facade over the session ChangeLog.
+﻿// Command facade over the session ChangeLog.
 
 using System;
 using System.ComponentModel;

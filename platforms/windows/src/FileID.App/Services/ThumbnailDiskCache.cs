@@ -1,7 +1,6 @@
-﻿// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
-// Survives app restarts so a rescan of a 50K-tile library doesn't re-render every thumbnail from scratch.
-// Layout: %LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<key>.bin. The 2-hex fanout prevents the OS dir-entry limit at 100K+ thumbnails; SHA256(path|mtime) keying invalidates on file edit; the stored payload is raw bytes (shell thumbnail or original file) that BitmapImage decodes transparently; 500 MB cap with eviction by in-memory LRU (no recurring disk walk); files > 500 KB skip disk (the in-memory LRU still serves them).
-// Concurrency: writes go temp+rename; reads are bare File.Open. The in-memory index keeps (path → size, lastAccessTicks) so eviction doesn't need to re-walk the directory on every cap trip.
+﻿// Persistent on-disk LRU cache of thumbnail bytes under %LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<key>.bin, so a rescan of a large library doesn't re-render every thumbnail.
+// Keys are SHA256(path|mtime), so an edit invalidates the entry. Total size is capped at 500 MB and evicted from an in-memory LRU index (no recurring directory walk); payloads over 500 KB skip disk.
+// Writes go to a temp file then rename; reads open the file directly.
 
 using System;
 using System.Collections.Concurrent;
@@ -46,8 +45,6 @@ internal static class ThumbnailDiskCache
     public static long DiskWrites => Interlocked.Read(ref _diskWrites);
     public static long DiskSweeps => Interlocked.Read(ref _diskSweeps);
     public static long CachedBytes => Interlocked.Read(ref _cachedBytes);
-    public static int IndexedEntries => _index.Count;
-
     internal const int LegacyImagePixelSize = 192;
 
     private static string CacheRoot { get; } = Path.Combine(AppPaths.ThumbsDir, "v1");

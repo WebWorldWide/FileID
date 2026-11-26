@@ -1,5 +1,4 @@
-﻿// Cross-view selection registry.
-// The Windows app builds a fresh LibraryViewModel per tab navigation, so a static global registry is the simplest equivalent — LibraryView publishes its selection here whenever the user changes it; DeepAnalyzeView (and any other tab) reads.
+﻿// Selection shared across views: the app builds a fresh LibraryViewModel per tab navigation, so LibraryView publishes its selection here and other tabs (Deep Analyze) read it.
 
 using System;
 using System.Collections.Generic;

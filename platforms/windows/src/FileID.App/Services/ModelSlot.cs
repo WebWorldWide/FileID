@@ -1,5 +1,4 @@
-﻿// ModelSlot — per-model install state row used by ModelInstallerService.
-// PRIVACY: never makes a network call.
+﻿// Install state for one model row, used by ModelInstallerService.
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -34,7 +33,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
 
     private readonly Func<Task> _installAction;
 
-    /// <summary>Without this, a failure path that wrote to LastError fired PropertyChanged from a worker thread, the welcome sheet's x:Bind propagated it to ErrorLabel.Text, and the TextBlock setter threw RPC_E_WRONG_THREAD (COMException 0x8001010E).</summary>
+    /// <summary>Property changes are marshaled to the UI thread; an x:Bind write from a worker thread throws RPC_E_WRONG_THREAD.</summary>
     private readonly DispatcherQueue? _ui;
 
     public ModelSlot(
@@ -129,7 +128,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
                 CurrentModelKind = null;
                 return;
             }
-            // 100 % event arrived but sentinel missing — engine wrote the sentinel before emitting this event in the happy path, so missing sentinel here means a write failure or a race.
+            // The engine writes the sentinel before emitting the 100% event, so a missing sentinel means a write failure or a race.
             DebugLog.Warn($"[INSTALL] {DisplayLabel} reported 100% but sentinel not present yet — staying Downloading");
         }
         Status = ModelInstallStatus.Downloading;
@@ -189,7 +188,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         var bytesPrev = total * _rateSampleFrac;
         var instant = (bytesNow - bytesPrev) / dt;
 
-        // The previous EMA decayed asymptotically toward zero when `instant == 0` (BytesPerSecond *= 0.7 each sample) but never actually hit zero.
+        // Below the stall threshold the rate and ETA snap to zero; an EMA alone only decays toward it.
         if (instant < StallThresholdBytesPerSecond)
         {
             BytesPerSecond = 0;
@@ -230,7 +229,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
-        // marshal PropertyChanged to UI thread. x:Bind forwards property writes into XAML DispatcherObjects (TextBlock.Text, VisibilityProperty, etc), which throw RPC_E_WRONG_THREAD if invoked from a worker thread.
+        // x:Bind forwards writes into XAML objects, which throw RPC_E_WRONG_THREAD off the UI thread.
         var handler = PropertyChanged;
         if (handler is null) return;
         var args = new PropertyChangedEventArgs(propertyName);

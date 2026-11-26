@@ -1,5 +1,4 @@
-﻿// AppPaths — C# mirror of the Rust engine's `paths.rs`.
-// Engine + app share the same directory layout so a DB written by the engine is reachable by the app's read-only connection without any path-translation logic.
+﻿// Mirrors the Rust engine's `paths.rs` so the app's read-only connection finds the engine's database.
 
 using System.IO;
 
@@ -27,7 +26,7 @@ internal static class AppPaths
             {
                 return beside;
             }
-            // Dev fallback: ../../engine/target/{x86_64,aarch64}-pc-windows-msvc/release/FileIDEngine.exe The platform string varies by target triple; we try both.
+            // Dev fallback: the engine's cargo target directory for this architecture.
             var arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
             string triple = arch == System.Runtime.InteropServices.Architecture.Arm64
                 ? "aarch64-pc-windows-msvc"
@@ -49,7 +48,7 @@ internal static class AppPaths
         }
     }
 
-    // Run-once guard: the app's directory tree does not vanish mid-session, so the CreateDirectory syscalls only need to happen once. This matters most for the DebugLog.Write hot path, which calls EnsureDirectories per line (twice per inbound IPC event via the [APPLY:N] enter/exit lines): without this guard each log line paid ~6 fs syscalls.
+    // DebugLog.Write calls EnsureDirectories per line; the guard avoids a handful of filesystem calls on each.
     private static volatile bool _directoriesEnsured;
 
     public static void EnsureDirectories()

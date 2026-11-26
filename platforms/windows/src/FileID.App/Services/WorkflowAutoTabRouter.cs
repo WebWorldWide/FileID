@@ -1,4 +1,4 @@
-﻿// WorkflowAutoTabRouter — auto-switches the active sidebar tab when pipeline milestones complete (face clustering → People, Deep Analyze → Library), only when the user is still on the tab we'd expect for that workflow, so manual navigation is never overridden.
+﻿// Switches tabs when a pipeline milestone completes (faces to People, Deep Analyze to Library), but only if the user is still on the expected tab.
 
 using System.ComponentModel;
 using FileID.ViewModels;
