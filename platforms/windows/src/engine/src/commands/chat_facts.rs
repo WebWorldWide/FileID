@@ -695,7 +695,8 @@ pub(crate) fn widened_folder(conn: &Connection, folder: Option<String>, root: Op
 
 /// `None` when the catalog has no such folder, so the question is searched as words instead.
 pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
-    let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
+    let folder = widened_folder(conn, Some(format!("named:{name}")), root)?;
+    let filter = Filter { folder, root: root.cloned(), ..Filter::default() };
     let (count, bytes) = totals(conn, &filter)?;
     if count == 0 {
         return Ok(None);
