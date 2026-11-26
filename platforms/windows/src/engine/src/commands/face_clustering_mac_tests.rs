@@ -53,7 +53,7 @@ fn a_clustering_pass_stats_each_photo_once_and_never_under_the_catalog_lock() {
     let database = Arc::new(Mutex::new(conn));
     PROBE.with(|probe| *probe.borrow_mut() = Some(database.clone()));
     STATS.with(|stats| stats.set((0, 0)));
-    let outcome = super::run(&database, &space());
+    let outcome = super::run(&database, &space(), &|| false).unwrap();
     PROBE.with(|probe| *probe.borrow_mut() = None);
     assert!(outcome.error.is_none());
     assert_eq!(STATS.with(std::cell::Cell::get), (6, 0), "(stats, stats made while the writer lock was held)");
@@ -65,7 +65,7 @@ fn presence(conn: &Connection) -> Presence {
 
 fn merge(conn: &mut Connection) -> Result<usize> {
     let presence = presence(conn);
-    auto_merge(conn, &space(), &presence)
+    auto_merge(conn, &space(), &presence, &|| false)
 }
 
 struct Catalog {
@@ -116,7 +116,7 @@ impl Catalog {
 
     fn run(self) -> (Self, Outcome) {
         let database = Arc::new(Mutex::new(self.conn));
-        let outcome = super::run(&database, &space());
+        let outcome = super::run(&database, &space(), &|| false).unwrap();
         let conn = Arc::try_unwrap(database).ok().unwrap().into_inner();
         (Self { conn, dir: self.dir }, outcome)
     }
@@ -661,13 +661,13 @@ fn a_plan_that_would_pass_the_person_limit_writes_nothing() {
     };
     let pool = HashSet::from([1, 2]);
     let tx = catalog.conn.unchecked_transaction().unwrap();
-    let refused = apply(&tx, &plan(&[1, 2]), &pool, &HashSet::new(), 1.0);
+    let refused = apply(&tx, &plan(&[1, 2]), &pool, &HashSet::new(), 1.0, &|| false);
     assert!(refused.is_err(), "8,001 people");
     drop(tx);
     assert_eq!(person_ids(&catalog).len(), MAX_PERSONS - 1);
     assert_eq!(catalog.assignments(), vec![(1, None), (2, None)]);
     let tx = catalog.conn.unchecked_transaction().unwrap();
-    assert_eq!(apply(&tx, &plan(&[1]), &pool, &HashSet::new(), 1.0).unwrap(), MAX_PERSONS as i64, "exactly the limit fits");
+    assert_eq!(apply(&tx, &plan(&[1]), &pool, &HashSet::new(), 1.0, &|| false).unwrap(), MAX_PERSONS as i64, "exactly the limit fits");
 }
 
 #[test]
@@ -683,7 +683,7 @@ fn unnamed_people_left_without_faces_are_cleared_and_do_not_count_toward_the_per
     tx.commit().unwrap();
     let plan = vec![Planned { person: None, faces: vec![1], representative: 1, centroid: decode(&vector(0, 1, 0.0)), radius: 0.1 }];
     let tx = catalog.conn.unchecked_transaction().unwrap();
-    apply(&tx, &plan, &HashSet::from([1]), &HashSet::new(), 1.0).unwrap();
+    apply(&tx, &plan, &HashSet::from([1]), &HashSet::new(), 1.0, &|| false).unwrap();
     tx.commit().unwrap();
     let kept = person_ids(&catalog);
     assert!(kept.contains(&5) && kept.contains(&6), "named and unknown people stay");
@@ -736,7 +736,7 @@ fn one_bridge_face_between_two_look_alike_groups_does_not_join_them() {
     }
     vectors.push(unit_vector(&[(0, 1.0), (1, 1.0), (100, 0.5)]));
     let files: Vec<i64> = (0..vectors.len() as i64).collect();
-    let clusters = cluster(&vectors, &files);
+    let clusters = cluster(&vectors, &files, &|| false).unwrap();
     let group_of = |face: usize| clusters.iter().find(|(_, members)| members.contains(&face)).map(|(id, _)| *id).unwrap();
     assert_ne!(group_of(0), group_of(20), "the two groups stay separate people");
     for member in 1..20 {
@@ -768,7 +768,7 @@ fn scattered_faces(count: usize, identities: usize) -> Vec<Vec<f32>> {
 fn a_large_library_gets_the_exact_nearest_faces_not_an_approximate_set() {
     let vectors = scattered_faces(BRUTE_FORCE_MAX + 200, 90);
     let k = 17;
-    let lists = nearest_lists(&vectors, k);
+    let lists = nearest_lists(&vectors, k, &|| false).unwrap();
     assert_eq!(lists.len(), vectors.len());
     for row in (0..vectors.len()).step_by(23) {
         let mut every: Vec<Neighbor> =
@@ -785,7 +785,7 @@ fn a_large_library_gets_the_exact_nearest_faces_not_an_approximate_set() {
 fn people_found_among_more_faces_than_the_exact_limit_match_a_full_comparison() {
     let vectors = scattered_faces(BRUTE_FORCE_MAX + 200, 90);
     let files: Vec<i64> = (0..vectors.len() as i64).collect();
-    let large = cluster(&vectors, &files);
+    let large = cluster(&vectors, &files, &|| false).unwrap();
     let (params, mutual) = hyperparameters();
     let k = params.k_nn + 1;
     let full = identity_clustering::cluster_with_options(
@@ -809,4 +809,78 @@ fn people_found_among_more_faces_than_the_exact_limit_match_a_full_comparison() 
     }
     let groups = |map: &BTreeMap<usize, Vec<usize>>| -> BTreeSet<Vec<usize>> { map.values().cloned().collect() };
     assert_eq!(groups(&large), groups(&expected));
+}
+
+fn stops_after(polls: &std::sync::atomic::AtomicUsize, allowed: usize) -> impl Fn() -> bool + Sync + '_ {
+    move || polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= allowed
+}
+
+#[test]
+fn a_stop_during_the_neighbour_search_of_a_large_library_is_noticed_within_a_few_checks() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX + 2_000, 90);
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    assert!(cluster(&vectors, &files, &stops_after(&polls, 20)).is_none());
+    assert!(polls.load(std::sync::atomic::Ordering::Relaxed) < 100, "the search kept running after the stop");
+}
+
+#[test]
+fn a_stop_while_every_face_is_compared_with_every_other_gives_no_grouping() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX, 90);
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    assert!(cluster(&vectors, &files, &stops_after(&polls, 20)).is_none());
+}
+
+#[test]
+fn a_stop_while_loose_faces_are_attached_to_people_leaves_them_unattached() {
+    let mut vectors: Vec<Vec<f32>> = (0..6).map(|member| unit_vector(&[(0, 1.0), (10 + member, 0.05)])).collect();
+    vectors.push(unit_vector(&[(0, 1.0), (30, 0.05)]));
+    let (held, files, face_ids): (Vec<bool>, Vec<i64>, Vec<i64>) = (vec![false; 7], (0..7).collect(), (0..7).collect());
+    let different = HashSet::new();
+    let attach = |cancelled: &dyn Fn() -> bool| {
+        let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size: 3, cancelled };
+        attach.run(BTreeMap::from([(0, vec![0, 1, 2, 3, 4, 5])]), &[6])
+    };
+    assert_eq!(attach(&|| false)[&0], vec![0, 1, 2, 3, 4, 5, 6], "the loose face joins the person it looks like");
+    assert_eq!(attach(&|| true)[&0], vec![0, 1, 2, 3, 4, 5], "a stopped pass attaches nothing more");
+}
+
+#[test]
+fn a_stop_while_photos_are_checked_on_disk_is_noticed_between_photos() {
+    let catalog = Catalog::new();
+    for face in 1..=40 {
+        catalog.face(face, (face % 3) as usize, 0.6, None);
+    }
+    let database = Mutex::new(catalog.conn);
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = Presence::build(&database, &stops_after(&polls, 5)).err().expect("the check was stopped");
+    assert!(stopped.is::<Stopped>());
+    assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 6, "no photo was checked after the stop");
+}
+
+#[test]
+fn a_pass_stopped_at_any_point_leaves_the_catalog_untouched_or_fully_grouped() {
+    for allowed in 0..40 {
+        let catalog = Catalog::new();
+        for face in 1..=12 {
+            catalog.face(face, (face % 3) as usize, 0.6, None);
+        }
+        let before = catalog.assignments();
+        let database = Arc::new(Mutex::new(catalog.conn));
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let outcome = super::run(&database, &space(), &stops_after(&polls, allowed));
+        let after: Vec<(i64, Option<i64>)> = {
+            let conn = database.lock();
+            let mut statement = conn.prepare("SELECT id, person_id FROM face_prints ORDER BY id").unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        if outcome.is_none() {
+            let fully_grouped = after.iter().all(|(_, person)| person.is_some());
+            assert!(after == before || fully_grouped, "stopped after {allowed} checks and left a half-written grouping: {after:?}");
+        }
+        if allowed == 0 {
+            assert!(outcome.is_none(), "a pass told to stop before it starts does nothing");
+        }
+    }
 }

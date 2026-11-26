@@ -521,6 +521,7 @@ public struct ScanProgress: Codable, Sendable {
     public let availableMB: Int
     public let postScanOwed: Int?    // postScan only: files the pass has to finish in all
     public let postScanDone: Int?    // postScan only: how many of those are finished
+    public let postScanStep: String? // postScan only: "captureDates" while the one-time capture-date check runs
 
     public init(
         sessionID: String,
@@ -534,7 +535,8 @@ public struct ScanProgress: Codable, Sendable {
         residentMB: Int,
         availableMB: Int,
         postScanOwed: Int? = nil,
-        postScanDone: Int? = nil
+        postScanDone: Int? = nil,
+        postScanStep: String? = nil
     ) {
         self.sessionID = sessionID
         self.phase = phase
@@ -548,6 +550,7 @@ public struct ScanProgress: Codable, Sendable {
         self.availableMB = availableMB
         self.postScanOwed = postScanOwed
         self.postScanDone = postScanDone
+        self.postScanStep = postScanStep
     }
 }
 

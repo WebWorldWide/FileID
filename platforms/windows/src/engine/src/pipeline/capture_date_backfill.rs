@@ -34,22 +34,34 @@ pub(crate) fn catalog_has_rows(conn: &Connection, root: &Path) -> bool {
 }
 
 /// A folder is checked once. The catalog remembers it, so a catalog moved or restored without its state folder is not
-/// read through again; the marker file is what earlier versions left and is read for libraries they checked.
+/// read through again; the marker file is what earlier versions left, and a folder they checked is recorded in the
+/// catalog from it here.
 pub(crate) fn is_done(conn: &Connection, state_dir: &Path, root: &Path) -> bool {
     let recorded: Option<String> = conn
         .query_row("SELECT capture_dates_checked FROM library_roots WHERE path = ?1", [root.to_string_lossy()], |row| row.get(0))
         .unwrap_or(None);
-    recorded.as_deref() == Some(VERSION) || marker(state_dir, root).exists()
+    if recorded.as_deref() == Some(VERSION) {
+        return true;
+    }
+    let marked = marker(state_dir, root).exists();
+    if marked {
+        record_in_catalog(conn, root);
+    }
+    marked
 }
 
-pub(crate) fn mark_done(conn: &Connection, state_dir: &Path, root: &Path) {
-    let marked = conn.execute(
+fn record_in_catalog(conn: &Connection, root: &Path) {
+    let recorded = conn.execute(
         "UPDATE library_roots SET capture_dates_checked = ?1 WHERE path = ?2",
         params![VERSION, root.to_string_lossy()],
     );
-    if let Err(error) = marked {
+    if let Err(error) = recorded {
         tracing::warn!(%error, "could not record the capture-date backfill in the catalog");
     }
+}
+
+pub(crate) fn mark_done(conn: &Connection, state_dir: &Path, root: &Path) {
+    record_in_catalog(conn, root);
     let mark = marker(state_dir, root);
     let written = mark.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&mark, b""));
     if let Err(error) = written {
@@ -356,6 +368,37 @@ mod tests {
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 0, "the marker keeps it to one pass per folder");
         mark_done(&database.lock(), &state, &scratch);
         assert!(marker(&state, &scratch).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn a_catalog_opened_with_its_state_folder_records_the_old_marker_and_does_no_rework() {
+        let scratch = std::env::temp_dir().join(format!("fileid-capture-dates-{}", uuid::Uuid::new_v4()));
+        let (root, state, elsewhere) = (scratch.join("Library"), scratch.join("state"), scratch.join("elsewhere"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("1.jpg");
+        std::fs::write(&path, jpeg_taken_at("2019:07:04 12:00:00", "+00:00", "")).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(1,?1,1,1,0,'image','jpg',1700000000)",
+            params![path.to_str().unwrap()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO library_roots(path,display,kind,added_at) VALUES(?1,?1,'internal',0)", params![root.to_string_lossy()]).unwrap();
+        let marker_file = marker(&state, &root);
+        std::fs::create_dir_all(marker_file.parent().unwrap()).unwrap();
+        std::fs::write(&marker_file, b"").unwrap();
+        let recorded = |conn: &Connection| -> Option<String> {
+            conn.query_row("SELECT capture_dates_checked FROM library_roots", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(recorded(&conn), None);
+        let database = Mutex::new(conn);
+        assert_eq!(run_if_needed(&database, &state, &root, &|| false), 0, "the earlier version already checked this folder");
+        assert_eq!(recorded(&database.lock()).as_deref(), Some(VERSION));
+        assert_eq!(run_if_needed(&database, &elsewhere, &root, &|| false), 0, "the catalog alone now says it was checked");
+        let unchanged: i64 =
+            database.lock().query_row("SELECT COUNT(*) FROM files WHERE created_at = 1700000000", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged, 1);
         std::fs::remove_dir_all(scratch).unwrap();
     }
 

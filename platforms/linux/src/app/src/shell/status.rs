@@ -545,6 +545,7 @@ mod tests {
             available_mb: 8000,
             post_scan_owed: None,
             post_scan_done: None,
+            post_scan_step: None,
         }
     }
 

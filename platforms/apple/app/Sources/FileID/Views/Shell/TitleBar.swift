@@ -341,11 +341,12 @@ struct TitleBar: View {
     private var rows: [ActivityRow] {
         var out: [ActivityRow] = []
         if let p = engine.lastProgress, p.phase != .idle {
-            let work = p.phase == .postScan ? p.postScanWork : nil
+            let dateCheck = p.phase == .postScan ? p.captureDateCheck : nil
+            let work = p.phase == .postScan ? (p.postScanWork ?? dateCheck) : nil
             let frac = work?.fraction ?? (p.total > 0 ? Double(p.processed) / Double(p.total) : (p.phase == .completed ? 1 : 0))
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",
-                                   sub: running ? (work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, "file", "files")) tagged" } ?? "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))") : "\(Plural.noun(p.processed, "file", "files"))",
+                                   sub: running ? (dateCheck.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, "photo or video", "photos and videos")) checked" } ?? work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, "file", "files")) tagged" } ?? "\(p.processed.formatted()) of \(Plural.noun(max(p.total, p.discovered), "file", "files"))") : "\(Plural.noun(p.processed, "file", "files"))",
                                    state: p.phase == .completed ? "Done" : running ? Self.scanStateLabel(p.phase, paused: engine.isPaused, fraction: frac, tagging: work != nil) : Self.phaseLabel(p.phase),
                                    color: p.phase == .completed ? Theme.delight : engine.isPaused ? Theme.text3 : Theme.gold,
                                    progress: running && !engine.isPaused && p.phase != .tagging && work == nil ? nil : frac,

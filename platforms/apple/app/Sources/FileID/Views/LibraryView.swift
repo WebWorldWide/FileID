@@ -481,7 +481,8 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func inFlightHeadline(_ p: ScanProgress) -> some View {
-        let work = p.phase == .postScan ? p.postScanWork : nil
+        let dateCheck = p.phase == .postScan ? p.captureDateCheck : nil
+        let work = p.phase == .postScan ? (p.postScanWork ?? dateCheck) : nil
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: "doc.text.magnifyingglass")
@@ -489,14 +490,15 @@ struct LibraryView: View {
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.phase == .discovering ? "Finding files…"
-                         : p.phase == .tagging ? "Reading files…" : work != nil ? "Adding tags and reading text…" : "Finishing up…")
+                         : p.phase == .tagging ? "Reading files…" : dateCheck != nil ? "Checking capture dates…" : work != nil ? "Adding tags and reading text…" : "Finishing up…")
                         .font(Theme.Font.body(14, .semibold))
-                    Text("Tagging photos and finding faces. You can browse while this runs.")
+                    Text(dateCheck != nil ? "A one-time check of when each photo and video was taken. You can browse while this runs."
+                         : "Tagging photos and finding faces. You can browse while this runs.")
                         .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
-                Text(work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, "file", "files"))" }
+                Text(work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, dateCheck != nil ? "photo or video" : "file", dateCheck != nil ? "photos and videos" : "files"))" }
                      ?? (p.total > 0
                          ? "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))"
                          : "\(p.discovered.formatted()) found so far"))

@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.30.0",
+  "version": "1.31.0",
 
   "$defs": {
     "IPCCommand": {
@@ -920,7 +920,8 @@
               "residentMB":     { "type": "integer", "minimum": 0 },
               "availableMB":    { "type": "integer", "minimum": 0 },
               "postScanOwed":   { "type": "integer", "minimum": 0, "description": "Schema 1.30.0. postScan snapshots only: how many files the post-scan pass has to finish in all (tags and careful text reads left over from the scan). Left out in other phases and by older engines; then total - discovered is not it, so a client that joins mid post-scan has no baseline." },
-              "postScanDone":   { "type": "integer", "minimum": 0, "description": "Schema 1.30.0. postScan snapshots only: how many of postScanOwed are finished; never above it." }
+              "postScanDone":   { "type": "integer", "minimum": 0, "description": "Schema 1.30.0. postScan snapshots only: how many of postScanOwed are finished; never above it." },
+              "postScanStep":    { "type": "string", "description": "Schema 1.31.0. postScan snapshots only: left out while the pass adds tags and reads text; captureDates while it checks the capture dates of photos and videos in a catalog an older version wrote, once per folder. postScanOwed and postScanDone then count those photos and videos." }
             }
           }
         }

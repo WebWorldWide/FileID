@@ -432,6 +432,7 @@ impl ScanSession {
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
         let discovered_cloud_only = handle.cloud_only_count.clone();
+        let discovered_skipped = handle.skipped.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
         let discovered_seen_dirs = handle.seen_dirs.clone();
         let discovery_join = handle.join;
@@ -519,6 +520,7 @@ impl ScanSession {
                     available_mb: 0,
                     post_scan_owed: None,
                     post_scan_done: None,
+                    post_scan_step: None,
                 };
                 lift_for_tick.apply(&mut progress);
                 let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
@@ -557,7 +559,7 @@ impl ScanSession {
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
-        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
+        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone()).with_timeouts_retried(self.retry_round < TIMEOUT_RETRY_ROUNDS);
         let known_twins = {
             let conn = self.db_conn.lock();
             crate::pipeline::twin_reuse::known_image_hashes(&conn, clip_can_embed()).unwrap_or_default()
@@ -829,6 +831,7 @@ impl ScanSession {
                             processed: total + self.carried.0,
                             failed: failed + self.carried.1,
                             lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
+                            step: Some(CAPTURE_DATES_STEP),
                             state: Mutex::new((0, 0, Instant::now())),
                             paused: {
                                 let coordinator = self.coordinator.clone();
@@ -896,6 +899,7 @@ impl ScanSession {
                             processed: total + self.carried.0,
                             failed: failed + self.carried.1,
                             lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
+                            step: None,
                             state: Mutex::new((0, 0, Instant::now())),
                             paused: {
                                 let coordinator = self.coordinator.clone();
@@ -963,6 +967,7 @@ impl ScanSession {
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
             stamp_scan_session_end(&conn, &session_id, completed_unix, total + self.carried.0, final_status);
+            record_skipped(&conn, &session_id, discovered_skipped.summary_json(discovered_cloud_only.load(std::sync::atomic::Ordering::Relaxed)));
             let _ = conn.execute(
                 "UPDATE library_roots SET last_scan_at=?1,last_status=?2 WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?3)",
                 rusqlite::params![completed_unix, final_status, session_id],
@@ -1135,10 +1140,14 @@ struct CatchUpProgress {
     processed: u64,
     failed: u64,
     lift: ProgressLift,
+    /// The `postScanStep` the snapshots carry; `None` for the pass that adds tags and reads text.
+    step: Option<&'static str>,
     /// (owed, done, started); `started` moves forward while paused, so a pause does not drag the rate down.
     state: Mutex<(u64, u64, Instant)>,
     paused: Arc<dyn Fn() -> bool + Send + Sync>,
 }
+
+const CAPTURE_DATES_STEP: &str = "captureDates";
 
 /// How often the post-scan phase repeats its progress while a read is slow, so the app never sees a silent minute.
 const CATCH_UP_HEARTBEAT: Duration = Duration::from_secs(1);
@@ -1195,6 +1204,7 @@ impl CatchUpProgress {
             available_mb: 0,
             post_scan_owed: Some(owed),
             post_scan_done: Some(done.min(owed)),
+            post_scan_step: self.step.map(str::to_owned),
         };
         self.lift.apply(&mut progress);
         progress
@@ -1216,6 +1226,7 @@ fn terminal_progress(session_id: &str, phase: ScanPhase, total: u64, discovered:
         available_mb: 0,
         post_scan_owed: None,
         post_scan_done: None,
+        post_scan_step: None,
     }
 }
 
@@ -1647,6 +1658,11 @@ fn stamp_scan_session_end(conn: &Connection, session_id: &str, completed_unix: f
     );
 }
 
+/// What the walk left out and why, as the JSON `Discovery` summarizes it, for Settings > Recent scans.
+fn record_skipped(conn: &Connection, session_id: &str, skipped: Option<String>) {
+    let _ = conn.execute("UPDATE scan_sessions SET skipped = ?1 WHERE id = ?2", rusqlite::params![skipped, session_id]);
+}
+
 fn should_reconcile_missing_rows(
     cancelled: bool,
     gpu_dead: bool,
@@ -2017,13 +2033,14 @@ fn maybe_emit_progress(
         total,
         discovered: discovered_total,
         processed: stats.processed_total,
-        failed: stats.failed_total,
+        failed: stats.failed_total.saturating_sub(stats.retried_total),
         files_per_second: fps,
         eta_seconds,
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
         post_scan_owed: None,
         post_scan_done: None,
+        post_scan_step: None,
     };
     lift.apply(&mut progress);
     // try_send: progress events are throttled to 10 Hz / 1k files, so a drop is rare and the next emit (within 100 ms) resyncs the UI.
@@ -2257,7 +2274,40 @@ mod tests {
             available_mb: 0,
             post_scan_owed: None,
             post_scan_done: None,
+            post_scan_step: None,
         }
+    }
+
+    #[test]
+    fn the_capture_date_check_names_its_step_and_the_tag_pass_does_not() {
+        let (sink, _events) = Sink::channel_for_test(4);
+        let progress = |step| CatchUpProgress {
+            sink: sink.clone(),
+            session_id: "s".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            lift: ProgressLift::default(),
+            step,
+            state: Mutex::new((8, 2, Instant::now())),
+            paused: Arc::new(|| false),
+        };
+        let checking = progress(Some(CAPTURE_DATES_STEP));
+        let snapshot = checking.snapshot(&checking.state.lock());
+        assert_eq!((snapshot.post_scan_step.as_deref(), snapshot.post_scan_owed, snapshot.post_scan_done), (Some("captureDates"), Some(8), Some(2)));
+        let tagging = progress(None);
+        assert_eq!(tagging.snapshot(&tagging.state.lock()).post_scan_step, None);
+    }
+
+    #[test]
+    fn progress_does_not_show_timed_out_files_that_will_be_read_again_as_failed() {
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let state = Arc::new(Mutex::new(ProgressState::new()));
+        let stats = BatchStats { processed_total: 30, processed_heavy: 30, failed_total: 7, retried_total: 5, ..BatchStats::default() };
+        std::thread::sleep(Duration::from_millis(150));
+        maybe_emit_progress(&sink, &state, "s", &stats, 100, 100, false, &ProgressLift::default());
+        let EventPayload::Progress(progress) = events.try_recv().unwrap().payload else { panic!("expected a progress event") };
+        assert_eq!(progress.inner.failed, 2);
     }
 
     #[test]
@@ -3184,6 +3234,7 @@ mod tests {
             processed: 100,
             failed: 2,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         });
@@ -3221,6 +3272,7 @@ mod tests {
             processed: 10,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         });
@@ -3264,6 +3316,7 @@ mod tests {
             processed: 130_108,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         };
@@ -3299,6 +3352,7 @@ mod tests {
             processed: 10,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((100, 50, Instant::now())),
             paused: Arc::new(move || flag.load(std::sync::atomic::Ordering::Relaxed)),
         });
@@ -3320,6 +3374,7 @@ mod tests {
             processed: 480,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         };
@@ -3342,6 +3397,7 @@ mod tests {
             processed: 10,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         });

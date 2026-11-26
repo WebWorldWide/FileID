@@ -351,6 +351,7 @@ pub(crate) async fn handle_start_scan(
         available_mb: 0,
         post_scan_owed: None,
         post_scan_done: None,
+        post_scan_step: None,
     }))))
     .await;
 
@@ -650,6 +651,34 @@ mod tests {
             floor = (p.total, p.processed);
         }
         assert_eq!(progress.last().unwrap().phase, ScanPhase::Completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_scan_records_what_it_left_out_and_why() {
+        let folder = std::env::temp_dir().join(format!("fileid-skipped-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join(".hidden")).unwrap();
+        std::fs::write(folder.join("note.txt"), "text").unwrap();
+        std::fs::write(folder.join("empty.txt"), "").unwrap();
+        std::fs::write(folder.join(".secret.txt"), "text").unwrap();
+        std::fs::write(folder.join(".hidden").join("inside.txt"), "text").unwrap();
+        std::fs::write(folder.join("Thumbs.db"), "cache").unwrap();
+        std::fs::write(folder.join("movie.part"), "partial").unwrap();
+        let db = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let (sink, _events) = Sink::channel_for_test(4096);
+        let payload = ipc::StartScanPayload {
+            root_path: folder.to_string_lossy().into_owned(),
+            root_bookmark: None,
+            root_display: None,
+            rescan: false,
+            excluded_paths: None,
+        };
+        handle_start_scan(sink, db.clone(), Arc::new(Mutex::new(None)), payload, Arc::new(AtomicBool::new(false)), None, None).await;
+        let _ = std::fs::remove_dir_all(&folder);
+        let recorded: Option<String> =
+            db.lock().query_row("SELECT skipped FROM scan_sessions ORDER BY started_at DESC LIMIT 1", [], |row| row.get(0)).unwrap();
+        let recorded: serde_json::Value = serde_json::from_str(&recorded.expect("the scan recorded its skips")).unwrap();
+        assert_eq!(recorded, serde_json::json!({"hidden": 2, "system": 1, "empty": 1, "unsupported": 1}));
     }
 
     #[cfg(unix)]

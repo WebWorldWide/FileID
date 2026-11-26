@@ -6,9 +6,9 @@ import Testing
 @Suite("Post-scan progress in plain words")
 struct PostScanProgressTests {
     private func progress(total: Int, discovered: Int, processed: Int, eta: Double? = nil, phase: ScanPhase = .postScan,
-                          owed: Int? = nil, done: Int? = nil) -> ScanProgress {
+                          owed: Int? = nil, done: Int? = nil, step: String? = nil) -> ScanProgress {
         ScanProgress(sessionID: "s", phase: phase, total: total, discovered: discovered, processed: processed, failed: 0,
-                     filesPerSecond: 8, etaSeconds: eta, residentMB: 0, availableMB: 0, postScanOwed: owed, postScanDone: done)
+                     filesPerSecond: 8, etaSeconds: eta, residentMB: 0, availableMB: 0, postScanOwed: owed, postScanDone: done, postScanStep: step)
     }
 
     @Test("the work left is the owed and done counts the engine sends, while the scan's own counts stay the library size")
@@ -25,6 +25,17 @@ struct PostScanProgressTests {
         #expect(progress(total: 100, discovered: 100, processed: 100).postScanWork == nil)
         #expect(progress(total: 100, discovered: 100, processed: 100, owed: 0, done: 0).postScanWork == nil)
         #expect(progress(total: 100, discovered: 100, processed: 100, owed: 5, done: 9).postScanWork == PostScanWork(owed: 5, done: 5))
+    }
+
+    @Test("the one-time capture-date check is its own step, not tagging work")
+    func captureDateCheckIsNotTaggingWork() {
+        let check = progress(total: 90_000, discovered: 90_000, processed: 90_000, owed: 90_714, done: 4_000, step: "captureDates")
+        #expect(check.postScanWork == nil)
+        #expect(check.captureDateCheck == PostScanWork(owed: 90_714, done: 4_000))
+        let tagging = progress(total: 90_000, discovered: 90_000, processed: 90_000, owed: 5, done: 1)
+        #expect(tagging.captureDateCheck == nil)
+        let text = PipelineBlock.captureDateCheckDetail(PostScanWork(owed: 90_714, done: 4_000), etaSeconds: nil)
+        #expect(text == "4,000 of 90,714 photos and videos · one time for this folder")
     }
 
     @Test("the sidebar says how many files are done, how many are owed and how long is left")

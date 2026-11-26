@@ -1353,7 +1353,19 @@ struct PostScanWork: Equatable {
 }
 
 extension ScanProgress {
+    static let captureDatesStep = "captureDates"
+
     var postScanWork: PostScanWork? {
+        guard postScanStep != Self.captureDatesStep else { return nil }
+        return countedPostScanWork
+    }
+
+    /// The one-time check of capture dates a catalog from an older version needs; counted in photos and videos, not in tagged files.
+    var captureDateCheck: PostScanWork? {
+        postScanStep == Self.captureDatesStep ? countedPostScanWork : nil
+    }
+
+    private var countedPostScanWork: PostScanWork? {
         guard let owed = postScanOwed, let done = postScanDone, owed > 0 else { return nil }
         return PostScanWork(owed: owed, done: min(owed, done))
     }
