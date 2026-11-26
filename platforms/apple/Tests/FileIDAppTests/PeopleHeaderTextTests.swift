@@ -14,4 +14,9 @@ struct PeopleHeaderTextTests {
         #expect(PeopleHeaderText.countLine(people: 0, unnamed: 0, faces: 12, grouping: false) == "12 faces detected · not grouped yet")
         #expect(PeopleHeaderText.countLine(people: 0, unnamed: 0, faces: 0, grouping: true) == "")
     }
+
+    @Test func theEmptyStateDoesNotTellYouToPressGroupFacesWhileGroupingRuns() {
+        #expect(!PeopleHeaderText.ungroupedMessage(grouping: true).contains("Press"))
+        #expect(PeopleHeaderText.ungroupedMessage(grouping: false).contains("Press Group faces"))
+    }
 }
