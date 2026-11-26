@@ -1493,6 +1493,25 @@ pub fn files_named(text: &str) -> Option<String> {
         .then(|| name.join(" "))
 }
 
+/// The words after the last "in", "inside" or "within" when they could name a folder ("PDFs from 2022 in File Cabinet"); the catalog decides whether one exists.
+pub fn trailing_place(text: &str) -> Option<String> {
+    let raw: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
+    let at = words.iter().rposition(|word| ["in", "inside", "within"].contains(&word.as_str()))? + 1;
+    let mut name: Vec<String> = raw.get(at..)?.iter().map(|word| original(word)).filter(|word| !word.is_empty()).collect();
+    if name.first().is_some_and(|word| ["the", "my", "our"].contains(&word.to_lowercase().as_str())) {
+        name.remove(0);
+    }
+    if name.last().is_some_and(|word| ["folder", "directory"].contains(&word.to_lowercase().as_str())) {
+        name.pop();
+    }
+    let sensible = !name.is_empty()
+        && name.len() <= 5
+        && name.iter().any(|word| word.chars().any(char::is_alphabetic))
+        && !KIND_WORDS.contains(&name[0].to_lowercase().as_str());
+    sensible.then(|| name.join(" "))
+}
+
 const FILE_QUALIFIERS: [&str; 11] = ["the", "my", "of", "all", "any", "many", "more", "new", "old", "large", "big"];
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];

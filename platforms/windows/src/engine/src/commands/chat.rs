@@ -1203,6 +1203,17 @@ fn prepare_turn(
         question.folder = Some(folder);
         plan.query.clear();
     }
+    if question.folder.is_none()
+        && let Some(name) = super::chat_intent::trailing_place(&text)
+        && let Some(folder) = chat_facts::existing_folder(conn, &name, root.as_ref())?
+        && folder.starts_with("named:")
+    {
+        question.folder = Some(folder);
+        let named = name.to_lowercase();
+        if plan.query.split_whitespace().all(|word| named.split_whitespace().any(|part| part == word.to_lowercase())) {
+            plan.query.clear();
+        }
+    }
     question.folder = chat_facts::widened_folder(conn, question.folder.take(), root.as_ref())?;
     let camera = camera.map(|ask| ask.pick).or_else(|| {
         previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())
@@ -2453,6 +2464,22 @@ mod tests {
         let one = ask(&mut conn, "Show the first 1 files that failed");
         assert_eq!(one.hits.len(), 1);
         assert!(one.message.contains("Showing the first 1"), "{}", one.message);
+    }
+
+    #[test]
+    fn a_folder_named_after_in_is_answered_as_that_folder_not_as_a_keyword() {
+        let mut conn = adlon_like_readable();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES
+             (30,'/lib/File Cabinet/a.pdf',30,10,1640995200,0,'pdf','pdf'),
+             (31,'/lib/File Cabinet/b.pdf',31,10,1640995300,0,'pdf','pdf'),
+             (32,'/lib/Other/File Cabinet Notes.pdf',32,10,1640995400,0,'pdf','pdf');",
+        )
+        .unwrap();
+        let answer = ask(&mut conn, "How many PDFs are in File Cabinet?");
+        assert_eq!(answer.hits.len(), 2, "{}", answer.message);
+        assert!(!answer.message.contains("matching"), "{}", answer.message);
+        assert!(answer.message.contains("File Cabinet"), "{}", answer.message);
     }
 
     #[test]
