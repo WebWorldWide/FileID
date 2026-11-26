@@ -1,4 +1,4 @@
-// Two-pass density clustering + quality validation for face identity (replaces Chinese Whispers, which collapsed bridge faces into mega-clusters).
+// Two-pass density clustering + quality validation for face identity.
 // Pass 1: connected components on a kNN graph at cosine ≥ pass1Cosine; size ≥ 2 become cores. Pass 2: each unassigned face joins its nearest core iff cosine ≥ pass2Cosine AND (top1 − top2 ≥ pass2Margin); the margin blocks bridge-face merges. Pass 3: clusters with low mean intra-cosine or high variance are split via 2-means and re-validated.
 
 use std::collections::{HashMap, HashSet};

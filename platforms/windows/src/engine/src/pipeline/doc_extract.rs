@@ -33,7 +33,7 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = match ext.as_str() {
-        // Plain text: notes + source code + prose markup (lockstep with macOS FileTypes.code).
+        // Plain text: notes + source code + prose markup.
         "txt" | "md" | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
         | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
         | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua" | "dart"
@@ -126,10 +126,8 @@ fn extract_pdf_text(path: &Path) -> Result<String> {
     use pdfium_render::prelude::Pdfium;
 
     let p = crate::util::path_safety::to_extended_length(path);
-    // Pdfium::default() unwraps the bind result and panics on a missing
-    // pdfium.dll — taking the entire engine down per OS LoadLibrary error
-    // 126. Bind explicitly so a missing/broken DLL becomes a per-file Err
-    // that the caller (extract() above) silently turns into "no PDF text".
+    // Pdfium::default() panics on a missing pdfium.dll. Bind explicitly so a
+    // missing or broken DLL becomes a per-file Err, which extract() treats as "no PDF text".
     let bindings = Pdfium::bind_to_system_library()
         .map_err(|e| anyhow::anyhow!("pdfium bind: {e}"))?;
     let pdfium = Pdfium::new(bindings);
@@ -345,7 +343,7 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
     Ok(out)
 }
 
-/// EPUB → text: the tag-stripped text of its (x)html members in sorted reading order, bounded like the OOXML globs. Mirrors the macOS `DocText.epubText`.
+/// EPUB → text: the tag-stripped text of its (x)html members in sorted reading order, bounded like the OOXML globs.
 fn extract_epub(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
     if let Some(b) = bytes {
         extract_epub_inner(Cursor::new(b), path)
@@ -398,7 +396,7 @@ fn extract_epub_inner<R: Read + Seek>(reader: R, path: &Path) -> Result<String> 
     Ok(out)
 }
 
-/// Strips XML/HTML tags (each becomes a space) and collapses whitespace. Leaves entities (`&amp;`) as-is, matching the macOS `epubText` regex strip.
+/// Strips XML/HTML tags (each becomes a space) and collapses whitespace. Leaves entities (`&amp;`) as-is.
 fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
@@ -648,7 +646,7 @@ mod tests {
     }
     #[test]
     fn xml_text_runs_resolves_entities() {
-        // Guards the quick-xml 0.41 migration: text runs must still be entity-decoded (predefined + numeric).
+        // Text runs must be entity-decoded (predefined + numeric).
         let xml = r"<root><w:t>Tom &amp; Jerry &#8217;s day &lt;3</w:t></root>";
         let out = xml_text_runs(xml, &["w:t"]);
         assert_eq!(out.trim(), "Tom & Jerry \u{2019}s day <3");
@@ -748,8 +746,8 @@ mod tests {
     #[test]
     fn truncate_handles_cut_inside_multibyte_char() {
         // 3-byte chars: MAX_TEXT_BYTES (262144) % 3 == 1, so the byte cut
-        // always lands mid-char — the case that used to panic in
-        // String::truncate before the boundary clamp.
+        // always lands mid-char, which would panic in String::truncate without
+        // the boundary clamp.
         let s = "夏".repeat(100_000);
         let truncated = truncate_to_max(s);
         assert!(truncated.len() <= MAX_TEXT_BYTES);

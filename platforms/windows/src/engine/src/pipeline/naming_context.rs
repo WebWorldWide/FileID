@@ -1,7 +1,6 @@
 //! Reviewed evidence a smart name may use, read live and validated again at
-//! commit. Lockstep with macOS `CatalogNamingContext.swift`: anything stale,
-//! ignored, unknown, malformed or incompatible is left out, and a source that
-//! changed on disk fails the load so the namer abstains.
+//! commit. Anything stale, ignored, unknown, malformed or incompatible is left out,
+//! and a source that changed on disk fails the load so the namer abstains.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -236,7 +235,7 @@ impl NamingContext {
     }
 }
 
-/// Organize Folders: a reviewed label's name replaces the stored model name; any load failure or abstention keeps it (macOS `Restructure.swift`).
+/// Organize Folders: a reviewed label's name replaces the stored model name; any load failure or abstention keeps it.
 pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
     let labelled = match labelled_files(conn, files) {
         Ok(ids) if !ids.is_empty() => ids,

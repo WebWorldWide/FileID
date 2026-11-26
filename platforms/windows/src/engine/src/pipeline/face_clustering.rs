@@ -1937,7 +1937,7 @@ pub fn solo_quality_floor() -> f32 {
         .unwrap_or(0.40)
 }
 
-/// Drop junk micro-clusters so the People tab isn't flooded with singleton/doubleton persons built from unrecognizable faces. Never merges clusters: it only suppresses low-confidence lone faces. `solo_quality_floor <= 0` keeps every cluster. Mirrors `FaceClustering.swift`'s `suppressLowQualityClusters`.
+/// Drop junk micro-clusters so the People tab isn't flooded with singleton/doubleton persons built from unrecognizable faces. Never merges clusters: it only suppresses low-confidence lone faces. `solo_quality_floor <= 0` keeps every cluster.
 #[cfg(test)]
 pub fn suppress_low_quality_micro_clusters(
     faces: &[FaceRow],

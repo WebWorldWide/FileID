@@ -1,5 +1,4 @@
 //! CIPA DC-007 (MPF) large thumbnail of a camera JPEG. Decoding it skips the entropy decode that bounds full-frame scans.
-//! Same rules as macOS `JPEGPreview.swift`, measured against full decodes.
 
 const LARGE_THUMBNAIL_TYPES: [u32; 2] = [0x0001_0001, 0x0001_0002];
 pub const MAX_PREVIEW_BYTES: usize = 8 << 20;
