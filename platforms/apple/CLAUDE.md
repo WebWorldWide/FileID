@@ -14,7 +14,7 @@ Newline-delimited JSON over stdin/stdout between the app and its engine (the eng
 - `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (C interface in `adapters/include/fileid_apple.h`), in Developer ID and App Store (`-DFILEID_APP_STORE`, child of the sandboxed app via `FileIDEngineAppStore.entitlements`) builds alike.
 - `Tests/` — Swift Testing (Shared, AppleKit and App suites); engine behaviour is covered by Rust tests and `shared/scripts/conformance.py`. `scripts/iterate.sh` — corpus regression harness against `fileidd`.
 
-Storage: SQLite WAL written only by the Rust engine (migrations in `../windows/src/engine/src/db/migrations.rs` and `shared/catalog/*.sql`, schema v36, one chain for every platform); the app reads it through GRDB.swift (`ReadStore`). Not SwiftData.
+Storage: SQLite WAL written only by the Rust engine (migrations in `../windows/src/engine/src/db/migrations.rs` and `shared/catalog/*.sql`, schema v41, one chain for every platform); the app reads it through GRDB.swift (`ReadStore`). Not SwiftData.
 
 ## Tabs
 
