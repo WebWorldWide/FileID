@@ -64,7 +64,9 @@ fn asks_beyond_the_catalog(text: &str, words: &[String]) -> bool {
     let compares_names = words.windows(2).any(|pair| ["same", "similar"].contains(&pair[0].as_str()) && ["name", "names", "filename", "filenames"].contains(&pair[1].as_str()));
     let aggregates = words.iter().any(|word| ["average", "median", "compare", "versus", "vs"].contains(&word.as_str()));
     let explains = words.first().is_some_and(|word| word == "why") && !super::chat_intent::unreadable_ask(text);
-    compares_names || aggregates || explains
+    let counts_folders = words.windows(2).any(|pair| pair == ["how", "many"]) && words.iter().any(|word| ["folders", "directories"].contains(&word.as_str()))
+        && !words.iter().all(|word| super::chat_intent::PLAIN_FOLDER_COUNT_WORDS.contains(&word.as_str()));
+    compares_names || aggregates || explains || counts_folders
 }
 
 fn asks_about_video_length(words: &[String]) -> bool {

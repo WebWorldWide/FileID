@@ -143,3 +143,26 @@ fn the_rename_card_and_library_smart_names_use_one_style() {
     assert!(library_name.chars().all(|c| c.is_lowercase() || c == '-' || c == '.' || c == '_' || c.is_ascii_digit()), "{library_name}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_folder_question_with_a_condition_is_not_answered_with_the_plain_folder_count() {
+    let mut conn = library();
+    assert!(ask(&mut conn, "How many folders do I have?").message.starts_with("Your library has"));
+    for question in ["How many folders have photos?", "How many folders are empty?", "How many folders have more than 100 files?"] {
+        assert!(ask(&mut conn, question).message.starts_with("I can't answer that"), "{question}");
+    }
+}
+
+#[test]
+fn a_location_question_may_name_the_file_with_its_extension() {
+    let mut conn = library();
+    let answer = ask(&mut conn, "Where was DSC02097.jpg taken?").message;
+    assert!(answer.contains("has a location recorded"), "{answer}");
+    assert!(ask(&mut conn, "Where was DSC02096.jpg taken?").message.contains("no location recorded"));
+}
+
+#[test]
+fn a_model_answer_that_is_only_the_no_action_sentence_is_kept() {
+    let (prose, _) = model_proposals("No action is requested.");
+    assert_eq!(prose, "No action is requested.");
+}

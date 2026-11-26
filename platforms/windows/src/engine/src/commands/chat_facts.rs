@@ -940,6 +940,13 @@ pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&R
     })
 }
 
+fn file_stem_of_word(word: &str) -> &str {
+    match word.rsplit_once('.') {
+        Some((stem, extension)) if !extension.is_empty() && extension.len() <= 5 && extension.chars().all(|c| c.is_ascii_alphanumeric()) => stem,
+        _ => word.trim_end_matches('.'),
+    }
+}
+
 /// "Where was DSC02096 taken?": the position stored for the file a question names by its stem; `None` when it names no file-like word.
 pub(crate) fn file_location_answer(conn: &Connection, text: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let within = super::roots::clause("f.path_text", "?2");
@@ -947,7 +954,7 @@ pub(crate) fn file_location_answer(conn: &Connection, text: &str, root: Option<&
         "SELECT f.id,f.path_text,f.location_lat,f.location_lon FROM files f WHERE f.failed=0 AND lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {within} ORDER BY f.path_text LIMIT 20"
     ))?;
     let mut missing = None;
-    for stem in text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')) {
+    for stem in text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.')).map(file_stem_of_word) {
         if stem.len() < 5 || !stem.chars().any(|c| c.is_ascii_digit()) || !stem.chars().any(|c| c.is_alphabetic()) {
             continue;
         }

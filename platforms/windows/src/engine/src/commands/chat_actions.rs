@@ -745,7 +745,7 @@ fn without_no_action_sentence(prose: &str) -> String {
         let sentence_start = prose.trim_end_matches(['.', '!']).rfind(['.', '!', '\n']).map_or(0, |at| at + 1);
         let sentence = prose[sentence_start..].trim().to_lowercase();
         let says_nothing_to_do = sentence.starts_with("no action") && ["request", "propos", "needed", "required", "necessary"].iter().any(|word| sentence.contains(word));
-        if !says_nothing_to_do {
+        if !says_nothing_to_do || sentence_start == 0 {
             return prose.to_owned();
         }
         prose = prose[..sentence_start].trim_end();

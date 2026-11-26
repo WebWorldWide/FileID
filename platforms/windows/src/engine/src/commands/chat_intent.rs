@@ -953,6 +953,11 @@ const OVERVIEW_WORDS: [&str; 26] = [
     "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got",
 ];
 
+pub(super) const PLAIN_FOLDER_COUNT_WORDS: &[&str] = &[
+    "how", "many", "number", "of", "folder", "folders", "directory", "directories", "do", "i", "we", "have", "got", "are", "there", "in", "my", "the", "our",
+    "library", "collection", "total", "altogether", "does", "contain", "hold", "it", "what", "is",
+];
+
 fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     let words: Vec<String> = words.iter().filter(|word| !word.is_empty()).cloned().collect();
     if words.is_empty() {
@@ -974,10 +979,9 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
                 return Some(("overview", "newest"));
             }
     let how_many = words.windows(2).any(|pair| pair == ["how", "many"] || pair == ["number", "of"]);
-    if has(&words, &["folder", "folders", "directory", "directories"])
-        && how_many
-        && !has(&words, &["inside", "under", "from"])
-        && (!has(&words, &["in"]) || has(&words, &["library", "collection"]))
+    if how_many
+        && has(&words, &["folder", "folders", "directory", "directories"])
+        && words.iter().all(|word| PLAIN_FOLDER_COUNT_WORDS.contains(&word.as_str()))
     {
         return Some(("folder_count", "newest"));
     }
