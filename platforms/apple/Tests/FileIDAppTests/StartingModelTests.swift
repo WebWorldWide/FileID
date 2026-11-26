@@ -11,8 +11,10 @@ struct StartingModelTests {
     }
 
     @Test func aDownloadedRecommendationIsPickedEvenWhenDiskIsTight() {
+        let tight = AIModelKind.qwen3VL4B.requiredFreeBytes + 1
+        #expect(AIModelKind.safeDefaultFor(ramGB: 16, freeDiskBytes: tight) != .qwen3VL8B)
         let kind = DeepAnalyzeSettings.startingModel(
-            persistedRawValue: nil, ramGB: 16, freeDiskBytes: 0, isInstalled: { $0 == .qwen3VL8B })
+            persistedRawValue: nil, ramGB: 16, freeDiskBytes: tight, isInstalled: { $0 == .qwen3VL8B })
         #expect(kind == .qwen3VL8B)
     }
 
