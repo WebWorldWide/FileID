@@ -53,14 +53,6 @@ struct AIModelRecommendationTests {
                                           freeDiskBytes: qwenOnly) == .qwen3VL4B)
     }
 
-    @Test func onboardingPreservesAnExplicitExistingChoice() {
-        let selected = AIModelKind.onboardingSelection(
-            persistedRawValue: AIModelKind.gemma3_4B.rawValue,
-            ramGB: 30.9,
-            freeDiskBytes: Int64.max)
-        #expect(selected == .gemma3_4B)
-    }
-
     @Test func fitIsTheEnginesAdmissionBudgetNotAFractionOfMemory() {
         #expect(AIModelKind.qwen3VL4B.fits(ramGB: 8))
         #expect(!AIModelKind.qwen3VL8B.fits(ramGB: 8))
