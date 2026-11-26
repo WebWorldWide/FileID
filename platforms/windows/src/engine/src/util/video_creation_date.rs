@@ -1,23 +1,31 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use super::video_container_dates as container_dates;
+
 const SECONDS_1904_TO_1970: u64 = 2_082_844_800;
 const MIN_PLAUSIBLE_UNIX: f64 = 631_152_000.0;
 const MAX_TOP_LEVEL_BOXES: usize = 4096;
 const MAX_MOOV_CHILDREN: usize = 256;
 const BOX_TYPES_AT_FILE_START: [&[u8; 4]; 8] = [b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot", b"junk"];
 
-/// When an MP4, MOV, M4V or 3GP file was shot, as Unix seconds. Apple devices write the capture time to
-/// `moov/meta` as `com.apple.quicktime.creationdate`; the movie header's creation time (`moov/mvhd`, ffprobe's
-/// `creation_time`) is the export time there, so the Apple key wins and the header is the fallback. Other
-/// containers, an unset clock (0), a pre-1990 reset or a future date yield None.
+/// When a video file was shot, as Unix seconds. Apple devices write the capture time to `moov/meta` as
+/// `com.apple.quicktime.creationdate` in MP4, MOV, M4V and 3GP files; the movie header's creation time (`moov/mvhd`,
+/// ffprobe's `creation_time`) is the export time there, so the Apple key wins and the header is the fallback.
+/// WMV and ASF, AVI and Matroska carry their own dates. MPEG program and transport streams carry none. An unset
+/// clock (0), a pre-1990 reset or a future date yield None.
 pub(crate) fn container_creation_unix(path: &Path) -> Option<f64> {
     let mut file = std::fs::File::open(crate::util::path_safety::to_extended_length(path)).ok()?;
     let length = file.metadata().ok()?.len();
-    let (apple, header) = movie_dates(&mut file, length)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
     let plausible = |unix: &f64| *unix >= MIN_PLAUSIBLE_UNIX && *unix <= now + 86_400.0;
-    apple.filter(plausible).or(header.filter(plausible))
+    let (apple, header) = movie_dates(&mut file, length).unwrap_or_default();
+    apple.filter(plausible).or(header.filter(plausible)).or_else(|| {
+        container_dates::asf_creation(&mut file, length)
+            .or_else(|| container_dates::avi_creation(&mut file, length))
+            .or_else(|| container_dates::matroska_creation(&mut file, length))
+            .filter(plausible)
+    })
 }
 
 const APPLE_CREATION_KEY: &[u8] = b"com.apple.quicktime.creationdate";
@@ -61,11 +69,17 @@ fn mvhd_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option
                 }
                 _ => return None,
             };
-            return seconds.checked_sub(SECONDS_1904_TO_1970).map(|unix| unix as f64);
+            return (seconds != 0).then(|| movie_header_unix(seconds));
         }
         at = next;
     }
     None
+}
+
+/// The header counts seconds since 1904, so no real clip has a value below the 1904-to-1970 offset. Some muxers
+/// (3gp4 among them) write plain Unix seconds instead, and those values are taken as they are.
+fn movie_header_unix(seconds: u64) -> f64 {
+    seconds.checked_sub(SECONDS_1904_TO_1970).unwrap_or(seconds) as f64
 }
 
 fn apple_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option<f64> {
@@ -267,6 +281,25 @@ pub(crate) mod tests {
     #[test]
     fn an_unset_clock_is_not_a_date() {
         assert_eq!(read(&mp4(true, mvhd_v0(0))), None);
+    }
+
+    #[test]
+    fn a_header_written_in_unix_seconds_is_read_as_unix_seconds() {
+        let shot = 1_387_504_826;
+        assert_eq!(read(&mp4(true, mvhd_v0(shot))), Some(f64::from(shot)));
+        assert_eq!(read(&mp4(true, mvhd_v1(u64::from(shot)))), Some(f64::from(shot)));
+    }
+
+    #[test]
+    fn a_header_at_the_unix_epoch_is_not_a_date() {
+        for header in [mvhd_v0(SECONDS_1904_TO_1970 as u32), mvhd_v1(SECONDS_1904_TO_1970)] {
+            let dir = std::env::temp_dir().join(format!("fileid-video-epoch-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("epoch.mp4");
+            std::fs::write(&path, mp4(true, header)).unwrap();
+            assert_eq!(container_creation_unix(&path), None);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

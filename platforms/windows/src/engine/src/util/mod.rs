@@ -1,5 +1,6 @@
 pub mod content_hash;
 pub(crate) mod jpeg_complete;
+pub(crate) mod video_container_dates;
 pub(crate) mod video_creation_date;
 pub mod display;
 pub mod user_message;
@@ -31,6 +32,9 @@ pub(crate) fn catalog_unix_seconds(time: std::time::SystemTime) -> Option<f64> {
 /// A capture or creation date later than this many seconds after now is a clock or metadata error (a camera that was never set, a drive
 /// that stamps 2040), not when the file was made. A day of slack covers time zones and a fast clock.
 pub(crate) const FUTURE_DATE_SLACK_SECONDS: f64 = 86_400.0;
+
+/// FAT and exFAT volumes report 1 January 1980 for a file with no date, so no file-system date before 1981 is real.
+pub(crate) const EARLIEST_FILE_SYSTEM_DATE_UNIX: f64 = 347_155_200.0;
 
 /// The date, unless it lies in the future.
 pub(crate) fn not_in_the_future(time: f64, now: f64) -> Option<f64> {

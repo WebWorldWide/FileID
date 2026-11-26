@@ -7,6 +7,7 @@ import FileIDShared
 @Suite("Library sort", .serialized)
 struct LibrarySortTests {
     private static let rowCount = 5_000
+    private static let firstDate = 1_000_000_000.0
     private static let kinds = ["image", "video", "pdf", "doc", "audio", "other"]
 
     private struct Fixture {
@@ -39,8 +40,8 @@ struct LibrarySortTests {
                 let id = Int64(i)
                 let folder = "/m/Photos/\(["Zeta", "alpha", "Mid"][i % 3])/\(i % 7)"
                 let name = "IMG \(String(format: "%04d", (i * 37) % 997)) \(i).jpg"
-                let taken: Double? = futureIDs.contains(id) ? Date().timeIntervalSince1970 + 15 * 365 * 86_400 : i % 11 == 0 ? nil : Double((i * 7919) % 100_003)
-                let modified: Double? = i % 11 == 0 ? (i % 22 == 0 ? nil : Double(i)) : nil
+                let taken: Double? = futureIDs.contains(id) ? Date().timeIntervalSince1970 + 15 * 365 * 86_400 : i % 11 == 0 ? nil : Double((i * 7919) % 100_003) + Self.firstDate
+                let modified: Double? = i % 11 == 0 ? (i % 22 == 0 ? nil : Double(i) + Self.firstDate) : nil
                 try db.execute(sql: """
                     INSERT INTO files(id, path_text, path_search, size_bytes, created_at, modified_at, scanned_at, kind, extension)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'jpg')
@@ -197,11 +198,23 @@ struct LibrarySortTests {
     @Test func aCaptureDateInTheFutureIsNotShown() {
         let future = Date().addingTimeInterval(15 * 365 * 86_400)
         #expect(row(id: 1, taken: future, added: Date()).displayDate == nil)
-        #expect(row(id: 2, taken: Date(timeIntervalSince1970: 1_000), added: Date()).displayDate == Date(timeIntervalSince1970: 1_000))
+        #expect(row(id: 2, taken: Date(timeIntervalSince1970: 1_500_000_000), added: Date()).displayDate == Date(timeIntervalSince1970: 1_500_000_000))
+    }
+
+    @Test func theFatZeroDateIsNotShownAsADate() {
+        let fatZero = Date(timeIntervalSince1970: 315_532_800)
+        let real = Date(timeIntervalSince1970: 1_500_000_000)
+        func file(taken: Date?, modified: Date?) -> FileRow {
+            FileRow(id: 1, pathText: "/a/x.jpg", sizeBytes: 1, createdAt: taken, modifiedAt: modified, scannedAt: Date(), kind: "image", extension: "jpg",
+                    phash: nil, aesthetic: nil, hasFaces: false, hasText: false, cameraModel: nil, locationLat: nil, locationLon: nil, failed: false, errorMessage: nil)
+        }
+        #expect(file(taken: fatZero, modified: fatZero).displayDate == nil)
+        #expect(file(taken: fatZero, modified: nil).displayDate == nil)
+        #expect(file(taken: fatZero, modified: real).displayDate == real)
     }
 
     @Test func dateAddedShowsWhenItWasAddedAndOtherSortsShowTheCaptureDate() {
-        let taken = Date(timeIntervalSince1970: 1_000), added = Date(timeIntervalSince1970: 9_000)
+        let taken = Date(timeIntervalSince1970: 1_500_000_000), added = Date(timeIntervalSince1970: 1_600_000_000)
         let file = row(id: 1, taken: taken, added: added)
         #expect(LibrarySort(key: .dateAdded, ascending: false).shownDate(of: file) == added)
         #expect(LibrarySort(key: .dateTaken, ascending: false).shownDate(of: file) == file.displayDate)

@@ -2046,7 +2046,9 @@ private struct InlineMediaPlayer: View {
             } else if failed {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle").font(.system(size: 28)).foregroundStyle(Theme.warning)
-                    Text("This file can’t be played on this Mac.").font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                    Text(isAudio ? "This file can’t be played on this Mac." : "This video can’t be played on this Mac, so FileID has no preview of it.")
+                        .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                        .multilineTextAlignment(.center)
                 }
             } else {
                 ProgressView().controlSize(.small)
