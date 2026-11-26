@@ -122,7 +122,8 @@ enum Command {
 
     /// List (or, with `--apply`, remove) duplicate / near-duplicate groups.
     ///
-    /// Listing is read-only. `--apply` keeps the first file of each group and
+    /// Listing is read-only. `--apply` keeps one file of each group (for exact
+    /// duplicates the original: not a copy by name, then the oldest) and
     /// removes the rest — to the Recycle Bin / Trash by default (recoverable;
     /// Windows + Linux), or permanently with `--delete`. SAFE: nothing is
     /// removed without `--apply`, and `--apply` prompts unless `--yes`.
@@ -136,9 +137,9 @@ enum Command {
         /// Group near-duplicates by perceptual-hash Hamming distance.
         #[arg(long)]
         similar: bool,
-        /// Near-dup Hamming threshold (bits, 0–16).
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(0..=16))]
-        threshold: u32,
+        /// Near-dup Hamming threshold with `--similar` (bits, 0–16; default 8).
+        #[arg(long, requires = "similar", value_parser = clap::value_parser!(u32).range(0..=16))]
+        threshold: Option<u32>,
         /// Remove duplicates (keep one per group). Destructive — see `--delete`.
         #[arg(long)]
         apply: bool,
@@ -367,7 +368,16 @@ fn run() -> ExitCode {
             dry_run,
             delete,
             yes,
-        } => dedupe::run(&ctx, exact, similar, threshold, apply, dry_run, delete, yes),
+        } => dedupe::run(
+            &ctx,
+            exact,
+            similar,
+            threshold.unwrap_or(dedupe::DEFAULT_SIMILAR_THRESHOLD),
+            apply,
+            dry_run,
+            delete,
+            yes,
+        ),
         Command::Restructure {
             plan,
             apply,
@@ -435,6 +445,13 @@ mod tests {
         assert!(is_stdout_closed_panic(&*closed));
         assert!(!is_stdout_closed_panic(&*other));
         assert!(!is_stdout_closed_panic(&*full));
+    }
+
+    #[test]
+    fn a_similarity_threshold_needs_the_similar_flag() {
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--threshold", "4"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--exact", "--threshold", "4"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--similar", "--threshold", "4"]).is_ok());
     }
 
     #[test]

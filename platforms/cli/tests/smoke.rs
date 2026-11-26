@@ -1265,3 +1265,78 @@ fn a_dry_run_on_a_read_only_drive_says_apply_would_be_refused() {
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
 }
+
+#[test]
+fn dedupe_apply_keeps_the_original_not_the_copy_that_sorts_first() {
+    let corpus = unique_dir("corpus-keeper");
+    let dbdir = unique_dir("db-keeper");
+    let db = dbdir.join("lib.sqlite");
+    std::fs::write(corpus.join("DSC01691.txt"), "the camera original").unwrap();
+    std::fs::write(corpus.join("A dupe-copy-2.txt"), "the camera original").unwrap();
+    let db_s = db.to_str().unwrap();
+    let scan = run(&["--db", db_s, "scan", corpus.to_str().unwrap()]);
+    assert!(scan.status.success());
+    seed_content_hash(&db, "DSC01691.txt", "A dupe-copy-2.txt");
+
+    let applied = run(&["--db", db_s, "--json", "dedupe", "--exact", "--apply", "--delete", "--yes"]);
+    assert!(applied.status.success(), "{}", String::from_utf8_lossy(&applied.stderr));
+
+    assert!(corpus.join("DSC01691.txt").exists());
+    assert!(!corpus.join("A dupe-copy-2.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+mod without_recoverable_trash {
+    use super::*;
+
+    fn duplicate_pair(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let corpus = unique_dir(&format!("corpus-{tag}"));
+        let dbdir = unique_dir(&format!("db-{tag}"));
+        let db = dbdir.join("lib.sqlite");
+        std::fs::write(corpus.join("one.txt"), "identical body").unwrap();
+        std::fs::write(corpus.join("two.txt"), "identical body").unwrap();
+        let scan = run(&["--db", db.to_str().unwrap(), "scan", corpus.to_str().unwrap()]);
+        assert!(scan.status.success());
+        seed_content_hash(&db, "one.txt", "two.txt");
+        (corpus, dbdir, db)
+    }
+
+    #[test]
+    fn a_refused_apply_exits_non_zero_and_removes_nothing() {
+        let (corpus, dbdir, db) = duplicate_pair("no-trash-apply");
+        let db_s = db.to_str().unwrap();
+
+        let out = run(&["--db", db_s, "--no-color", "dedupe", "--exact", "--apply", "--yes"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Trash is unavailable"));
+        assert!(corpus.join("one.txt").exists() && corpus.join("two.txt").exists());
+
+        let machine = run(&["--db", db_s, "--json", "dedupe", "--exact", "--apply", "--yes"]);
+        assert!(!machine.status.success());
+        assert_eq!(json(&machine)["reason"], "trash_unavailable_on_platform");
+
+        let _ = std::fs::remove_dir_all(&corpus);
+        let _ = std::fs::remove_dir_all(&dbdir);
+    }
+
+    #[test]
+    fn a_dry_run_says_the_apply_would_be_refused() {
+        let (corpus, dbdir, db) = duplicate_pair("no-trash-preview");
+        let db_s = db.to_str().unwrap();
+
+        let out = run(&["--db", db_s, "--no-color", "dedupe", "--exact", "--apply", "--dry-run"]);
+        assert!(out.status.success());
+        let shown = stdout(&out);
+        assert!(shown.contains("Apply would be refused"), "{shown}");
+        assert!(!shown.contains("Trash/Recycle Bin"), "{shown}");
+
+        let machine = run(&["--db", db_s, "--json", "dedupe", "--exact", "--apply", "--dry-run"]);
+        assert!(json(&machine)["applyRefused"].is_string());
+
+        let _ = std::fs::remove_dir_all(&corpus);
+        let _ = std::fs::remove_dir_all(&dbdir);
+    }
+}
