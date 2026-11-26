@@ -383,11 +383,17 @@ struct LibraryView: View {
         let title: String
         let detail: String
         var needsModel = false
+        var canResume = false
     }
 
+    static let pausedSearchTitle = "Visual search is paused"
+
     /// Why a visual search gave nothing, in plain words.
-    private static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
+    static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
         let title = similar ? "Couldn’t find similar files" : "Showing matches by name and text only"
+        if let message = response?.message, message.hasPrefix(pausedSearchTitle) {
+            return SearchProblem(title: pausedSearchTitle, detail: "Resume it to search by what’s in a picture. Names and text still match.", canResume: true)
+        }
         var installed = false
         if case .installed = CLIPModelInstaller.shared.status { installed = true }
         if !installed {
@@ -416,6 +422,9 @@ struct LibraryView: View {
             Spacer()
             if problem.needsModel {
                 Button("Open Settings") { onSwitchTab(.settings) }.buttonStyle(.dsSecondary)
+            }
+            if problem.canResume {
+                Button("Resume") { resumeVisualSearch() }.buttonStyle(.dsSecondary)
             }
             DSIconButton("Dismiss", systemImage: "xmark", tint: Theme.text3) { searchProblem = nil }
         }
@@ -1363,6 +1372,17 @@ struct LibraryView: View {
         } else if updated != rows {
             rows = updated
             rowsEpoch &+= 1
+        }
+    }
+
+    private func resumeVisualSearch() {
+        Task { @MainActor in
+            let listing = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "jobs"), timeout: 10)
+            guard let job = listing?.jobs.first(where: { $0.kind == "catalogIndex" && $0.state == "paused" }) else { return }
+            let resumed = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "resumeJob", jobID: job.id), timeout: 10)
+            guard resumed?.status == "ok" else { return }
+            searchProblem = nil
+            reload()
         }
     }
 

@@ -94,3 +94,13 @@ struct LibrarySearchOutcomeTests {
         #expect(LibrarySearchOutcome.promotingNameMatches(rows, query: "sunset").map(\.id) == [1, 2])
     }
 }
+
+@Suite("Library search problem")
+struct LibrarySearchProblemTests {
+    @Test func aSearchTheUserPausedOffersResumeInsteadOfAnError() throws {
+        let reply = #"{"requestID":"r","status":"error","message":"Visual search is paused. Resume it to search by what’s in a picture; names and text still match.","hits":[],"chapters":[],"jobs":[]}"#
+        let response = try JSONDecoder().decode(CatalogResponse.self, from: Data(reply.utf8))
+        let problem = LibraryView.searchProblem(response, similar: false)
+        #expect(problem.title == "Visual search is paused" && problem.canResume && !problem.needsModel)
+    }
+}

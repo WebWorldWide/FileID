@@ -348,7 +348,8 @@ fn a_search_does_not_resume_a_job_the_user_paused() {
         .execute("UPDATE catalog_jobs SET state='paused',error=NULL WHERE id=?1", [CatalogIndex::job_id()])
         .unwrap();
     index.state.lock().cache = None;
-    assert!(index.search(&seed()).is_err());
+    let error = index.search(&seed()).unwrap_err();
+    assert_eq!(error.to_string(), PAUSED_BY_USER_MESSAGE);
     assert_eq!(state(&index), "paused");
     index.shutdown();
 }
