@@ -173,11 +173,11 @@ impl BatchRefusal {
 }
 
 /// Checks every target before any side effect. One read-only target refuses the whole batch.
-pub fn require_all_writable<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Result<(), BatchRefusal> {
+pub fn require_all_writable(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Result<(), BatchRefusal> {
     let (mut total, mut read_only, mut first) = (0usize, 0usize, None);
     for path in paths {
         total += 1;
-        if let Some(name) = read_only_location(path) {
+        if let Some(name) = read_only_location(path.as_ref()) {
             read_only += 1;
             first.get_or_insert(name);
         }

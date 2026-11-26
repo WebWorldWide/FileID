@@ -1191,3 +1191,77 @@ fn a_closed_stdout_ends_quietly_instead_of_panicking() {
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
 }
+
+fn scanned_text_library(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let corpus = unique_dir(&format!("corpus-{tag}"));
+    let dbdir = unique_dir(&format!("db-{tag}"));
+    let db = dbdir.join("lib.sqlite");
+    std::fs::write(corpus.join("report.md"), "# Q3\nquarterly revenue figures\n").unwrap();
+    std::fs::write(corpus.join("notes.txt"), "meeting notes and action items\n").unwrap();
+    let scan = run(&["--db", db.to_str().unwrap(), "scan", corpus.to_str().unwrap()]);
+    assert!(scan.status.success());
+    (corpus, dbdir, db)
+}
+
+#[test]
+fn replanning_an_organized_library_proposes_no_moves() {
+    let (corpus, dbdir, db) = scanned_text_library("organized");
+    let db_s = db.to_str().unwrap();
+    let root = corpus.to_str().unwrap();
+
+    let applied = run(&["--db", db_s, "restructure", "--apply", "--yes", root]);
+    assert!(applied.status.success());
+
+    let plan = run(&["--db", db_s, "--json", "restructure", "--plan", root]);
+    assert!(plan.status.success());
+    assert_eq!(json(&plan)["moveCount"].as_u64(), Some(0), "{}", stdout(&plan));
+
+    let text = run(&["--db", db_s, "--no-color", "restructure", "--plan", root]);
+    assert!(stdout(&text).contains("already organized"), "{}", stdout(&text));
+
+    let again = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--yes", root]);
+    assert!(stdout(&again).contains("already organized"), "{}", stdout(&again));
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn a_dry_run_names_its_verb() {
+    let (corpus, dbdir, db) = scanned_text_library("verb");
+    let db_s = db.to_str().unwrap();
+    let root = corpus.to_str().unwrap();
+
+    let moves = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--dry-run", root]);
+    assert!(stdout(&moves).contains("DRY RUN — would move 2 file(s) into"), "{}", stdout(&moves));
+    let links = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--dry-run", "--symlinks", root]);
+    assert!(stdout(&links).contains("DRY RUN — would symlink 2 file(s) into"), "{}", stdout(&links));
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn a_dry_run_on_a_read_only_drive_says_apply_would_be_refused() {
+    let (corpus, dbdir, db) = scanned_text_library("readonly-preview");
+    let db_s = db.to_str().unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE files SET path_text = '/Volumes/Adlon/' || replace(path_text, '/', '_')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let root = corpus.to_str().unwrap();
+
+    let text = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--dry-run", root]);
+    let shown = stdout(&text);
+    assert!(shown.contains("read-only drive") && shown.contains("Apply would be refused."), "{shown}");
+
+    let machine = run(&["--db", db_s, "--json", "restructure", "--apply", "--dry-run", root]);
+    let refused = json(&machine)["applyRefused"].as_str().map(str::to_owned);
+    assert!(refused.is_some_and(|text| text.contains("Apply would be refused.")));
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
