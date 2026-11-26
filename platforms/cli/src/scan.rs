@@ -317,6 +317,8 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         .with_context(|| format!("opening library db at {}", ctx.db.display()))?;
     let now = now_unix();
     let started = Instant::now();
+    fileid_engine::scan_session::record_library_root_started(&conn, &root_abs, now, None)
+        .context("recording the scanned folder")?;
 
     // Live carriage-return progress only when stderr is a TTY (and not
     // --quiet/--json); otherwise fall back to coarse, non-spammy lines.
@@ -564,6 +566,14 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             );
         }
     }
+
+    fileid_engine::scan_session::record_library_root_finished(
+        &conn,
+        &root_abs,
+        now_unix(),
+        if failed == 0 { "completed" } else { "failed" },
+    )
+    .context("recording the scan result")?;
 
     if live {
         let _ = write!(std::io::stderr(), "\r\x1b[K");
@@ -1281,6 +1291,29 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(paths, vec![stored_path(&root.join("real.txt"))]);
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_lists_the_folder_as_a_library_location_and_stamps_its_result() {
+        let (temp, root, ctx) = test_layout("location");
+        std::fs::write(root.join("note.txt"), "text").unwrap();
+        run(&ctx, &root, false).unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let rows: Vec<(String, Option<f64>, Option<String>)> = conn
+            .prepare("SELECT path, last_scan_at, last_status FROM library_roots")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, canonical.to_string_lossy());
+        assert!(rows[0].1.is_some());
+        assert_eq!(rows[0].2.as_deref(), Some("completed"));
         drop(conn);
         std::fs::remove_dir_all(temp).unwrap();
     }
