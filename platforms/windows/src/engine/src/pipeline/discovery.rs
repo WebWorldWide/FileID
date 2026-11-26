@@ -1,6 +1,6 @@
 // Discovery walks the user-picked root and emits one DiscoveredFile per readable file the scan should consider. jwalk stats in parallel on `walk_concurrency_for(root)` threads (see platform.rs); process_read_dir prunes noise directories so we never recurse into them.
 // The counter is bumped BEFORE the blocking send so it tracks the walk even when the channel fills. The channel cap is memory-tier-scaled (see discovery_channel_cap): a corpus that fits walks to completion at filesystem speed, so `done`, the total and DiscoveryComplete are truthful even when the ML stage is far slower.
-// Filters: hidden/system files (leading `.`, thumbs.db, desktop.ini, ...), symlinks (not followed), zero-byte files, and unsupported kinds are skipped before tagging.
+// Filters: hidden files and folders (leading `.`), thumbs.db, desktop.ini and the like, symlinks (not followed), zero-byte files, and unsupported kinds are skipped before tagging.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -289,6 +289,54 @@ pub struct Discovery {
     exclusions: Arc<HashSet<String>>,
 }
 
+/// Why a walk left a file or folder out of the library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// A name starting with a dot.
+    Hidden,
+    /// Thumbnail caches, recycle bins, dependency folders and the like.
+    System,
+    /// A file with no bytes.
+    Empty,
+    /// A kind FileID does not catalog: unfinished downloads, scratch files, Takeout metadata, links.
+    Unsupported,
+}
+
+/// How many files and folders a walk left out, by reason.
+#[derive(Debug, Default)]
+pub struct SkippedCounts {
+    hidden: AtomicU64,
+    system: AtomicU64,
+    empty: AtomicU64,
+    unsupported: AtomicU64,
+}
+
+impl SkippedCounts {
+    fn note(&self, reason: SkipReason) {
+        let counter = match reason {
+            SkipReason::Hidden => &self.hidden,
+            SkipReason::System => &self.system,
+            SkipReason::Empty => &self.empty,
+            SkipReason::Unsupported => &self.unsupported,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The summary stored with the scan session: a JSON object of the reasons that occurred, `None` when nothing was left out. `cloud_only` counts files not downloaded from cloud storage.
+    pub fn summary_json(&self, cloud_only: u64) -> Option<String> {
+        let counts = [
+            ("hidden", self.hidden.load(Ordering::Relaxed)),
+            ("system", self.system.load(Ordering::Relaxed)),
+            ("empty", self.empty.load(Ordering::Relaxed)),
+            ("unsupported", self.unsupported.load(Ordering::Relaxed)),
+            ("cloudOnly", cloud_only),
+        ];
+        let present: serde_json::Map<String, serde_json::Value> =
+            counts.into_iter().filter(|(_, count)| *count > 0).map(|(reason, count)| (reason.to_string(), count.into())).collect();
+        (!present.is_empty()).then(|| serde_json::Value::Object(present).to_string())
+    }
+}
+
 /// Handle returned from `Discovery::spawn`. `count` is a live counter the orchestrator polls for Progress events; `done` flips the instant the walker exits, so an empty folder (count stays 0) surfaces "no supported files found" instead of hanging.
 pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
@@ -304,6 +352,7 @@ pub struct DiscoveryHandle {
     /// Walk errors swallowed during traversal, surfaced as a non-fatal `discovery_partial` event.
     pub error_count: Arc<AtomicU64>,
     pub cloud_only_count: Arc<AtomicU64>,
+    pub skipped: Arc<SkippedCounts>,
     /// Retained by the scan orchestrator so a panic in the blocking walker becomes a failed scan, not an apparently successful empty one.
     pub join: tokio::task::JoinHandle<()>,
 }
@@ -321,6 +370,7 @@ struct WalkContext {
     error_count: Arc<AtomicU64>,
     cloud_only_count: Arc<AtomicU64>,
     moved_count: Arc<AtomicU64>,
+    skipped: Arc<SkippedCounts>,
 }
 
 impl WalkContext {
@@ -333,6 +383,7 @@ impl WalkContext {
             error_count: Arc::new(AtomicU64::new(0)),
             cloud_only_count: Arc::new(AtomicU64::new(0)),
             moved_count: Arc::new(AtomicU64::new(0)),
+            skipped: Arc::new(SkippedCounts::default()),
         }
     }
 }
@@ -383,6 +434,7 @@ impl Discovery {
         let error_count = Arc::new(AtomicU64::new(0));
         let cloud_only_count = Arc::new(AtomicU64::new(0));
         let moved_count = Arc::new(AtomicU64::new(0));
+        let skipped = Arc::new(SkippedCounts::default());
         let context = Arc::new(WalkContext {
             skip_paths: skip_paths.clone(),
             known_placeholders: self.known_placeholders.clone(),
@@ -390,6 +442,7 @@ impl Discovery {
             error_count: error_count.clone(),
             cloud_only_count: cloud_only_count.clone(),
             moved_count: moved_count.clone(),
+            skipped: skipped.clone(),
         });
         let seen_paths = Arc::new(Mutex::new(Vec::new()));
         let seen_dirs: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
@@ -479,6 +532,7 @@ impl Discovery {
                         let name = name.to_string_lossy();
                         if file_type.is_dir() {
                             if is_noise_directory(&name) {
+                                context_for_dir.skipped.note(directory_skip_reason(&name));
                                 return false;
                             }
                             // User exclusions: normalized equality on the child's full path. dir_path carries the walk root's "\\?\" prefix when present; normalize strips it so verbatim and plain roots match the same stored exclusion.
@@ -489,13 +543,19 @@ impl Discovery {
                                     return false;
                                 }
                             }
-                            if is_ambiguous_build_directory(&name) {
-                                return !has_build_marker;
+                            if is_ambiguous_build_directory(&name) && has_build_marker {
+                                context_for_dir.skipped.note(SkipReason::System);
+                                return false;
                             }
                             true
                         } else if file_type.is_file() {
-                            !is_noise_file(&name)
+                            if !is_noise_file(&name) {
+                                return true;
+                            }
+                            context_for_dir.skipped.note(if is_hidden_name(&name) { SkipReason::Hidden } else { SkipReason::System });
+                            false
                         } else {
+                            context_for_dir.skipped.note(SkipReason::Unsupported);
                             false
                         }
                     });
@@ -594,6 +654,7 @@ impl Discovery {
             seen_dirs,
             error_count,
             cloud_only_count,
+            skipped,
             join,
         }
     }
@@ -652,6 +713,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
     // Compute the reconciliation hash BEFORE any eligibility early-return: "seen" means present under the root, not pipeline-eligible, or a clean-walk reconciliation would soft-hide the catalog row of a zero-byte or unsupported file that still exists.
     let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
     if size == 0 {
+        context.skipped.note(SkipReason::Empty);
         return ClassifiedEntry {
             discovered: None,
             zero_byte: Some(ZeroByteObservation {
@@ -698,6 +760,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         } else if extension.as_deref() == Some("json")
             && entry_path.file_name().is_some_and(|n| is_takeout_sidecar(&n.to_string_lossy()))
         {
+            context.skipped.note(SkipReason::Unsupported);
             return ClassifiedEntry {
                 discovered: None,
                 zero_byte: None,
@@ -706,6 +769,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         }
     }
     if kind == FileKind::Other && !is_cataloged_other(path_extension_lower(entry_path).as_deref()) {
+        context.skipped.note(SkipReason::Unsupported);
         // Present but never cataloged (unfinished downloads, scratch and SQLite temp files): kept in `seen` so a row whose kind mapping changed across versions isn't soft-hidden while the file exists.
         return ClassifiedEntry {
             discovered: None,
@@ -830,39 +894,24 @@ pub fn is_non_unicode_path(path: &std::path::Path) -> bool {
     path.to_str().is_none()
 }
 
-/// Directory names whose entire subtree is skipped, decided once per directory in `process_read_dir`.
-pub fn is_noise_directory(name: &str) -> bool {
-    // Case-insensitive: Windows lists System Volume Information / $RECYCLE.BIN mixed-case at the root.
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "node_modules"
-            | ".git"
-            | ".svn"
-            | ".hg"
-            | "__pycache__"
-            | "$recycle.bin"
-            | "system volume information"
-            | ".cache"
-            | ".gradle"
-            | ".idea"
-            | ".fseventsd"
-            | ".spotlight-v100"
-            | ".trashes"
-            | ".temporaryitems"
-            | ".documentrevisions-v100"
-            | ".pkinstallsandboxmanager"
-            | ".trash"
-            | "lost+found"
-    ) || is_chkdsk_recovery_directory(&lower)
-        || is_per_volume_trash_directory(&lower)
+fn directory_skip_reason(name: &str) -> SkipReason {
+    if is_hidden_name(name) { SkipReason::Hidden } else { SkipReason::System }
 }
 
-/// freedesktop per-volume trash: `.Trash-<uid>` at a mount root.
-fn is_per_volume_trash_directory(lower: &str) -> bool {
-    lower
-        .strip_prefix(".trash-")
-        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+/// A leading dot hides a file or a folder alike; the same rule decides both.
+pub fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Directories whose whole subtree is skipped, decided once per directory in `process_read_dir`: every hidden folder, plus the system and tool folders below that are not hidden by name.
+pub fn is_noise_directory(name: &str) -> bool {
+    if is_hidden_name(name) {
+        return true;
+    }
+    // Case-insensitive: Windows lists System Volume Information / $RECYCLE.BIN mixed-case at the root.
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "node_modules" | "__pycache__" | "$recycle.bin" | "system volume information" | "lost+found")
+        || is_chkdsk_recovery_directory(&lower)
 }
 
 /// chkdsk's `FOUND.000`, `FOUND.001`, ... hold recovered `.CHK` fragments, not user files.
@@ -905,17 +954,13 @@ pub fn is_build_marker(name: &str) -> bool {
     })
 }
 
-/// Per-file noise filter, separate from `is_noise_directory` because file-vs-dir semantics differ (some libraries live under `.local/share/...`).
+/// Hidden files and the thumbnail and folder-settings files Windows and Finder leave behind.
 pub fn is_noise_file(name: &str) -> bool {
-    if name.starts_with('.') {
+    if is_hidden_name(name) {
         return true;
     }
     let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "thumbs.db" | "desktop.ini" | "ehthumbs.db" | "ehthumbs_vista.db"
-            | ".ds_store" | "icon\r"
-    )
+    matches!(lower.as_str(), "thumbs.db" | "desktop.ini" | "ehthumbs.db" | "ehthumbs_vista.db" | "icon\r")
 }
 
 
@@ -1288,7 +1333,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn linux_volume_folders_are_not_walked_and_per_volume_trash_is_not_indexed() {
+    fn linux_volume_folders_and_every_hidden_folder_are_not_walked() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempdir_or_skip();
         let root = tmp.path();
@@ -1306,7 +1351,7 @@ mod tests {
         let readable = std::fs::read_dir(&locked).is_ok();
         let (files, errors) = walk(root);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(files.len(), 2, "only a.jpg and the non-uid folder's file are library files");
+        assert_eq!(files.len(), 1, "only a.jpg is a library file; .Trash-keep is hidden like the trash folders");
         if !readable {
             assert_eq!(errors, 0, "an unreadable lost+found must be skipped, not counted");
         }
@@ -1383,6 +1428,45 @@ mod tests {
         let names: Vec<_> = got.iter().map(|file| file.path.clone()).collect();
         assert_eq!(names, vec![root.join("fine.jpg")]);
         assert_eq!(errors, 2);
+    }
+
+    #[test]
+    fn a_leading_dot_hides_files_and_folders_by_the_same_rule() {
+        for name in [".git", ".thumbnails", ".anything", ".hidden"] {
+            assert!(is_noise_directory(name) && is_noise_file(name), "{name}");
+        }
+        assert!(!is_noise_directory("2019.trip") && !is_noise_file("2019.trip.jpg"));
+    }
+
+    #[test]
+    fn a_walk_counts_what_it_leaves_out_by_reason() {
+        use std::fs;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("pics")).unwrap();
+        fs::write(root.join("pics").join("a.jpg"), b"jpeg").unwrap();
+        fs::write(root.join("pics").join(".b.jpg"), b"jpeg").unwrap();
+        fs::write(root.join("pics").join("Thumbs.db"), b"cache").unwrap();
+        fs::write(root.join("pics").join("empty.jpg"), b"").unwrap();
+        fs::write(root.join("pics").join("clip.part"), b"partial").unwrap();
+        fs::create_dir_all(root.join(".album")).unwrap();
+        fs::write(root.join(".album").join("c.jpg"), b"jpeg").unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(root.join("node_modules").join("d.jpg"), b"jpeg").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (kept, summary) = rt.block_on(async {
+            let disc = Discovery::new_with_skip_and_exclusions(root, ScanCoordinator::new(), Arc::new(HashMap::new()), Arc::new(Vec::new()));
+            let mut handle = disc.spawn();
+            let mut kept = Vec::new();
+            while let Some(file) = handle.rx.recv().await {
+                kept.push(file.path);
+            }
+            while handle.zero_byte_rx.recv().await.is_some() {}
+            (kept, handle.skipped.summary_json(0))
+        });
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        let summary: serde_json::Value = serde_json::from_str(&summary.unwrap()).unwrap();
+        assert_eq!(summary, serde_json::json!({"hidden": 2, "system": 2, "empty": 1, "unsupported": 1}));
     }
 
     #[test]

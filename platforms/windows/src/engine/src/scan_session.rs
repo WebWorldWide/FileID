@@ -432,6 +432,7 @@ impl ScanSession {
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
         let discovered_cloud_only = handle.cloud_only_count.clone();
+        let discovered_skipped = handle.skipped.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
         let discovered_seen_dirs = handle.seen_dirs.clone();
         let discovery_join = handle.join;
@@ -966,6 +967,7 @@ impl ScanSession {
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
             stamp_scan_session_end(&conn, &session_id, completed_unix, total + self.carried.0, final_status);
+            record_skipped(&conn, &session_id, discovered_skipped.summary_json(discovered_cloud_only.load(std::sync::atomic::Ordering::Relaxed)));
             let _ = conn.execute(
                 "UPDATE library_roots SET last_scan_at=?1,last_status=?2 WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?3)",
                 rusqlite::params![completed_unix, final_status, session_id],
@@ -1654,6 +1656,11 @@ fn stamp_scan_session_end(conn: &Connection, session_id: &str, completed_unix: f
         "UPDATE scan_sessions SET completed_at = ?1, total_files = ?2, last_file_index = ?2, status = ?3 WHERE id = ?4",
         rusqlite::params![completed_unix, files_written as i64, status, session_id],
     );
+}
+
+/// What the walk left out and why, as the JSON `Discovery` summarizes it, for Settings > Recent scans.
+fn record_skipped(conn: &Connection, session_id: &str, skipped: Option<String>) {
+    let _ = conn.execute("UPDATE scan_sessions SET skipped = ?1 WHERE id = ?2", rusqlite::params![skipped, session_id]);
 }
 
 fn should_reconcile_missing_rows(

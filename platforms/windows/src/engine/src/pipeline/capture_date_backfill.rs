@@ -396,8 +396,9 @@ mod tests {
         assert_eq!(run_if_needed(&database, &state, &root, &|| false), 0, "the earlier version already checked this folder");
         assert_eq!(recorded(&database.lock()).as_deref(), Some(VERSION));
         assert_eq!(run_if_needed(&database, &elsewhere, &root, &|| false), 0, "the catalog alone now says it was checked");
-        let stored: f64 = database.lock().query_row("SELECT created_at FROM files", [], |row| row.get(0)).unwrap();
-        assert_eq!(stored, 1_700_000_000.0);
+        let unchanged: i64 =
+            database.lock().query_row("SELECT COUNT(*) FROM files WHERE created_at = 1700000000", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged, 1);
         std::fs::remove_dir_all(scratch).unwrap();
     }
 

@@ -561,10 +561,7 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64], cancelled: &(dyn Fn() -> bool + 
             }
         }
     }
-    let nearest = match vectors.len() > BRUTE_FORCE_MAX {
-        true => Some(nearest_lists(vectors, k, cancelled)?),
-        false => None,
-    };
+    let nearest = if vectors.len() > BRUTE_FORCE_MAX { Some(nearest_lists(vectors, k, cancelled)?) } else { None };
     let result = identity_clustering::cluster_with_options(
         vectors,
         |i| {
