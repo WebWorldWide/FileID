@@ -1723,6 +1723,7 @@ private struct SuggestedMergesSheet: View {
                         .tint(Theme.gold)
                         .disabled(inFlight)
                 }
+                .fixedSize()
             }
             .padding(10)
             .background(
@@ -1747,7 +1748,7 @@ private struct SuggestedMergesSheet: View {
                     .foregroundStyle(Theme.text3)
             }
         }
-        .frame(width: 170, alignment: .leading)
+        .frame(minWidth: 120, maxWidth: 170, alignment: .leading)
     }
 
     private func similarityColor(_ s: Double) -> Color {
