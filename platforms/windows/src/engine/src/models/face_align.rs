@@ -292,12 +292,14 @@ mod tests {
 
     #[test]
     fn turning_a_square_clockwise_moves_its_top_left_pixel_to_the_top_right() {
+        let pixel = [9, 8, 7, 255];
+        let at = |image: &[u8], x: usize, y: usize| image[(y * 3 + x) * 4..(y * 3 + x) * 4 + 4].to_vec();
         let mut image = vec![0u8; 3 * 3 * 4];
-        image[0..4].copy_from_slice(&[9, 8, 7, 255]);
-        let turned = rotate_square_rgba(&image, 3, 1);
-        assert_eq!(&turned[(0 * 3 + 2) * 4..(0 * 3 + 2) * 4 + 4], &[9, 8, 7, 255]);
+        image[0..4].copy_from_slice(&pixel);
+        assert_eq!(at(&rotate_square_rgba(&image, 3, 1), 2, 0), pixel);
+        assert_eq!(at(&rotate_square_rgba(&image, 3, 2), 2, 2), pixel);
+        assert_eq!(at(&rotate_square_rgba(&image, 3, 3), 0, 2), pixel);
         assert_eq!(rotate_square_rgba(&rotate_square_rgba(&image, 3, 1), 3, 3), image);
-        assert_eq!(&rotate_square_rgba(&image, 3, 2)[(2 * 3 + 2) * 4..], &[9, 8, 7, 255]);
     }
 
     #[test]

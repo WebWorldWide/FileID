@@ -566,7 +566,7 @@ impl CatalogIndex {
             let (current, error): (String, Option<String>) =
                 conn.query_row("SELECT state,error FROM catalog_jobs WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
             let interrupted = current == "paused" && error.is_some();
-            ensure!(!(current == "paused" && !interrupted), PAUSED_BY_USER_MESSAGE);
+            ensure!(current != "paused" || interrupted, PAUSED_BY_USER_MESSAGE);
             ensure!(
                 interrupted || ["queued", "completed"].contains(&current.as_str()),
                 "Visual index preparation is stopped or failed. Resume its job; keyword search remains available."
