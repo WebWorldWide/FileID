@@ -222,10 +222,12 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
         }
     });
     let rx = engine.borrow_mut().subscribe();
-    let weak = Rc::downgrade(&this);
+    let card_alive = card.downgrade();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
-            let Some(this) = weak.upgrade() else { break };
+            if card_alive.upgrade().is_none() {
+                break;
+            }
             let waiting = !this.request.borrow().is_empty();
             match &*event {
                 EngineState::ScanComplete(_) if this.list.is_mapped() => this.refresh(),
@@ -249,6 +251,45 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn descendants(widget: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            descendants(&current, found);
+            child = current.next_sibling();
+            found.push(current);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_card_fills_in_when_refresh_is_pressed() {
+        adw::init().unwrap();
+        let engine = Rc::new(RefCell::new(crate::engine_client::EngineClient::new()));
+        let card = build(engine);
+        let mut widgets = Vec::new();
+        descendants(&card, &mut widgets);
+        let refresh = widgets
+            .iter()
+            .find_map(|widget| widget.downcast_ref::<gtk::Button>().filter(|b| b.label().as_deref() == Some("Refresh")))
+            .expect("refresh button");
+        let status = widgets
+            .iter()
+            .find_map(|widget| widget.downcast_ref::<gtk::Label>().filter(|label| !label.is_visible()))
+            .expect("status label");
+        let list = card.last_child().expect("location list");
+
+        refresh.emit_clicked();
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !status.is_visible() && list.first_child().is_none() {
+            while context.pending() {
+                context.iteration(false);
+            }
+            assert!(std::time::Instant::now() < deadline, "the card never rendered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
 
     fn root(count: i64, bytes: i64, last_scan_at: Option<f64>) -> LibraryRoot {
         LibraryRoot {
