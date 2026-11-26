@@ -2301,28 +2301,40 @@ pub mod video {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         use anyhow::Context;
-        let image = crate::apple::scan::video_keyframe(path, 1280, std::time::Duration::from_secs(20))
-            .context("The video has no frame AVFoundation can decode")?;
-        let (rgb, width, height) = image.rgb().context("The video frame could not be read")?;
-        Ok(VideoFrame { width, height, rgb })
+        let decoded = crate::apple::scan::video_keyframe(path, 1280, std::time::Duration::from_secs(20))
+            .context("The video has no frame AVFoundation can decode")
+            .and_then(|image| image.rgb().context("The video frame could not be read"));
+        match decoded {
+            Ok((rgb, width, height)) => Ok(VideoFrame { width, height, rgb }),
+            Err(error) => embedded_frame(path).ok_or(error),
+        }
     }
 
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         use anyhow::Context;
         let never = std::sync::atomic::AtomicBool::new(false);
-        let probe = crate::commands::video_export::analysis_probe(path, &never)
-            .context("video frames need FileID's FFmpeg runtime")?;
-        let (width, height) =
-            crate::commands::video_export::fitted_size(probe.width, probe.height, 1280);
-        let rgb = crate::commands::video_export::frame_rgb(
-            path,
-            (probe.duration * 0.25).max(0.0),
-            width,
-            height,
-            &never,
-        )?;
-        Ok(VideoFrame { width, height, rgb })
+        let decoded = crate::commands::video_export::analysis_probe(path, &never)
+            .context("video frames need FileID's FFmpeg runtime")
+            .and_then(|probe| {
+                let (width, height) =
+                    crate::commands::video_export::fitted_size(probe.width, probe.height, 1280);
+                let rgb = crate::commands::video_export::frame_rgb(
+                    path,
+                    (probe.duration * 0.25).max(0.0),
+                    width,
+                    height,
+                    &never,
+                )?;
+                Ok(VideoFrame { width, height, rgb })
+            });
+        decoded.or_else(|error| embedded_frame(path).ok_or(error))
+    }
+
+    fn embedded_frame(path: &Path) -> Option<VideoFrame> {
+        let image = crate::util::video_cover_frame::embedded_frame(path)?;
+        let (width, height) = image.dimensions();
+        Some(VideoFrame { width, height, rgb: image.into_raw() })
     }
 
     #[cfg(test)]

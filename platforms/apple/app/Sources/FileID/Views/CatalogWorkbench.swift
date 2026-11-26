@@ -327,8 +327,11 @@ struct CatalogWorkbench: View {
                     .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             }
             if chapters.isEmpty && !editorOpen {
-                MetaText("No chapters yet. Press Find moments for suggestions, or add your own at the current time.")
+                MetaText(Self.noChaptersMessage(sceneCount: tracks.scenes.count, analyzed: !tracks.examined.isEmpty))
                     .padding(.horizontal, 14).padding(.vertical, 12)
+                ForEach(tracks.scenes, id: \.self) { scene in
+                    sceneRow(scene)
+                }
             }
             ForEach(chapters, id: \.id) { chapter in
                 chapterRow(chapter, fileID: hit.fileID)
@@ -339,6 +342,29 @@ struct CatalogWorkbench: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    static func noChaptersMessage(sceneCount: Int, analyzed: Bool) -> String {
+        switch sceneCount {
+        case 0: analyzed
+            ? "FileID looked at this video and found nothing to split into chapters. Add your own at the current time."
+            : "No chapters yet. Press Find moments for suggestions, or add your own at the current time."
+        case 1: "FileID found one scene in this video, so it suggested no chapters."
+        default: "FileID found \(sceneCount) scenes but suggested no chapters."
+        }
+    }
+
+    private func sceneRow(_ scene: ReadStore.TimelineSpan) -> some View {
+        Button { seek(scene.start) } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(DurationText.clock(scene.start)).font(Theme.Font.mono(12)).foregroundStyle(Theme.text3)
+                Text(scene.text).font(Theme.Font.body(12)).foregroundStyle(Theme.text2).lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scene at \(DurationText.spoken(scene.start)): \(scene.text)")
     }
 
     private var draftNote: String? {

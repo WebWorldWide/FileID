@@ -627,11 +627,13 @@ public final class ReadStore: @unchecked Sendable {
     public struct TimelineTracks: Sendable, Equatable {
         public var examined: [TimelineSpan] = []
         public var speech: [TimelineSpan] = []
+        public var scenes: [TimelineSpan] = []
         public static let empty = TimelineTracks()
     }
 
     /// What the timeline analysis has looked at in a video: sampled frame
-    /// times (Examined) and transcribed speech passages (Speech). Stale rows
+    /// times (Examined), transcribed speech passages (Speech) and the
+    /// described scenes. Stale rows
     /// from an older revision of the file are left out.
     public func timelineTracks(forFileID id: Int64) -> TimelineTracks {
         guard let q = queue else { return .empty }
@@ -646,7 +648,12 @@ public final class ReadStore: @unchecked Sendable {
                 WHERE file_id = ? AND stale = 0 AND start_seconds IS NOT NULL AND id LIKE 'speech:%'
                 ORDER BY start_seconds LIMIT 4000
                 """, arguments: [id]).map { TimelineSpan(start: $0["start_seconds"], end: $0["end_seconds"], text: $0["text"]) }
-            return TimelineTracks(examined: examined, speech: speech)
+            let scenes = try Row.fetchAll(db, sql: """
+                SELECT start_seconds, COALESCE(end_seconds, start_seconds) AS end_seconds, text FROM catalog_passages
+                WHERE file_id = ? AND stale = 0 AND start_seconds IS NOT NULL AND id LIKE 'scene:%'
+                ORDER BY start_seconds LIMIT 200
+                """, arguments: [id]).map { TimelineSpan(start: $0["start_seconds"], end: $0["end_seconds"], text: $0["text"]) }
+            return TimelineTracks(examined: examined, speech: speech, scenes: scenes)
         }) ?? .empty
     }
 
