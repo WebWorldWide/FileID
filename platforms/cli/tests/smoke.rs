@@ -1316,7 +1316,11 @@ fn restructuring_a_folder_plans_only_files_inside_it() {
     let (corpus, dbdir, db) = scanned_text_library("scoped-plan");
     let db_s = db.to_str().unwrap();
     let elsewhere = unique_dir("corpus-scoped-elsewhere");
-    std::fs::write(elsewhere.join("stray.txt"), "a file in another library folder\n").unwrap();
+    std::fs::write(
+        elsewhere.join("stray.txt"),
+        "a file in another library folder\n",
+    )
+    .unwrap();
     let scan = run(&["--db", db_s, "scan", elsewhere.to_str().unwrap()]);
     assert!(scan.status.success());
     let root = corpus.to_str().unwrap();
@@ -1354,7 +1358,13 @@ fn restructuring_a_folder_with_no_scanned_files_says_so() {
     let db_s = db.to_str().unwrap();
     let unscanned = unique_dir("corpus-unscanned-root");
 
-    let out = run(&["--db", db_s, "restructure", "--plan", unscanned.to_str().unwrap()]);
+    let out = run(&[
+        "--db",
+        db_s,
+        "restructure",
+        "--plan",
+        unscanned.to_str().unwrap(),
+    ]);
     assert!(!out.status.success());
     let shown = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(shown.contains("no scanned files are under"), "{shown}");

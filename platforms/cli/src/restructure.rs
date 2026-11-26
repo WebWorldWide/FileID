@@ -187,12 +187,13 @@ pub fn run(
     }
 
     let library_root = resolve_library_root(&conn, root)?;
-    let (root_text, root_prefix, root_upper) =
-        plan_root_bounds(&library_root.to_string_lossy());
+    let (root_text, root_prefix, root_upper) = plan_root_bounds(&library_root.to_string_lossy());
     let file_count = conn
-        .query_row(PLAN_FILE_COUNT_SQL, params![root_text, root_prefix, root_upper], |r| {
-            r.get::<_, i64>(0)
-        })?
+        .query_row(
+            PLAN_FILE_COUNT_SQL,
+            params![root_text, root_prefix, root_upper],
+            |r| r.get::<_, i64>(0),
+        )?
         .max(0) as u64;
     if file_count == 0 {
         anyhow::bail!(
@@ -595,7 +596,9 @@ fn apply_outcome(
         );
     }
     if result.failed > 0 {
-        let reason = first_failure.map(|f| format!(" (first: {f})")).unwrap_or_default();
+        let reason = first_failure
+            .map(|f| format!(" (first: {f})"))
+            .unwrap_or_default();
         anyhow::bail!("restructure: {} move(s) failed{reason}", result.failed);
     }
     Ok(())

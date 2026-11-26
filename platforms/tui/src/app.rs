@@ -1266,14 +1266,20 @@ mod tests {
     #[test]
     fn typing_a_search_shows_files_whose_text_matches_not_only_their_names() {
         let mut app = app_with_files(0);
-        app.data.files = vec![file(1, "/x/notes.txt", "doc"), file(2, "/x/photo.jpg", "image")];
+        app.data.files = vec![
+            file(1, "/x/notes.txt", "doc"),
+            file(2, "/x/photo.jpg", "image"),
+        ];
         app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
         for ch in "invoice".chars() {
             app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
         }
         assert!(app.live_search_requested);
         assert!(app.visible_files().is_empty());
-        assert!(app.search_pending(), "no match may be claimed before the search answers");
+        assert!(
+            app.search_pending(),
+            "no match may be claimed before the search answers"
+        );
 
         app.apply_load(LoadMsg::LiveSearch {
             query: "invoice".into(),
