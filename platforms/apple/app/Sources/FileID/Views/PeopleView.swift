@@ -462,10 +462,8 @@ struct PeopleView: View {
                         setStatus("Couldn’t look for likely merges right now. Try again in a moment.")
                         return
                     }
-                    // The scan is multi-second; don't preempt whatever the
-                    // user navigated to while it ran. Only surface the sheet
-                    // if they're still on a neutral People view — no sheet
-                    // already up, not mid merge/unknown selection.
+                    // The scan takes seconds; only surface the sheet if the user is still on a
+                    // neutral People view (no sheet up, no merge or unknown selection).
                     guard activeSheet == nil, !mergeMode, !unknownMode else { return }
                     suggestions = result
                     setStatus(nil)
@@ -1047,9 +1045,7 @@ private struct PersonDetailSheet: View {
     @State private var isUnknown: Bool = false
     @State private var tagBatchStatus: String?
     @State private var tagBatchInFlight: Bool = false
-    // Multi-select for moving photos to another person's cluster.
-    // Common case: clusterer put a photo of Adam in Jack's cluster;
-    // the user opens Jack, selects the wrong photos, picks Adam.
+    // Multi-select for moving mis-clustered photos to another person.
     @State private var selectMode: Bool = false
     @State private var checked: Set<Int64> = []
     @State private var showMoveTargetPicker: Bool = false
@@ -1627,9 +1623,7 @@ private struct SuggestedMergesSheet: View {
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             HStack(spacing: 8) {
-                // Bulk-accept the highest-confidence ("Very likely same",
-                // cosine ≥ 0.55) pairs in one click. Lets the user clear
-                // the easy cases without 100 individual Merge clicks.
+                // Accepts every "Very likely same" pair (cosine ≥ 0.55) in one click.
                 let veryLikely = candidates.filter { $0.similarity >= 0.55 }
                 Button {
                     pending = PendingMerge(pairs: veryLikely, single: false,
