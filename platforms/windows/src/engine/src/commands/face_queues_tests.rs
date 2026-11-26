@@ -127,6 +127,21 @@ fn merge_moves_faces_journals_and_undo_brings_the_person_back() {
 }
 
 #[test]
+fn undoing_a_merge_brings_back_the_suggestions_of_the_person_merged_away() {
+    let conn = pair();
+    person(&conn, 3, None, false);
+    face(&conn, 4, 10, 3, (0.98, 0.02));
+    refresh_all(&conn);
+    let before = merge_pairs(&conn);
+    assert!(before.iter().any(|(a, b)| (*a, *b) == (3, 1) || (*a, *b) == (1, 3)), "{before:?}");
+    let reply = act(&conn, 2, Some(1), "merge");
+    assert_eq!(reply.status, "ok");
+    assert!(!merge_pairs(&conn).iter().any(|(a, b)| *a == 1 || *b == 1));
+    assert_eq!(undo_op(&conn, &reply.operation_id.unwrap()).status, "ok");
+    assert_eq!(merge_pairs(&conn), before);
+}
+
+#[test]
 fn merge_is_refused_when_the_people_now_share_a_photo() {
     let conn = pair();
     refresh_all(&conn);

@@ -705,6 +705,8 @@ fn merge_in(conn: &Connection, request: &str, resolution: &str, keep: i64, other
             before["verification"] = verification(conn, pair)?;
             before["other"] = other_row;
             before["keepNames"] = serde_json::json!(names(&keep_row));
+            before["suggestions"] = serde_json::json!(super::person_merge::pending_suggestions(conn, other)?);
+            before["splits"] = serde_json::json!(super::person_merge::pending_splits(conn, other)?);
             write_verification(conn, (keep, other), (&keep_anchor, &other_anchor), 1, "user-merged", at)?;
             conn.execute("UPDATE face_prints SET person_id=?1 WHERE person_id=?2", params![keep, other])?;
             conn.execute(
@@ -939,6 +941,8 @@ pub(crate) fn undo_in(conn: &Connection, request: &str, before: &serde_json::Val
                 restore_verification(conn, pair, 1, "user-merged", &before["verification"])?;
                 recount(conn, person)?;
                 recount(conn, other)?;
+                super::person_merge::restore_pending(conn, other, before, now())?;
+
             }
             "notSamePerson" => restore_verification(conn, pair, 0, "user-verified", &before["verification"])?,
             "dismiss" => {
