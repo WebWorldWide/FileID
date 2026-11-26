@@ -1,17 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    EmptyStateView — reusable empty-state template. Big gold icon, title,
-    body callout, optional secondary message, optional primary action button.
-
-    Usage:
-        <views:EmptyStateView
-            Glyph="&#xE91B;"
-            Title="No images yet"
-            Body="Pick a folder above to begin."
-            ActionLabel="Pick a folder"
-            ActionGlyph="&#xE8B7;"
-            ActionInvoked="OnPickInvoked" />
--->
+<!-- EmptyStateView: reusable empty state with a gold glyph, title, body, optional secondary line and optional action button (Glyph, Title, Body, Secondary, ActionLabel, ActionGlyph, ActionInvoked). -->
 <UserControl
     x:Class="FileID.Views.EmptyStateView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

@@ -1,6 +1,4 @@
-﻿// Visible when the bound value is NULL, Collapsed when it has a value.
-
-using System;
+﻿using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Data;
 

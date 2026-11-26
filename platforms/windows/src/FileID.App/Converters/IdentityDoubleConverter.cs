@@ -1,7 +1,4 @@
-﻿// Double passthrough with optional additive offset (via ConverterParameter
-// as an invariant-culture double string).
-
-using System;
+﻿using System;
 using System.Globalization;
 using Microsoft.UI.Xaml.Data;
 

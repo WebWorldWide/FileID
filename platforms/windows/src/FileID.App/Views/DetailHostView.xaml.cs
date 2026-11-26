@@ -1,5 +1,4 @@
-﻿// DetailHostView code-behind. Subscribes to AppViewModel and swaps the
-// Reduce-motion gates the animation so the swap is instant for users who prefer it.
+﻿// Swaps the detail child on tab or folder changes with a fade; reduced motion makes the swap instant.
 
 using System.ComponentModel;
 using FileID.Services;
@@ -147,7 +146,7 @@ public sealed partial class DetailHostView : UserControl
         Host.Children.Add(child);
     }
 
-    /// <summary>Without this the old view became unreachable and waited on GC to finalize, leaving its ReadStore / ClipSearchService / thumbnail cache alive for an unbounded window — during which engine event callbacks could still fire into a detached XAML element and crash the dispatcher.</summary>
+    /// <summary>Disposes the outgoing view deterministically; waiting for GC would keep its ReadStore, ClipSearchService and thumbnail cache alive while engine callbacks could still fire into a detached element.</summary>
     private void DisposePriorChild()
     {
         if (Host.Children.Count == 0) return;

@@ -1,7 +1,5 @@
-﻿// ReadStore — app-side read-only SQLite access.
-// The engine owns the writer connection (rusqlite, single-threaded by design); the app reads through ephemeral read-only connections that ride the same WAL, getting consistent snapshots without contending with the writer.
-// CLIP semantic search dot-products the query embedding against `clip_embeddings.vector` (BLOB of float32 little-endian, L2-normalized — same on-disk format as macOS).
-// `Open()` is async so the call site can await schema validation without blocking the UI thread.
+﻿// Read-only SQLite access for the app. The engine owns the writer; the app reads through ephemeral read-only connections on the same WAL for consistent snapshots.
+// CLIP semantic search dot-products the query embedding against `clip_embeddings.vector` (little-endian float32 BLOB, L2-normalized).
 
 using System;
 using System.Collections.Generic;
@@ -75,11 +73,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             {
                 return;
             }
-            // First-launch guard: the engine creates the DB on first scan; stay closed until it exists (opening a missing file read-only would throw). File.Exists is wrapped because invalid-char paths or a denied ACL on the parent dir would otherwise throw.
-            // On network shares or slow USB sticks this sync call can block the UI for hundreds of ms; the cost on a local SSD is < 1 ms so there's no downside to always going async here.
+            // Stay closed until the engine has created the DB on first scan (opening a missing file read-only throws). File.Exists is wrapped because invalid-char paths or a denied parent ACL would throw.
             var dbPath = _dbPath;
-            // Cap the File.Exists call: on a disconnected SMB share the system call can stall for 30+ seconds.
-            // We'd rather treat it as "DB not present" after a few seconds than freeze startup.
+            // Capped: on a disconnected SMB share File.Exists can stall 30+ seconds, so treat it as "DB not present" after 5 s.
             bool dbExists;
             using (var existsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
@@ -95,7 +91,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    // A 5s stall on the DB path is an actionable degradation (disconnected SMB share / unplugged USB), not the silent first-launch "DB not yet created" case — surface it so the caller shows a dismissible "drive unreachable" message rather than an indistinguishable empty grid.
+                    // A stall (disconnected SMB share, unplugged USB) differs from the silent first-launch case, so surface it for a dismissible "drive unreachable" message.
                     DebugLog.Warn($"ReadStore.OpenAsync: File.Exists timed out for {PathRedactor.Redact(dbPath)}; treating as missing.");
                     LastOpenError = "FileID couldn't reach the library folder (the drive may be disconnected or slow). Check the drive is connected and try again.";
                     return;
@@ -110,7 +106,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             {
                 conn = new SqliteConnection(_connString);
                 await conn.OpenAsync(ct).ConfigureAwait(false);
-                // Match the engine's PRAGMA shape so reads see the same cache / mmap behavior as the writer (these are no-ops on read-only, but documented for parity).
+                // Same PRAGMA shape as the engine's connection (no-ops on read-only).
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = "PRAGMA query_only = ON;";
@@ -160,7 +156,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var seen = new HashSet<long>();
             using var cmd = _connection.CreateCommand();
 
-            // NFC-normalize first (macOS parity): SQLite LIKE compares bytes, and path_search stores the NFC form (v16) so an NFC query matches Mac/NAS-synced NFD names too.
+            // NFC-normalize: SQLite LIKE compares bytes and path_search stores the NFC form, so an NFC query also matches NFD names synced from a Mac or NAS.
             var escapedSearch = trimmedSearch
                 .Normalize(NormalizationForm.FormC)
                 .Replace("\\", "\\\\")
@@ -231,7 +227,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return Array.Empty<FileRow>();
             var rows = new List<FileRow>(limit);
             using var cmd = _connection.CreateCommand();
-            // `failed = 0` is the BASE predicate (matches SearchAsync / SemanticSearchAsync and the macOS reference) so files the engine flagged failed (corrupt / unreadable / permission-denied) don't leak into the default grid as broken placeholder tiles and inflate the count-vs-grid mismatch.
+            // Files the engine flagged failed (corrupt, unreadable, denied) stay out of the default grid and counts.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND kind = $kind";
             var scope = _scope;
             var scopeClause = ScopeClause("path_text", scope);
@@ -270,7 +266,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return Array.Empty<FileRowWithScore>();
             var heap = new PriorityQueue<FileRowWithScore, float>(limit);
             using var cmd = _connection.CreateCommand();
-            // exclude failed files — a corrupt file with a stale CLIP embedding must not surface in semantic results.
+            // A failed file with a stale CLIP embedding must not surface in semantic results.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
             var scope = _scope;
             var scopeClause = ScopeClause("f.path_text", scope);
@@ -292,7 +288,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 var blob = (byte[])reader.GetValue(9);
                 if (blob.Length != queryEmbedding.Length * 4) continue;
                 float score = DotProduct(queryEmbedding, blob);
-                // Reading by column index stays valid until the next ReadAsync, so a lazy materialize inside the enqueue branches is byte-identical.
+                // Column reads by index stay valid until the next ReadAsync, so a lazy materialize in the enqueue branches is safe.
                 if (heap.Count < limit)
                 {
                     heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
@@ -578,7 +574,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         }
     }
 
-    /// <summary>Byte-faithful with the macOS `ReadStore.personTagName` so a person is tagged identically on both platforms.</summary>
+    /// <summary>Person tag names are formatted identically on every platform.</summary>
     internal static string FormatPersonTagName(string? title, string? first, string? middle,
                                               string? last, string? suffix, string? legacy)
     {
@@ -824,7 +820,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         {
             return string.Empty;
         }
-        // Drop tokens shorter than 2 chars to avoid degenerate explosion of matches.
+        // Drop tokens shorter than 2 characters; they match almost everything.
         var parts = new List<string>();
         foreach (var raw in query.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -874,7 +870,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        // Quiesce in-flight reads before freeing the native connection: every read holds `_gate` the whole time it touches `_connection`, so acquiring it guarantees none is mid-query against a connection we're about to Dispose (otherwise the close frees it out from under the reader: a use-after-dispose native crash). Reads ConfigureAwait(false) throughout and never re-enter the gate, so this can't self-deadlock.
+        // Wait on _gate to quiesce in-flight reads: every read holds it while using _connection, so disposing without it could free the connection mid-query. Reads never re-enter the gate, so this cannot self-deadlock.
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {

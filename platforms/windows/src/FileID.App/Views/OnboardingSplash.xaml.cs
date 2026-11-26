@@ -1,6 +1,4 @@
-﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the "FileID" title and routes the "Choose a folder to scan" button to the same FolderPickerService the sidebar uses.
-
-using System;
+﻿using System;
 using System.ComponentModel;
 using FileID.Services;
 using FileID.Theme.Motion;
@@ -150,7 +148,7 @@ public sealed partial class OnboardingSplash : UserControl
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // Catch + log so a failed alert never escalates to App.UnhandledException.
+        // Catch and log so a failed alert never reaches App.UnhandledException.
         try
         {
             if (XamlRoot is null)

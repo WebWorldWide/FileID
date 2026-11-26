@@ -1,4 +1,4 @@
-﻿// VlmWeightDirs — wire model_kind → on-disk weights dir under Models\vlm\.
+﻿// Maps a VLM model_kind to its weights directory under Models\vlm\.
 
 namespace FileID.Services;
 

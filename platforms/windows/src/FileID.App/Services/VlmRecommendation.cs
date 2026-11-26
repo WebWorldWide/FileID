@@ -1,9 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.IO;
 using System.Runtime.InteropServices;
-using FileID.ViewModels;
 
 namespace FileID.Services;
 
@@ -32,28 +30,6 @@ internal static class VlmRecommendation
     internal const string Mistral = "mistral_small_3_2";
 
     internal static readonly string[] SupportedKinds = [Mistral, Qwen, Gemma, Qwen3Four, Qwen3Eight];
-
-    internal static VlmHardwareProfile CurrentProfile()
-    {
-        var info = EngineClient.Instance.Info;
-        var total = info?.PhysicalMemoryGB ?? 0;
-        if (total <= 0 && info?.Hardware is { RamTotalMb: > 0 } hwTotal)
-        {
-            total = hwTotal.RamTotalMb / 1024.0;
-        }
-        var available = info?.Hardware is { RamAvailableMb: > 0 } hwAvailable
-            ? hwAvailable.RamAvailableMb / 1024.0
-            : total;
-        var vram = info?.Hardware?.VramMb ?? 0;
-        var vendor = info?.Hardware?.GpuVendor ?? "none";
-        return new VlmHardwareProfile(
-            total,
-            available,
-            vram,
-            vendor,
-            RuntimeInformation.ProcessArchitecture,
-            FreeBytesFor(AppPaths.ModelsDir));
-    }
 
     internal static VlmRecommendationResult Recommend(VlmHardwareProfile profile)
     {
@@ -223,21 +199,6 @@ internal static class VlmRecommendation
         return $"Recommended for this{arch} PC's {profile.TotalRamGb:0.#} GB RAM{vram}.";
     }
 
-    private static ulong? FreeBytesFor(string path)
-    {
-        try
-        {
-            var full = Path.GetFullPath(path);
-            var root = Path.GetPathRoot(full);
-            if (string.IsNullOrWhiteSpace(root)) return null;
-            var drive = new DriveInfo(root);
-            return drive.IsReady ? (ulong)drive.AvailableFreeSpace : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
 }
 
 internal static class AcceleratorActivationPolicy

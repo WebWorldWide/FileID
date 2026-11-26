@@ -1,5 +1,5 @@
-﻿// DebugLog — local-only structured logging for the C# app side.
-// Writes UTF-8 lines to %LOCALAPPDATA%\FileID\logs\app.log, truncating only when > 10 MB to bound disk usage. Debug lines need FILEID_DEBUG_LOG=1; Trace lines need TraceEnabled. NEVER transmits — this is enforced by the CI binary scan privacy gate. PRIVACY: every log call site that includes a user file path MUST wrap the path in PathRedactor.Redact first.
+﻿// Local-only log at %LOCALAPPDATA%\FileID\logs\app.log, truncated past 10 MB. Debug lines need FILEID_DEBUG_LOG=1; Trace lines need TraceEnabled.
+// Nothing is ever transmitted. Call sites that log a user file path must wrap it in PathRedactor.Redact.
 
 using System.IO;
 using System.Text;
@@ -19,7 +19,7 @@ internal static class DebugLog
     private static long s_reopenAfterTick;
     private static bool s_traceEnabled;
     private static bool s_debugEnabled = ReadDebugSwitch();
-    // One persistent, unbuffered handle: each line is a single synchronous write to the OS, so it survives a NATIVE fast-fail (the OS keeps what was written when the process dies) without a per-line open, stat and close on the UI thread. A queued background writer was rejected on purpose: it loses the last lines on a fast-fail, exactly the [APPLY:N]/[ENGINE-SUB] tail this log exists to capture (CLAUDE.md marks it load-bearing).
+    // One persistent unbuffered handle: each line is a single synchronous write, so it survives a native fast-fail. A queued background writer would lose the last [APPLY:N]/[ENGINE-SUB] lines this log exists to capture.
 
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
@@ -87,7 +87,7 @@ internal static class DebugLog
             var stamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var line = $"{stamp} {level} [tid {Environment.CurrentManagedThreadId}] {message}\n";
             var bytes = s_utf8.GetBytes(line);
-            // The oversize check, the truncation and the append share s_writeLock so a concurrent append can never land between the truncate and the marker and lose the forensic tail.
+            // Truncation and append share s_writeLock so a concurrent append can't land between the truncate and the marker.
             lock (s_writeLock)
             {
                 var stream = EnsureStreamLocked();
@@ -127,7 +127,7 @@ internal static class DebugLog
         {
             return s_stream;
         }
-        // After a failed open (folder locked, disk full) wait before trying again so a broken log never costs a syscall storm per line.
+        // After a failed open (folder locked, disk full) wait before retrying so a broken log doesn't cost a syscall storm per line.
         var now = Environment.TickCount64;
         if (s_stream is null && now < Volatile.Read(ref s_reopenAfterTick))
         {
@@ -262,7 +262,7 @@ internal static class DebugLog
         }
     }
 
-    // Last-session breadcrumb. The managed crash sinks (Application.UnhandledException / AppDomain / TaskScheduler) catch every managed crash but cannot intercept a native fast-fail: WinUI 3's composition layer calls RaiseFailFastException on cross-thread DispatcherObject misuse, which terminates the process without unwinding the CLR, so no crash-*.txt is produced. BeginSession writes last-session.txt (start time, pid, clean_exit=false) and MarkCleanExit flips it; if the NEXT launch finds it unflipped, the previous session died without a handler (most likely a native fast-fail) and DetectPriorAbnormalExit emits session-died-without-handler-{ts}.txt.
+    // WinUI's composition layer can end the process with a native fast-fail that skips every managed crash sink. BeginSession writes last-session.txt with clean_exit=false and MarkCleanExit flips it; a launch that finds it unflipped records the prior death.
     private const string LastSessionFileName = "last-session.txt";
     private const string PriorDeathFilePrefix = "session-died-without-handler-";
 
@@ -317,7 +317,6 @@ internal static class DebugLog
             {
                 return; // healthy previous session
             }
-            // Surface a forensic artifact so we know to look further.
             var fileName = $"{PriorDeathFilePrefix}{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.txt";
             var fullPath = Path.Combine(logsDir, fileName);
             var sb = new StringBuilder();

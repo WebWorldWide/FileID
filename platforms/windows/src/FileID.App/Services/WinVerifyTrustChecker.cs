@@ -1,17 +1,5 @@
-﻿// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
-//
-// Mirrors macOS SecCode/SecStaticCode validation. On every spawn, the app verifies that FileIDEngine.exe's Authenticode chain
-// is intact AND chains to a publisher we trust. Refuses to spawn on
-// mismatch — same threat model as macOS (a malicious replacement engine
-// next to FileID.exe should not be loadable).
-//
-// The check runs and surfaces the verdict via the IntegrityVerdict enum.
-// For dev builds (unsigned binaries) the verdict is `Unsigned`; the
-// EngineClient logs a warning and proceeds. Signed releases verify against
-// a publisher subject embedded at build time.
-//
-// References:
-//   docs.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust
+﻿// Authenticode integrity check on the engine binary, run on every spawn: the signature chain must be intact and chain to a trusted publisher, so a replacement engine placed next to FileID.exe is refused.
+// Dev builds are unsigned, so the verdict is `Unsigned` and EngineClient logs a warning and proceeds; signed releases verify against a publisher subject embedded at build time.
 
 using System.Runtime.InteropServices;
 
@@ -30,21 +18,14 @@ internal enum IntegrityVerdict
 
 internal static class WinVerifyTrustChecker
 {
-    /// <summary>
-    /// Verify the Authenticode signature on a file. The optional
-    /// <paramref name="expectedThumbprintHex"/> optionally pins one leaf
-    /// certificate, <paramref name="expectedSignerSubject"/> checks publisher
-    /// display identity, and <paramref name="expectedSignerPublicKeySha256"/>
-    /// cryptographically binds companion FileID artifacts to the same signer.
-    /// </summary>
+    /// <summary>Verifies a file's Authenticode signature. The optional thumbprint pins the leaf certificate, the signer subject checks publisher identity, and the public-key hash binds companion FileID artifacts to the same signer.</summary>
     public static IntegrityVerdict Verify(
         string path,
         string? expectedThumbprintHex = null,
         string? expectedSignerSubject = null,
         string? expectedSignerPublicKeySha256 = null)
     {
-        // File.Exists wrapped — paths with invalid chars or
-        // denied access on the parent dir would throw.
+        // File.Exists is wrapped because invalid-char paths or a denied parent ACL would throw.
         bool exists;
         try { exists = System.IO.File.Exists(path); }
         catch (System.IO.IOException) { exists = false; }
@@ -54,12 +35,7 @@ internal static class WinVerifyTrustChecker
             return IntegrityVerdict.NotFound;
         }
 
-        // SEC-4: WTD_REVOCATION_CHECK_CHAIN in dwProvFlags is a no-op
-        // unless fdwRevocationChecks asks for it. The previous version
-        // had REVOKE_NONE so revocation never actually ran. Set
-        // WHOLECHAIN to validate every cert in the chain (including the
-        // root CA) against published CRL/OCSP. This is what blocks a
-        // signed-but-revoked binary from spawning.
+        // WTD_REVOCATION_CHECK_CHAIN in dwProvFlags does nothing unless fdwRevocationChecks asks for it. WHOLECHAIN validates every cert in the chain (including the root) so a signed-but-revoked binary can't spawn.
         var fileInfo = new WinTrustFileInfo
         {
             cbStruct = (uint)Marshal.SizeOf<WinTrustFileInfo>(),
@@ -86,12 +62,7 @@ internal static class WinVerifyTrustChecker
                 dwStateAction = WTD_STATEACTION_VERIFY,
                 hWVTStateData = IntPtr.Zero,
                 pwszURLReference = null,
-                // WTD_CACHE_ONLY_URL_RETRIEVAL: revocation uses ONLY locally
-                // cached CRL/OCSP and never makes a network request. This keeps
-                // the integrity/revocation check while honoring the product's
-                // no-extra-egress, offline-first stance — the live WHOLECHAIN
-                // fetch otherwise hit a third-party CA on every engine spawn
-                // and froze/blocked launch when offline or the CA was slow.
+                // Revocation uses only locally cached CRL/OCSP data and never touches the network (the product makes no extra egress); a live fetch also blocked launch when offline or the CA was slow.
                 dwProvFlags = WTD_REVOCATION_CHECK_CHAIN | WTD_CACHE_ONLY_URL_RETRIEVAL,
                 dwUIContext = 0,
                 pSignatureSettings = IntPtr.Zero,
@@ -101,14 +72,7 @@ internal static class WinVerifyTrustChecker
 
             int hr = NativeWinVerifyTrust(IntPtr.Zero, ref WINTRUST_ACTION_GENERIC_VERIFY_V2, trustDataPtr);
 
-            // Always issue a Close to release the WVT state, regardless of hr.
-            // Read the NATIVE struct back first: the VERIFY call allocated per-call
-            // state and wrote its handle into hWVTStateData in native memory.
-            // Re-marshaling the stale managed copy (whose hWVTStateData is still
-            // Zero) would clobber that handle, so CLOSE would receive NULL and
-            // wintrust would free nothing — leaking the state (native heap +
-            // cert-chain context) on every engine spawn. Round-tripping the native
-            // struct preserves the handle so CLOSE actually releases it.
+            // Always Close to release the WVT state. Read the native struct back first: VERIFY wrote its state handle into native memory, and re-marshaling the stale managed copy (handle still zero) would make CLOSE receive NULL and leak the state on every spawn.
             var afterVerify = Marshal.PtrToStructure<WinTrustData>(trustDataPtr);
             afterVerify.dwStateAction = WTD_STATEACTION_CLOSE;
             Marshal.StructureToPtr(afterVerify, trustDataPtr, fDeleteOld: true);
@@ -139,15 +103,13 @@ internal static class WinVerifyTrustChecker
         string? expectedSignerPublicKeySha256,
         string path)
     {
-        // S_OK (0) = Trusted. TRUST_E_NOSIGNATURE = Unsigned.
-        // Anything else = Untrusted (revoked, tampered, expired, etc).
+        // S_OK is Trusted, TRUST_E_NOSIGNATURE is Unsigned, anything else (revoked, tampered, expired) is Untrusted.
         const int TRUST_E_NOSIGNATURE = unchecked((int)0x800B0100);
         const int TRUST_E_BAD_DIGEST = unchecked((int)0x80096010);
 
         if (hr == 0)
         {
-            // Optional cert-pinning. If a thumbprint is supplied, walk the
-            // certificate chain and confirm the leaf matches.
+            // Optional cert pinning: the leaf certificate must match the supplied thumbprint.
             if (!string.IsNullOrWhiteSpace(expectedThumbprintHex)
                 && !CertificateThumbprintMatches(path, expectedThumbprintHex))
             {
@@ -249,7 +211,7 @@ internal static class WinVerifyTrustChecker
             .Trim();
 
     private const uint WTD_UI_NONE = 2;
-    private const uint WTD_REVOKE_WHOLECHAIN = 1; // SEC-4: actually checks revocation
+    private const uint WTD_REVOKE_WHOLECHAIN = 1;
     private const uint WTD_CHOICE_FILE = 1;
     private const uint WTD_STATEACTION_VERIFY = 1;
     private const uint WTD_STATEACTION_CLOSE = 2;

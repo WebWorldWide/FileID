@@ -1,6 +1,4 @@
-﻿// CleanupView code-behind. Trash-non-keepers walks every group, gathers the file_ids for members where IsKeeper == false, confirms with the user, then sends one big trashFiles IPC.
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
@@ -20,7 +18,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
     private static readonly TimeSpan CleanupReloadThrottle = TimeSpan.FromSeconds(1);
-    // Per-tile shell thumbnails (macOS CopyTile parity) — loaded lazily via the members repeater's ElementPrepared, cancelled on recycle, like LibraryView.
+    // Per-tile shell thumbnails, loaded in ElementPrepared and cancelled on recycle as in LibraryView.
     private readonly ThumbnailService _thumbnails = ThumbnailService.Shared;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<DuplicateMember, CancellationTokenSource> _inflightThumbs = new();
 
@@ -159,7 +157,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(HeaderStats));
     }
 
-    // Tracked explicitly so a CollectionChanged.Reset — which carries neither OldItems nor NewItems — can still unsubscribe the prior handlers instead of leaking them (and double-counting in HeaderStats).
+    // Tracked explicitly because CollectionChanged.Reset carries no OldItems; without it the prior handlers would leak and double-count in HeaderStats.
     private readonly System.Collections.Generic.HashSet<DuplicateGroup> _wiredGroups = new();
 
     private void OnGroupsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -289,7 +287,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         catch { /* best-effort thumbnail */ }
         finally
         {
-            // Remove only OUR entry (key+value): a clear+re-prepare of the same member can replace ours with a newer live CTS, and a key-only remove would drop that one — orphaning the live load (uncancellable on recycle) and leaking its CTS.
+            // Remove only our own entry (key and value): a re-prepare of the same member can install a newer live CTS that a key-only remove would orphan.
             if (_inflightThumbs.TryRemove(
                     new System.Collections.Generic.KeyValuePair<DuplicateMember, CancellationTokenSource>(member, ownCts)))
             {
@@ -672,7 +670,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
-    // Dismissible alert mirroring SidebarProcessingControl.ShowAlertAsync — surfaces a partial/failed bulk op so the user is never left thinking a trash succeeded when some (or all) of it didn't.
+    // Dismissible alert so a partial or failed bulk trash never looks successful.
     private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
     {
         try

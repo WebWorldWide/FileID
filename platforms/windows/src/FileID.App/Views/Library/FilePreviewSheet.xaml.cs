@@ -1,6 +1,4 @@
-﻿// FilePreviewSheet code-behind. Kind-dispatched preview; CloseInternal pauses the media player so audio doesn't keep playing after the sheet closes.
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -44,7 +42,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private void OnSheetLoaded(object sender, RoutedEventArgs e)
     {
-        // The host ContentDialog has no default button, so focus would otherwise sit on the dialog chrome and the tunneling PreviewKeyDown would never fire.
+        // The host ContentDialog has no default button, so focus would sit on the dialog chrome and the tunneling PreviewKeyDown would never fire.
         try { Focus(FocusState.Programmatic); } catch { /* best-effort */ }
     }
 
@@ -75,7 +73,7 @@ public sealed partial class FilePreviewSheet : UserControl
     private void OnPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
         => HandleKeyDown(e);
 
-    /// <summary>Public because the host wires it on the ContentDialog via AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true): once the dialog is shown IT owns keyboard focus (not this UserControl), so the sheet's own PreviewKeyDown never fires.</summary>
+    /// <summary>Public because the host wires it on the ContentDialog (AddHandler with handledEventsToo): once shown, the dialog owns keyboard focus, so the sheet's own PreviewKeyDown never fires.</summary>
     internal void HandleKeyDown(Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
         var focused = XamlRoot is null
@@ -147,22 +145,22 @@ public sealed partial class FilePreviewSheet : UserControl
     {
         int navGen = System.Threading.Interlocked.Increment(ref _navGen);
         FileId = fileId;
-        // Publish the active file so the Deep Analyze tab's "Analyze current" button can target it without LibraryView wiring.
+        // Publish the active file so the Deep Analyze "Analyze current" button can target it.
         FileID.Services.SelectionRegistry.Instance.PreviewedFileId =
             fileId > 0 ? fileId : null;
         TextBadge.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
 
         TagInput.Text = string.Empty;
         TagStatusText.Visibility = Visibility.Collapsed;
-        // Refresh the proposed-rename card from the DB (separate query because the sheet may be opened for a file the LibraryView hasn't loaded yet).
+        // Query the proposed-rename card separately: the sheet may open for a file LibraryView has not loaded.
         _ = LoadProposedNameAsync(fileId, navGen);
         _ = LoadVisionTagsAsync(fileId, navGen);
 
-        // Media + placeholder are cleared up front (media must stop the instant we navigate away; neither flashes a loading ring).
+        // Media and placeholder are cleared up front: media must stop the instant we navigate away, and neither should flash a loading ring.
         StopAndClearMedia();
         PreviewMedia.Visibility = Visibility.Collapsed;
         PlaceholderPanel.Visibility = Visibility.Collapsed;
-        // Arm a short timer instead so only a genuinely slow decode shows it; the continuation that binds the new image (or shows media / placeholder) cancels the timer first.
+        // A short timer shows the ring only for a genuinely slow decode; the continuation that binds the new surface cancels it first.
         ArmLoadingDelay();
 
         // Any unhandled exception here would terminate the dispatcher and crash the window.
@@ -223,7 +221,7 @@ public sealed partial class FilePreviewSheet : UserControl
         FileNameText.Text = Path.GetFileName(path);
         ParentPathText.Text = Path.GetDirectoryName(path) ?? string.Empty;
 
-        // Show the Analyze button only for images — matches macOS, which gates Deep Analyze to image files on the sheet (other kinds route through the Deep Analyze tab).
+        // Only images get the Analyze button; other kinds go through the Deep Analyze tab.
         AnalyzeButton.Visibility = kind == "image" ? Visibility.Visible : Visibility.Collapsed;
 
         BuildMetadata(path, kind, sizeBytes, modifiedAt);
@@ -271,7 +269,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt, int navGen)
     {
-        // The await on GetThumbnailAsync can resume on a worker thread; constructing the BitmapImage there is a known native-fast-fail shape — RaiseFailFastException, no managed catch.
+        // GetThumbnailAsync can resume on a worker thread, where constructing the BitmapImage is a native fast-fail (RaiseFailFastException, no managed catch).
         var dispatcher = DispatcherQueue;
         var targetDip = PreviewTargetDip();
         var decodePixels = PreviewDecodePixels(targetDip, XamlRoot?.RasterizationScale ?? 1);
@@ -343,7 +341,7 @@ public sealed partial class FilePreviewSheet : UserControl
             return;
         }
 
-        // Don't show the failure placeholder if we navigated away (or the stale guard above set tcs=false for a superseded nav) — otherwise the prior file's load clobbers the CURRENT sibling's preview with a placeholder.
+        // Skip the failure placeholder after navigating away, or the prior file's load would clobber the current sibling's preview.
         if (_isClosed || _navGen != navGen) return;
         ShowPlaceholder(kind switch
         {
@@ -696,7 +694,7 @@ public sealed partial class FilePreviewSheet : UserControl
             if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
             try
             {
-                // Await the engine's BulkActionResult instead of fire-and-forget: handle_rename_files reports per-file failure (unsafe name, destination exists, source missing, DB-update failed) in the result, not as a thrown exception.
+                // Await the BulkActionResult: handle_rename_files reports per-file failure (unsafe name, destination exists, source missing, DB update failed) in the result, not as an exception.
                 var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                     "renameFiles",
                     () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]

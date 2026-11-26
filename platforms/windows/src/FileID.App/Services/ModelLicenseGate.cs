@@ -16,9 +16,7 @@ internal static class ModelLicenseGate
     {
         "gemma_3_4b" or "gemma_3_12b" or "paligemma_3b" => "Gemma",
         "cudnn_runtime_x64" => "NVIDIA-cuDNN",
-        // The ORT CUDA pack carries the CUDA Toolkit redistributables
-        // (cudart/cublas/cuFFT/NVRTC) alongside the MIT-licensed ORT build,
-        // so it is governed by the CUDA Toolkit EULA like the llama runtime.
+        // The ORT CUDA pack ships CUDA Toolkit redistributables, so the CUDA Toolkit EULA governs it like the llama runtime.
         "ort_cuda_x64" or "llama_runtime_cuda_x64" => "NVIDIA-CUDA",
         _ => null,
     };
@@ -48,44 +46,6 @@ internal static class ModelLicenseGate
         {
             Gate.Release();
         }
-    }
-
-    /// <summary>Prompt (once, sequentially) for every distinct license policy the
-    /// given model kinds require, and return the set of policy keys the user
-    /// DECLINED. Unlike <see cref="EnsureAcceptedAsync"/> — which aborts the whole
-    /// batch on the first decline — this keeps prompting the remaining policies so
-    /// the caller can install the slots the user DID accept (and the un-gated ones)
-    /// while skipping only those tied to a declined policy. An empty result means
-    /// nothing was declined. (Install-all no longer aborts the free core models
-    /// when a gated model's license is declined.)</summary>
-    internal static async Task<IReadOnlySet<string>> RequestDeclinedPoliciesAsync(IEnumerable<string> modelKinds)
-    {
-        var declined = new HashSet<string>();
-        var policies = modelKinds
-            .Select(PolicyForModelKind)
-            .Where(policy => policy is not null)
-            .Cast<Policy>()
-            .DistinctBy(policy => policy.Key)
-            .ToArray();
-        if (policies.Length == 0) return declined;
-
-        await Gate.WaitAsync().ConfigureAwait(true);
-        try
-        {
-            foreach (var policy in policies)
-            {
-                if (IsAccepted(policy)) continue;
-                if (!await ShowTermsAsync(policy).ConfigureAwait(true) || !RememberAcceptance(policy))
-                {
-                    declined.Add(policy.Key);
-                }
-            }
-        }
-        finally
-        {
-            Gate.Release();
-        }
-        return declined;
     }
 
     internal static async Task<bool> EnsureCatalogTermsAcceptedAsync(IpcSchema.ModelCatalogItem model)
@@ -132,7 +92,7 @@ internal static class ModelLicenseGate
     private static string AcceptanceKey(Policy policy)
         => $"ModelLicenseAccepted:{policy.Key}:{policy.ReviewedAt}";
 
-    // The app is UNPACKAGED (WiX MSI / Burn bundle — no MSIX, no package identity), so Windows.Storage.ApplicationData.Current is unavailable and throws.
+    // The app is unpackaged (MSI/Burn, no package identity), so Windows.Storage.ApplicationData.Current throws.
     private static string AcceptancePath =>
         System.IO.Path.Combine(AppPaths.Root, "model-licenses.json");
 

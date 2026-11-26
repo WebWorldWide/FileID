@@ -1,4 +1,4 @@
-﻿// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses for free.
+﻿// Hosted in a ContentDialog, so Esc dismisses it.
 
 using System;
 using System.Collections.Generic;
@@ -138,7 +138,7 @@ public sealed partial class BulkTagSheet : UserControl
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // Catch + log so a failed alert never escalates.
+        // Catch and log so a failed alert never escalates.
         try
         {
             if (XamlRoot is null) return;

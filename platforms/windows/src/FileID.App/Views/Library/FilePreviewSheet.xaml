@@ -1,35 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    FilePreviewSheet — modal preview matching macOS LibraryView.swift:882-1115.
-
-    Layout:
-       Row 0: top toolbar (filename + path, sibling counter, prev/next,
-              Analyze [images], Open, Show in Explorer, Close).
-       Row 1: HStack
-                Left: kind-dispatched preview canvas (Image / MediaPlayer /
-                      placeholder).
-                Right: 360-DIP metadata + tags sidebar.
-
-    Preview kinds (matches macOS, with Windows-only enhancements):
-       image  → BitmapImage at 1024 px via shell IThumbnailProvider chain
-                (handles JPEG, PNG, HEIC, RAW, .pages, anything with a
-                provider).
-       video  → MediaPlayerElement with transport controls (Windows wins
-                here — macOS opens the default app for video; we play
-                inline because WinUI 3 ships a Media Foundation control
-                that handles most codecs out of the box).
-       audio  → MediaPlayerElement with audio-mode UI (kind glyph + filename
-                + Play). Again, in-app vs macOS's default-app handoff.
-       pdf    → 1024 px shell thumbnail (page 1). Multi-page nav delegated
-                to the default PDF viewer via Open button, matching macOS
-                PDFKit-first-page behavior.
-       doc    → 1024 px shell thumbnail. Office providers render these
-                natively on Windows.
-       audio fallback / unknown → kind glyph + filename + caption.
-
-    The sheet is hosted in a ContentDialog from LibraryView; the toolbar
-    Close button raises RequestClose so the host can Hide() the dialog.
--->
+<!-- FilePreviewSheet: modal preview hosted in a ContentDialog; the toolbar Close button raises RequestClose so the host can hide the dialog. Images, PDFs and documents show a 1024 px shell thumbnail; video and audio play inline in a MediaPlayerElement. -->
 <UserControl
     x:Class="FileID.Views.Library.FilePreviewSheet"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -48,7 +18,6 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- ─── Toolbar ───────────────────────────────────────────── -->
         <Grid Grid.Row="0"
               Padding="20,12"
               Background="{ThemeResource SubtleFillColorSecondaryBrush}"
@@ -65,7 +34,6 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Filename + parent path. -->
             <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
                 <TextBlock x:Name="FileNameText"
                            Style="{StaticResource SubtitleTextBlockStyle}"
@@ -80,7 +48,6 @@
                            MaxLines="1" />
             </StackPanel>
 
-            <!-- "N of M" counter (visible only when siblings list has > 1). -->
             <TextBlock Grid.Column="1"
                        x:Name="SiblingCountText"
                        Style="{StaticResource CaptionTextBlockStyle}"
@@ -88,7 +55,6 @@
                        VerticalAlignment="Center"
                        Visibility="Collapsed" />
 
-            <!-- Prev/Next. -->
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                 <Button x:Name="PrevButton"
                         Click="OnPrevClicked"
@@ -150,16 +116,13 @@
             </Button>
         </Grid>
 
-        <!-- ─── Body: preview canvas + metadata sidebar ─────────── -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="360" />
             </Grid.ColumnDefinitions>
 
-            <!-- Preview canvas. One of {PreviewImage, PreviewMedia,
-                 PlaceholderPanel} is visible at a time; SetFileCoreAsync
-                 picks the right one based on file.kind. -->
+            <!-- One of PreviewImage, PreviewMedia or PlaceholderPanel is visible at a time. -->
             <Grid Grid.Column="0"
                   x:Name="PreviewCanvas"
                   Background="#1A000000">
@@ -172,10 +135,7 @@
                        AutomationProperties.Name="File preview"
                        Visibility="Collapsed" />
 
-                <!-- MediaPlayerElement handles both video and audio.
-                     AreTransportControlsEnabled=true exposes play/pause/scrub
-                     out of the box; Visibility flips off when the sheet
-                     unloads so any in-flight playback stops. -->
+                <!-- Handles both video and audio. -->
                 <MediaPlayerElement x:Name="PreviewMedia"
                                     AreTransportControlsEnabled="True"
                                     AutoPlay="False"
@@ -204,7 +164,6 @@
                                TextWrapping="Wrap" />
                 </StackPanel>
 
-                <!-- Loading indicator while the thumbnail / media source resolves. -->
                 <StackPanel x:Name="LoadingPanel"
                             HorizontalAlignment="Center"
                             VerticalAlignment="Center"
@@ -217,7 +176,6 @@
                                HorizontalAlignment="Center"/>
                 </StackPanel>
 
-                <!-- Badges — tile-level boolean (OCR text). -->
                 <StackPanel x:Name="BadgesPanel"
                             Orientation="Horizontal"
                             Spacing="6"
@@ -242,7 +200,6 @@
                 </StackPanel>
             </Grid>
 
-            <!-- Sidebar. Scrolls when content overflows. -->
             <Border Grid.Column="1"
                     Background="{ThemeResource SubtleFillColorTertiaryBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -251,7 +208,6 @@
                               HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Padding="16" Spacing="14">
 
-                        <!-- Metadata card. -->
                         <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
@@ -268,20 +224,12 @@
                                         <ColumnDefinition Width="80" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <!-- Rows are added dynamically in code-behind so a
-                                         missing field (no date / no camera) doesn't
-                                         leave an empty row. -->
+                                    <!-- Rows are added in code-behind so a missing field leaves no empty row. -->
                                 </Grid>
                             </StackPanel>
                         </Border>
 
-                        <!-- Vision Tags card. Shows every auto + user tag
-                             on this file. Mirrors macOS preview sheet's
-                             tag strip. Visible whenever the file has at
-                             least one tag (the engine emits enriched-extras
-                             for every image so this is almost always non-
-                             empty for image kinds). Same TagChip control
-                             as the Library cards for visual parity. -->
+                        <!-- Every auto and user tag on the file; hidden when it has none. -->
                         <Border x:Name="VisionTagsCard"
                                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -293,22 +241,12 @@
                                 <TextBlock Text="Tags"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"
                                            AutomationProperties.HeadingLevel="Level2" />
-                                <!-- Chips are added in code-behind from
-                                     LoadVisionTagsAsync because WinUI 3's
-                                     built-in layouts don't wrap (StackPanel
-                                     overflows; UniformGridLayout's cell
-                                     widths must be uniform). The host
-                                     panel is a plain Grid whose Children
-                                     we populate dynamically. -->
+                                <!-- Chips are added in code-behind: WinUI 3 has no wrapping layout whose cells may differ in width. -->
                                 <Grid x:Name="VisionTagsHost" />
                             </StackPanel>
                         </Border>
 
-                        <!-- Proposed rename card. Visible only when Deep
-                             Analyze has written a vlm_proposed_name for
-                             this file. Mirrors macOS FilePreviewSheet
-                             which shows the proposed name in gold +
-                             "Apply rename" button. -->
+                        <!-- Visible only when Deep Analyze has written a proposed name for this file. -->
                         <Border x:Name="ProposedRenameCard"
                                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                                 BorderBrush="{ThemeResource GoldBrush}"
@@ -339,7 +277,6 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- Tags card. -->
                         <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"

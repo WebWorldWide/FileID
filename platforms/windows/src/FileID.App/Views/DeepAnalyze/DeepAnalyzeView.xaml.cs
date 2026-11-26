@@ -1,7 +1,4 @@
-﻿// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
-// Drives the llama.cpp runtime install, model install, full-library/per-file analyze, cancel, and renders the live caption stream as tokens arrive from the engine.
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
@@ -37,7 +34,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         InitializeComponent();
         NameStyleHost.Content = new NameStyleCard();
         ExcludedFoldersHost.Content = new ExcludedFoldersCard();
-        // Restore the user's last VLM choice so the auto-chain after face clustering and a manual Analyze All both use the same weights the user last picked.
+        // Restore the last VLM choice so the post-clustering auto-chain and a manual Analyze All use the same weights.
         try { _activeModel = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
         catch { /* keep default */ }
         Loaded += OnLoadedHandler;
@@ -112,7 +109,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         SyncSelectionButtons();
         _ = RefreshNamePeopleGateAsync();
         SyncExplainerBanner();
-        // Restore the pending-rename pill from the DB on every load so navigating away and back doesn't wipe the count. _proposedNameCount is incremented per-FileDone during a run; this seeds it from the authoritative DB count so the pill is correct even after a tab switch between runs.
+        // Seeds the pending-rename pill from the DB on every load so it survives tab switches; _proposedNameCount is incremented per FileDone during a run.
         _ = RestorePendingNamesCountAsync();
         ResolveCatalogModelName();
     }
@@ -129,7 +126,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (_unloaded) return;
-                // Only override the in-memory counter when a run is NOT in progress (Starting/Progress latched) — a live run's counter is correct; the DB version may lag by one file.
+                // Skip while a run is in progress: its live counter is correct and the DB count may lag by one file.
                 var ec = EngineClient.Instance;
                 if (ec.DeepAnalyzeStarting is not null || ec.DeepAnalyzeProgress is not null) return;
                 _proposedNameCount = count;
@@ -347,7 +344,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void SyncCards()
     {
         var slot = ModelInstallerService.Instance.DeepVlm;
-        // Each card reflects whether ITS model's weights are actually on disk — not the shared "any VLM installed" slot, otherwise installing one model makes the other cards mis-report as installed and Deep Analyze fails every file with "VLM weights not installed".
+        // Each card reports whether its own model weights are on disk, not the shared "any VLM installed" slot.
         var ramGB = PhysicalRamGB();
         ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, ramGB);
         ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, ramGB);
@@ -365,7 +362,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, double? ramGB)
     {
-        // When the engine has reported physical RAM and this VLM's budget can't fit under the ~8 GB headroom, disable install/select and show a "Needs N GB (you have M)" affordance instead of letting the model OOM-kill the engine on load.
+        // When the engine has reported physical RAM and this model cannot fit under the ~8 GB headroom, disable install/select and show "Needs N GB (you have M)" rather than OOM-killing the engine on load.
         if (ramGB is double available && !Fits(kind))
         {
             status.Text = NeedsMemoryText(kind, available);
@@ -462,13 +459,13 @@ public sealed partial class DeepAnalyzeView : UserControl
 
         if (starting is null && prog is null && last is null && complete is null) return;
 
-        // Any real progress/result/terminal event proves the model loaded and tokens are flowing — disarm the warm-up watchdog so it can't false-fire.
+        // Any progress, result or terminal event proves the model loaded; disarm the warm-up watchdog.
         if (prog is not null || last is not null || complete is not null)
         {
             CancelWarmupTimer();
         }
 
-        // Surface the phase text so the user knows we're not stalled while the VLM warms up (~5-30 s on first run).
+        // Show the phase text so the user knows a slow first-run VLM warm-up (~5-30 s) has not stalled.
         if (starting is not null && prog is null)
         {
             StreamCard.Visibility = Visibility.Visible;
@@ -481,14 +478,14 @@ public sealed partial class DeepAnalyzeView : UserControl
                 : starting.Message;
             StreamInheritedText.Visibility = Visibility.Collapsed;
             StreamProposedNameText.Text = string.Empty;
-            // Reset the smart-rename tally at the start of each run so the pill reflects only THIS run, not a cumulative count across runs.
+            // Reset the smart-rename tally so the pill reflects only this run.
             _proposedNameCount = 0;
             _lastConsumedFileDone = null;
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
             OverallProgressText.Text = "Getting ready…";
-            // Arm the warm-up watchdog so a stalled model load surfaces a dismissible error + reverts the optimistic UI instead of spinning "Preparing…" indefinitely.
+            // Arm the warm-up watchdog so a stalled model load reverts the optimistic UI with a dismissible error instead of spinning on "Preparing…".
             ArmWarmupTimer();
         }
 
@@ -515,7 +512,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                 StreamCaptionText.Text = string.Empty;
                 StreamInheritedText.Visibility = Visibility.Collapsed;
             }
-            // Engine emits the partial accumulated text at 4 Hz; show it directly in the caption line so the user sees the model generating word-by-word.
+            // The engine emits the accumulated partial text at 4 Hz; show it directly so captions appear word by word.
             if (!string.IsNullOrEmpty(prog.CurrentCaption))
             {
                 _captionAccumulator = prog.CurrentCaption!;
@@ -523,7 +520,6 @@ public sealed partial class DeepAnalyzeView : UserControl
             }
         }
 
-        // Only act on a genuinely new FileDone.
         if (last is not null && !ReferenceEquals(last, _lastConsumedFileDone))
         {
             _lastConsumedFileDone = last;
@@ -686,7 +682,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             {
                 return;
             }
-            // Revert the optimistic UI so it doesn't look like a run is still in flight, then surface a dismissible, actionable error.
+            // Revert the optimistic UI, then surface a dismissible error.
             StreamCard.Visibility = Visibility.Collapsed;
             OverallProgress.IsIndeterminate = false;
             OverallProgress.Value = 0;
@@ -792,7 +788,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // This path calls GetThumbnailAsync directly, bypassing ThumbnailService, so it must apply the same skip — single source of truth in ThumbnailService.SkipShellThumbnailForExtension.
         if (Services.ThumbnailService.SkipShellThumbnailForExtension(path))
         {
-            // No shell thumbnail for video/audio — clear any prior file's image so the stream card doesn't show a stale preview under the current filename (placeholder, not stale).
+            // No shell thumbnail for video/audio: show the placeholder instead of a prior file's stale image.
             ClearStreamImageOnDispatcher(DispatcherQueue, generation);
             return;
         }
@@ -945,7 +941,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             await ShowAlertAsync("Describing stopped", reason);
             return;
         }
-        // Setting it after the await meant a send failure showed the user nothing — the run silently never started while the UI looked idle/ready.
+        // Set before the await so a send failure is visible instead of a silent no-op.
         StreamCard.Visibility = Visibility.Visible;
         CancelButton.IsEnabled = true;
         AnalyzeAllButton.IsEnabled = false;
@@ -959,7 +955,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             var reason = EngineClient.Instance.GpuDeviceRemoved
                 ? EngineClient.GpuRestartRequiredMessage
                 : ex.Message;
-            // Revert the optimistic state so the UI doesn't falsely look like a run is in flight, then surface a dismissible error.
+            // Revert the optimistic state, then surface a dismissible error.
             StreamCard.Visibility = Visibility.Collapsed;
             CancelButton.IsEnabled = false;
             AnalyzeAllButton.IsEnabled = true;
@@ -1117,7 +1113,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
     {
-        // Catch + log so a failed alert never escalates to App.UnhandledException.
+        // Catch and log so a failed alert never reaches App.UnhandledException.
         try
         {
             if (XamlRoot is null)

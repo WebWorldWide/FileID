@@ -1,6 +1,5 @@
-﻿// ChangeLog — the session-wide record of every applied file mutation
-// (renames, trash, restructure applies, people merges, tag writes), each with an inverse-action closure so the user can undo anything they didn't mean before closing the app.
-// Threading: Push arrives from EngineClient PropertyChanged handlers (the untrusted engine-event path) while reads/undo run on the UI thread, so all list access is under _gate and reverse closures run OUTSIDE the lock. Session-only by design, matching the macOS app's session-scoped Undo.
+﻿// Session-only record of applied file mutations, each with an inverse closure for undo.
+// Push arrives from engine-event handlers while reads and undo run on the UI thread, so list access is under _gate and reverse closures run outside the lock.
 
 using System;
 using System.Collections.Generic;

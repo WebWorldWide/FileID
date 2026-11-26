@@ -1,12 +1,4 @@
-﻿// SEC-9: centralized "Open file in default handler" helper with an
-// extension allowlist. The library DB stores paths; if a row's underlying
-// file is swapped on disk for a `.exe` / `.lnk` / `.bat` between scan + open,
-// a naive ShellExecute would execute it. This helper restricts "Open" to
-// known media extensions; everything else falls back to "Reveal in Explorer"
-// (which can't execute).
-//
-// "Reveal" stays universal — Explorer just selects the file in its parent
-// folder. That's a UI surface, not an execution path.
+﻿// Opens files in the default handler only for an allowlist of media extensions, so a library row whose file was swapped for a `.exe`/`.lnk`/`.bat` after scanning is never executed. Everything else falls back to Reveal in Explorer, which cannot execute.
 
 using System;
 using System.Diagnostics;
@@ -16,9 +8,7 @@ namespace FileID.Services;
 
 internal static class SafeOpen
 {
-    // Conservative allowlist. Extend only if a user reports a missing
-    // legitimate format. NEVER include .exe / .lnk / .bat / .cmd / .ps1 /
-    // .vbs / .msi / .scr / .com / .pif / .reg / .url / .website / .hta.
+    // Never add .exe / .lnk / .bat / .cmd / .ps1 / .vbs / .msi / .scr / .com / .pif / .reg / .url / .website / .hta.
     private static readonly HashSet<string> AllowedExts = new(StringComparer.OrdinalIgnoreCase)
     {
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
@@ -35,11 +25,7 @@ internal static class SafeOpen
         ".html", ".htm", ".xml", ".json", ".yaml", ".yml",
     };
 
-    /// <summary>
-    /// Open the given file via ShellExecute IF its extension is in the
-    /// allowlist. Returns false (without launching) for anything else.
-    /// On false, callers should fall back to Reveal.
-    /// </summary>
+    /// <summary>Opens the file via ShellExecute only if its extension is allowlisted; returns false otherwise so callers fall back to Reveal.</summary>
     public static bool TryOpenFile(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
@@ -69,12 +55,7 @@ internal static class SafeOpen
     internal static bool IsAllowedFileExtension(string? path) =>
         !string.IsNullOrWhiteSpace(path) && AllowedExts.Contains(Path.GetExtension(path));
 
-    /// <summary>
-    /// Open a folder (Explorer). Folder paths are inherently safe — no
-    /// execution surface — so no allowlist applies. Uses
-    /// UseShellExecute=false + ArgumentList so quotes/backslashes/
-    /// shell metachars in the path can't be interpreted by cmd.
-    /// </summary>
+    /// <summary>Opens a folder in Explorer. UseShellExecute=false with ArgumentList keeps shell metacharacters in the path inert.</summary>
     public static void OpenFolder(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
@@ -94,12 +75,7 @@ internal static class SafeOpen
         }
     }
 
-    /// <summary>
-    /// Reveal-in-Explorer. Selects the file in its parent folder. Universal:
-    /// works for any file extension, can't execute the target. Uses
-    /// UseShellExecute=false + ArgumentList for the same reason as
-    /// OpenFolder above.
-    /// </summary>
+    /// <summary>Selects the file in its parent folder in Explorer; works for any extension and cannot execute the target.</summary>
     public static void Reveal(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return;
@@ -110,10 +86,7 @@ internal static class SafeOpen
                 FileName = "explorer.exe",
                 UseShellExecute = false,
             };
-            // explorer.exe expects "/select," and the path as ONE argument
-            // (no space between comma and path). ArgumentList quotes each
-            // entry independently, so we still need to glue them ourselves
-            // for the /select, syntax.
+            // explorer.exe needs "/select," glued to the path as one argument; ArgumentList would split them.
             psi.ArgumentList.Add("/select," + path);
             Process.Start(psi);
         }
@@ -123,12 +96,7 @@ internal static class SafeOpen
         }
     }
 
-    /// <summary>
-    /// File.Exists wrapper that swallows IOException / UnauthorizedAccessException.
-    /// an unguarded File.Exists can throw on paths with invalid
-    /// characters or denied access — defensive wrap returns false in
-    /// those cases so callers don't crash.
-    /// </summary>
+    /// <summary>File.Exists that returns false instead of throwing on invalid characters or denied access.</summary>
     private static bool SafeFileExists(string path)
     {
         try { return File.Exists(path); }

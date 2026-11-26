@@ -1,13 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    LibraryView — search bar + kind filter + thumbnail grid.
-
- Same visual hierarchy:
-      - Top toolbar: search box (Ctrl+F focus), kind segmented control
-      - Grid: ItemsRepeater + UniformGridLayout, 256-px tiles
-      - Empty state: when no rows match the current query/filter
-
--->
+<!-- LibraryView: search bar, kind filter and thumbnail grid. -->
 <UserControl
     x:Class="FileID.Views.Library.LibraryView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -20,11 +12,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- macOS Library binds Cmd+F to search-box focus, Esc to "clear
-         selection / clear search", Cmd+A to select-all, Cmd+Z to undo
-         the last destructive op. Mirror with Ctrl on Windows. The
-         accelerators are scoped to the UserControl so they fire from
-         anywhere on the page, not only from the search box. -->
+    <!-- Ctrl+F focuses search, Esc clears selection or search, Ctrl+A selects all, Ctrl+Z undoes. Scoped to the UserControl so they fire anywhere on the page. -->
     <UserControl.KeyboardAccelerators>
         <KeyboardAccelerator Modifiers="Control" Key="F" Invoked="OnFocusSearchAccelerator" />
         <KeyboardAccelerator Modifiers="Control" Key="A" Invoked="OnSelectAllAccelerator" />
@@ -41,7 +29,6 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Toolbar: search + kind filter + Select-all-visible + Undo pill. -->
         <Grid Grid.Row="0" ColumnSpacing="12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -73,10 +60,6 @@
                 <ComboBoxItem Content="Audio" Tag="audio"/>
             </ComboBox>
 
-            <!-- explicit "Select all" affordance. macOS Library
-                 tab always exposes this so users don't have to discover
-                 Ctrl+Click. Toggling fills the selection bar; clicking
-                 again clears. -->
             <TextBlock x:Name="ShownCountText"
                        Grid.Column="2"
                        VerticalAlignment="Center"
@@ -96,9 +79,6 @@
                 </StackPanel>
             </Button>
 
-            <!-- Undo-last-rename header button. Hidden when the
-                 UndoStack is empty; shows a tappable pill with the last
-                 destructive op's label when entries exist. -->
             <Button x:Name="UndoButton"
                     Grid.Column="4"
                     Click="OnUndoLastClicked"
@@ -113,11 +93,7 @@
             </Button>
         </Grid>
 
-        <!-- Inline banners: CLIP-not-installed hint when the user types
-             a semantic query, Deep Analyze active banner when the engine
-             is captioning, face clustering banner when clustering is
-             running. Mirrors macOS LibraryView's banner stack. Collapses
-             cleanly when no banner applies. -->
+        <!-- Banners for the CLIP-not-installed hint, Deep Analyze captioning and face clustering. -->
         <StackPanel Grid.Row="1" Spacing="6">
             <Border x:Name="ClipMissingBanner"
                     Visibility="Collapsed"
@@ -187,7 +163,6 @@
             </Border>
         </StackPanel>
 
-        <!-- Selection toolbar — visible when at least one tile is selected. -->
         <Grid Grid.Row="2"
               x:Name="SelectionBar"
               Visibility="Collapsed"
@@ -250,9 +225,7 @@
             </Button>
         </Grid>
 
-        <!-- Grid of tiles. IsTabStop so Tab can land focus on the grid and
-             arrow-key navigation (OnGridPreviewKeyDown) takes over; a tile
-             click also routes focus here. -->
+        <!-- IsTabStop lets Tab land on the grid, where OnGridPreviewKeyDown takes over arrow keys; tile clicks also route focus here. -->
         <Grid Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
@@ -268,12 +241,7 @@
                            ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}"
                            ElementPrepared="OnRepeaterElementPrepared"
                            ElementClearing="OnRepeaterElementClearing">
-                <!-- Square tiles. UniformGridLayout cells are 180 wide minimum;
-                     each tile sets its own Height = width + 68 (caption row) in
-                     OnTileSizeChanged, so the image area is always 1:1. macOS
-                     uses .aspectRatio(1, contentMode: .fit) for the same effect.
-                     ItemsStretch="Fill" keeps the cells filling the grid width;
-                     MinItemHeight=248 (180+68) reserves a square-friendly cell. -->
+                <!-- Cells are at least 180 wide; each tile sets its own height in OnTileSizeChanged. MinItemHeight=248 is 180 + 68 (caption row). -->
                 <ItemsRepeater.Layout>
                     <UniformGridLayout MinItemWidth="180"
                                        MinItemHeight="248"
@@ -284,18 +252,7 @@
 
                 <ItemsRepeater.ItemTemplate>
                     <DataTemplate x:DataType="vm:FileTile">
-                        <!-- PointerEntered/Exited drive a 1.012 hover scale on
-                             the tight spring (response 0.35, damping 0.78).
-                             Height = width + 68 (caption row) so the image
-                             area is exactly square regardless of how long
-                             the caption is. Mirrors macOS's
-                             .aspectRatio(1, contentMode: .fit) pattern.
-                             Set via SizeChanged (OnTileSizeChanged), NOT a
-                             self-binding to ActualWidth: ActualWidth isn't an
-                             observable DP, so a OneWay bind reads 0 before
-                             layout (→ height 68, image row collapses to ~0)
-                             and never re-fires. SizeChanged runs post-arrange
-                             with the real width and again on column resize. -->
+                        <!-- Height = width + 68 (caption row), set from SizeChanged in OnTileSizeChanged so the image area is square. Binding to ActualWidth does not work: it is not an observable DP, so a OneWay bind reads 0 before layout and never re-fires. -->
                         <Grid x:Name="TileRoot"
                               CornerRadius="12"
                               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -313,9 +270,7 @@
                               ToolTipService.ToolTip="{x:Bind Path}"
                               AutomationProperties.Name="{x:Bind AccessibleName, Mode=OneWay}"
                               AutomationProperties.HelpText="Click to show details, double-click to preview, or right-click for more actions">
-                            <!-- Inline so each tile gets a unique animatable instance.
-                                 macOS LibraryView.swift:676-677 ramps stroke opacity
-                                 0.08 → 0.18 on hover (easeOut 0.18s). -->
+                            <!-- Inline so each tile gets its own animatable instance. -->
                             <Grid.BorderBrush>
                                 <SolidColorBrush Color="White" Opacity="0.08" />
                             </Grid.BorderBrush>
@@ -353,11 +308,7 @@
                                     </MenuFlyoutItem>
                                 </MenuFlyout>
                             </Grid.ContextFlyout>
-                            <!-- Row 0 = image (square; takes remaining height
-                                 = TileRoot.ActualWidth). Row 1 = caption,
-                                 pinned at exactly 68 DIP so a long filename
-                                 or extra tag chip can't push the image
-                                 area taller than its neighbours. -->
+                            <!-- Row 0 is the square image; row 1 is the caption, pinned at 68 DIP so long names or extra chips cannot grow the image area. -->
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="68"/>
@@ -366,30 +317,15 @@
                                     Background="{ThemeResource SubtleFillColorTertiaryBrush}"
                                     CornerRadius="8">
                                 <Grid>
-                                    <!-- Shimmer placeholder while
-                                         thumbnail loads. ShowShimmer is
-                                         Thumbnail==null && !ThumbnailFailed
-                                         so the shimmer cedes to the
-                                         broken-image placeholder when
-                                         the fallback chain returns null. -->
+                                    <!-- Shimmer until the thumbnail loads or fails; ThumbnailFailed swaps it for the broken-image placeholder. -->
                                     <motion:ShimmerView
                                         Visibility="{x:Bind ShowShimmer, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"/>
-                                    <!-- The Image keeps its default Opacity=1 and just
-                                         renders its bound Source. No ImageOpened handler:
-                                         it never fired for pre-decoded / L1-cached
-                                         BitmapImages (so any opacity logic gated on it was
-                                         dead), and the tile-root entrance (scale-only) is
-                                         what carries the reveal. ShowShimmer is the load
-                                         indicator; ThumbnailFailed shows the broken glyph. -->
+                                    <!-- No ImageOpened handler: it never fires for pre-decoded or cached BitmapImages. ShowShimmer is the load indicator. -->
                                     <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
                                            Stretch="UniformToFill"
                                            HorizontalAlignment="Stretch"
                                            VerticalAlignment="Stretch" />
-                                    <!-- Broken-image placeholder when
-                                         ThumbnailService.RequestAsync
-                                         returns null after exhausting its
-                                         fallback chain. Procedural FontIcon
-                                         so no Assets bookkeeping. -->
+                                    <!-- Broken-image placeholder when the thumbnail fallback chain returns null. -->
                                     <FontIcon Glyph="&#xE91F;"
                                               FontSize="48"
                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
@@ -411,9 +347,7 @@
                                       Margin="0,4,4,0"
                                       Foreground="{ThemeResource AccentFillColorDefaultBrush}"
                                       Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource BoolToVisibility}}" />
-                            <!-- Hover badges: kind + face cluster + OCR text indicators top-left.
-                                 Kind badge first so the "what is this file" answer reads
-                                 left-to-right even when face/OCR badges are absent. -->
+                            <!-- Kind badge first so it reads left to right even when the face and OCR badges are absent. -->
                             <StackPanel Grid.Row="0"
                                         Orientation="Horizontal"
                                         Spacing="4"
@@ -438,29 +372,20 @@
                                     <FontIcon Glyph="&#xE8C1;" FontSize="12" Foreground="{ThemeResource AiBrush}" />
                                 </Border>
                             </StackPanel>
-                            <!-- Caption stack pinned at fixed 68 DIP. Overflow
-                                 is clipped by the Grid's row constraint; long
-                                 filenames + chip rows + size still fit. -->
+                            <!-- Fixed 68 DIP; overflow is clipped by the row constraint. -->
                             <StackPanel Grid.Row="1" Spacing="2" Margin="0,8,0,0"
                                         VerticalAlignment="Top">
                                 <TextBlock Text="{x:Bind FileName}"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"
                                            TextTrimming="CharacterEllipsis"/>
-                                <!-- Deep Analyze smart-rename proposal. Gold text per
-                                     macOS visual language; collapses when the engine
-                                     hasn't proposed a rename. ToolTip echoes the
-                                     proposal so truncated text remains discoverable. -->
+                                <!-- Gold proposal text; the ToolTip echoes it so truncated text stays discoverable. -->
                                 <TextBlock Text="{x:Bind ProposedName, Mode=OneWay}"
                                            FontSize="11"
                                            Foreground="{ThemeResource GoldBrush}"
                                            TextTrimming="CharacterEllipsis"
                                            Visibility="{x:Bind HasProposedName, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
                                            ToolTipService.ToolTip="{x:Bind ProposedName, Mode=OneWay}" />
-                                <!-- Chip row: structured kind chip (gray) first,
-                                     then auto-tag chips (gold). HasChips collapses
-                                     the whole row on bare Other-kind files with
-                                     no tags so the caption row keeps its fixed
-                                     68 DIP height. -->
+                                <!-- HasChips collapses the row on bare Other-kind files so the caption keeps its fixed 68 DIP height. -->
                                 <StackPanel Orientation="Horizontal" Spacing="4"
                                             Visibility="{x:Bind HasChips, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
                                     <theme:TagChip TagText="{x:Bind KindDisplay}"
@@ -511,7 +436,6 @@
             </Grid>
         </Grid>
 
-        <!-- Status footer: loading + error. -->
         <StackPanel Grid.Row="4"
                     Orientation="Horizontal"
                     Spacing="12"

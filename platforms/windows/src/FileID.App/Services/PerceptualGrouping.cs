@@ -1,4 +1,4 @@
-﻿// Perceptual near-duplicate grouping — pure + testable.
+﻿// Groups perceptually near-identical files.
 
 using System;
 using System.Collections.Generic;

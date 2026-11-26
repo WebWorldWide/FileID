@@ -1,5 +1,4 @@
-﻿// Fires a Windows shell toast when a scan completes. We use the raw
-// Subscribe at app startup; unsubscribe never (lives for the process). PRIVACY: toast text is local, never sent anywhere.
+﻿// Fires a Windows shell toast when a scan completes. Started once at app startup and lives for the process; the toast text stays local.
 
 using System;
 using System.Reactive.Linq;
@@ -26,13 +25,6 @@ public static class ScanCompleteToast
                     Show(sc.Result);
                 }
             });
-    }
-
-    /// <summary>Call from app shutdown (App.OnSuspending or equivalent) so the lambda doesn't outlive the process intent.</summary>
-    public static void Stop()
-    {
-        _sub?.Dispose();
-        _sub = null;
     }
 
     private static void Show(ScanComplete result)

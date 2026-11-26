@@ -1,5 +1,4 @@
-﻿// AppSettings — durable user preferences.
-// Persisted JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic writes via temp-file + File.Move so a crash mid-save doesn't corrupt the file. Every property must default safely so older settings.json files load cleanly.
+﻿// User preferences persisted to %LOCALAPPDATA%\FileID\app-settings.json. Every property must default safely so older files load.
 
 using System;
 using System.IO;
@@ -16,9 +15,9 @@ internal sealed class AppSettings
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = false, // strict casing — case-flips can't smuggle past Sanitize
+        PropertyNameCaseInsensitive = false,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        // Unknown fields are intentionally ignored (forward-compatibility for the next schema version); Sanitize() validates every declared field individually so an unknown field can't pollute the in-memory state.
+        // Unknown fields are ignored for forward compatibility; Sanitize() validates every declared field.
     };
 
     /// <summary>Absolute path or null if never picked.</summary>
@@ -111,7 +110,7 @@ internal sealed class AppSettings
         return result;
     }
 
-    /// <summary>Fresh installs start at the current version so one-time Sanitize migrations only ever touch older files (and can't clobber a fresh user's first deliberate pick).</summary>
+    /// <summary>Fresh installs start at the current version so the one-time migrations in Sanitize only touch older files.</summary>
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
     /// <summary>Only "cpu" changes engine behaviour; the older provider names stay accepted so existing settings files round-trip.</summary>
@@ -119,7 +118,7 @@ internal sealed class AppSettings
         new(StringComparer.OrdinalIgnoreCase)
         { "auto", "cuda", "tensorrt", "directml", "openvino", "qnn", "cpu" };
 
-    /// <summary>Sanitize() coerces any other value to the safe default so a tampered settings.json can't smuggle an arbitrary model_kind into the auto-chain deepAnalyzeAll call.</summary>
+    /// <summary>Sanitize() coerces any other value to the default so a tampered settings.json can't inject an arbitrary model_kind into deepAnalyzeAll.</summary>
     private static readonly HashSet<string> AllowedVlmKinds =
         new(StringComparer.OrdinalIgnoreCase)
         { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
@@ -147,16 +146,16 @@ internal sealed class AppSettings
         }
         catch (Exception ex)
         {
-            // Corrupt settings file shouldn't brick the app.
+            // A corrupt settings file falls back to defaults.
             DebugLog.Warn("AppSettings.Load failed: " + ex.Message);
         }
         return new AppSettings();
     }
 
-    /// <summary>Current schema version this build understands. Bumped only on incompatible field renames or one-time value migrations; Sanitize() clamps loaded values to this.</summary>
+    /// <summary>Bumped only on incompatible field renames or one-time value migrations.</summary>
     private const int CurrentSchemaVersion = 5;
 
-    /// <summary>Defensive cleanup of fields a malicious settings.json could otherwise smuggle through. Currently scrubs the EP override (rejects anything outside the canonical enum so DLL paths can't be injected). Add new validations as fields are added.</summary>
+    /// <summary>Validates every loaded field. The execution-provider override must be in the allowed set so a DLL path can't be injected.</summary>
     private static void Sanitize(AppSettings s)
     {
         if (s.LibraryScopeRootId is <= 0) s.LibraryScopeRootId = null;
@@ -179,13 +178,13 @@ internal sealed class AppSettings
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
 
-        // A corrupt or malicious settings.json could otherwise set 999, and a future migration path that branches on version could behave unsafely.
+        // A tampered version number could send a future version-branching migration down the wrong path.
         if (s.SchemaVersion < 0 || s.SchemaVersion > CurrentSchemaVersion)
         {
             DebugLog.Warn($"AppSettings: SchemaVersion {s.SchemaVersion} out of supported range [0, {CurrentSchemaVersion}]; coercing to {CurrentSchemaVersion}.");
             s.SchemaVersion = CurrentSchemaVersion;
         }
-        // Advance any older-but-in-range schema to current so the one-time migrations above don't re-run (which could clobber a later deliberate re-pick once it's persisted).
+        // Advance to current so the one-time migrations above never re-run over a later deliberate pick.
         if (s.SchemaVersion < CurrentSchemaVersion)
         {
             s.SchemaVersion = CurrentSchemaVersion;
@@ -206,13 +205,13 @@ internal sealed class AppSettings
     }
 
     private static readonly SemaphoreSlim s_writeGate = new(1, 1);
-    // Setters call Save(), which bumps a debounce timer; the write fires 200 ms after the LAST setter on a thread-pool thread, so rapid changes (tab spam, sidebar toggle, scroll-driven kind-filter changes) don't each run a synchronous WriteAllBytes + File.Move chain on the UI thread (5-15 ms of stutter per change). Writes are serialized through s_writeGate so concurrent debounced saves and the synchronous SaveImmediately path can't race.
+    // Save() debounces: the write fires 200 ms after the last setter on a thread-pool thread, keeping rapid changes off the UI thread. s_writeGate serializes debounced saves with SaveImmediately.
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(200);
     private static CancellationTokenSource? s_pendingSaveCts;
 
     public void Save()
     {
-        // Cancel any pending save and replace it with this one: the async worker observes the new token, and one cancelled before its delay elapses does no IO.
+        // A save cancelled before its delay elapses does no IO.
         var newCts = new CancellationTokenSource();
         var prior = Interlocked.Exchange(ref s_pendingSaveCts, newCts);
         try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
@@ -232,12 +231,11 @@ internal sealed class AppSettings
         });
     }
 
-    /// <summary>Synchronous flush. Use at shutdown to make sure a pending debounced save actually lands on disk before exit.</summary>
+    /// <summary>Synchronous flush for shutdown, so a pending debounced save reaches disk.</summary>
     public void SaveImmediately()
     {
         try
         {
-            // Cancel any debounced save: this synchronous write supersedes it.
             var prior = Interlocked.Exchange(ref s_pendingSaveCts, null);
             try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
             var snapshot = CloneForWrite();
@@ -251,7 +249,7 @@ internal sealed class AppSettings
 
     private AppSettings CloneForWrite()
     {
-        // Settings are value-shaped (all primitive properties), so a shallow copy is enough for serialization; importantly, the snapshot captures state at the moment Save() was called so a setter running mid-debounce can't tear the write.
+        // Shallow copy suffices; the snapshot pins state at Save() time so a setter during the debounce can't tear the write.
         var clone = (AppSettings)MemberwiseClone();
         clone.DeepAnalyzeExcludedFolders = [.. DeepAnalyzeExcludedFolders];
         return clone;
@@ -265,7 +263,7 @@ internal sealed class AppSettings
             AppPaths.EnsureDirectories();
             var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, s_jsonOptions);
             var tmp = AppPaths.SettingsPath + ".tmp";
-            // Avoids partial files on crash.
+            // Temp file + move so a crash mid-save leaves no partial file.
             await File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
             File.Move(tmp, AppPaths.SettingsPath, overwrite: true);
         }
