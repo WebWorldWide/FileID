@@ -243,7 +243,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb
           export XDG_DATA_HOME="$RUNNER_TEMP/xdg-data" XDG_CONFIG_HOME="$RUNNER_TEMP/xdg-config"
           mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
-          xvfb-run -a cargo test --locked -- --ignored --exact tabs::model_catalog::tests::locations_move_to_the_top_of_settings tabs::locations::tests::the_card_fills_in_when_refresh_is_pressed shell::page_header::tests::the_breadcrumb_is_never_shortened window::shortcut_tests::the_stack_is_only_as_wide_as_the_page_being_shown tabs::model_catalog::tests::settings_wraps_its_rows_to_fit_beside_the_sidebar_in_an_800_wide_window
+          # GTK belongs to the first thread that initializes it, so each widget test runs in its own process.
+          for test in tabs::model_catalog::tests::locations_move_to_the_top_of_settings tabs::locations::tests::the_card_fills_in_when_refresh_is_pressed shell::page_header::tests::the_breadcrumb_is_never_shortened window::shortcut_tests::the_stack_is_only_as_wide_as_the_page_being_shown tabs::model_catalog::tests::settings_wraps_its_rows_to_fit_beside_the_sidebar_in_an_800_wide_window; do
+            xvfb-run -a cargo test --locked -- --ignored --exact "$test"
+          done
 
       - name: Verify binary exists
         run: |
