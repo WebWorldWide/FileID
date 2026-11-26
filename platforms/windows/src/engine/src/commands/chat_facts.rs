@@ -704,6 +704,13 @@ pub(crate) fn widened_folder(conn: &Connection, folder: Option<String>, root: Op
     Ok(if totals(conn, &starts)?.0 > 0 { Some(widened) } else { folder })
 }
 
+/// The folder filter for a name that exact or longer folder names carry, `None` when no folder does.
+pub(crate) fn existing_folder(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<String>> {
+    let folder = widened_folder(conn, Some(format!("named:{name}")), root)?;
+    let filter = Filter { folder: folder.clone(), root: root.cloned(), ..Filter::default() };
+    Ok(if totals(conn, &filter)?.0 > 0 { folder } else { None })
+}
+
 /// `None` when the catalog has no such folder, so the question is searched as words instead.
 pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let folder = widened_folder(conn, Some(format!("named:{name}")), root)?;

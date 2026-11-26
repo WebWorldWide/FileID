@@ -1471,6 +1471,20 @@ pub fn asks_why(text: &str) -> bool {
     text.split_whitespace().next().is_some_and(|word| clean(word) == "why")
 }
 
+/// The words before "files" in "how many Google Takeout files do I have?", when the question asks for nothing else.
+pub fn files_named(text: &str) -> Option<String> {
+    let raw: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
+    let end = words.iter().position(|word| word == "files" || word == "file")?;
+    let lead = words.windows(2).position(|pair| pair == ["how", "many"])? + 2;
+    let name: Vec<String> = raw.get(lead..end)?.iter().map(|word| original(word)).collect();
+    let rest_is_filler = words[end + 1..].iter().all(|word| ["do", "i", "we", "have", "are", "there", "got", "in", "my", "library", "total", "altogether"].contains(&word.as_str()));
+    (name.len() >= 2 && rest_is_filler && words[lead..end].iter().all(|word| !KIND_WORDS.contains(&word.as_str()) && !FILE_QUALIFIERS.contains(&word.as_str())))
+        .then(|| name.join(" "))
+}
+
+const FILE_QUALIFIERS: [&str; 11] = ["the", "my", "of", "all", "any", "many", "more", "new", "old", "large", "big"];
+
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
 const GEOTAG_WORDS: [&str; 5] = ["gps", "geotagged", "geotag", "geotags", "geolocated"];
 

@@ -1,6 +1,6 @@
 use super::chat_actions::{self, Context, Resolution};
 use super::chat_facts::{self, Filter};
-use super::chat_intent::{asked_inside, asks_why, off_topic, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
+use super::chat_intent::{asked_inside, asks_why, files_named, off_topic, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
 use super::chat_search::SearchPlan;
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
@@ -1189,7 +1189,14 @@ fn prepare_turn(
     let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
     let camera = chat_facts::camera_asked_about(conn, &text)?;
     let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
-    let (mut question, plan, continues) = plan_for(planned, previous.as_ref(), people, events);
+    let (mut question, mut plan, continues) = plan_for(planned, previous.as_ref(), people, events);
+    if question.folder.is_none()
+        && let Some(name) = files_named(&text)
+        && let Some(folder) = chat_facts::existing_folder(conn, &name, root.as_ref())?
+    {
+        question.folder = Some(folder);
+        plan.query.clear();
+    }
     question.folder = chat_facts::widened_folder(conn, question.folder.take(), root.as_ref())?;
     let camera = camera.map(|ask| ask.pick).or_else(|| {
         previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())

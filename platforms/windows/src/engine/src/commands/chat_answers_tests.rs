@@ -114,6 +114,15 @@ fn a_model_answer_loses_its_closing_no_action_sentence() {
 }
 
 #[test]
+fn a_named_folder_of_files_counts_the_same_files_however_it_is_asked() {
+    let mut conn = library();
+    let by_folder = ask(&mut conn, "How many files are in the Google Takeout folder?");
+    let by_name = ask(&mut conn, "How many Google Takeout files do I have?");
+    assert!(by_folder.message.starts_with("Found 2 files in Google Takeout"), "{}", by_folder.message);
+    assert!(by_name.message.starts_with("Found 2 files in Google Takeout"), "{}", by_name.message);
+}
+
+#[test]
 fn the_rename_card_and_library_smart_names_use_one_style() {
     let mut conn = crate::db::test_support::memory_db();
     let dir = std::env::temp_dir().join(format!("fileid-chat-names-{}", std::process::id()));
