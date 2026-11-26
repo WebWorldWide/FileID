@@ -93,8 +93,40 @@ pub(crate) fn current_model() -> Option<String> {
 /// A scan inserts faces with empty vectors and embeds them afterwards; those are waiting to be grouped, not saved by an earlier version.
 const NOT_YET_EMBEDDED: &str = "AND NOT (length(fp.print_data)=0 AND length(COALESCE(fp.arcface_embedding,X''))=0 AND fp.embedding_model IS NULL)";
 
+/// Mac crops written before this instant (Unix seconds) were aligned on landmarks that could be upside down or sideways, and
+/// their vectors were embedded from those crops. Refreshing a face rewrites its crop, which leaves this set.
+const UPRIGHT_ALIGNMENT_SINCE: u64 = 1_795_587_552;
+
+fn stale_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
+    if !processing.starts_with(super::face_clustering_mac::MAC_PREFIX) {
+        return Ok(Vec::new());
+    }
+    let cutoff = std::time::UNIX_EPOCH + Duration::from_secs(UPRIGHT_ALIGNMENT_SINCE);
+    let mut statement = conn.prepare(
+        "SELECT fp.id FROM face_prints fp JOIN files f ON f.id=fp.file_id JOIN catalog_revisions r ON r.file_id=fp.file_id \
+         WHERE f.failed=0 AND length(fp.arcface_embedding)=512 AND fp.embedding_model=?1 AND fp.processing_version=?2 \
+           AND fp.source_revision=r.revision ORDER BY fp.id",
+    )?;
+    let faces: Vec<i64> = statement.query_map(params![model, processing], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(faces
+        .into_iter()
+        .filter(|face| {
+            std::fs::metadata(faces_dir.join(format!("{face}.jpg"))).and_then(|crop| crop.modified()).is_ok_and(|written| written < cutoff)
+        })
+        .collect())
+}
+
+fn outdated_in(conn: &Connection, model: &str, processing: &str, faces_dir: Option<&Path>) -> rusqlite::Result<i64> {
+    let stale = match faces_dir {
+        Some(dir) => stale_crops(conn, model, processing, dir)?.len() as i64,
+        None => 0,
+    };
+    let counted: i64 = conn.query_row(&format!("SELECT COUNT(*) {OUTDATED} {NOT_YET_EMBEDDED}"), params![model, processing], |row| row.get(0))?;
+    Ok(counted + stale)
+}
+
 pub(crate) fn outdated(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<i64> {
-    conn.query_row(&format!("SELECT COUNT(*) {OUTDATED} {NOT_YET_EMBEDDED}"), params![model, processing], |row| row.get(0))
+    outdated_in(conn, model, processing, crate::paths::faces_dir().ok().as_deref())
 }
 
 pub(crate) fn status(conn: &Connection, model: Option<&str>, processing: &str) -> rusqlite::Result<FaceRefreshStatus> {
@@ -162,6 +194,19 @@ pub fn recover(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) -> rusqlite::Result<()> {
+    seed_in(conn, model, processing, at, crate::paths::faces_dir().ok().as_deref())
+}
+
+fn seed_in(conn: &Connection, model: &str, processing: &str, at: f64, faces_dir: Option<&Path>) -> rusqlite::Result<()> {
+    if let Some(dir) = faces_dir {
+        let stale = serde_json::to_string(&stale_crops(conn, model, processing, dir)?).unwrap_or_else(|_| "[]".into());
+        conn.execute(
+            "INSERT INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,reason,updated_at) \
+             SELECT value, ?1, ?2, 'pending', 0, NULL, ?3 FROM json_each(?4) WHERE true \
+             ON CONFLICT(face_id,embedding_model,processing_version) DO UPDATE SET state='pending', updated_at=?3 WHERE state='done'",
+            params![model, processing, at, stale],
+        )?;
+    }
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,reason,updated_at) \

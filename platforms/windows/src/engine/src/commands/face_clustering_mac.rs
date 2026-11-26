@@ -444,6 +444,8 @@ fn hyperparameters() -> (Hyperparameters, bool) {
             pass3_min_mean_cosine: 0.60,
             pass3_max_splits: 7,
             k_nn: env_int("FILEID_FACE_KNN", 16, 4..=256),
+            oversized_faces: env_int("FILEID_FACE_OVERSIZED_FACES", 300, 2..=1_000_000),
+            oversized_min_mean_cosine: env_cos("FILEID_FACE_OVERSIZED_MEAN_COSINE", 0.72),
         },
         env_bool("FILEID_FACE_MUTUAL_KNN", true),
     )
@@ -1336,6 +1338,7 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
     let by_id: HashMap<i64, &Prior> = priors.iter().map(|p| (p.id, p)).collect();
     let mut sums: BTreeMap<i64, Vec<f32>> = BTreeMap::new();
     let mut files: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut face_counts: HashMap<i64, usize> = HashMap::new();
     let mut owners: HashMap<i64, i64> = HashMap::new();
     for (row, snapshot) in partition.rows.iter().zip(&partition.snapshots) {
         let Some(owner) = snapshot.person_id.filter(|owner| complete.contains(owner)) else { continue };
@@ -1349,6 +1352,7 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
             *value += vector[index];
         }
         files.entry(owner).or_default().insert(snapshot.file_id);
+        *face_counts.entry(owner).or_default() += 1;
     }
     let mut blockers: HashSet<Pair> = verdicts
         .iter()
@@ -1381,20 +1385,27 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
     struct Centroid {
         id: i64,
         vector: Vec<f32>,
+        sum: Vec<f32>,
+        faces: usize,
         files: usize,
         named: bool,
     }
     let mut clusters: Vec<Centroid> = Vec::new();
-    for (id, mut sum) in sums {
+    for (id, sum) in sums {
         let norm: f32 = sum.iter().map(|x| x * x).sum();
         if !norm.is_finite() {
             continue;
         }
         let inverse = 1.0 / norm.sqrt().max(f32::from_bits(1));
-        for value in &mut sum {
-            *value *= inverse;
-        }
-        clusters.push(Centroid { id, vector: sum, files: files.get(&id).map_or(0, HashSet::len), named: by_id[&id].has_name() });
+        let vector = sum.iter().map(|value| value * inverse).collect();
+        clusters.push(Centroid {
+            id,
+            vector,
+            sum,
+            faces: face_counts.get(&id).copied().unwrap_or(0),
+            files: files.get(&id).map_or(0, HashSet::len),
+            named: by_id[&id].has_name(),
+        });
     }
     let index_of: HashMap<i64, usize> = clusters.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
     let mut parent: Vec<usize> = (0..clusters.len()).collect();
@@ -1420,6 +1431,9 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
         }
     }
     let mut size = vec![1usize; clusters.len()];
+    let (params, _) = hyperparameters();
+    let mut group_sums: Vec<Vec<f32>> = clusters.iter().map(|c| c.sum.clone()).collect();
+    let mut group_faces: Vec<usize> = clusters.iter().map(|c| c.faces).collect();
     let vectors: Vec<Vec<f32>> = clusters.iter().map(|c| c.vector.clone()).collect();
     let small: Vec<bool> = clusters.iter().map(|c| c.files <= 1).collect();
     let join = Join {
@@ -1437,6 +1451,13 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
         if ri == rj || (has_named[ri] && has_named[rj]) || forbidden[ri].contains(&rj) || forbidden[rj].contains(&ri) {
             continue;
         }
+        let faces = group_faces[ri] + group_faces[rj];
+        if faces >= params.oversized_faces {
+            let joined: f32 = group_sums[ri].iter().zip(&group_sums[rj]).map(|(a, b)| (a + b) * (a + b)).sum();
+            if joined.sqrt() / (faces as f32) < params.required_mean_cosine(faces) {
+                continue;
+            }
+        }
         let (keep, drop) = if forbidden[ri].len() > forbidden[rj].len() || (forbidden[ri].len() == forbidden[rj].len() && size[ri] >= size[rj]) {
             (ri, rj)
         } else {
@@ -1444,6 +1465,11 @@ fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence) -> Resu
         };
         parent[drop] = keep;
         size[keep] += size[drop];
+        group_faces[keep] += group_faces[drop];
+        let absorbed = std::mem::take(&mut group_sums[drop]);
+        for (total, add) in group_sums[keep].iter_mut().zip(&absorbed) {
+            *total += add;
+        }
         has_named[keep] = has_named[keep] || has_named[drop];
         let moved = std::mem::take(&mut forbidden[drop]);
         for neighbor in moved {

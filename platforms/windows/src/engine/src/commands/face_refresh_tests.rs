@@ -74,7 +74,7 @@ fn face(conn: &Connection, id: i64, file: i64, bbox: &str, model: Option<&str>) 
 
 struct Library {
     conn: Connection,
-    _dir: TempDir,
+    dir: TempDir,
 }
 
 fn library() -> Library {
@@ -96,7 +96,7 @@ fn library() -> Library {
     face(&conn, 3, 2, "ok-3", Some("old"));
     face(&conn, 4, 3, "ok-4", Some("old"));
     face(&conn, 5, 1, "ok-5", Some("m"));
-    Library { conn, _dir: dir }
+    Library { conn, dir }
 }
 
 fn states(conn: &Connection) -> Vec<(i64, String)> {
@@ -122,6 +122,26 @@ fn seeding_queues_outdated_faces_of_one_namespace() {
     assert_eq!((status.total, status.pending, status.outdated, status.state.as_deref()), (4, 4, 4, Some("queued")));
     let other = super::status(conn, Some("n"), "p").unwrap();
     assert_eq!(other.total, 0, "another model has its own backlog");
+}
+
+#[test]
+fn faces_whose_crop_predates_the_upright_alignment_fix_are_outdated_until_their_crop_is_rewritten() {
+    let library = library();
+    let conn = &library.conn;
+    conn.execute("UPDATE face_prints SET processing_version='macos-test' WHERE id=5", []).unwrap();
+    let crops = library.dir.path().join("face_crops");
+    std::fs::create_dir_all(&crops).unwrap();
+    let crop = crops.join("5.jpg");
+    std::fs::write(&crop, b"jpeg").unwrap();
+    std::fs::File::options().write(true).open(&crop).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+
+    assert_eq!(outdated_in(conn, "m", "macos-test", None).unwrap(), 4);
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
+    seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
+    assert!(states(conn).contains(&(5, "pending".to_string())));
+
+    std::fs::write(&crop, b"jpeg again").unwrap();
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 4);
 }
 
 #[test]

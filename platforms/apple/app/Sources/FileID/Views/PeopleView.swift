@@ -732,7 +732,7 @@ struct PeopleView: View {
         EmptyStateView(
             icon: "person.crop.circle.badge.questionmark",
             title: "\(Plural.noun(totalFacePrints, "face", "faces")) found",
-            message: "Press Group faces to sort them into one card per person. This can take a few minutes for a large library.",
+            message: PeopleHeaderText.ungroupedMessage(grouping: engine.faceClusteringInFlight),
             primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
             secondaryMessage: "Then click a card to type that person’s name.",
             progressLabel: engine.faceClusteringInFlight ? (engine.faceStageProgress ?? "Grouping faces…") : nil
@@ -1971,6 +1971,12 @@ extension MergeSuggestionPair {
 }
 
 enum PeopleHeaderText {
+    static func ungroupedMessage(grouping: Bool) -> String {
+        grouping
+            ? "FileID is sorting them into one card per person. This can take a few minutes for a large library."
+            : "Press Group faces to sort them into one card per person. This can take a few minutes for a large library."
+    }
+
     static func countLine(people: Int, unnamed: Int, faces: Int, grouping: Bool) -> String {
         if people == 0 && faces == 0 { return "" }
         if people == 0 { return grouping ? "\(Plural.noun(faces, "face", "faces")) · grouping…" : "\(Plural.noun(faces, "face", "faces")) detected · not grouped yet" }

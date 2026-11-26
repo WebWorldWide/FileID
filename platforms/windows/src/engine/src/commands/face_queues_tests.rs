@@ -127,6 +127,21 @@ fn merge_moves_faces_journals_and_undo_brings_the_person_back() {
 }
 
 #[test]
+fn undoing_a_merge_brings_back_the_suggestions_of_the_person_merged_away() {
+    let conn = pair();
+    person(&conn, 3, None, false);
+    face(&conn, 4, 10, 3, (0.98, 0.02));
+    refresh_all(&conn);
+    let before = merge_pairs(&conn);
+    assert!(before.iter().any(|(a, b)| (*a, *b) == (3, 1) || (*a, *b) == (1, 3)), "{before:?}");
+    let reply = act(&conn, 2, Some(1), "merge");
+    assert_eq!(reply.status, "ok");
+    assert!(!merge_pairs(&conn).iter().any(|(a, b)| *a == 1 || *b == 1));
+    assert_eq!(undo_op(&conn, &reply.operation_id.unwrap()).status, "ok");
+    assert_eq!(merge_pairs(&conn), before);
+}
+
+#[test]
 fn merge_is_refused_when_the_people_now_share_a_photo() {
     let conn = pair();
     refresh_all(&conn);
@@ -322,4 +337,27 @@ fn a_person_of_thousands_is_split_over_all_of_its_faces_not_the_first_two_thousa
     let page = listed(&conn, "splits");
     let split = &page.splits.as_ref().unwrap()[0];
     assert_eq!((split.keep_count, split.split_count), (1250, 1250), "every face lands in one of the two groups");
+}
+
+#[test]
+fn a_person_of_many_look_alike_groups_offers_one_group_at_a_time_and_the_next_right_after() {
+    let conn = library_of_files(6100);
+    person(&conn, 1, None, false);
+    let groups = [(1.0, 0.0, 1500), (0.9, 0.44, 1500), (-1.0, 0.0, 1550), (-0.9, -0.44, 1550)];
+    let mut id = 0;
+    for (x, y, count) in groups {
+        for _ in 0..count {
+            id += 1;
+            face(&conn, id, id, 1, (x, y));
+        }
+    }
+    assert_eq!(refresh_all(&conn).1, 1);
+    let first = listed(&conn, "splits").splits.unwrap().remove(0);
+    let moved = first.keep_count.min(first.split_count);
+    assert!((1500..=1550).contains(&moved), "one look-alike group is offered, not two halves: {first:?}");
+    let reply = act(&conn, 1, None, "split");
+    assert_eq!(reply.status, "ok");
+    let next = listed(&conn, "splits");
+    assert_eq!(next.total, 1, "the person still holding several groups is offered its next group at once");
+    assert_eq!(next.splits.unwrap()[0].person_id, 1);
 }

@@ -295,6 +295,34 @@ fn auto_merge_joins_two_unnamed_people_who_are_the_same_identity() {
     assert!(owners.iter().all(|owner| *owner == owners[0] && owner.is_some()), "{owners:?}");
 }
 
+fn crowds(jitter: f32, size: i64) -> (Catalog, usize) {
+    let catalog = Catalog::new();
+    catalog.person(10, None, false);
+    catalog.person(20, None, false);
+    for face in 1..=2 * size {
+        catalog.face(face, 0, 0.6, Some(if face <= size { 10 } else { 20 }));
+        catalog
+            .conn
+            .execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=?2", params![vector(0, face as usize, jitter), face])
+            .unwrap();
+    }
+    let mut conn = catalog.conn;
+    let absorbed = merge(&mut conn).unwrap();
+    (Catalog { conn, dir: catalog.dir }, absorbed)
+}
+
+#[test]
+fn auto_merge_does_not_pile_two_loose_crowds_into_one_oversized_person() {
+    let (_catalog, absorbed) = crowds(1.0, 160);
+    assert_eq!(absorbed, 0);
+}
+
+#[test]
+fn auto_merge_still_joins_two_tight_halves_of_one_big_identity() {
+    let (_catalog, absorbed) = crowds(0.3, 160);
+    assert_eq!(absorbed, 1);
+}
+
 #[test]
 fn auto_merge_folds_an_unnamed_person_into_the_named_one_and_never_the_other_way() {
     let (catalog, absorbed) = twin_people((None, false), (Some("Alex"), false), None);

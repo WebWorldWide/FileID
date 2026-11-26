@@ -86,7 +86,7 @@ fn pending_candidates(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Va
         .collect()
 }
 
-fn pending_suggestions(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
+pub(super) fn pending_suggestions(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
     let mut statement = conn.prepare(
         "SELECT person_id,other_person_id,score,namespace,created_at FROM face_merge_suggestions \
          WHERE person_id=?1 OR other_person_id=?1 ORDER BY person_id,other_person_id",
@@ -104,7 +104,7 @@ fn pending_suggestions(conn: &Connection, source: i64) -> rusqlite::Result<Vec<V
         .collect()
 }
 
-fn pending_splits(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
+pub(super) fn pending_splits(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
     let mut statement =
         conn.prepare("SELECT person_id,score,keep_json,split_json,namespace,created_at FROM face_split_suggestions WHERE person_id=?1")?;
     statement
@@ -224,6 +224,38 @@ pub(crate) fn list(conn: &Connection, request: &str, at: f64) -> rusqlite::Resul
     })
 }
 
+/// Puts back the merge and split suggestions the merge cascaded away with `other`.
+pub(super) fn restore_pending(conn: &Connection, other: i64, before: &Value, at: f64) -> rusqlite::Result<()> {
+    for suggestion in before["suggestions"].as_array().into_iter().flatten() {
+        let (Some(a), Some(b)) = (suggestion["personID"].as_i64(), suggestion["otherPersonID"].as_i64()) else { continue };
+        let both_exist: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?1) AND EXISTS(SELECT 1 FROM persons WHERE id=?2)",
+            [a, b],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if both_exist {
+            conn.execute(
+                "INSERT OR IGNORE INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES(?1,?2,?3,?4,?5)",
+                params![a, b, suggestion["score"].as_f64().unwrap_or(0.0), suggestion["namespace"].as_str().unwrap_or_default(), suggestion["createdAt"].as_f64().unwrap_or(at)],
+            )?;
+        }
+    }
+    for split in before["splits"].as_array().into_iter().flatten() {
+        conn.execute(
+            "INSERT OR IGNORE INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                other,
+                split["score"].as_f64().unwrap_or(0.0),
+                split["keepJSON"].as_str().unwrap_or("[]"),
+                split["splitJSON"].as_str().unwrap_or("[]"),
+                split["namespace"].as_str().unwrap_or_default(),
+                split["createdAt"].as_f64().unwrap_or(at)
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn undo(conn: &Connection, request: &str, before: &Value, after: &Value, at: f64) -> rusqlite::Result<FaceReviewPage> {
     let Some((keep, other, faces)) = undoable(conn, after)? else {
         return Ok(FaceReviewPage { total: offered(conn, at)?, ..queue_refused(request, "undo", QUEUE, CHANGED) });
@@ -300,33 +332,7 @@ pub(crate) fn undo(conn: &Connection, request: &str, before: &Value, after: &Val
     for face in id_list(&before["runnerUpFaces"]) {
         conn.execute("UPDATE face_review_candidates SET runner_up_person_id=?1 WHERE face_id=?2 AND runner_up_person_id IS NULL", params![other, face])?;
     }
-    for suggestion in before["suggestions"].as_array().into_iter().flatten() {
-        let (Some(a), Some(b)) = (suggestion["personID"].as_i64(), suggestion["otherPersonID"].as_i64()) else { continue };
-        let both_exist: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?1) AND EXISTS(SELECT 1 FROM persons WHERE id=?2)",
-            [a, b],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if both_exist {
-            conn.execute(
-                "INSERT OR IGNORE INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES(?1,?2,?3,?4,?5)",
-                params![a, b, suggestion["score"].as_f64().unwrap_or(0.0), suggestion["namespace"].as_str().unwrap_or_default(), suggestion["createdAt"].as_f64().unwrap_or(at)],
-            )?;
-        }
-    }
-    for split in before["splits"].as_array().into_iter().flatten() {
-        conn.execute(
-            "INSERT OR IGNORE INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                other,
-                split["score"].as_f64().unwrap_or(0.0),
-                split["keepJSON"].as_str().unwrap_or("[]"),
-                split["splitJSON"].as_str().unwrap_or("[]"),
-                split["namespace"].as_str().unwrap_or_default(),
-                split["createdAt"].as_f64().unwrap_or(at)
-            ],
-        )?;
-    }
+    restore_pending(conn, other, before, at)?;
     if let Some(representative) = before["keepRepresentative"].as_i64() {
         conn.execute(
             "UPDATE persons SET representative_face_id=?1 WHERE id=?2 AND EXISTS(SELECT 1 FROM face_prints WHERE id=?1 AND person_id=?2)",
