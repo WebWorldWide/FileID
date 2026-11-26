@@ -650,6 +650,7 @@ final class LibraryTileItem: NSCollectionViewItem {
             .withSymbolConfiguration(.init(pointSize: 34, weight: .light)) : nil
         self.kindGlyph.isHidden = !blank
         CATransaction.commit()
+        view.toolTip = blank && row.kind == "video" ? VideoPreviewNotice.text : nil
     }
 
     override func prepareForReuse() {
@@ -660,6 +661,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         thumbLayer.contents = nil
         thumbLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
         kindGlyph.isHidden = true
+        view.toolTip = nil
         hovering = false
     }
 

@@ -14,6 +14,11 @@ enum FileKindLabel {
     }
 }
 
+enum VideoPreviewNotice {
+    /// Shown for a video that has no thumbnail: macOS can't decode its format, and a visual search only finds what FileID could see.
+    static let text = "No preview: macOS can’t decode this kind of video, so FileID can’t show a frame from it or find it by what’s in the picture. Its name, date and folder still work in search."
+}
+
 enum TagLabel {
     /// Chip text for a catalog tag: the last segment of an engine label ("Year_2026" → "2026",
     /// "Camera_Sony" → "Sony"), dashes as spaces, first letter capitalized. Phrases pass through.
