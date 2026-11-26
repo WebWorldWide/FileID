@@ -950,6 +950,7 @@ struct Prepared {
     hits: Vec<CatalogHit>,
     actions: Vec<ChatAction>,
     summarize: bool,
+    counts_files: bool,
 }
 
 struct Earlier {
@@ -1088,8 +1089,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let root = super::roots::RootScope::load(conn, request.context.as_ref().and_then(|chat| chat.root_id))?;
     let history = user_history(conn, &request.conversation_id)?;
     let mut prepared = prepare_turn(conn, request, semantic, text, &history, &people, &events, root.as_ref())?;
-    if prepared.actions.is_empty()
-        && !super::chat_intent::unreadable_ask(&prepared.text)
+    if prepared.counts_files
         && let Some(note) = chat_facts::unreadable_files_note(conn, root.as_ref())?
     {
         prepared.message = format!("{} {note}", prepared.message);
@@ -1129,37 +1129,37 @@ fn prepare_turn(
     if let Some(intent) = parse_intent(&text) {
         let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), root: root.as_ref(), people: &people, events: &events, source: "parser" };
         let Resolution { message, hits, actions } = chat_actions::resolve(conn, &intent, &context)?;
-        return Ok(Prepared { text, message, hits, actions, summarize: false });
+        return Ok(Prepared { text, message, hits, actions, summarize: false, counts_files: false });
     }
     {
         let context = Context { request_id: &request.request_id, text: &text, chat: request.context.as_ref(), root: root.as_ref(), people: &people, events: &events, source: "parser" };
         if let Some(Resolution { message, hits, actions }) = super::chat_commands::resolve(conn, &text, history, &context)? {
-            return Ok(Prepared { text, message, hits, actions, summarize: false });
+            return Ok(Prepared { text, message, hits, actions, summarize: false, counts_files: false });
         }
     }
     if off_topic(&text) {
         let message = format!("{OFF_TOPIC_REPLY} Try “How many photos do I have?” or “Find photos of a beach”.");
-        return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false, counts_files: false });
     }
     let question = parse_question(&text);
     if question.people.is_some() {
         let (message, hits) = chat_facts::people_answer(conn, &question, root.as_ref())?;
-        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if super::chat_intent::unreadable_ask(&text) {
         let (message, hits) = chat_facts::unreadable_answer(conn, root.as_ref())?;
-        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if let Some(kinds) = place_ask(&text) {
         let message = chat_facts::places_answer(conn, &kinds, root.as_ref())?;
-        return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false, counts_files: false });
     }
     if question.folder.is_none()
         && let Some(name) = asked_inside(&text)
         && let Some((message, hits)) = chat_facts::folder_answer(conn, &name, root.as_ref())?
     {
         let message = with_same_named_folders_note(conn, &format!("named:{name}"), root.as_ref(), message)?;
-        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: true });
     }
     if let Some(reference) = reference_ask(&text) {
         let mut listed = history;
@@ -1172,7 +1172,7 @@ fn prepare_turn(
         }
         let hits = earlier_hits(conn, request, semantic, listed, people, events, root.as_ref())?;
         let (message, hits) = chat_facts::reference_answer(&reference, hits);
-        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
     let camera = chat_facts::camera_asked_about(conn, &text)?;
@@ -1216,7 +1216,7 @@ fn prepare_turn(
             Some(folder) => with_same_named_folders_note(conn, folder, root.as_ref(), message)?,
             None => message,
         };
-        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
+        return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: true });
     }
     let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds, root.as_ref());
     let groups = chat_facts::subject_groups(&plan.query);
@@ -1331,7 +1331,7 @@ fn prepare_turn(
         format!("Found {} {noun} {scope}{qualifiers}.{sample_note}", hits.len())
     };
     let explanation = with_unnamed_people_note(conn, &text, &plan, root.as_ref(), explanation)?;
-    Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true })
+    Ok(Prepared { text, message: explanation, hits, actions: vec![], summarize: true, counts_files: true })
 }
 
 fn with_same_named_folders_note(conn: &Connection, folder: &str, root: Option<&super::roots::RootScope>, message: String) -> Result<String> {
@@ -1505,13 +1505,26 @@ mod tests {
             ..Default::default()
         };
         let answer = execute(&mut conn, &request).unwrap().message;
-        assert!(answer.ends_with("2 files couldn't be read yet — they're not in these results."), "{answer}");
+        assert!(answer.ends_with("2 files couldn't be read — they're not in these results."), "{answer}");
         conn.execute("DELETE FROM files WHERE id = 3", []).unwrap();
         let answer = execute(&mut conn, &request).unwrap().message;
-        assert!(answer.ends_with("1 file couldn't be read yet — it's not in these results."), "{answer}");
+        assert!(answer.ends_with("1 file couldn't be read — it's not in these results."), "{answer}");
         conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
         let answer = execute(&mut conn, &request).unwrap().message;
         assert!(!answer.contains("couldn't be read"), "{answer}");
+    }
+
+    #[test]
+    fn the_unreadable_note_follows_answers_about_files_not_refusals_or_cards() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/lib/a.mov',1,100,0,'video','mov')", []).unwrap();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,error_message) VALUES(2,'/lib/bad.jpg',2,100,0,'image','jpg',1,'Vision pass timed out')", []).unwrap();
+        let note = "couldn't be read";
+        assert!(ask(&mut conn, "How many videos do I have?").message.contains(note));
+        for text in ["Copy my photos to the desktop", "What's the weather?", "Merge person 3 and person 4", "How many files couldn't be read?"] {
+            let message = ask(&mut conn, text).message;
+            assert!(!message.ends_with("not in these results."), "{text}: {message}");
+        }
     }
 
     #[test]

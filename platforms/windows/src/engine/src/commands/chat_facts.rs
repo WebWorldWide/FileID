@@ -836,7 +836,7 @@ pub(crate) fn unreadable_files_note(conn: &Connection, root: Option<&RootScope>)
     )?;
     Ok((count > 0).then(|| {
         let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
-        format!("{} {noun} couldn't be read yet — {pronoun} not in these results.", count_label(count))
+        format!("{} {noun} couldn't be read — {pronoun} not in these results.", count_label(count))
     }))
 }
 
