@@ -111,3 +111,15 @@ struct AccessibilityKeyboardTests {
         #expect(opened == 1)
     }
 }
+
+@Suite("Detail pane preview")
+struct DetailPanePreviewAccessibilityTests {
+    @Test func theThumbnailCanBeOpenedWithoutADoubleClick() throws {
+        let source = try appSource("Views/LibraryView.swift")
+        let pane = try #require(source.range(of: "private struct LibrarySelectedPane"))
+        let thumbnail = try #require(source.range(of: ".onTapGesture(count: 2, perform: onOpen)", range: pane.upperBound..<source.endIndex))
+        let following = String(source[thumbnail.upperBound...].prefix(600))
+        #expect(following.contains(".accessibilityAddTraits(.isButton)"))
+        #expect(following.contains(".accessibilityAction(.default, onOpen)"))
+    }
+}

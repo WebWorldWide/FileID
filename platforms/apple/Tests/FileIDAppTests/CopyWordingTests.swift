@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import FileIDModelInfo
 @testable import FileID
 
 @Suite("Copy wording")
