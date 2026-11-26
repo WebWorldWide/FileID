@@ -76,20 +76,31 @@ enum TakeProposals {
         return previous?.state != "completed" || previous?.updatedAt != current.updatedAt
     }
 
-    static let listLimit = 100
+    static let pageSize = 100
     static let possibleGroupsOrder = "Photo bursts and repeated video takes from your scans. Recent groups and groups with more shots sit nearer the top."
 
-    /// The engine returns at most `listLimit` groups with no way to page, so a full list may hide more.
-    static func listLimitNote(shown: Int) -> String? {
-        shown >= listLimit ? "Showing the first \(listLimit) groups. Finish with some of these and more appear." : nil
+    /// The engine hands out `pageSize` groups at a time, so a full page means more may follow.
+    static func hasMore(afterPage count: Int) -> Bool { count >= pageSize }
+
+    /// The open count in a section label; a trailing plus means groups beyond the loaded pages are not counted.
+    static func countLabel(open: Int, hasMore: Bool) -> String { hasMore ? "\(open)+" : "\(open)" }
+
+    /// A page can repeat a group when the ranking shifts between requests, so only unseen groups are added.
+    static func appending(_ page: [CatalogTakeAutoGroup], to loaded: [CatalogTakeAutoGroup]) -> [CatalogTakeAutoGroup] {
+        let known = Set(loaded.map(\.groupKey))
+        return loaded + page.filter { !known.contains($0.groupKey) }
     }
 
     static func enqueueRequest(id: String) -> CatalogRequest {
         CatalogRequest(requestID: id, action: "enqueueTakeGrouping")
     }
 
-    static func proposalsRequest(id: String) -> CatalogRequest {
-        CatalogRequest(requestID: id, action: "takeGroupProposals", limit: listLimit)
+    static func proposalsRequest(id: String, offset: Int = 0) -> CatalogRequest {
+        CatalogRequest(requestID: id, action: "takeGroupProposals", limit: pageSize, offset: offset)
+    }
+
+    static func autoRequest(id: String, offset: Int = 0) -> CatalogRequest {
+        CatalogRequest(requestID: id, action: "autoTakeGroups", limit: pageSize, offset: offset)
     }
 
     static func accessibilityLabel(_ group: CatalogTakeAutoGroup, date: String) -> String {

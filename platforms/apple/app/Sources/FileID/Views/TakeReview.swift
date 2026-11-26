@@ -580,6 +580,29 @@ enum TakeRequests {
         await engine.catalogReply(to: request, timeout: .seconds(timeout))
     }
 
+    struct Pages {
+        var groups: [CatalogTakeAutoGroup] = []
+        var hasMore = false
+        var jobs: [CatalogJob] = []
+    }
+
+    /// Reads pages from the start until at least `count` groups are loaded or the list ends; nil when the first page fails.
+    static func pages(_ engine: EngineClient, upTo count: Int, request: (Int) -> CatalogRequest) async -> Pages? {
+        var result = Pages()
+        var offset = 0
+        repeat {
+            guard let response = await send(engine, request(offset), timeout: 60), response.status == "ok" else {
+                return offset == 0 ? nil : result
+            }
+            let page = response.takeGroups ?? []
+            result.groups = TakeProposals.appending(page, to: result.groups)
+            result.hasMore = TakeProposals.hasMore(afterPage: page.count)
+            result.jobs = response.jobs
+            offset += page.count
+        } while result.hasMore && result.groups.count < count
+        return result
+    }
+
     static func bulkResult(_ engine: EngineClient, after signal: Int, prefix: String, commandID: String? = nil, timeout: Double) async -> BulkActionResult? {
         await engine.bulkActionResult(after: signal, prefix: prefix, commandID: commandID, timeout: .seconds(timeout))
     }

@@ -33,11 +33,15 @@ struct TakeWorkbench: View {
     @State private var autoGroups: [CatalogTakeAutoGroup] = []
     @State private var autoLoading = false
     @State private var autoLoaded = false
+    @State private var autoHasMore = false
+    @State private var autoLoadingMore = false
     @State private var selectedAutoKey: String?
     @State private var manual = false
     @State private var proposals: [CatalogTakeAutoGroup] = []
     @State private var proposalsLoaded = false
     @State private var proposalsLoading = false
+    @State private var proposalsHasMore = false
+    @State private var proposalsLoadingMore = false
     @State private var selectedProposalKey: String?
     @State private var groupingJob: CatalogJob?
     @State private var confirmDeleteGroup = false
@@ -158,7 +162,7 @@ struct TakeWorkbench: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)
+                        SectionLabel("Possible groups · \(TakeProposals.countLabel(open: autoGroups.filter { $0.status == "open" }.count, hasMore: autoHasMore))", color: Theme.ai)
                         Spacer(minLength: 4)
                         if autoLoading { IndeterminateBar().frame(width: 40) }
                         DSIconButton("Look again", systemImage: "arrow.clockwise", tint: Theme.text3) { reloadAuto(after: nil) }
@@ -177,11 +181,7 @@ struct TakeWorkbench: View {
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
                             .id(group.groupKey)
                     }
-                    if let note = TakeProposals.listLimitNote(shown: autoGroups.count) {
-                        MetaText(note, size: 11.5)
-                            .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    if autoHasMore { ShowMoreGroupsButton(loading: autoLoadingMore, action: loadMoreAuto) }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
                     ForEach(events, id: \.id) { event in
@@ -199,8 +199,9 @@ struct TakeWorkbench: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
-                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
-                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
+                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, hasMore: proposalsHasMore,
+                                        loadingMore: proposalsLoadingMore, selectedKey: selectedProposalKey,
+                                        onFind: findRelated, onShowMore: loadMoreProposals, onControl: controlGrouping, onOpen: openProposal)
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     manualSection
                 }
@@ -493,14 +494,17 @@ struct TakeWorkbench: View {
         proposalsLoading = true
         let position = resolved.flatMap { key in proposals.firstIndex { $0.groupKey == key } }
         Task {
-            let response = await TakeRequests.send(engine, TakeProposals.proposalsRequest(id: UUID().uuidString), timeout: 60)
+            let loaded = await TakeRequests.pages(engine, upTo: max(TakeProposals.pageSize, proposals.count)) {
+                TakeProposals.proposalsRequest(id: UUID().uuidString, offset: $0)
+            }
             proposalsLoading = false
             proposalsLoaded = true
-            guard let response, response.status == "ok" else { return }
-            let groups = response.takeGroups ?? []
+            guard let loaded else { return }
+            let groups = loaded.groups
             withAnimation(Theme.springStandard) {
                 proposals = groups
-                if let job = TakeProposals.job(response.jobs) { groupingJob = job }
+                proposalsHasMore = loaded.hasMore
+                if let job = TakeProposals.job(loaded.jobs) { groupingJob = job }
                 if let resolved, selectedProposalKey == resolved {
                     let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
                     selectedProposalKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey
@@ -509,6 +513,38 @@ struct TakeWorkbench: View {
                 }
             }
             if resolved != nil { reloadAuto(after: nil) }
+        }
+    }
+
+    private func loadMoreProposals() {
+        guard !proposalsLoading, !proposalsLoadingMore else { return }
+        proposalsLoadingMore = true
+        let offset = proposals.count
+        Task {
+            let response = await TakeRequests.send(engine, TakeProposals.proposalsRequest(id: UUID().uuidString, offset: offset), timeout: 60)
+            proposalsLoadingMore = false
+            guard let response, response.status == "ok", proposals.count == offset else { return }
+            let page = response.takeGroups ?? []
+            withAnimation(Theme.springStandard) {
+                proposals = TakeProposals.appending(page, to: proposals)
+                proposalsHasMore = TakeProposals.hasMore(afterPage: page.count)
+            }
+        }
+    }
+
+    private func loadMoreAuto() {
+        guard !autoLoading, !autoLoadingMore else { return }
+        autoLoadingMore = true
+        let offset = autoGroups.count
+        Task {
+            let response = await TakeRequests.send(engine, TakeProposals.autoRequest(id: UUID().uuidString, offset: offset), timeout: 60)
+            autoLoadingMore = false
+            guard let response, response.status == "ok", autoGroups.count == offset else { return }
+            let page = response.takeGroups ?? []
+            withAnimation(Theme.springStandard) {
+                autoGroups = TakeProposals.appending(page, to: autoGroups)
+                autoHasMore = TakeProposals.hasMore(afterPage: page.count)
+            }
         }
     }
 
@@ -529,13 +565,16 @@ struct TakeWorkbench: View {
         autoLoading = true
         let position = resolved.flatMap { key in autoGroups.firstIndex { $0.groupKey == key } }
         Task {
-            let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups", limit: TakeProposals.listLimit), timeout: 60)
+            let loaded = await TakeRequests.pages(engine, upTo: max(TakeProposals.pageSize, autoGroups.count)) {
+                TakeProposals.autoRequest(id: UUID().uuidString, offset: $0)
+            }
             autoLoading = false
             autoLoaded = true
-            guard let response, response.status == "ok" else { return }
-            let groups = response.takeGroups ?? []
+            guard let loaded else { return }
+            let groups = loaded.groups
             withAnimation(Theme.springStandard) {
                 autoGroups = groups
+                autoHasMore = loaded.hasMore
                 if let resolved, selectedAutoKey == resolved || selectedAutoKey == nil {
                     let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
                     selectedAutoKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey

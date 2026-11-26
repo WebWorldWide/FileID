@@ -9,8 +9,11 @@ struct RelatedTriesSection: View {
     let proposals: [CatalogTakeAutoGroup]
     let job: CatalogJob?
     let loaded: Bool
+    let hasMore: Bool
+    let loadingMore: Bool
     let selectedKey: String?
     let onFind: () -> Void
+    let onShowMore: () -> Void
     let onControl: (String) -> Void
     let onOpen: (CatalogTakeAutoGroup) -> Void
 
@@ -40,11 +43,7 @@ struct RelatedTriesSection: View {
                     .id(group.groupKey)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            if let note = TakeProposals.listLimitNote(shown: proposals.count) {
-                MetaText(note, size: 11.5)
-                    .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            if hasMore { ShowMoreGroupsButton(loading: loadingMore, action: onShowMore) }
         }
         .animation(Theme.springStandard, value: proposals.map(\.groupKey))
         .animation(Theme.springStandard, value: job?.state)
@@ -52,10 +51,22 @@ struct RelatedTriesSection: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            SectionLabel("Similar takes · \(proposals.filter { $0.status == "open" }.count)", color: Theme.gold)
+            SectionLabel("Similar takes · \(TakeProposals.countLabel(open: proposals.filter { $0.status == "open" }.count, hasMore: hasMore))", color: Theme.gold)
             Spacer(minLength: 4)
         }
         .padding(.leading, Theme.Metrics.railInset).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
+    }
+}
+
+struct ShowMoreGroupsButton: View {
+    let loading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(loading ? "Loading…" : "Show more", action: action)
+            .buttonStyle(.dsSecondary)
+            .disabled(loading)
+            .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
     }
 }
 
