@@ -355,7 +355,7 @@ fn save_crop(dir: &Path, id: i64, jpeg: &[u8]) {
     }
     let path = dir.join(format!("{id}.jpg"));
     let temporary = dir.join(format!(".{id}.jpg.tmp"));
-    if std::fs::write(&temporary, jpeg).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+    if std::fs::write(&temporary, crate::util::face_crop_stamp::stamp(jpeg)).is_ok() && std::fs::rename(&temporary, &path).is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
 }

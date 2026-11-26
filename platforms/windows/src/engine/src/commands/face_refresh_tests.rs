@@ -1,5 +1,8 @@
 use super::*;
 use crate::db::test_support::memory_db;
+use crate::util::face_crop_stamp;
+
+const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
 
 struct TempDir(PathBuf);
 
@@ -125,22 +128,21 @@ fn seeding_queues_outdated_faces_of_one_namespace() {
 }
 
 #[test]
-fn faces_whose_crop_predates_the_upright_alignment_fix_are_outdated_until_their_crop_is_rewritten() {
+fn faces_whose_crop_lacks_the_upright_stamp_are_outdated_until_their_crop_is_rewritten() {
     let library = library();
     let conn = &library.conn;
     conn.execute("UPDATE face_prints SET processing_version='macos-test' WHERE id=5", []).unwrap();
     let crops = library.dir.path().join("face_crops");
     std::fs::create_dir_all(&crops).unwrap();
     let crop = crops.join("5.jpg");
-    std::fs::write(&crop, b"jpeg").unwrap();
-    std::fs::File::options().write(true).open(&crop).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+    std::fs::write(&crop, JPEG).unwrap();
 
     assert_eq!(outdated_in(conn, "m", "macos-test", None).unwrap(), 4);
     assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
     seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
     assert!(states(conn).contains(&(5, "pending".to_string())));
 
-    std::fs::write(&crop, b"jpeg again").unwrap();
+    std::fs::write(&crop, face_crop_stamp::stamp(JPEG)).unwrap();
     conn.execute("UPDATE face_refresh_backlog SET state='done', updated_at=?1 WHERE face_id=5", [now()]).unwrap();
     assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 4);
 }
@@ -151,13 +153,27 @@ fn library_with_a_stale_crop() -> (Library, PathBuf) {
     let crops = library.dir.path().join("face_crops");
     std::fs::create_dir_all(&crops).unwrap();
     let crop = crops.join("5.jpg");
-    std::fs::write(&crop, b"jpeg").unwrap();
-    std::fs::File::options().write(true).open(&crop).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+    std::fs::write(&crop, JPEG).unwrap();
     (library, crops)
 }
 
 fn fail_as_source_changed(conn: &Connection, faces: &str) {
     conn.execute(&format!("UPDATE face_refresh_backlog SET state='failed', reason='source_changed' WHERE face_id IN ({faces})"), []).unwrap();
+}
+
+#[test]
+fn refreshing_a_face_writes_a_stamped_crop_that_ends_its_outdated_count() {
+    let (library, crops) = library_with_a_stale_crop();
+    let conn = &library.conn;
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
+    seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
+
+    save_crops_in(&crops, &[(5, JPEG.to_vec()), (3, JPEG.to_vec())], &[5]);
+    assert!(face_crop_stamp::is_stamped(&crops.join("5.jpg")));
+    assert!(!crops.join("3.jpg").exists(), "a face whose vector was not saved keeps its crop");
+    conn.execute("UPDATE face_refresh_backlog SET state='done', updated_at=?1 WHERE face_id=5", [now()]).unwrap();
+    OLD_CROPS.lock().remove(&crop_space(&crops, "m", "macos-test"));
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 4);
 }
 
 #[test]
@@ -181,13 +197,13 @@ fn the_crop_folder_is_scanned_once_and_a_clean_scan_is_remembered() {
     let (library, crops) = library_with_a_stale_crop();
     let conn = &library.conn;
     assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5]);
-    std::fs::File::options().write(true).open(crops.join("5.jpg")).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
-    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5], "the second look does not stat the crops again");
+    std::fs::write(crops.join("5.jpg"), face_crop_stamp::stamp(JPEG)).unwrap();
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5], "the second look does not open the crops again");
 
     OLD_CROPS.lock().remove(&crop_space(&crops, "m", "macos-test"));
     assert!(stale_crops(conn, "m", "macos-test", &crops).unwrap().is_empty());
     assert!(crops.join(CROPS_VERIFIED).exists());
-    std::fs::File::options().write(true).open(crops.join("5.jpg")).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+    std::fs::write(crops.join("5.jpg"), JPEG).unwrap();
     assert!(stale_crops(conn, "m", "macos-test", &crops).unwrap().is_empty(), "a folder verified clean is not scanned again");
 }
 
