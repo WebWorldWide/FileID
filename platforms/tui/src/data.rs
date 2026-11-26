@@ -790,6 +790,34 @@ mod tests {
     }
 
     #[test]
+    fn restructure_preview_of_a_library_already_organized_under_its_scanned_folder_is_empty() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let organized = "/library/Photos/2026/November";
+        let november_2026 = 1_794_000_000.0;
+        for name in ["a.jpg", "b.jpg"] {
+            conn.execute(
+                "INSERT INTO files \
+                 (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension) \
+                 VALUES (?1, ?2, 1, ?3, ?3, 'image', 'jpg')",
+                params![format!("{organized}/{name}"), name.len(), november_2026],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO library_roots(path, display, added_at) VALUES ('/library', '/library', 1)",
+            [],
+        )
+        .unwrap();
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        assert!(
+            plan.is_empty(),
+            "{:?}",
+            plan.iter().map(|row| &row.source).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn duplicate_snapshot_caps_paths_but_keeps_the_real_copy_count() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();

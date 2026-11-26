@@ -134,7 +134,8 @@ pub fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClas
 }
 
 /// `None` when the library is empty. The component prefix of a sorted set's first and last members bounds every member,
-/// so only two rows are read.
+/// so only two rows are read. When that shared folder sits inside a scanned library root, the root is the answer, so a
+/// library already organized under its root plans no moves.
 pub fn library_root(conn: &Connection) -> rusqlite::Result<Option<(PathBuf, i64)>> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |row| row.get(0))?;
     if count == 0 {
@@ -150,8 +151,18 @@ pub fn library_root(conn: &Connection) -> rusqlite::Result<Option<(PathBuf, i64)
     let (first, last) = (edge("ASC")?, edge("DESC")?);
     let parents = [&first, &last].map(|path| path.parent().unwrap_or(path).components().collect::<Vec<_>>());
     let shared = parents[0].iter().zip(&parents[1]).take_while(|(a, b)| a == b).count();
-    let root: PathBuf = parents[0][..shared].iter().map(|part| part.as_os_str()).collect();
-    Ok(Some((root, count)))
+    let shared_folder: PathBuf = parents[0][..shared].iter().map(|part| part.as_os_str()).collect();
+    Ok(Some((enclosing_scan_root(conn, &shared_folder)?.unwrap_or(shared_folder), count)))
+}
+
+fn enclosing_scan_root(conn: &Connection, folder: &Path) -> rusqlite::Result<Option<PathBuf>> {
+    let mut stmt = conn.prepare("SELECT path FROM library_roots WHERE enabled = 1")?;
+    let roots = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(roots
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|root| folder.starts_with(root))
+        .max_by_key(|root| root.components().count()))
 }
 
 pub fn is_filesystem_root(root: &Path) -> bool {
@@ -185,6 +196,18 @@ mod tests {
         let (root, count) = library_root(&conn).unwrap().unwrap();
         assert_eq!((root.as_path(), count), (Path::new("/"), 4));
         assert!(is_filesystem_root(&root));
+    }
+
+    #[test]
+    fn library_root_is_the_scanned_folder_when_every_file_sits_deeper_inside_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert(&conn, "/lib/Photos/2026/November/a.jpg");
+        insert(&conn, "/lib/Photos/2026/November/b.jpg");
+        assert_eq!(library_root(&conn).unwrap().unwrap().0, PathBuf::from("/lib/Photos/2026/November"));
+        conn.execute("INSERT INTO library_roots(path,display,added_at) VALUES('/lib','/lib',1)", []).unwrap();
+        conn.execute("INSERT INTO library_roots(path,display,added_at) VALUES('/elsewhere','/elsewhere',1)", []).unwrap();
+        assert_eq!(library_root(&conn).unwrap().unwrap().0, PathBuf::from("/lib"));
     }
 
     #[test]
