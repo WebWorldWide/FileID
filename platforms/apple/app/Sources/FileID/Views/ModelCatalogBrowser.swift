@@ -36,7 +36,7 @@ struct ModelCatalogBrowser: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
