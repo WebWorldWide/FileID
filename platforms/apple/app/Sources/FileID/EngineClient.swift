@@ -194,7 +194,7 @@ public final class EngineClient {
 
     private var process: Process?
     private var stdinPipe: Pipe?
-    /// Serial queue for stdin writes: the former global concurrent queue let two rapid send() calls write to the stdin fd at once, reordering commands or interleaving bytes mid-line.
+    /// Serial queue for stdin writes: one writer at a time keeps commands in order and bytes from interleaving mid-line.
     private let stdinWriteQueue = DispatchQueue(label: "com.fileid.engine.stdin")
 
     // MARK: - App Nap protection
@@ -225,7 +225,7 @@ public final class EngineClient {
     /// AttributeGraph overflows on a fast Deep Analyze run.
     private var lastDeepAnalyzeFileDoneAt: Date = .distantPast
 
-    // Every decoded event goes through ONE serial AsyncStream consumed by a single @MainActor task, so handleEvent runs in strict receipt order; per-event `Task { @MainActor }` dispatch had no ordering guarantee and could wedge the Deep Analyze / face-clustering in-flight flags.
+    // Every decoded event goes through ONE serial AsyncStream consumed by a single @MainActor task, so handleEvent runs in strict receipt order, which keeps the Deep Analyze and face-clustering in-flight flags consistent.
     private let eventContinuation: AsyncStream<InboundEvent>.Continuation
     private var eventPump: Task<Void, Never>?
 
@@ -420,7 +420,7 @@ public final class EngineClient {
         }
         // `scanned` = leading buffer bytes already known newline-free, so the drain resumes the newline search instead of re-scanning the buffer every tick (O(n²) for a large frame).
         let stderrBuffer = MutexBox((data: Data(), scanned: 0))
-        // 64 MiB inbound frame cap, matching the Windows app and the engine's command-read cap. A whole-library restructurePlan blows past a 1 MiB guard, which silently dropped the frame and wedged the UI. Still bounded so an engine that never emits a newline can't OOM the app; an oversize frame surfaces a visible error.
+        // 64 MiB inbound frame cap, matching the Windows app and the engine's command-read cap. A whole-library restructurePlan is far larger than 1 MiB. Still bounded so an engine that never emits a newline can't OOM the app; an oversize frame surfaces a visible error.
         let maxFrameBytes = 64 * 1024 * 1024
         // Hand decoded events to the serial pump (Sendable continuation captured as a local) rather than an unordered Task per event.
         let continuation = self.eventContinuation
@@ -475,7 +475,7 @@ public final class EngineClient {
                 }
             }
             for line in lines {
-                // Only lines that can be JSON frames earn a decode attempt; anything else is chatter from an engine predating the fd-2 split (or a torn frame), logged as a truncated sample so it can't bloat app.log.
+                // Only lines that can be JSON frames earn a decode attempt; anything else is a torn frame or stray output, logged as a truncated sample so it can't bloat app.log.
                 guard line.first == 0x7B else {
                     Self.debug("ENGINE: \(Self.redactFrameSample(line))")
                     continue
@@ -508,7 +508,7 @@ public final class EngineClient {
         return nil
     }
 
-    /// Error kinds that are a notice, not a failure: the user's own Cancel, a scan that fell back to the CPU, a repeated Scan click (Swift sends `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
+    /// Error kinds that are a notice, not a failure: the user's own Cancel, a scan that fell back to the CPU, a repeated Scan click (`scan_already_queued` or `scan_already_running`), a rescan with nothing new, a declined license.
     /// Errors that end an Organize move or undo with no result event, so the page has to release its in-flight state itself.
     nonisolated static func endsRestructureWithoutResult(_ kind: String) -> Bool {
         kind == "apply_restructure" || kind == "undo_restructure" || kind == "db_unavailable"
@@ -636,7 +636,7 @@ public final class EngineClient {
             case .idle: break
             }
         case .phaseChanged(let phase):
-            // The Swift engine ends a scan with a terminal progress snapshot; the shared engine announces it with this event alone, so the snapshot keeps its post-scan phase unless the event settles it.
+            // The engine announces the end of a scan with this event alone, so the snapshot keeps its post-scan phase unless the event settles it.
             if let settled = lastProgress?.settled(by: phase) {
                 lastProgress = settled
             }
@@ -744,7 +744,7 @@ public final class EngineClient {
             // An apply that moved files makes the run undoable; the undo's own reply clears it.
             if undoRestructureInFlight {
                 undoRestructureInFlight = false
-                // A cancelled or partially-failed undo must KEEP the affordance: Restructure.undoLast clears the on-disk journal only when the undo completed with zero failures, so the remaining files are still reversible. Clearing unconditionally stranded a half-reverted library with no UI path back, since this flag is only set by a forward apply and never re-seeded from disk. Mirrors Windows NextCanUndoRestructure and Linux undo_fully_completed.
+                // A cancelled or partially-failed undo must KEEP the affordance: Restructure.undoLast clears the on-disk journal only when the undo completed with zero failures, so the remaining files are still reversible. This flag is only set by a forward apply and never re-seeded from disk, so clearing it would strand a half-reverted library. Mirrors Windows NextCanUndoRestructure and Linux undo_fully_completed.
                 canUndoRestructure = result.cancelled || result.failed > 0
             } else {
                 canUndoRestructure = result.applied > 0
@@ -1179,7 +1179,7 @@ public final class EngineClient {
         SpotlightIndexer.wipe()
     }
 
-    // In-flight flags arm only when send() succeeded: a click during respawn backoff (stdinPipe nil) used to set the flag, drop the command, and wedge the UI with no job running.
+    // In-flight flags arm only when send() succeeded: a click during respawn backoff (stdinPipe nil) would otherwise set the flag, drop the command, and wedge the UI with no job running.
     public func runFaceClustering() {
         guard !faceClusteringInFlight, send(.runFaceClustering) else { return }
         faceClusteringInFlight = true
@@ -1328,7 +1328,7 @@ public final class EngineClient {
     func selfShotSetModelProgress(_ progress: ModelDownloadProgress) { modelDownloadProgress = progress }
     #endif
 
-    /// Drops a stale `modelDownloadProgress` left by a cancelled prewarm. The engine auto-clears the bar only at 1.0 (or on exit), so a user Cancel leaves the last fraction with the same modelKind and would fool WelcomeSheet's retry watchdogs into thinking a fresh download is progressing, arming neither the "no response" nor "stalled" timer. A modelKind clears only that model's residue; nil clears whatever is showing.
+    /// Drops a stale `modelDownloadProgress` left by a cancelled prewarm. The engine auto-clears the bar only at 1.0 (or on exit), so a user Cancel leaves the last fraction behind, and WelcomeSheet's retry watchdogs would take it for a fresh download. A modelKind clears only that model's residue; nil clears whatever is showing.
     public func clearModelDownloadProgress(forModelKind modelKind: String? = nil) {
         if let modelKind, modelDownloadProgress?.modelKind != modelKind { return }
         modelDownloadProgress = nil

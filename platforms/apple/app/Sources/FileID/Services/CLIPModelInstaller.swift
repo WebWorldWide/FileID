@@ -19,8 +19,8 @@ final class CLIPModelInstaller: ModelInstalling {
     /// On-disk presence of each required file, refreshed only on real disk
     /// transitions (appear / install / uninstall) via refreshStatus — never on
     /// download ticks. The Settings card reads this instead of calling
-    /// FileManager.fileExists in its row builder, so an active download no longer
-    /// fires a stat() syscall on the main thread on every progress tick.
+    /// FileManager.fileExists in its row builder, so an active download does not
+    /// fire a stat() syscall on the main thread on every progress tick.
     private(set) var presentFilePaths: Set<String> = []
     /// True once the CLIP files are on disk, so the engine can embed search
     /// text — Library observes it to drop the keyword-only hint and re-run
@@ -31,7 +31,7 @@ final class CLIPModelInstaller: ModelInstalling {
     /// arrive as queued MainActor tasks and can be scheduled AFTER the
     /// catch arm wrote a terminal status — gate `publishFromTracker` on
     /// liveness so a stale tick can't resurrect a phantom "Downloading…"
-    /// footer with a dead Cancel button. Mirrors ArcFaceModelInstaller.active.
+    /// footer with a dead Cancel button.
     private var installing = false
     private var uninstalling = false
 
@@ -108,7 +108,7 @@ final class CLIPModelInstaller: ModelInstalling {
     /// failure paths (promote / verify / extract) leave some required files in
     /// the live tree but must keep their `.installFailed` status — calling
     /// refreshStatus() there would overwrite it with .missing/.installed, so they
-    /// call this instead to keep the per-file Settings rows accurate. (R7 delta)
+    /// call this instead to keep the per-file Settings rows accurate.
     private func recomputePresentFiles() {
         var present: Set<String> = []
         for f in Self.requiredFiles where ModelFileLayout.installedFile(f, in: Self.modelsRoot) != nil {

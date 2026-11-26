@@ -933,7 +933,7 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return [] }
         let rows: [Row]
         do {
-            // phash == 0 is the engine's "none / failed" sentinel (see DBWriter),
+            // phash == 0 is the engine's "none / failed" sentinel (see `DBWriter` in the engine),
             // so exclude it alongside NULL — otherwise every blank-hash image would
             // collapse into one giant false group. Only the columns grouping needs
             // are read; full rows are fetched for the clustered members afterwards.
@@ -1011,9 +1011,8 @@ public final class ReadStore: @unchecked Sendable {
                 let bd = b.createdAt ?? .distantFuture
                 if ad != bd { return ad < bd }
                 if a.pathText.count != b.pathText.count { return a.pathText.count < b.pathText.count }
-                // Final tiebreaker on the unique id: Swift's sort isn't stable, so
-                // without this the displayed keeper (files[0]) of two rows tied on
-                // every rank key above would hop run-to-run. (display determinism)
+                // Final tiebreaker on the unique id: Swift's sort isn't stable, so without it the
+                // displayed keeper of two rows tied on every rank key above would change between runs.
                 return a.id < b.id
             }
             // Stable Identifiable id: the smallest member file id — independent of
@@ -1464,11 +1463,8 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? (0, 0, 0)
     }
 
-    /// All non-failed image files that have a non-empty
-    /// `vlm_proposed_name`. Used by the bulk-rename UI.
-    /// Item 5: (url, tags) for every file carrying ≥1 keyword tag, so the
-    /// "Apply tags" action can write them onto the files as Finder tags (making
-    /// Spotlight + Finder search work). Aggregated per file — one FS write each.
+    /// (url, tags) for every file carrying at least one keyword tag, so "Apply tags" can write
+    /// them as Finder tags. Aggregated per file, one write each.
     public func filesWithKeywordTags() -> [(url: URL, tags: [String])] {
         guard let q = queue else { return [] }
         do {
@@ -1519,9 +1515,8 @@ public final class ReadStore: @unchecked Sendable {
                       last: row["last_name"], suffix: row["suffix"], legacy: row["name"])
     }
 
-    /// Item 5: (url, names) for every file containing ≥1 NAMED person, so the
-    /// "Apply people as tags" action can write the person names onto the files.
-    /// Skips Unknown / unnamed clusters. Aggregated per file.
+    /// (url, names) for every file containing at least one named person, so "Apply people as tags"
+    /// can write the names onto the files. Skips Unknown and unnamed clusters.
     public func filesWithPersonTags() -> [(url: URL, names: [String])] {
         guard let q = queue else { return [] }
         do {
@@ -1636,7 +1631,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     /// Concurrent read-only connections over the engine's WAL database: the
-    /// grid, search, tags, people and counters no longer queue behind one
+    /// grid, search, tags, people and counters do not queue behind one
     /// another. Each reader gets a 32 MB page cache and memory-mapped I/O.
     /// A pool of concurrent readers needs WAL (the engine's database always
     /// is). Other journal modes get one connection, since there a reader's
