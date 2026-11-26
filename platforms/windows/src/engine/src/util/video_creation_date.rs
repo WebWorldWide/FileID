@@ -1,23 +1,31 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use super::video_container_dates as container_dates;
+
 const SECONDS_1904_TO_1970: u64 = 2_082_844_800;
 const MIN_PLAUSIBLE_UNIX: f64 = 631_152_000.0;
 const MAX_TOP_LEVEL_BOXES: usize = 4096;
 const MAX_MOOV_CHILDREN: usize = 256;
 const BOX_TYPES_AT_FILE_START: [&[u8; 4]; 8] = [b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot", b"junk"];
 
-/// When an MP4, MOV, M4V or 3GP file was shot, as Unix seconds. Apple devices write the capture time to
-/// `moov/meta` as `com.apple.quicktime.creationdate`; the movie header's creation time (`moov/mvhd`, ffprobe's
-/// `creation_time`) is the export time there, so the Apple key wins and the header is the fallback. Other
-/// containers, an unset clock (0), a pre-1990 reset or a future date yield None.
+/// When a video file was shot, as Unix seconds. Apple devices write the capture time to `moov/meta` as
+/// `com.apple.quicktime.creationdate` in MP4, MOV, M4V and 3GP files; the movie header's creation time (`moov/mvhd`,
+/// ffprobe's `creation_time`) is the export time there, so the Apple key wins and the header is the fallback.
+/// WMV and ASF, AVI and Matroska carry their own dates. MPEG program and transport streams carry none. An unset
+/// clock (0), a pre-1990 reset or a future date yield None.
 pub(crate) fn container_creation_unix(path: &Path) -> Option<f64> {
     let mut file = std::fs::File::open(crate::util::path_safety::to_extended_length(path)).ok()?;
     let length = file.metadata().ok()?.len();
-    let (apple, header) = movie_dates(&mut file, length)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
     let plausible = |unix: &f64| *unix >= MIN_PLAUSIBLE_UNIX && *unix <= now + 86_400.0;
-    apple.filter(plausible).or(header.filter(plausible))
+    let (apple, header) = movie_dates(&mut file, length).unwrap_or_default();
+    apple.filter(plausible).or(header.filter(plausible)).or_else(|| {
+        container_dates::asf_creation(&mut file, length)
+            .or_else(|| container_dates::avi_creation(&mut file, length))
+            .or_else(|| container_dates::matroska_creation(&mut file, length))
+            .filter(plausible)
+    })
 }
 
 const APPLE_CREATION_KEY: &[u8] = b"com.apple.quicktime.creationdate";

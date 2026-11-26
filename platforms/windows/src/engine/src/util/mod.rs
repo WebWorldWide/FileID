@@ -1,5 +1,6 @@
 pub mod content_hash;
 pub(crate) mod jpeg_complete;
+pub(crate) mod video_container_dates;
 pub(crate) mod video_creation_date;
 pub mod display;
 pub mod user_message;
