@@ -123,3 +123,14 @@ struct DetailPanePreviewAccessibilityTests {
         #expect(following.contains(".accessibilityAction(.default, onOpen)"))
     }
 }
+
+@Suite("Toast placement")
+struct ToastPlacementTests {
+    @Test func theToastSitsInThePageAreaNotOverTheSidebar() throws {
+        let source = try appSource("Views/MainWindow.swift")
+        let page = try #require(source.range(of: "Detail(engine: engine"))
+        let chat = try #require(source.range(of: "// Chat stays beside the current page", range: page.upperBound..<source.endIndex))
+        #expect(source[page.upperBound..<chat.lowerBound].contains("ToastView(toast: toast)"))
+        #expect(source.components(separatedBy: "ToastView(toast: toast)").count == 2)
+    }
+}
