@@ -472,7 +472,16 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
     }
 
     if visible.is_empty() && !app.scanning {
-        if !app.search.is_empty() {
+        if app.search_pending() {
+            render_empty(
+                f,
+                rows[1],
+                "Files",
+                "Searching…",
+                "Looking through names and the text inside files.",
+                None,
+            );
+        } else if !app.search.is_empty() {
             render_empty(
                 f,
                 rows[1],

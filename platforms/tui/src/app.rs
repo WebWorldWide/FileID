@@ -63,6 +63,10 @@ pub struct App {
     pub selected: [usize; 6],
     pub search: String,
     pub search_active: bool,
+    /// Set as the search text changes; `main` consumes it and starts a content search for `search`.
+    pub live_search_requested: bool,
+    /// Rows found for the text typed so far, for the query they answer.
+    live_matches: Option<(String, Vec<FileRow>)>,
     pub status: String,
     pending_scan_warning: Option<String>,
     pub loading: bool,
@@ -121,6 +125,8 @@ impl App {
             selected: [0; 6],
             search: String::new(),
             search_active: false,
+            live_search_requested: false,
+            live_matches: None,
             status: "Starting…".to_string(),
             pending_scan_warning: None,
             loading: true,
@@ -156,6 +162,8 @@ impl App {
     pub fn visible_files(&self) -> Vec<&FileRow> {
         if !self.search_active || self.search == self.data.query {
             self.data.files.iter().collect()
+        } else if let Some((_, files)) = self.live_matches_for_search() {
+            files.iter().collect()
         } else {
             let q = self.search.to_lowercase();
             self.data
@@ -166,6 +174,21 @@ impl App {
                 })
                 .collect()
         }
+    }
+
+    fn live_matches_for_search(&self) -> Option<&(String, Vec<FileRow>)> {
+        let typed = self.search.trim();
+        self.live_matches
+            .as_ref()
+            .filter(|(query, _)| query == typed)
+    }
+
+    /// Typed text whose content search has not answered yet, so "no matches" cannot be claimed.
+    pub fn search_pending(&self) -> bool {
+        self.search_active
+            && !self.search.trim().is_empty()
+            && self.search != self.data.query
+            && self.live_matches_for_search().is_none()
     }
 
     /// Length of the list backing the active tab.
@@ -273,6 +296,7 @@ impl App {
             }
             LoadMsg::Done(snap) => {
                 self.data = *snap;
+                self.live_matches = None;
                 self.loading = false;
                 self.scanning = false;
                 self.downloading = false;
@@ -291,6 +315,12 @@ impl App {
                 if let Some(warning) = self.pending_scan_warning.take() {
                     self.status = warning;
                     self.status_error = true;
+                }
+            }
+            LoadMsg::LiveSearch { query, files } => {
+                if self.search.trim() == query {
+                    self.live_matches = Some((query, files));
+                    self.set_cursor(0);
                 }
             }
             LoadMsg::Error(e) => {
@@ -603,10 +633,12 @@ impl App {
             KeyCode::Backspace => {
                 self.search.pop();
                 self.set_cursor(0);
+                self.live_search_requested = true;
             }
             KeyCode::Char(c) => {
                 self.search.push(c);
                 self.set_cursor(0);
+                self.live_search_requested = true;
             }
             _ => {}
         }
@@ -1229,6 +1261,49 @@ mod tests {
         app.switch_tab(Tab::People);
         app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
         assert!(!app.search_active);
+    }
+
+    #[test]
+    fn typing_a_search_shows_files_whose_text_matches_not_only_their_names() {
+        let mut app = app_with_files(0);
+        app.data.files = vec![
+            file(1, "/x/notes.txt", "doc"),
+            file(2, "/x/photo.jpg", "image"),
+        ];
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "invoice".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        assert!(app.live_search_requested);
+        assert!(app.visible_files().is_empty());
+        assert!(
+            app.search_pending(),
+            "no match may be claimed before the search answers"
+        );
+
+        app.apply_load(LoadMsg::LiveSearch {
+            query: "invoice".into(),
+            files: vec![file(1, "/x/notes.txt", "doc")],
+        });
+        let visible = app.visible_files();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].path, "/x/notes.txt");
+        assert!(!app.search_pending());
+    }
+
+    #[test]
+    fn a_late_answer_for_older_typing_is_ignored() {
+        let mut app = app_with_files(0);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "invoice".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        app.apply_load(LoadMsg::LiveSearch {
+            query: "inv".into(),
+            files: vec![file(1, "/x/notes.txt", "doc")],
+        });
+        assert!(app.visible_files().is_empty());
+        assert!(app.search_pending());
     }
 
     #[test]

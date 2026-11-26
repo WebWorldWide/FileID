@@ -1312,6 +1312,100 @@ fn a_dry_run_names_its_verb() {
 }
 
 #[test]
+fn restructuring_a_folder_plans_only_files_inside_it() {
+    let (corpus, dbdir, db) = scanned_text_library("scoped-plan");
+    let db_s = db.to_str().unwrap();
+    let elsewhere = unique_dir("corpus-scoped-elsewhere");
+    std::fs::write(
+        elsewhere.join("stray.txt"),
+        "a file in another library folder\n",
+    )
+    .unwrap();
+    let scan = run(&["--db", db_s, "scan", elsewhere.to_str().unwrap()]);
+    assert!(scan.status.success());
+    let root = corpus.to_str().unwrap();
+
+    let plan = run(&["--db", db_s, "--json", "restructure", "--plan", root]);
+    assert!(plan.status.success(), "{}", stdout(&plan));
+    let plan = json(&plan);
+    let canonical_root = std::fs::canonicalize(&corpus).unwrap();
+    for planned in plan["moves"].as_array().unwrap() {
+        let source = planned["source"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(source).starts_with(&canonical_root),
+            "{source} is outside {root}"
+        );
+    }
+    assert_eq!(plan["fileCount"].as_u64(), Some(2));
+
+    let applied = run(&["--db", db_s, "restructure", "--apply", "--yes", root]);
+    assert!(
+        applied.status.success(),
+        "{} {}",
+        stdout(&applied),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(elsewhere.join("stray.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn restructuring_a_folder_with_no_scanned_files_says_so() {
+    let (corpus, dbdir, db) = scanned_text_library("unscanned-root");
+    let db_s = db.to_str().unwrap();
+    let unscanned = unique_dir("corpus-unscanned-root");
+
+    let out = run(&[
+        "--db",
+        db_s,
+        "restructure",
+        "--plan",
+        unscanned.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success());
+    let shown = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(shown.contains("no scanned files are under"), "{shown}");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&unscanned);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn applying_on_a_read_only_drive_refuses_before_listing_any_move() {
+    let (corpus, dbdir, db) = scanned_text_library("readonly-apply");
+    let db_s = db.to_str().unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE files SET path_text = '/Volumes/Adlon/' || replace(path_text, '/', '_')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--yes",
+        "/Volumes/Adlon",
+    ]);
+    let shown = stdout(&out);
+    let refusal = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success());
+    assert!(!shown.contains("Will move"), "{shown}");
+    assert!(refusal.contains("read-only drive"), "{refusal}");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
 fn a_dry_run_on_a_read_only_drive_says_apply_would_be_refused() {
     let (corpus, dbdir, db) = scanned_text_library("readonly-preview");
     let db_s = db.to_str().unwrap();
@@ -1322,7 +1416,7 @@ fn a_dry_run_on_a_read_only_drive_says_apply_would_be_refused() {
     )
     .unwrap();
     drop(conn);
-    let root = corpus.to_str().unwrap();
+    let root = "/Volumes/Adlon";
 
     let text = run(&[
         "--db",

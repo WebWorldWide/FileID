@@ -30,6 +30,7 @@ pub fn title(kind: &str) -> &'static str {
 
 pub fn text(kind: &str, message: &str) -> String {
     let fixed = match kind {
+        "empty_folder" => "That folder is empty. Pick another one, or reconnect the drive.",
         "scan_failed" => "Press Scan again. Files already read are skipped.",
         "db_unavailable" | "db_failed" => "Quit and reopen FileID. If it keeps happening, use Start over in the folder menu.",
         "db_disk_full" => "Free some space on this computer (about 1 GB is plenty), then quit and reopen FileID.",
@@ -102,6 +103,15 @@ mod tests {
         assert_eq!(title("db_disk_full"), "Your disk is full");
         assert_eq!(title("scan_disk_full"), title("db_disk_full"));
         assert_eq!(title("no_such_kind"), "Something went wrong");
+    }
+
+    #[test]
+    fn an_empty_folder_is_called_empty_whatever_path_the_engine_names() {
+        let message = "No supported files found in /Users/sam/My_Folder.\nPick a folder with images, videos, PDFs, or documents.";
+        assert_eq!(
+            sentence("empty_folder", message),
+            "No files to scan. That folder is empty. Pick another one, or reconnect the drive."
+        );
     }
 
     #[test]

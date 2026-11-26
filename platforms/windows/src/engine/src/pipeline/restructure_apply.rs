@@ -1559,6 +1559,7 @@ pub struct RestructureApply {
     undo_journal_override: Option<PathBuf>,
     shortcut_undo_dir_override: Option<PathBuf>,
     unusable_names: Mutex<UnusableNames>,
+    first_failure: Mutex<Option<String>>,
     #[cfg(test)]
     fail_next_move_after_journal: AtomicBool,
     #[cfg(test)]
@@ -1706,6 +1707,7 @@ impl RestructureApply {
             undo_journal_override: None,
             shortcut_undo_dir_override: None,
             unusable_names: Mutex::new(UnusableNames::default()),
+            first_failure: Mutex::new(None),
             #[cfg(test)]
             fail_next_move_after_journal: AtomicBool::new(false),
             #[cfg(test)]
@@ -1754,6 +1756,16 @@ impl RestructureApply {
     /// What the last apply skipped for an unusable destination name; resets the tally.
     pub(crate) fn take_unusable_names(&self) -> UnusableNames {
         std::mem::take(&mut *self.unusable_names.lock())
+    }
+
+    /// The file and reason of the first move the last apply could not make; resets after it is read.
+    pub fn take_first_failure(&self) -> Option<String> {
+        self.first_failure.lock().take()
+    }
+
+    fn note_failure(&self, source: &str, reason: &str) {
+        let name = Path::new(source).file_name().map_or_else(|| source.to_owned(), |n| n.to_string_lossy().into_owned());
+        self.first_failure.lock().get_or_insert_with(|| format!("{name}: {reason}"));
     }
 
     #[cfg(test)]
@@ -1915,6 +1927,7 @@ impl RestructureApply {
                             file_id = m.file_id,
                             "[RESTRUCTURE] skipping stale move: the file changed since the plan was made"
                         );
+                        self.note_failure(&m.source, "the file changed since the plan was made");
                         failed += 1;
                         continue;
                     }
@@ -1947,6 +1960,7 @@ impl RestructureApply {
                         file_id = m.file_id,
                         "[RESTRUCTURE] skipping stale move: source no longer matches the DB row"
                     );
+                    self.note_failure(&m.source, "it is no longer at the path the plan recorded");
                     failed += 1;
                     continue;
                 }
@@ -1959,6 +1973,7 @@ impl RestructureApply {
                     source=%crate::platform::redact_path_for_log(source_path),
                     "rejecting move whose source is outside the selected library root"
                 );
+                self.note_failure(&m.source, "it is outside the folder being organized");
                 failed += 1;
                 continue;
             }
@@ -1966,6 +1981,7 @@ impl RestructureApply {
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
             {
                 tracing::warn!(file_id = m.file_id, "[RESTRUCTURE] refusing to move a symbolic-link source");
+                self.note_failure(&m.source, "it is a symbolic link");
                 failed += 1;
                 continue;
             }
@@ -1974,6 +1990,12 @@ impl RestructureApply {
                     file_id = m.file_id,
                     "[RESTRUCTURE] source identity is unavailable or changed; rescan before applying"
                 );
+                let reason = if source_path.try_exists().unwrap_or(true) {
+                    "it changed on disk since it was scanned; scan again"
+                } else {
+                    "it is no longer there; scan again"
+                };
+                self.note_failure(&m.source, reason);
                 failed += 1;
                 continue;
             };
@@ -1988,6 +2010,7 @@ impl RestructureApply {
                 unusable.count += 1;
                 unusable.first.get_or_insert_with(|| name.to_owned());
                 drop(unusable);
+                self.note_failure(&m.source, "its name cannot be used in a new folder");
                 failed += 1;
                 continue;
             }
@@ -1996,6 +2019,7 @@ impl RestructureApply {
             if record_undo
                 && let Err(err) = ensure_inside_root(&dest, &canonical_root) {
                     tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
+                    self.note_failure(&m.source, "its destination is outside the folder being organized");
                     failed += 1;
                     continue;
                 }
@@ -2004,6 +2028,7 @@ impl RestructureApply {
                 && (crate::util::read_only::require_source_mutation(Path::new(&m.source)).is_err()
                     || crate::util::read_only::require_source_mutation(&dest).is_err())
             {
+                self.note_failure(&m.source, "the drive or folder is read-only or protected");
                 failed += 1;
                 continue;
             }
@@ -2015,11 +2040,13 @@ impl RestructureApply {
                         parent=%crate::platform::redact_path_for_log(parent),
                         "rejecting move: pre-existing reparse point in destination parent chain"
                     );
+                    self.note_failure(&m.source, "a destination folder contains a link that leads elsewhere");
                     failed += 1;
                     continue;
                 }
                 if let Err(err) = std::fs::create_dir_all(parent) {
                     tracing::warn!(?err, parent=%crate::platform::redact_path_for_log(parent), "create_dir_all failed");
+                    self.note_failure(&m.source, "the destination folder could not be created");
                     failed += 1;
                     continue;
                 }
@@ -2029,6 +2056,7 @@ impl RestructureApply {
                         parent=%crate::platform::redact_path_for_log(parent),
                         "rejecting move: reparse point appeared after create_dir_all"
                     );
+                    self.note_failure(&m.source, "a destination folder contains a link that leads elsewhere");
                     failed += 1;
                     continue;
                 }
@@ -2036,6 +2064,7 @@ impl RestructureApply {
 
             if self.use_symlinks {
                 let Some(parent) = dest.parent() else {
+                    self.note_failure(&m.source, "it has no destination folder");
                     failed += 1;
                     continue;
                 };
@@ -2055,6 +2084,7 @@ impl RestructureApply {
                             file_id = m.file_id,
                             "[RESTRUCTURE] could not inspect existing shortcuts"
                         );
+                        self.note_failure(&m.source, "its existing shortcuts could not be checked");
                         failed += 1;
                         continue;
                     }
@@ -2078,6 +2108,7 @@ impl RestructureApply {
                         );
                         // `reserve` always claims the name it returns, so the bumped alternative is held even though this row is skipped. Release it, or a later row that planned that exact name (the planner emits "a.jpg" + "a (2).jpg" pairs) is bumped again and fails: one raced file silently unfiling two.
                         claimed.release(&destination);
+                        self.note_failure(&m.source, "its planned destination was taken by another file");
                         failed += 1;
                         continue;
                     }
@@ -2088,6 +2119,7 @@ impl RestructureApply {
                             file_id = m.file_id,
                             "[RESTRUCTURE] could not reserve a collision-free destination"
                         );
+                        self.note_failure(&m.source, "no free name was available in the destination");
                         failed += 1;
                         continue;
                     }
@@ -2100,6 +2132,7 @@ impl RestructureApply {
                 if !self.use_symlinks {
                     claimed.release(&final_dest);
                 }
+                self.note_failure(&m.source, "the drive or folder is read-only or protected");
                 failed += 1;
                 continue;
             }
@@ -2270,6 +2303,7 @@ impl RestructureApply {
                     if !self.use_symlinks {
                         claimed.release(&final_dest);
                     }
+                    self.note_failure(&m.source, &format!("{err:#}"));
                     failed += 1;
                 }
             }
@@ -5306,6 +5340,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_file_deleted_after_the_scan_is_reported_as_gone_not_changed() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let gone = root.join("gone.jpg");
+        std::fs::write(&gone, b"data").unwrap();
+
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &gone.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        std::fs::remove_file(&gone).unwrap();
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let dest = root.join("Sorted").join("x.jpg").to_string_lossy().into_owned();
+        let res = apply.apply(&[move_fixture(1, &gone.to_string_lossy(), &dest)]).unwrap();
+
+        assert_eq!(res.failed, 1);
+        assert_eq!(
+            apply.take_first_failure().as_deref(),
+            Some("gone.jpg: it is no longer there; scan again")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A move whose source no longer matches the live DB row for its file_id is a stale plan and must be skipped.
     #[test]
     fn apply_skips_stale_move_when_source_mismatches_db() {
@@ -5326,6 +5385,11 @@ mod tests {
 
         assert_eq!(res.applied, 0, "stale move must not apply");
         assert_eq!(res.failed, 1);
+        assert_eq!(
+            apply.take_first_failure().as_deref(),
+            Some("vanished.jpg: it is no longer at the path the plan recorded")
+        );
+        assert_eq!(apply.take_first_failure(), None, "the note resets once read");
         assert!(real.exists(), "the real file must be untouched");
         assert!(!root.join("Sorted").join("x.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);

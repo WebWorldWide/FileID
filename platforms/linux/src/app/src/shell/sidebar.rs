@@ -505,7 +505,8 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     frame.set_margin_start(10);
     frame.set_margin_end(10);
     frame.set_margin_bottom(10);
-    let stack = gtk::Stack::builder().vhomogeneous(false).build();
+    // Not homogeneous: the hidden scan page would otherwise set the sidebar's width.
+    let stack = gtk::Stack::builder().vhomogeneous(false).hhomogeneous(false).build();
     frame.append(&stack);
 
     let pick = vbox(8);
@@ -765,4 +766,20 @@ fn sync_details_toggle(toggle: &gtk::Button, open: bool) {
     } else {
         "Show scan details"
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_sidebar_never_asks_for_more_than_its_fixed_width() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let sidebar = Sidebar::new(Rc::new(|_| {}));
+        let (minimum, _, _, _) = sidebar.root.measure(gtk::Orientation::Horizontal, -1);
+        assert!(minimum <= 232, "the sidebar asks for {minimum} px");
+    }
 }

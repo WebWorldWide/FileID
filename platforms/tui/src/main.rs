@@ -120,6 +120,13 @@ fn event_loop(
             }
         }
 
+        if app.live_search_requested {
+            app.live_search_requested = false;
+            let query = app.search.trim().to_string();
+            if !query.is_empty() {
+                data::spawn_live_search(ctx.db.clone(), query, tx.clone());
+            }
+        }
         if app.reload_requested {
             app.reload_requested = false;
             let generation = app.advance_load_generation();
