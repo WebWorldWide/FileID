@@ -1,3 +1,4 @@
+use chrono::TimeZone;
 use std::io::{Read, Seek, SeekFrom};
 
 const ASF_HEADER_GUID: [u8; 16] = [0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C];
@@ -42,8 +43,12 @@ pub(crate) fn asf_creation<R: Read + Seek>(reader: &mut R, length: u64) -> Optio
 
 /// The recording date an AVI carries: the `IDIT` chunk (a C `ctime` string such as `Mon Mar 10 15:04:05 2008`) or
 /// the `ICRD` entry of `LIST INFO` (`2008-03-10`, optionally with a time). Neither names a zone, so the clock time
-/// is read as UTC.
+/// is read in the machine's zone, as EXIF capture times without an offset are.
 pub(crate) fn avi_creation<R: Read + Seek>(reader: &mut R, length: u64) -> Option<f64> {
+    avi_creation_in(reader, length, &chrono::Local)
+}
+
+fn avi_creation_in<R: Read + Seek, Tz: chrono::TimeZone>(reader: &mut R, length: u64, zone: &Tz) -> Option<f64> {
     reader.seek(SeekFrom::Start(0)).ok()?;
     let mut head = [0u8; 12];
     reader.read_exact(&mut head).ok()?;
@@ -51,10 +56,11 @@ pub(crate) fn avi_creation<R: Read + Seek>(reader: &mut R, length: u64) -> Optio
         return None;
     }
     let end = (u64::from(u32::from_le_bytes(head[4..8].try_into().ok()?)) + 8).min(length);
-    riff_dates(reader, 12, end, 0)
+    let wall_clock = riff_dates(reader, 12, end, 0)?;
+    Some(zone.from_local_datetime(&wall_clock).latest()?.timestamp() as f64)
 }
 
-fn riff_dates<R: Read + Seek>(reader: &mut R, start: u64, end: u64, depth: u8) -> Option<f64> {
+fn riff_dates<R: Read + Seek>(reader: &mut R, start: u64, end: u64, depth: u8) -> Option<chrono::NaiveDateTime> {
     let mut at = start;
     for _ in 0..MAX_ELEMENTS {
         if at.checked_add(8)? > end {
@@ -104,19 +110,18 @@ fn chunk_text<R: Read + Seek>(reader: &mut R, at: u64, size: u32) -> Option<Stri
     Some(text.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string())
 }
 
-fn ctime_date(text: &str) -> Option<f64> {
-    let parsed = chrono::NaiveDateTime::parse_from_str(text, "%a %b %e %H:%M:%S %Y").ok()?;
-    Some(parsed.and_utc().timestamp() as f64)
+fn ctime_date(text: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(text, "%a %b %e %H:%M:%S %Y").ok()
 }
 
-fn info_date(text: &str) -> Option<f64> {
+fn info_date(text: &str) -> Option<chrono::NaiveDateTime> {
     for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
         if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(text, format) {
-            return Some(parsed.and_utc().timestamp() as f64);
+            return Some(parsed);
         }
     }
     let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
-    Some(day.and_hms_opt(0, 0, 0)?.and_utc().timestamp() as f64)
+    day.and_hms_opt(0, 0, 0)
 }
 
 /// The `DateUTC` of a Matroska or WebM segment (`Segment/Info`), which counts nanoseconds from 2001-01-01.
@@ -268,6 +273,10 @@ pub(crate) mod tests {
         avi_creation(&mut Cursor::new(bytes), bytes.len() as u64)
     }
 
+    fn avi_in(bytes: &[u8], zone: &chrono::FixedOffset) -> Option<f64> {
+        avi_creation_in(&mut Cursor::new(bytes), bytes.len() as u64, zone)
+    }
+
     fn matroska(bytes: &[u8]) -> Option<f64> {
         matroska_creation(&mut Cursor::new(bytes), bytes.len() as u64)
     }
@@ -289,13 +298,22 @@ pub(crate) mod tests {
     fn an_avi_gives_the_ctime_string_of_its_idit_chunk() {
         let header = list(b"hdrl", riff_chunk(b"avih", &[0; 56]));
         let bytes = avi_with([header, riff_chunk(b"IDIT", b"Mon Mar 10 15:04:05 2008\n\0")].concat());
-        assert_eq!(avi(&bytes), Some(1_205_161_445.0));
+        assert_eq!(avi_in(&bytes, &chrono::FixedOffset::east_opt(0).unwrap()), Some(1_205_161_445.0));
+    }
+
+    #[test]
+    fn an_avi_clock_time_is_read_in_the_given_zone_not_as_utc() {
+        let central = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let bytes = avi_with(riff_chunk(b"IDIT", b"Mon Mar 10 15:04:05 2008\n\0"));
+        assert_eq!(avi_in(&bytes, &central), Some(1_205_161_445.0 + 5.0 * 3600.0));
+        let day_only = avi_with(list(b"INFO", riff_chunk(b"ICRD", b"2010-06-29\0\0")));
+        assert_eq!(avi_in(&day_only, &central), Some(1_277_769_600.0 + 5.0 * 3600.0));
     }
 
     #[test]
     fn an_avi_gives_the_icrd_entry_of_its_info_list() {
         let info = list(b"INFO", riff_chunk(b"ICRD", b"2008-03-10\0\0"));
-        assert_eq!(avi(&avi_with(info)), Some(1_205_107_200.0));
+        assert_eq!(avi_in(&avi_with(info), &chrono::FixedOffset::east_opt(0).unwrap()), Some(1_205_107_200.0));
     }
 
     #[test]
@@ -330,7 +348,9 @@ pub(crate) mod tests {
         };
         let idit = avi_with(riff_chunk(b"IDIT", b"Mon Mar 10 15:04:05 2008\n\0"));
         assert_eq!(date_of("holiday.wmv", asf_with_creation(1_245_000_000)), Some(1_245_000_000.0));
-        assert_eq!(date_of("holiday.avi", idit), Some(1_205_161_445.0));
+        let wall_clock = chrono::NaiveDate::from_ymd_opt(2008, 3, 10).unwrap().and_hms_opt(15, 4, 5).unwrap();
+        let local = chrono::Local.from_local_datetime(&wall_clock).latest().unwrap().timestamp() as f64;
+        assert_eq!(date_of("holiday.avi", idit), Some(local));
         assert_eq!(date_of("holiday.mkv", matroska_with(630_000_000 * 1_000_000_000)), Some(1_608_307_200.0));
         assert_eq!(date_of("clock-reset.mkv", matroska_with(-900_000_000 * 1_000_000_000)), None, "a pre-1990 date is a reset clock");
         assert_eq!(date_of("holiday.mpg", vec![0, 0, 1, 0xBA, 0x44, 0, 4, 0, 4, 1, 0, 0, 3, 0xF8]), None);
