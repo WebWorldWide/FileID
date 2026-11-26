@@ -148,3 +148,6 @@ __pycache__/
 
 # Local agent/tool configuration
 .serena/
+
+# Local agent tool config
+.codex/
