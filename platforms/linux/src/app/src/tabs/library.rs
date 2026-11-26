@@ -1391,23 +1391,47 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem, offl
     if row.kind == "image" || is_video {
         let key = ThumbCacheKey::for_row(&row);
         if let Some(tex) = thumb_cache_get(&key) {
-            pic.set_paintable(Some(&tex));
+            show_thumbnail(&pic, &tex);
             play.set_visible(is_video);
             return;
         }
-        pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
+        show_kind_icon(&pic, &row.kind);
         let parts = TileRequest {
             engine: engine.clone(),
             list_item: list_item.downgrade(),
             pic: pic.downgrade(),
             play: play.downgrade(),
+            caption: caption.downgrade(),
+            kind: row.kind.clone(),
             key,
             is_video,
         };
         request_tile_thumbnail(list_item, parts, true);
     } else {
-        pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
+        show_kind_icon(&pic, &row.kind);
     }
+}
+
+fn show_thumbnail(pic: &gtk::Picture, texture: &gtk::gdk::Texture) {
+    pic.set_content_fit(gtk::ContentFit::Cover);
+    pic.set_tooltip_text(None);
+    pic.set_paintable(Some(texture));
+}
+
+/// The kind icon at its own size, centred in the tile: stretched to fill like a photo it would blur.
+fn show_kind_icon(pic: &gtk::Picture, kind: &str) {
+    pic.set_content_fit(gtk::ContentFit::ScaleDown);
+    pic.set_tooltip_text(None);
+    pic.set_paintable(icon_paintable(icon_for_kind(kind), 96).as_ref());
+}
+
+const NO_PREVIEW_CAPTION: &str = "No preview";
+
+fn no_preview_reason(kind: &str) -> String {
+    format!(
+        "No preview: FileID could not read a picture from this {kind}, so it shows the {kind} icon. \
+         Its name, date and folder still work in search."
+    )
 }
 
 struct TileRequest {
@@ -1415,6 +1439,8 @@ struct TileRequest {
     list_item: glib::WeakRef<gtk::ListItem>,
     pic: glib::WeakRef<gtk::Picture>,
     play: glib::WeakRef<gtk::Image>,
+    caption: glib::WeakRef<gtk::Label>,
+    kind: String,
     key: ThumbCacheKey,
     is_video: bool,
 }
@@ -1483,7 +1509,13 @@ fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry
                 }
                 return;
             }
-            ThumbReply::Dropped | ThumbReply::Failed => return,
+            ThumbReply::Dropped => return,
+            ThumbReply::Failed => {
+                if still_wanted {
+                    explain_missing_preview(&request);
+                }
+                return;
+            }
         };
         let tex = texture_from_decoded(decoded);
         thumb_cache_put(request.key.clone(), tex.clone());
@@ -1491,12 +1523,21 @@ fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry
             return;
         }
         if let Some(pic) = request.pic.upgrade() {
-            pic.set_paintable(Some(&tex));
+            show_thumbnail(&pic, &tex);
         }
         if let Some(play) = request.play.upgrade() {
             play.set_visible(request.is_video);
         }
     });
+}
+
+fn explain_missing_preview(request: &TileRequest) {
+    if let Some(pic) = request.pic.upgrade() {
+        pic.set_tooltip_text(Some(&no_preview_reason(&request.kind)));
+    }
+    if let Some(caption) = request.caption.upgrade() {
+        caption.set_text(&format!("{} · {NO_PREVIEW_CAPTION}", caption.text()));
+    }
 }
 
 fn clear_tile(tile: &gtk::Widget) {
@@ -1505,6 +1546,7 @@ fn clear_tile(tile: &gtk::Widget) {
     };
     if let Some(parts) = tile_parts(vbox) {
         parts.pic.set_paintable(None::<&gtk::gdk::Texture>);
+        parts.pic.set_tooltip_text(None);
         parts.play.set_visible(false);
         parts.offline.set_visible(false);
     }
@@ -2002,6 +2044,15 @@ fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &ThumbCacheKey
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tile_with_no_picture_says_why_and_that_search_still_works() {
+        let reason = no_preview_reason("video");
+        assert!(reason.starts_with("No preview"), "{reason}");
+        assert!(reason.contains("this video"), "{reason}");
+        assert!(reason.contains("name, date and folder still work in search"), "{reason}");
+        assert!(no_preview_reason("image").contains("this image"));
+    }
 
     #[test]
     fn new_files_are_inserted_only_at_the_top_of_the_grid() {

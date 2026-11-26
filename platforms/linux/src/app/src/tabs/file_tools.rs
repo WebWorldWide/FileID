@@ -1061,7 +1061,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     output_body.append(&media_rows);
     output_panel.body.append(&output_body);
     let output_footer = output_panel.show_footer();
-    output_footer.append(&v3::section("Save to"));
+    output_footer.append(&v3::section_whole("Save to"));
     let destination_label = v3::mono("No folder chosen", "s12");
     destination_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
     destination_label.set_hexpand(true);
@@ -1781,5 +1781,31 @@ mod tests {
             9.0 / 16.0
         );
         assert_eq!(output_state("completed"), ("Completed", Tone::Done));
+    }
+
+    fn descendants(widget: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            found.push(current.clone());
+            descendants(&current, found);
+            child = current.next_sibling();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_save_to_label_is_never_shortened() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let engine = Rc::new(std::cell::RefCell::new(crate::engine_client::EngineClient::new()));
+        let mut widgets = Vec::new();
+        descendants(&tools(engine), &mut widgets);
+        let label = widgets
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
+            .find(|label| label.text() == "SAVE TO")
+            .expect("save to label");
+        assert_eq!(label.ellipsize(), gtk::pango::EllipsizeMode::None);
     }
 }

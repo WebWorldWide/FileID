@@ -121,6 +121,24 @@ pub struct ScanSession {
     progress_floor: ProgressFloor,
 }
 
+/// Lists `root` among the library's scanned locations and marks its scan as running.
+pub fn record_library_root_started(conn: &rusqlite::Connection, root: &Path, started_unix: f64, display: Option<&str>) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,COALESCE(?4,?1),?2,?3,'running') \
+         ON CONFLICT(path) DO UPDATE SET last_status='running', display=COALESCE(?4,display)",
+        rusqlite::params![root.to_string_lossy(), library_root_kind(root), started_unix, display],
+    )
+    .map(|_| ())
+}
+
+pub fn record_library_root_finished(conn: &rusqlite::Connection, root: &Path, completed_unix: f64, status: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE library_roots SET last_scan_at=?1,last_status=?2 WHERE path=?3",
+        rusqlite::params![completed_unix, status, root.to_string_lossy()],
+    )
+    .map(|_| ())
+}
+
 fn library_root_kind(root: &Path) -> &'static str {
     let text = root.to_string_lossy();
     if text.starts_with("\\\\") {
@@ -268,13 +286,7 @@ impl ScanSession {
                     started_unix,
                 ],
             );
-            let root_text = root.to_string_lossy();
-            let kind = library_root_kind(root);
-            let _ = conn.execute(
-                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,COALESCE(?4,?1),?2,?3,'running') \
-                 ON CONFLICT(path) DO UPDATE SET last_status='running', display=COALESCE(?4,display)",
-                rusqlite::params![root_text, kind, started_unix, self.root_display],
-            );
+            let _ = record_library_root_started(&conn, root, started_unix, self.root_display.as_deref());
         }
 
         let capture_dates_current = self.capture_dates_current.unwrap_or_else(|| {

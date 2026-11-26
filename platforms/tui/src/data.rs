@@ -504,7 +504,8 @@ fn load_dupes_until(
         max_candidates: DUP_CANDIDATE_CAP as u64,
         max_bytes: DUP_READ_BUDGET_BYTES,
     };
-    let listing = dupes::exact_groups(conn, caps, should_cancel)?;
+    let mut listing = dupes::exact_groups(conn, caps, should_cancel)?;
+    dupes::put_originals_first(conn, &mut listing.groups)?;
     let candidate_count = (listing.admitted + listing.skipped_candidates) as i64;
     let partial = listing.is_partial() || listing.unreadable > 0;
     let mut groups: Vec<DupGroup> = listing
@@ -789,6 +790,34 @@ mod tests {
     }
 
     #[test]
+    fn restructure_preview_of_a_library_already_organized_under_its_scanned_folder_is_empty() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let organized = "/library/Photos/2026/November";
+        let november_2026 = 1_794_000_000.0;
+        for name in ["a.jpg", "b.jpg"] {
+            conn.execute(
+                "INSERT INTO files \
+                 (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension) \
+                 VALUES (?1, ?2, 1, ?3, ?3, 'image', 'jpg')",
+                params![format!("{organized}/{name}"), name.len(), november_2026],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO library_roots(path, display, added_at) VALUES ('/library', '/library', 1)",
+            [],
+        )
+        .unwrap();
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        assert!(
+            plan.is_empty(),
+            "{:?}",
+            plan.iter().map(|row| &row.source).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn duplicate_snapshot_caps_paths_but_keeps_the_real_copy_count() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
@@ -832,6 +861,32 @@ mod tests {
         assert_eq!(candidates, 2);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].copies, 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplicate_snapshot_lists_the_original_first_as_the_cli_keeps_it() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let dir = temp_dir("keeper-order");
+        for (name, modified) in [
+            ("newer.bin", 300.0),
+            ("copy-of-it.bin", 50.0),
+            ("oldest.bin", 100.0),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"same").unwrap();
+            let id = insert_file(&conn, &path.to_string_lossy(), modified);
+            conn.execute("UPDATE files SET size_bytes = 4 WHERE id = ?1", params![id])
+                .unwrap();
+        }
+        let (groups, _, _) = load_dupes(&conn).unwrap();
+        let names: Vec<&str> = groups[0]
+            .paths
+            .iter()
+            .map(|path| path.rsplit('/').next().unwrap())
+            .collect();
+        assert_eq!(names, ["oldest.bin", "newer.bin", "copy-of-it.bin"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

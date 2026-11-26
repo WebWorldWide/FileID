@@ -153,7 +153,7 @@ impl ComparePane {
             .build();
         let header = v3::hbox(8);
         header.add_css_class("v3-take-head");
-        let title = v3::section("BEST");
+        let title = v3::section_whole("BEST");
         header.append(&title);
         let star = v3::label("★", &["v3-take-star"]);
         star.set_visible(false);
@@ -419,5 +419,20 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
         widget.add_css_class(class);
     } else {
         widget.remove_css_class(class);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_take_title_is_never_shortened() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let pane = ComparePane::new();
+        assert_eq!(pane.title.ellipsize(), gtk::pango::EllipsizeMode::None);
     }
 }

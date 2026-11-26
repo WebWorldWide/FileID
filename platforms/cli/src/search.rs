@@ -6,9 +6,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::context::{
-    Ctx, display_path, escape_like, file_size_i64, print_json, resolve_file_id, terminal_text,
-};
+use crate::context::{Ctx, display_path, escape_like, file_size_i64, print_json, resolve_file_id};
 
 struct Hit {
     id: i64,
@@ -392,11 +390,8 @@ fn absent(ctx: &Ctx, kind: &str, msg: &str, seed_id: Option<i64>) -> Result<()> 
             "message": msg,
             "seedId": seed_id,
         }));
-    } else {
-        println!("{}", ctx.bold("Similarity search unavailable."));
-        println!("  {}.", terminal_text(msg));
     }
-    Ok(())
+    anyhow::bail!("similarity search unavailable: {msg}")
 }
 
 #[cfg(test)]

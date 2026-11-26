@@ -516,8 +516,12 @@ fn apply_dryrun_models_and_similar_model_free() {
         dup1.to_str().unwrap(),
     ]);
     assert!(
-        out.status.success(),
-        "search --similar failed: {}",
+        !out.status.success(),
+        "search --similar must fail when the library has no embeddings"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no CLIP embeddings in this library"),
+        "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(

@@ -91,6 +91,14 @@ pub fn section(text: &str) -> gtk::Label {
     label
 }
 
+/// A section label for short fixed text. Letter-spaced labels measure narrower than they draw, so
+/// an ellipsizing one is cut short with room to spare.
+pub fn section_whole(text: &str) -> gtk::Label {
+    let label = section(text);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    label
+}
+
 pub fn meta(text: &str) -> gtk::Label {
     label(text, &["v3-meta"])
 }

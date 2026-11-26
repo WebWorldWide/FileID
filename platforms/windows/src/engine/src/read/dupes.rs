@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -115,6 +115,71 @@ pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> boo
         skipped_candidates: selected.skipped_candidates,
         skipped_bytes: selected.skipped_bytes,
     })
+}
+
+/// Whether a path reads as a copy of something else: a Takeout export, a folder or file named "copy", or a numbered "name (2)" duplicate.
+fn looks_like_a_copy(path: &Path) -> bool {
+    let named_copy = |text: &str| {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| matches!(word, "copy" | "copies" | "takeout"))
+    };
+    let numbered = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_suffix(')'))
+        .and_then(|stem| stem.rsplit_once(" ("))
+        .is_some_and(|(_, number)| {
+            !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        });
+    numbered
+        || path
+            .components()
+            .any(|part| named_copy(&part.as_os_str().to_string_lossy()))
+}
+
+/// Puts the original first: not a copy by name, then the oldest modification time, the shortest path, the lowest id.
+fn put_original_first(files: &mut [ExactDuplicateCandidate], modified_at: &HashMap<i64, f64>) {
+    let modified = |file: &ExactDuplicateCandidate| {
+        modified_at.get(&file.id).copied().unwrap_or(f64::INFINITY)
+    };
+    files.sort_by(|a, b| {
+        looks_like_a_copy(&a.path)
+            .cmp(&looks_like_a_copy(&b.path))
+            .then_with(|| modified(a).total_cmp(&modified(b)))
+            .then_with(|| a.path.as_os_str().len().cmp(&b.path.as_os_str().len()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn modified_times(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, f64>> {
+    let mut times = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT id, modified_at FROM files WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<f64>>(1)?))
+        })?;
+        for row in rows {
+            if let (id, Some(modified)) = row? {
+                times.insert(id, modified);
+            }
+        }
+    }
+    Ok(times)
+}
+
+/// Orders each group so its first file is the original to keep and the rest are the copies.
+pub fn put_originals_first(conn: &Connection, groups: &mut [ExactDuplicateGroup]) -> Result<()> {
+    let ids: Vec<i64> = groups.iter().flat_map(|group| group.files.iter().map(|file| file.id)).collect();
+    let modified_at = modified_times(conn, &ids)?;
+    for group in groups {
+        put_original_first(&mut group.files, &modified_at);
+    }
+    Ok(())
 }
 
 /// Groups of files whose dHashes are all within `threshold` bits of one anchor hash; ids sorted, groups by smallest id.
@@ -345,6 +410,55 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    fn candidate(id: i64, path: &str) -> ExactDuplicateCandidate {
+        ExactDuplicateCandidate { id, path: PathBuf::from(path), indexed_size: 1 }
+    }
+
+    #[test]
+    fn copies_are_recognised_by_folder_or_file_name() {
+        for copy in [
+            "/photos/Takeout/Google Photos/a.jpg",
+            "/photos/dupe-copy-2.jpg",
+            "/photos/Copy of a.jpg",
+            "/photos/Copies/a.jpg",
+            "/photos/a (2).jpg",
+        ] {
+            assert!(looks_like_a_copy(Path::new(copy)), "{copy}");
+        }
+        for original in [
+            "/photos/DSC01691.JPG",
+            "/photos/Copyright/a.jpg",
+            "/photos/photocopy.jpg",
+            "/photos/Trip (Italy).jpg",
+        ] {
+            assert!(!looks_like_a_copy(Path::new(original)), "{original}");
+        }
+    }
+
+    #[test]
+    fn the_original_outranks_a_copy_even_with_the_lower_id() {
+        let mut files = vec![
+            candidate(1, "/photos/dupe-copy-2.jpg"),
+            candidate(2, "/photos/Camera/DSC01691.JPG"),
+        ];
+        put_original_first(&mut files, &HashMap::from([(1, 100.0), (2, 200.0)]));
+        assert_eq!(files[0].id, 2);
+    }
+
+    #[test]
+    fn among_plain_names_the_oldest_then_the_shortest_path_then_the_lowest_id_wins() {
+        let times = HashMap::from([(1, 300.0), (2, 100.0), (3, 100.0), (4, 100.0)]);
+        let mut files = vec![
+            candidate(1, "/a/one.jpg"),
+            candidate(3, "/a/b/three.jpg"),
+            candidate(2, "/a/two.jpg"),
+            candidate(4, "/a/fou.jpg"),
+        ];
+        put_original_first(&mut files, &times);
+        let order: Vec<i64> = files.iter().map(|file| file.id).collect();
+        assert_eq!(order, [2, 4, 3, 1]);
+    }
 
     fn components(rows: &[(i64, i64)], threshold: u32) -> Result<Vec<Vec<i64>>> {
         Ok(similar_components(rows, threshold, &|| false)?.0)
