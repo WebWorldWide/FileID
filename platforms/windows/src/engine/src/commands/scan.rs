@@ -52,6 +52,20 @@ async fn wait_for_blocking<T: Send + 'static>(
     }
 }
 
+/// A scan started right after a cancel finds the last scan's decoders still stopping; they finish within a second or two.
+const DECODER_DRAIN_GRACE: Duration = Duration::from_secs(10);
+
+async fn decoders_after_grace(grace: Duration, active_decoders: impl Fn() -> usize) -> usize {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        let active = active_decoders();
+        if active == 0 || tokio::time::Instant::now() >= deadline {
+            return active;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn reject_stranded_decoders(
     sink: &Sink,
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
@@ -292,7 +306,7 @@ pub(crate) async fn handle_start_scan(
         return false;
     }
 
-    let active_decoders = crate::pipeline::tagging::active_decoder_threads();
+    let active_decoders = decoders_after_grace(DECODER_DRAIN_GRACE, crate::pipeline::tagging::active_decoder_threads).await;
     if active_decoders > 0 {
         reject_stranded_decoders(&sink, &scan_state, active_decoders).await;
         tracing::warn!(active_decoders, "[SCAN] previous decoder workers are still active");
@@ -468,6 +482,18 @@ pub(crate) async fn handle_start_scan(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_new_scan_waits_for_the_last_scans_decoders_and_reports_only_ones_that_never_stop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let draining = std::sync::Arc::new(AtomicUsize::new(3));
+        let counter = draining.clone();
+        let started = std::time::Instant::now();
+        let left = decoders_after_grace(Duration::from_secs(5), move || counter.fetch_sub(1, Ordering::AcqRel).saturating_sub(1)).await;
+        assert_eq!(left, 0, "decoders that stop inside the grace period are waited for");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(decoders_after_grace(Duration::from_millis(200), || 2).await, 2, "decoders that never stop are still reported");
+    }
+
     use super::*;
 
     use std::sync::atomic::{AtomicBool, Ordering};
