@@ -312,7 +312,12 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         && let Ok(root_abs) = std::fs::canonicalize(root)
         && let Ok(conn) = fileid_engine::db::open_writer(&ctx.db)
     {
-        let _ = fileid_engine::scan_session::record_library_root_finished(&conn, &root_abs, now_unix(), "failed");
+        let _ = fileid_engine::scan_session::record_library_root_finished(
+            &conn,
+            &root_abs,
+            now_unix(),
+            "failed",
+        );
     }
     outcome
 }
@@ -1339,7 +1344,9 @@ mod tests {
         assert!(run(&ctx, &root, false).is_err());
         let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
         let status: String = conn
-            .query_row("SELECT last_status FROM library_roots", [], |row| row.get(0))
+            .query_row("SELECT last_status FROM library_roots", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(status, "failed");
         drop(conn);
