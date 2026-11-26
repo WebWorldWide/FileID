@@ -2028,7 +2028,10 @@ mod tests {
             }],
             1,
         );
-        assert!(text.contains("→ Photos/2026/September/DSC01692.ARW"), "{text}");
+        assert!(
+            text.contains("→ Photos/2026/September/DSC01692.ARW"),
+            "{text}"
+        );
     }
 
     #[test]

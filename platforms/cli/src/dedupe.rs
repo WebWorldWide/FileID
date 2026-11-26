@@ -451,7 +451,10 @@ fn apply_run(
 
     if dry_run {
         if trash_refused {
-            println!("{}", ctx.bold(&format!("Apply would be refused: {TRASH_UNAVAILABLE}.")));
+            println!(
+                "{}",
+                ctx.bold(&format!("Apply would be refused: {TRASH_UNAVAILABLE}."))
+            );
         }
         ctx.progress(&format!("  {}", ctx.dim("dry run — nothing was removed.")));
         return Ok(());
@@ -960,7 +963,9 @@ fn looks_like_a_copy(path: &Path) -> bool {
         .and_then(|stem| stem.to_str())
         .and_then(|stem| stem.strip_suffix(')'))
         .and_then(|stem| stem.rsplit_once(" ("))
-        .is_some_and(|(_, number)| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()));
+        .is_some_and(|(_, number)| {
+            !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        });
     numbered
         || path
             .components()

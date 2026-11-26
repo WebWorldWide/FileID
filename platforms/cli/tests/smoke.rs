@@ -1178,7 +1178,12 @@ fn a_closed_stdout_ends_quietly_instead_of_panicking() {
     for index in 0..5 {
         std::fs::write(corpus.join(format!("note{index}.txt")), "text").unwrap();
     }
-    let scan = run(&["--db", db.to_str().unwrap(), "scan", corpus.to_str().unwrap()]);
+    let scan = run(&[
+        "--db",
+        db.to_str().unwrap(),
+        "scan",
+        corpus.to_str().unwrap(),
+    ]);
     assert!(scan.status.success());
 
     let mut child = command()
@@ -1202,9 +1207,18 @@ fn scanned_text_library(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     let corpus = unique_dir(&format!("corpus-{tag}"));
     let dbdir = unique_dir(&format!("db-{tag}"));
     let db = dbdir.join("lib.sqlite");
-    std::fs::write(corpus.join("report.md"), "# Q3\nquarterly revenue figures\n").unwrap();
+    std::fs::write(
+        corpus.join("report.md"),
+        "# Q3\nquarterly revenue figures\n",
+    )
+    .unwrap();
     std::fs::write(corpus.join("notes.txt"), "meeting notes and action items\n").unwrap();
-    let scan = run(&["--db", db.to_str().unwrap(), "scan", corpus.to_str().unwrap()]);
+    let scan = run(&[
+        "--db",
+        db.to_str().unwrap(),
+        "scan",
+        corpus.to_str().unwrap(),
+    ]);
     assert!(scan.status.success());
     (corpus, dbdir, db)
 }
@@ -1220,13 +1234,34 @@ fn replanning_an_organized_library_proposes_no_moves() {
 
     let plan = run(&["--db", db_s, "--json", "restructure", "--plan", root]);
     assert!(plan.status.success());
-    assert_eq!(json(&plan)["moveCount"].as_u64(), Some(0), "{}", stdout(&plan));
+    assert_eq!(
+        json(&plan)["moveCount"].as_u64(),
+        Some(0),
+        "{}",
+        stdout(&plan)
+    );
 
     let text = run(&["--db", db_s, "--no-color", "restructure", "--plan", root]);
-    assert!(stdout(&text).contains("already organized"), "{}", stdout(&text));
+    assert!(
+        stdout(&text).contains("already organized"),
+        "{}",
+        stdout(&text)
+    );
 
-    let again = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--yes", root]);
-    assert!(stdout(&again).contains("already organized"), "{}", stdout(&again));
+    let again = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--yes",
+        root,
+    ]);
+    assert!(
+        stdout(&again).contains("already organized"),
+        "{}",
+        stdout(&again)
+    );
 
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
@@ -1238,10 +1273,35 @@ fn a_dry_run_names_its_verb() {
     let db_s = db.to_str().unwrap();
     let root = corpus.to_str().unwrap();
 
-    let moves = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--dry-run", root]);
-    assert!(stdout(&moves).contains("DRY RUN — would move 2 file(s) into"), "{}", stdout(&moves));
-    let links = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--dry-run", "--symlinks", root]);
-    assert!(stdout(&links).contains("DRY RUN — would symlink 2 file(s) into"), "{}", stdout(&links));
+    let moves = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        root,
+    ]);
+    assert!(
+        stdout(&moves).contains("DRY RUN — would move 2 file(s) into"),
+        "{}",
+        stdout(&moves)
+    );
+    let links = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        "--symlinks",
+        root,
+    ]);
+    assert!(
+        stdout(&links).contains("DRY RUN — would symlink 2 file(s) into"),
+        "{}",
+        stdout(&links)
+    );
 
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
@@ -1260,11 +1320,30 @@ fn a_dry_run_on_a_read_only_drive_says_apply_would_be_refused() {
     drop(conn);
     let root = corpus.to_str().unwrap();
 
-    let text = run(&["--db", db_s, "--no-color", "restructure", "--apply", "--dry-run", root]);
+    let text = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        root,
+    ]);
     let shown = stdout(&text);
-    assert!(shown.contains("read-only drive") && shown.contains("Apply would be refused."), "{shown}");
+    assert!(
+        shown.contains("read-only drive") && shown.contains("Apply would be refused."),
+        "{shown}"
+    );
 
-    let machine = run(&["--db", db_s, "--json", "restructure", "--apply", "--dry-run", root]);
+    let machine = run(&[
+        "--db",
+        db_s,
+        "--json",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        root,
+    ]);
     let refused = json(&machine)["applyRefused"].as_str().map(str::to_owned);
     assert!(refused.is_some_and(|text| text.contains("Apply would be refused.")));
 
@@ -1284,8 +1363,14 @@ fn dedupe_apply_keeps_the_original_not_the_copy_that_sorts_first() {
     assert!(scan.status.success());
     seed_content_hash(&db, "DSC01691.txt", "A dupe-copy-2.txt");
 
-    let applied = run(&["--db", db_s, "--json", "dedupe", "--exact", "--apply", "--delete", "--yes"]);
-    assert!(applied.status.success(), "{}", String::from_utf8_lossy(&applied.stderr));
+    let applied = run(&[
+        "--db", db_s, "--json", "dedupe", "--exact", "--apply", "--delete", "--yes",
+    ]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
 
     assert!(corpus.join("DSC01691.txt").exists());
     assert!(!corpus.join("A dupe-copy-2.txt").exists());
@@ -1304,7 +1389,12 @@ mod without_recoverable_trash {
         let db = dbdir.join("lib.sqlite");
         std::fs::write(corpus.join("one.txt"), "identical body").unwrap();
         std::fs::write(corpus.join("two.txt"), "identical body").unwrap();
-        let scan = run(&["--db", db.to_str().unwrap(), "scan", corpus.to_str().unwrap()]);
+        let scan = run(&[
+            "--db",
+            db.to_str().unwrap(),
+            "scan",
+            corpus.to_str().unwrap(),
+        ]);
         assert!(scan.status.success());
         seed_content_hash(&db, "one.txt", "two.txt");
         (corpus, dbdir, db)
@@ -1315,12 +1405,22 @@ mod without_recoverable_trash {
         let (corpus, dbdir, db) = duplicate_pair("no-trash-apply");
         let db_s = db.to_str().unwrap();
 
-        let out = run(&["--db", db_s, "--no-color", "dedupe", "--exact", "--apply", "--yes"]);
+        let out = run(&[
+            "--db",
+            db_s,
+            "--no-color",
+            "dedupe",
+            "--exact",
+            "--apply",
+            "--yes",
+        ]);
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("Trash is unavailable"));
         assert!(corpus.join("one.txt").exists() && corpus.join("two.txt").exists());
 
-        let machine = run(&["--db", db_s, "--json", "dedupe", "--exact", "--apply", "--yes"]);
+        let machine = run(&[
+            "--db", db_s, "--json", "dedupe", "--exact", "--apply", "--yes",
+        ]);
         assert!(!machine.status.success());
         assert_eq!(json(&machine)["reason"], "trash_unavailable_on_platform");
 
@@ -1333,13 +1433,29 @@ mod without_recoverable_trash {
         let (corpus, dbdir, db) = duplicate_pair("no-trash-preview");
         let db_s = db.to_str().unwrap();
 
-        let out = run(&["--db", db_s, "--no-color", "dedupe", "--exact", "--apply", "--dry-run"]);
+        let out = run(&[
+            "--db",
+            db_s,
+            "--no-color",
+            "dedupe",
+            "--exact",
+            "--apply",
+            "--dry-run",
+        ]);
         assert!(out.status.success());
         let shown = stdout(&out);
         assert!(shown.contains("Apply would be refused"), "{shown}");
         assert!(!shown.contains("Trash/Recycle Bin"), "{shown}");
 
-        let machine = run(&["--db", db_s, "--json", "dedupe", "--exact", "--apply", "--dry-run"]);
+        let machine = run(&[
+            "--db",
+            db_s,
+            "--json",
+            "dedupe",
+            "--exact",
+            "--apply",
+            "--dry-run",
+        ]);
         assert!(json(&machine)["applyRefused"].is_string());
 
         let _ = std::fs::remove_dir_all(&corpus);
