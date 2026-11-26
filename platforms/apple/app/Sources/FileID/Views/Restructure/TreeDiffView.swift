@@ -10,9 +10,7 @@ struct TreeDiffView: View {
     let planVersion: Int
     var onTapSource: (String) -> Void = { _ in }
     var onTapDestination: (String) -> Void = { _ in }
-    /// Same hover bus the Sankey writes into. Hovering a folder row
-    /// here lights the matching node + ribbons in the diagram, and
-    /// vice versa.
+    /// The hover bus the Sankey also uses, so hovering a row lights the matching node and ribbons, and the reverse.
     var hoverBus: RestructureHoverBus
 
     enum FilterMode: String, CaseIterable, Identifiable {

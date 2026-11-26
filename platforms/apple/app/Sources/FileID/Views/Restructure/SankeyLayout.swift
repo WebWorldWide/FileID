@@ -13,9 +13,7 @@ extension SankeyFlowView {
         var destinationsForSource: [String: Set<String>]
         var sourcesForDestination: [String: Set<String>]
         var nodesByOutcome: [RestructureOutcome: Set<String>]
-        /// Long-tail source folder paths that were collapsed into the
-        /// "+ N more folders" rollup node. Tapping the rollup drills
-        /// down into these.
+        /// Long-tail source folder paths collapsed into the "+ N more folders" node.
         var rollupSourceFolders: [String]
         var rollupDestBuckets: [String]
         var isPopulated: Bool

@@ -1,5 +1,4 @@
-// Root window: Prototype v3 shell. Title bar over a hairline-split
-// sidebar + page, all on the LavaLamp.
+// Root window: title bar over a hairline-split sidebar and page, all on the LavaLamp.
 import SwiftUI
 import AppKit
 import FileIDShared
@@ -118,8 +117,7 @@ struct MainWindow: View {
     }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .library }
 
-    /// A job list taken from a search reply goes stale (the pill kept saying
-    /// "Moments 0%"), so any page asks again each second while a job runs.
+    /// A job list taken from a search reply goes stale, so any page asks again each second while a job runs.
     nonisolated static func jobsNeedRefresh(_ jobs: [CatalogJob]) -> Bool {
         jobs.contains { $0.state == "queued" || $0.state == "running" }
     }
@@ -171,8 +169,7 @@ struct MainWindow: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .engineUnavailableOverlay(engine: engine, activeTab: activeTab)
                         .focusSection()
-                    // Chat stays beside the current page, as before the redesign;
-                    // the Chat page is the same conversation at full width.
+                    // Chat stays beside the current page; the Chat page is the same conversation at full width.
                     if chatPresented && activeTab != .chat {
                         VHairline()
                         ChatWorkbench(engine: engine, store: store, onClose: { chatPresented = false })

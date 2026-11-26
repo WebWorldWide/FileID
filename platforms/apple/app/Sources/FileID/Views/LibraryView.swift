@@ -124,9 +124,7 @@ struct LibraryView: View {
         lifecycle(content)
             .onChange(of: searchText) { _, _ in
                 similarSeed = nil   // typing exits similarity mode
-                // Debounce: cancel any pending reload, schedule a new one.
-                // The DB hit + optional CLIP encode is ~50-100ms; without
-                // debounce, fast typers stutter their own keystrokes.
+                // Debounced: each reload costs a DB query plus an optional CLIP encode.
                 searchDebounce?.cancel()
                 searchDebounce = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 200_000_000)
@@ -220,10 +218,7 @@ struct LibraryView: View {
                 listedQuery = nil
                 reload()
             }
-            // Terminal reload: the 1 s batch throttle above can swallow the FINAL
-            // scan batch (it advances lastSeenBatchIndex before the throttle guard,
-            // so the last batch never triggers a reload if it lands within 1 s).
-            // Reloading on any terminal event guarantees the grid ends complete.
+            // The 1 s batch throttle can swallow the final scan batch, so any terminal event reloads.
             .onChange(of: engine.lastTerminalEventAt) { _, _ in
                 if pageActive { scanEnded() } else { missedWhileHidden.insert(.terminal) }
             }
@@ -849,8 +844,7 @@ struct LibraryView: View {
             .help("Choose several files, then tag them all at once")
         }
 
-        // Bulk-rename trigger lives in the Deep Analyze tab now: that's where smart
-        // names come from in the workflow. Only the per-row "Undo last rename" stays here.
+        // Bulk rename starts from the Deep Analyze tab; only "Undo last rename" lives here.
         if lastBatchAvailable {
             Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
             .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
@@ -1618,11 +1612,8 @@ struct FilePreviewSheet: View {
         .focusable()
         .focusEffectDisabled()
         .focused($keyFocus)
-        // Grab key focus when the sheet appears so the arrow handlers fire
-        // without a click; reclaim it whenever the tag field gives focus up.
-        // The brief defer lets the sheet enter the responder hierarchy first —
-        // setting focus synchronously in .task doesn't reliably stick on a
-        // freshly presented sheet.
+        // Takes key focus so the arrow handlers fire without a click, and reclaims it when the
+        // tag field lets go. The short delay lets the sheet join the responder chain first.
         .task {
             try? await Task.sleep(for: .milliseconds(50))
             keyFocus = true
@@ -1642,10 +1633,8 @@ struct FilePreviewSheet: View {
             step(1); return .handled
         }
         .task(id: "\(file.id):\(file.vlmAnalyzedAt?.timeIntervalSince1970 ?? 0)") {
-            // Generate a larger preview for the sheet (640px). Keyed on
-            // file id and analysis timestamp so it re-fires on sibling navigation
-            // and after Deep Analyze updates the current row. Clear first so the
-            // spinner shows and the prior preview never bleeds into the new state.
+            // Larger preview, regenerated on navigation and after Deep Analyze updates the
+            // row. Cleared first so the previous file's image never shows.
             preview = nil
             previewFailed = false
             tags = []
@@ -1664,9 +1653,7 @@ struct FilePreviewSheet: View {
             var image = file.kind == "image" && !offline ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
             if image == nil { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 1600) }
             if image == nil, offline { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 256) }
-            // ThumbnailService ignores cancellation, so a slow load for the prior file
-            // (network volume) can resolve after the user arrowed on; drop it once
-            // `.task(id:)` has been superseded, else it overwrites the current image.
+            // ThumbnailService ignores cancellation; drop a slow load for a file the user already left.
             guard !Task.isCancelled else { return }
             preview = image
             previewFailed = image == nil
@@ -1898,13 +1885,11 @@ private struct FinderTagsEditor: View {
     @State private var tags: [String] = []
     @State private var draft: String = ""
     @State private var error: String?
-    // Serial chain for off-main tag edits. addTags/removeTags are
-    // non-atomic read-modify-write on the xattr, so two quick edits must NOT run
-    // concurrently (one would clobber the other). Each edit awaits the previous.
+    // Serial chain for off-main tag edits: addTags/removeTags are a non-atomic xattr
+    // read-modify-write, so each edit awaits the previous one.
     @State private var tagEditChain: Task<Void, Never>?
-    // The file currently displayed. `file` is a by-value `let` captured stale in
-    // the edit closure; this @State reads live, so a write that finishes after the
-    // user arrowed to another file knows not to apply its result to that file.
+    // The file on screen now. `file` is captured by value in the edit closure, so a write
+    // finishing after the user moved on checks this instead.
     @State private var displayedFileID: Int64?
 
     var body: some View {
@@ -1943,18 +1928,12 @@ private struct FinderTagsEditor: View {
             }
         
         .task(id: file.id) {
-            // Record the now-displayed file so a still-in-flight tag write for the
-            // prior file can detect that the user navigated away (see runTagEdit).
+            // Lets an in-flight tag write for the previous file see the user moved on (see runTagEdit).
             displayedFileID = file.id
-            // Read xattr off the main thread — for files on slow / network
-            // volumes the read can stall the preview sheet for hundreds of
-            // milliseconds while the user is trying to scrub through.
+            // Off the main thread: an xattr read on a network volume can stall the sheet.
             let url = file.url
             let result = await Task.detached { TagWriter.readTags(at: url) }.value
-            // The detached read doesn't inherit `.task` cancellation; if the
-            // user arrowed to another file mid-read, a slow stale read on a
-            // network volume could land after the newer one and overwrite it.
-            // Drop it once `.task(id:)` is superseded.
+            // A detached read ignores `.task` cancellation; drop a stale result so it cannot overwrite a newer file's tags.
             guard !Task.isCancelled else { return }
             tags = result
             error = nil

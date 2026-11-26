@@ -33,24 +33,18 @@ struct RestructureView: View {
     @State private var planStoreVersion = 0
     @State private var planDelivered = false
     @State private var sankeyHeaderStat = ""
-    /// Single-flight guard for the apply / convert paths. A real move is
-    /// irreversible inside the app, so a double-click must never run apply
-    /// twice — the bar buttons disable while this is set.
+    /// Single-flight guard for apply: a double-click must never run it twice, so the bar buttons disable while set.
     @State private var applying = false
     @State private var cancelRequested = false
-    /// Moves frozen at the instant the apply-confirmation dialog is
-    /// presented. A background re-plan (e.g. Deep Analyze finishing mid-review)
-    /// rewrites proposals/selectedIDs/engine.restructurePlan while the dialog
-    /// stays open; the confirm action must apply exactly what the user reviewed,
-    /// not the re-planned set (TOCTOU → unreviewed irreversible moves).
+    /// Moves frozen when the confirmation dialog opens. A background re-plan can rewrite the
+    /// proposals while it is open; confirming must apply exactly what the user reviewed.
     @State private var pendingMoves: [RestructureMove] = []
     @State private var pendingPlanID: String?
     @State private var pendingApplyCount = 0
     @State private var storedPlanID: String?
     @State private var storedPlanMoveCount = 0
-    /// Full-plan confidence tallies for the active stored plan — the auto-tier
-    /// count is what actually applies (see `applyStoredPlan`'s Auto-only
-    /// filter); review/ask/unknown stay put. Nil until a truncated plan lands.
+    /// Full-plan confidence tallies for the stored plan. Only the auto tier applies (see
+    /// `applyStoredPlan`); nil until a truncated plan lands.
     @State private var storedPlanConfidenceCounts: RestructureConfidenceCounts?
 
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
@@ -60,26 +54,20 @@ struct RestructureView: View {
     @State private var skippedOutcomes: Set<RestructureOutcome> = []
     @State private var expandedOutcome: RestructureOutcome?
     @State private var drillDown: DrillDownScope?
-    /// Filtered + grouped proposals for the active drill-down scope.
-    /// Rebuilt only when `drillDown` changes so a per-row checkbox tap
-    /// inside the sheet doesn't re-filter + re-group the whole set.
+    /// Filtered and grouped proposals for the drill-down scope, rebuilt only when the scope changes.
     @State private var drillDownGroups: [Group] = []
 
-    /// Shared hover state used by the Sankey, recommendation rows,
-    /// and tree to drive cross-highlight.
+    /// Hover state shared by the Sankey, recommendation rows and tree.
     @State private var hoverBus = RestructureHoverBus()
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @AppStorage("restructure.dismissedDeepAnalyzeHint") private var dismissedDeepAnalyzeHint = false
-    /// (clip, text) embedding counts at plan time. nil = not yet measured. When both are
-    /// 0 the scan ran without the CLIP/BGE models, so the plan is date/name-only — we tell
-    /// the user to install the models + rescan for content-based grouping.
+    /// (clip, text) embedding counts at plan time; nil until measured. Both 0 means the plan
+    /// is date/name-only, and the user is told to install the models and rescan.
     @State private var embeddingCounts: (clip: Int, text: Int)?
     /// Lets the missing-models banner jump the user to Settings → AI Models.
     @AppStorage("activeTabRawValue") private var activeTabRaw: String = MainWindow.Tab.library.rawValue
-    /// Per-file deselections captured at `requestPlan()` time and re-applied in
-    /// `applyPlan()`, so an engine re-plan (e.g. after Deep Analyze finishes
-    /// mid-review) doesn't silently re-check rows the user unchecked.
+    /// Deselections captured at `requestPlan()` and re-applied in `applyPlan()`, so a re-plan does not re-check rows the user unchecked.
     @State private var priorDeselectedIDs: Set<Int64> = []
 
     /// Which subset of proposals the drill-down sheet renders.
@@ -88,11 +76,7 @@ struct RestructureView: View {
         case outcome(RestructureOutcome)
         case sourceFolder(String)
         case destBucket(String)
-        /// Rollup of long-tail source folders that were collapsed into
-        /// the Sankey's "+ N more folders" node. Tapping the rollup
-        /// node should drill into every proposal whose source folder
-        /// is in this list — not into a literal "+ N more folders"
-        /// folder, which doesn't exist.
+        /// The long-tail source folders collapsed into the Sankey's "+ N more folders" node.
         case sourceFolders([String])
         case destBuckets([String])
         var id: String {
@@ -181,9 +165,7 @@ struct RestructureView: View {
                     .padding(.horizontal, Theme.Metrics.pageInsetX)
                     .padding(.top, 16).padding(.bottom, 12)
                     .transition(.opacity)
-                    // The engine butler performs real on-disk moves (macOS has
-                    // no shortcut-preview mode), so the confirmation states the
-                    // real behavior before anything moves.
+                    // The butler performs real on-disk moves, so the dialog states that before anything moves.
                     .confirmationDialog(
                         "Move \(pendingApplyCount) file\(pendingApplyCount == 1 ? "" : "s")?",
                         isPresented: $confirmApply,
@@ -283,9 +265,7 @@ struct RestructureView: View {
             guard libraryRoot != nil, !loading, !applying, !confirmApply, !confirmLargeApply else { return }
             if Self.needsReplan(storeVersion: store.version, planStoreVersion: planStoreVersion, planDelivered: planDelivered) { requestPlan() }
         })
-        // Apply finished engine-side — surface the result, release the
-        // single-flight guard, and re-request a fresh plan (moved files now
-        // carry new path_text).
+        // Apply finished: show the result, release the single-flight guard, and re-plan (moved files have new paths).
         .onChange(of: engine.restructureApplyResultSignal) { _, _ in
             guard libraryRoot != nil, let result = engine.restructureApplyResult else { return }
             applying = false
@@ -316,8 +296,7 @@ struct RestructureView: View {
                 moveOutcome = MoveOutcome(title: "Moved \(files)", detail: "Undo move puts every file back where it was.", warning: false)
             }
         }
-        // The engine died before a terminal plan/apply event could clear the
-        // local in-flight UI — release it so the tab doesn't wedge.
+        // The engine died before a terminal event arrived; release the in-flight UI so the tab does not wedge.
         .onChange(of: engine.engineResetSignal) { _, _ in
             if applying {
                 applying = false
@@ -327,20 +306,13 @@ struct RestructureView: View {
             }
             loading = false
         }
-        // A plan computation that failed engine-side ends the "Computing…"
-        // spinner (it would otherwise spin forever waiting for a plan event).
-        // Keyed on `lastErrorSignal` (bumps on every error write) not the
-        // message, so a retry that fails with the identical message still
-        // clears the spinner. An oversized plan frame dropped by the app's
-        // inbound IPC cap (`ipc_frame_too_large`) is a terminal plan failure
-        // here too — otherwise the tab wedges on a very large library's plan.
+        // A failed plan ends the "Computing…" spinner. Keyed on `lastErrorSignal`, not the message,
+        // so a retry failing with the same message still clears it. A plan frame dropped by the
+        // inbound IPC cap (`ipc_frame_too_large`) is also a terminal failure.
         .onChange(of: engine.lastErrorSignal) { _, _ in
             guard let kind = engine.lastError?.kind else { return }
-            // An apply/undo the engine rejected with a bare error (db_unavailable:
-            // the engine stays alive, so NO restructureApplyResult and NO reset
-            // event arrives) would wedge `applying` true forever — the apply bar +
-            // Undo button stay disabled and re-entry-guarded. Release it here,
-            // mirroring the engineResetSignal handler above.
+            // An apply or undo rejected with a bare error (e.g. db_unavailable) gets no apply result
+            // and no reset event, so `applying` would stay set forever; release it here.
             if applying, EngineClient.endsRestructureWithoutResult(kind) {
                 applying = false
                 undoing = false
@@ -375,8 +347,7 @@ struct RestructureView: View {
                 break
             }
         }
-        // Group the drill-down's proposals once per scope, not on every
-        // checkbox tap inside the sheet.
+        // Grouped once per scope, not on every checkbox tap in the sheet.
         .onChange(of: drillDown) { _, newScope in
             rebuildDrillDownGroups(for: newScope)
         }
@@ -975,9 +946,7 @@ struct RestructureView: View {
 
     // MARK: - Engine-routed plan + apply
 
-    /// Ask the engine butler for a fresh restructure plan. The reply arrives
-    /// asynchronously on `engine.restructurePlan`; `applyPlan()` (driven by
-    /// `engine.restructurePlanSignal`) maps it onto the view's proposal model.
+    /// Asks the engine for a fresh plan. The reply lands on `engine.restructurePlan` and `applyPlan()` maps it.
     private func requestPlan() {
         guard let root = libraryRoot else { return }
         priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
@@ -996,13 +965,10 @@ struct RestructureView: View {
         }
     }
 
-    /// Map the engine's authoritative plan onto the view's `Proposal`/summary
-    /// model, then rebuild the grouping/selection/inline caches the Sankey,
-    /// TreeDiff, recommendation rows, and drill-down render from.
+    /// Maps the engine plan onto the view's proposals and summary, and rebuilds the grouping, selection and inline caches the map, tree, rows and drill-down render from.
     private func applyPlan() {
         guard let plan = engine.restructurePlan, let root = libraryRoot else { return }
-        // Ignore a plan computed for a different destination root (the user may
-        // have switched folders while a plan was in flight).
+        // Ignore a plan for another root: the user may have switched folders mid-plan.
         guard Self.pathsMatch(plan.libraryRoot, root.path) else { return }
 
         if plan.truncated {
@@ -1037,8 +1003,7 @@ struct RestructureView: View {
         storedPlanConfidenceCounts = nil
         storedPlanFolders = []
 
-        // Up to 100k moves: mapping, grouping and the two catalog reads run off
-        // the main actor; only the assignments below happen on it.
+        // Plans reach 100k moves, so mapping, grouping and the catalog reads run off the main actor.
         let deselected = priorDeselectedIDs
         let skipped = skippedOutcomes
         let store = store
@@ -1083,23 +1048,17 @@ struct RestructureView: View {
             .sorted { a, b in a.proposals.count != b.proposals.count ? a.proposals.count > b.proposals.count : a.bucket < b.bucket }
 
         var selectedIDs = Set(mapped.map(\.fileID))
-        // Ask-confidence moves start deselected — "No clear signal, the decision
-        // is yours." The user must explicitly check them before applying.
-        // (RESTRUCTURE.md §6 — confidence-tier autonomy)
+        // Ask-confidence moves start deselected: the user must check them before applying (RESTRUCTURE.md §6).
         for p in mapped where p.confidence.lowercased() == "ask" {
             selectedIDs.remove(p.fileID)
         }
         selectedIDs.subtract(deselected)
-        // Preserve the user's "Skip these" choices: re-exclude any persisted
-        // skipped outcome's proposals (otherwise skipped rows render dimmed but
-        // get re-applied).
+        // Re-exclude skipped outcomes, or their dimmed rows would still be applied.
         for p in mapped where skipped.contains(outcome(for: p)) {
             selectedIDs.remove(p.fileID)
         }
 
-        // Per-outcome groupings the recommendation row's expand-in-place file
-        // list reads from. Built here so the render path returns cached values
-        // without re-running filter/groupBy.
+        // Per-outcome groupings for the recommendation rows' inline file lists, cached so rendering does no grouping.
         let totalCap = 30
         let bucketCap = 4
         var byOutcome: [RestructureOutcome: [Group]] = [:]
@@ -1129,7 +1088,7 @@ struct RestructureView: View {
             embeddings: store.contentEmbeddingCounts())
     }
 
-    /// Applies the selected, non-skipped moves through the engine butler. Single-flight: `applying` clears when `restructureApplyResult` arrives. Moves are snapshotted into `pendingMoves` at dialog time so a background re-plan can't change the set.
+    /// The selected, non-skipped moves from the current plan.
     private func eligibleMoves() -> [RestructureMove] {
         guard let plan = engine.restructurePlan else { return [] }
         let eligible = Set(
@@ -1146,8 +1105,7 @@ struct RestructureView: View {
             statusIsError = true
             return
         }
-        // Apply exactly the set frozen when the dialog was presented, not
-        // a set a mid-dialog re-plan may have rewritten.
+        // The set frozen when the dialog opened, not one a re-plan has since rewritten.
         let moves = pendingMoves
         guard pendingPlanID != nil || !moves.isEmpty else {
             status = "Nothing selected to apply."
@@ -1187,9 +1145,7 @@ struct RestructureView: View {
         }
     }
 
-    /// Derive the at-a-glance summary from the plan. Folder counts come from the
-    /// engine's `folderClassifications`; a reply without them (an older engine)
-    /// falls back to counting distinct source folders per outcome.
+    /// The at-a-glance summary. Folder counts come from `folderClassifications`, or from distinct source folders per outcome when the plan has none.
     nonisolated static func makeSummary(from plan: RestructurePlan, proposals: [Proposal], libraryFiles: Int = 0) -> AssistantSummary {
         let movedOut = proposals.filter { $0.kind == .movedOutAsOutlier }
         let dissolved = proposals.filter { $0.kind == .dissolved }
@@ -1289,8 +1245,7 @@ struct RestructureView: View {
             }
         } else {
             skippedOutcomes.insert(outcome)
-            // Drop this outcome's proposals from the selection so the
-            // Apply button count + the actual apply pass match.
+            // Keeps the Apply count and the apply pass in step.
             for p in proposals where outcomeFor(p) == outcome {
                 selectedIDs.remove(p.fileID)
             }
@@ -1350,9 +1305,7 @@ struct RestructureView: View {
         .dsEscapeCancels { drillDown = nil }
     }
 
-    /// Recompute the filtered + bucketed proposals for a drill-down scope.
-    /// Called only when the scope changes (sheet open/close/switch), so the
-    /// O(N) filter + groupBy doesn't run on every checkbox tap.
+    /// Recomputes the filtered, bucketed proposals for a scope; called only when the scope changes.
     private func rebuildDrillDownGroups(for scope: DrillDownScope?) {
         guard let scope else { drillDownGroups = []; return }
         let matched = proposals.filter { matches(scope, $0) }
