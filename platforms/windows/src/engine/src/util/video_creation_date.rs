@@ -61,11 +61,17 @@ fn mvhd_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option
                 }
                 _ => return None,
             };
-            return seconds.checked_sub(SECONDS_1904_TO_1970).map(|unix| unix as f64);
+            return (seconds != 0).then(|| movie_header_unix(seconds));
         }
         at = next;
     }
     None
+}
+
+/// The header counts seconds since 1904, so no real clip has a value below the 1904-to-1970 offset. Some muxers
+/// (3gp4 among them) write plain Unix seconds instead, and those values are taken as they are.
+fn movie_header_unix(seconds: u64) -> f64 {
+    seconds.checked_sub(SECONDS_1904_TO_1970).unwrap_or(seconds) as f64
 }
 
 fn apple_creation<R: Read + Seek>(reader: &mut R, start: u64, end: u64) -> Option<f64> {
@@ -267,6 +273,25 @@ pub(crate) mod tests {
     #[test]
     fn an_unset_clock_is_not_a_date() {
         assert_eq!(read(&mp4(true, mvhd_v0(0))), None);
+    }
+
+    #[test]
+    fn a_header_written_in_unix_seconds_is_read_as_unix_seconds() {
+        let shot = 1_387_504_826;
+        assert_eq!(read(&mp4(true, mvhd_v0(shot))), Some(f64::from(shot)));
+        assert_eq!(read(&mp4(true, mvhd_v1(u64::from(shot)))), Some(f64::from(shot)));
+    }
+
+    #[test]
+    fn a_header_at_the_unix_epoch_is_not_a_date() {
+        for header in [mvhd_v0(SECONDS_1904_TO_1970 as u32), mvhd_v1(SECONDS_1904_TO_1970)] {
+            let dir = std::env::temp_dir().join(format!("fileid-video-epoch-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("epoch.mp4");
+            std::fs::write(&path, mp4(true, header)).unwrap();
+            assert_eq!(container_creation_unix(&path), None);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
