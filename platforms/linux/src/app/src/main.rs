@@ -1,6 +1,4 @@
 #![allow(deprecated)]
-
-
 #![allow(clippy::type_complexity)]
 
 mod app_settings;
@@ -30,7 +28,7 @@ const APP_ID: &str = "io.github.fileid.FileID";
 fn main() -> glib::ExitCode {
     window::note_launch();
 
-    // Local-only structured logging; NEVER transmits.
+    // Local-only structured logging.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -1806,9 +1806,8 @@ enum SelectOp {
     Invert,
 }
 
-/// Wire a group "Select…" menu item: `op` mutates the selection set for this
-/// group's members, then rebuilds. A nested-free fn (not a closure) so its
-/// reference parameters don't snag closure-lifetime inference.
+/// Wires a group "Select…" menu item: `op` mutates the selection for this group's members, then rebuilds.
+/// A fn rather than a closure so its reference parameters infer lifetimes.
 fn wire_select(
     btn: &gtk::Button,
     this: &Rc<Cleanup>,

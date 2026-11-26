@@ -567,9 +567,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button) {
             if ui.in_flight.get() || run_blocker(&ui).is_some() {
                 return;
             }
-            // Gate a restricted-model (e.g. Gemma) download behind license
-            // acceptance, like macOS gates every describe entry point. On
-            // acceptance the gate re-emits this click so the run proceeds.
+            // A restricted model (e.g. Gemma) needs license acceptance; the gate re-emits this click once accepted.
             let kind = ui.active_kind.get();
             if !crate::model_license::ensure_or_prompt(button, kind) {
                 return;
@@ -595,8 +593,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button) {
             if ui.in_flight.get() {
                 return;
             }
-            // Gate the restricted-model download before opening the picker; the
-            // gate re-emits this click after acceptance (parity with macOS).
+            // Same license gate as the run button, before the picker opens.
             if !crate::model_license::ensure_or_prompt(btn, ui.active_kind.get()) {
                 return;
             }
@@ -943,16 +940,13 @@ fn rename_summary(succeeded: u32, failed: u32, messages: &[fileid_engine::ipc::B
     }
 }
 
-/// Optimistic refresh after a fire-and-forget command (the engine's
-/// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
-/// so we re-read the DB shortly after instead of waiting for confirmation).
+/// Re-reads the DB shortly after a fire-and-forget command; `renameResult` events are not surfaced.
 fn schedule_refresh(ui: &Rc<DeepUi>, ms: u64) {
     let ui = ui.clone();
     glib::timeout_add_local_once(Duration::from_millis(ms), move || refresh(&ui));
 }
 
-/// Flip into the "running" presentation the instant a run is requested — before
-/// the first engine event lands (mirrors macOS `isStartingDeepAnalyze`).
+/// Shows the running state as soon as a run is requested, before the first engine event.
 fn begin_run(ui: &Rc<DeepUi>) {
     ui.in_flight.set(true);
     ui.run_btn.set_sensitive(false);
