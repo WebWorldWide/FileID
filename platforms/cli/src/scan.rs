@@ -307,6 +307,17 @@ fn commit_batch(
 }
 
 pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
+    let outcome = scan_folder(ctx, root, rescan);
+    if outcome.is_err()
+        && let Ok(root_abs) = std::fs::canonicalize(root)
+        && let Ok(conn) = fileid_engine::db::open_writer(&ctx.db)
+    {
+        let _ = fileid_engine::scan_session::record_library_root_finished(&conn, &root_abs, now_unix(), "failed");
+    }
+    outcome
+}
+
+fn scan_folder(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let root_abs = std::fs::canonicalize(root)
         .with_context(|| format!("resolving scan root {}", root.display()))?;
     if !root_abs.is_dir() {
@@ -1314,6 +1325,23 @@ mod tests {
         assert_eq!(rows[0].0, canonical.to_string_lossy());
         assert!(rows[0].1.is_some());
         assert_eq!(rows[0].2.as_deref(), Some("completed"));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn a_scan_that_errors_marks_the_location_failed() {
+        let (temp, root, ctx) = test_layout("errored");
+        std::fs::write(root.join("note.txt"), "text").unwrap();
+        run(&ctx, &root, false).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::write(&root, "now a file").unwrap();
+        assert!(run(&ctx, &root, false).is_err());
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let status: String = conn
+            .query_row("SELECT last_status FROM library_roots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "failed");
         drop(conn);
         std::fs::remove_dir_all(temp).unwrap();
     }
