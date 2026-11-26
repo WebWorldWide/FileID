@@ -52,7 +52,7 @@ pub(crate) fn resolve(conn: &Connection, text: &str, history: &[String], context
     if let Some(answer) = rename_question(conn, text, &words, context)? {
         return Ok(Some(answer));
     }
-    Ok(described_count(conn, &words, context)?)
+    described_count(conn, &words, context)
 }
 
 fn asks_how_many(words: &[String]) -> bool {

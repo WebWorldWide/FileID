@@ -786,7 +786,7 @@ pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> 
 /// "Takeout" names one nested folder here and "Google Takeout Export" holds thousands of files: offer the longer
 /// names that contain the word, since the exact match alone can badly undercount what the person means.
 pub(crate) fn containing_folders_note(conn: &Connection, folder: &str, root: Option<&RootScope>) -> Result<Option<String>> {
-    let Some(name) = folder.strip_prefix("named:").map(str::trim).filter(|name| name.chars().count() >= 3) else { return Ok(None) };
+    let Some(name) = folder.strip_prefix("named:").or_else(|| folder.strip_prefix(STARTS_WITH)).map(str::trim).filter(|name| name.chars().count() >= 3) else { return Ok(None) };
     let wanted = name.to_lowercase();
     let within = super::roots::clause("f.path_text", "?2");
     let mut statement = conn.prepare(&format!(

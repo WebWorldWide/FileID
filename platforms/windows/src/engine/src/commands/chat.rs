@@ -1138,8 +1138,8 @@ fn prepare_turn(
             return Ok(Prepared { text, message, hits, actions, summarize: false, counts_files: false });
         }
     }
-    if let Some(head) = super::chat_intent::summary_ask(&text) {
-        let Some(head) = head else {
+    if let Some(ask) = super::chat_intent::summary_ask(&text) {
+        let Some(head) = ask.answerable_head else {
             return Ok(Prepared { text, message: CANNOT_SUMMARIZE.into(), hits: vec![], actions: vec![], summarize: false, counts_files: false });
         };
         let counted = prepare_turn(conn, request, semantic, head, history, people, events, root.as_ref())?;
@@ -2511,7 +2511,10 @@ mod tests {
         .unwrap();
         let found = ask(&mut conn, "Which photos show a watch in the Ryan Homecoming folder?");
         assert_eq!(found.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![1], "{}", found.message);
-        assert_eq!(ask(&mut conn, "How many files are in the Ryan Homecoming folder?").message, "Found 2 files in Ryan Homecoming, using 200 bytes.");
+        assert_eq!(
+            ask(&mut conn, "How many files are in the Ryan Homecoming folder?").message,
+            "Found 2 files in Ryan Homecoming, using 200 bytes. Folders with “Ryan Homecoming” in their name: Ryan Homecoming Photos 9-26-26 (2 files). Ask about one by its full name."
+        );
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(5,'/lib/Ryan Homecoming/e.jpg',5,100,0,'image','jpg')", []).unwrap();
         assert!(ask(&mut conn, "How many files are in the Ryan Homecoming folder?").message.starts_with("Found 1 file in Ryan Homecoming, using 100 bytes."));
     }

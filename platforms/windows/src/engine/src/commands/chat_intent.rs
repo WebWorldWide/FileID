@@ -1424,7 +1424,7 @@ const FILE_WORDS: [&str; 20] = [
 
 /// "Summarize what my videos show", "what are they mostly about": a request to digest a whole set, which Chat cannot do.
 /// Returns the leading part that can still be answered ("how many photos do I have") when there is one.
-pub fn summary_ask(text: &str) -> Option<Option<String>> {
+pub fn summary_ask(text: &str) -> Option<DigestAsk> {
     let lower = text.to_lowercase();
     let words: Vec<String> = lower.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|word| !word.is_empty()).map(str::to_owned).collect();
     let digest = has(&words, &["summarize", "summarise", "summary", "overview"]) || lower.contains("mostly about") || lower.contains("are they about");
@@ -1433,7 +1433,12 @@ pub fn summary_ask(text: &str) -> Option<Option<String>> {
     }
     let split = [" and what ", " and which ", " and tell ", ", and what ", ", what "].iter().filter_map(|marker| lower.find(marker)).min();
     let head = split.map(|at| text[..at].trim().to_owned()).filter(|head| head.to_lowercase().starts_with("how many"));
-    Some(head)
+    Some(DigestAsk { answerable_head: head })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DigestAsk {
+    pub answerable_head: Option<String>,
 }
 
 /// A general-assistant question ("what's the weather", "tell me a joke") that names nothing in the library.
@@ -1727,8 +1732,8 @@ mod tests {
 
     #[test]
     fn a_request_to_digest_a_set_of_files_is_recognised_with_its_answerable_head() {
-        assert_eq!(summary_ask("Summarize what my videos show"), Some(None));
-        assert_eq!(summary_ask("How many photos do I have and what are they mostly about?"), Some(Some("How many photos do I have".into())));
+        assert_eq!(summary_ask("Summarize what my videos show").map(|ask| ask.answerable_head), Some(None));
+        assert_eq!(summary_ask("How many photos do I have and what are they mostly about?").and_then(|ask| ask.answerable_head).as_deref(), Some("How many photos do I have"));
         assert_eq!(summary_ask("How many photos do I have?"), None);
         assert_eq!(summary_ask("What does DSC01691 show?"), None);
     }
