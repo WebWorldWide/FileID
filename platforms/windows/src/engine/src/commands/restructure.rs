@@ -143,26 +143,7 @@ fn reserve_collision_free_destination(
 }
 
 fn ipc_move_is_noop(move_: &IpcMove) -> bool {
-    names_the_same_file(&move_.source, &move_.destination)
-}
-
-fn proposed_move_is_noop(move_: &restructure::ProposedMove) -> bool {
-    names_the_same_file(
-        &move_.source.to_string_lossy(),
-        &move_.destination.to_string_lossy(),
-    )
-}
-
-// A case-only spelling is the same file only where the volume says so: on a
-// case-sensitive volume it is a real rename.
-fn names_the_same_file(source: &str, destination: &str) -> bool {
-    if source == destination {
-        return true;
-    }
-    match (std::fs::canonicalize(source), std::fs::canonicalize(destination)) {
-        (Ok(source), Ok(destination)) => source == destination,
-        _ => false,
-    }
+    restructure::names_the_same_file(Path::new(&move_.source), Path::new(&move_.destination))
 }
 
 #[cfg(test)]
@@ -583,7 +564,7 @@ fn persist_rule_chunk(
             .to_string_lossy()
             .into_owned();
         insert_stat.execute(rusqlite::params![source_folder, move_.category])?;
-        if proposed_move_is_noop(&move_) {
+        if move_.is_noop() {
             continue;
         }
         insert_move.execute(rusqlite::params![
@@ -1313,7 +1294,7 @@ pub(crate) async fn handle_plan_restructure(
     // With the respect stage on, every surviving move is one it intends (a format correction or loose-file move), so none of their folders is wholly kept.
     let semantic_action_folders: std::collections::HashSet<PathBuf> = proposed
         .iter()
-        .filter(|move_| (respect_on || moved.contains(&move_.file_id)) && !proposed_move_is_noop(move_))
+        .filter(|move_| (respect_on || moved.contains(&move_.file_id)) && !move_.is_noop())
         .filter_map(|move_| move_.source.parent().map(Path::to_path_buf))
         .collect();
     let mut anchor = 0u32;
@@ -1361,7 +1342,7 @@ pub(crate) async fn handle_plan_restructure(
     };
     let proposed: Vec<_> = proposed
         .into_iter()
-        .filter(|move_| !proposed_move_is_noop(move_))
+        .filter(|move_| !move_.is_noop())
         .collect();
     let category_summary = restructure::category_counts(&proposed);
     let mut confidence_tiers = StoredPlanTiers::default();

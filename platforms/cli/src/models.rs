@@ -265,7 +265,7 @@ fn resolve(cat: &'static Catalog) -> Option<Resolved> {
         LookupResult::Found(m) => m,
         LookupResult::Unknown => return None,
     };
-    let installed = registry::sentinel_path(&model).is_some_and(|p| p.exists());
+    let installed = registry::installation_complete(&model);
     let size_bytes = model.files.iter().map(|f| f.approx_bytes).sum();
     let repo = hf_repo(model.files.first().map(|f| f.url.as_str()).unwrap_or(""));
     Some(Resolved {
@@ -826,6 +826,24 @@ fn human_eta(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marker_without_the_model_files_does_not_count_as_installed() {
+        let dir = std::env::temp_dir().join(format!("fileid-cli-models-{}", std::process::id()));
+        // SAFETY: no other unit test in this binary reads FILEID_MODELS_DIR.
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+        let arcface = CATALOG.iter().find(|cat| cat.kind == "arcface").unwrap();
+        let model = match registry::lookup_full(arcface.kind) {
+            LookupResult::Found(model) => model,
+            LookupResult::Unknown => panic!("arcface is in the registry"),
+        };
+        let marker = registry::sentinel_path(&model).unwrap();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+
+        assert!(!resolve(arcface).unwrap().installed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn vlm_fit_keeps_a_system_ram_floor_even_with_large_vram() {

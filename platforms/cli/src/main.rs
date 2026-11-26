@@ -122,7 +122,8 @@ enum Command {
 
     /// List (or, with `--apply`, remove) duplicate / near-duplicate groups.
     ///
-    /// Listing is read-only. `--apply` keeps the first file of each group and
+    /// Listing is read-only. `--apply` keeps one file of each group (for exact
+    /// duplicates the original: not a copy by name, then the oldest) and
     /// removes the rest — to the Recycle Bin / Trash by default (recoverable;
     /// Windows + Linux), or permanently with `--delete`. SAFE: nothing is
     /// removed without `--apply`, and `--apply` prompts unless `--yes`.
@@ -136,9 +137,9 @@ enum Command {
         /// Group near-duplicates by perceptual-hash Hamming distance.
         #[arg(long)]
         similar: bool,
-        /// Near-dup Hamming threshold (bits, 0–16).
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(0..=16))]
-        threshold: u32,
+        /// Near-dup Hamming threshold with `--similar` (bits, 0–16; default 8).
+        #[arg(long, requires = "similar", value_parser = clap::value_parser!(u32).range(0..=16))]
+        threshold: Option<u32>,
         /// Remove duplicates (keep one per group). Destructive — see `--delete`.
         #[arg(long)]
         apply: bool,
@@ -289,7 +290,36 @@ fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
     }
 }
 
+/// Exit status of a process killed by SIGPIPE, which is what a Unix tool conventionally reports when its reader goes away.
+const EXIT_STDOUT_CLOSED: u8 = 141;
+
+fn is_stdout_closed_panic(payload: &(dyn std::any::Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    message.is_some_and(|message| {
+        message.starts_with("failed printing to stdout")
+            && (message.contains("Broken pipe") || message.contains("os error 232"))
+    })
+}
+
+/// `println!` panics when the reader of a pipe (`fileid ... | head`) has gone away; that is the reader's choice, not a crash.
 fn main() -> ExitCode {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !is_stdout_closed_panic(info.payload()) {
+            default_hook(info);
+        }
+    }));
+    match std::panic::catch_unwind(run) {
+        Ok(code) => code,
+        Err(payload) if is_stdout_closed_panic(&*payload) => ExitCode::from(EXIT_STDOUT_CLOSED),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn run() -> ExitCode {
     let cli = Cli::parse();
     let json_output = cli.global.json;
 
@@ -338,7 +368,16 @@ fn main() -> ExitCode {
             dry_run,
             delete,
             yes,
-        } => dedupe::run(&ctx, exact, similar, threshold, apply, dry_run, delete, yes),
+        } => dedupe::run(
+            &ctx,
+            exact,
+            similar,
+            threshold.unwrap_or(dedupe::DEFAULT_SIMILAR_THRESHOLD),
+            apply,
+            dry_run,
+            delete,
+            yes,
+        ),
         Command::Restructure {
             plan,
             apply,
@@ -394,6 +433,25 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(args).is_err(), "accepted {args:?}");
         }
+    }
+
+    #[test]
+    fn only_a_closed_stdout_panic_counts_as_a_closed_pipe() {
+        let closed: Box<dyn std::any::Any + Send> =
+            Box::new("failed printing to stdout: Broken pipe (os error 32)".to_owned());
+        let other: Box<dyn std::any::Any + Send> = Box::new("index out of bounds");
+        let full: Box<dyn std::any::Any + Send> =
+            Box::new("failed printing to stdout: No space left on device (os error 28)".to_owned());
+        assert!(is_stdout_closed_panic(&*closed));
+        assert!(!is_stdout_closed_panic(&*other));
+        assert!(!is_stdout_closed_panic(&*full));
+    }
+
+    #[test]
+    fn a_similarity_threshold_needs_the_similar_flag() {
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--threshold", "4"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--exact", "--threshold", "4"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--similar", "--threshold", "4"]).is_ok());
     }
 
     #[test]

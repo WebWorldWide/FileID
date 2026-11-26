@@ -243,7 +243,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb
           export XDG_DATA_HOME="$RUNNER_TEMP/xdg-data" XDG_CONFIG_HOME="$RUNNER_TEMP/xdg-config"
           mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
-          xvfb-run -a cargo test --locked -- --ignored --exact tabs::model_catalog::tests::locations_move_to_the_top_of_settings
+          xvfb-run -a cargo test --locked -- --ignored --exact tabs::model_catalog::tests::locations_move_to_the_top_of_settings tabs::locations::tests::the_card_fills_in_when_refresh_is_pressed shell::page_header::tests::the_breadcrumb_is_never_shortened
 
       - name: Verify binary exists
         run: |

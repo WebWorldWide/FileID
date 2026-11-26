@@ -14,7 +14,9 @@ impl PageHeader {
         let root = hbox(16);
         root.add_css_class("page-header");
         let titles = vbox(7);
-        titles.append(&section_label(&page.crumb()));
+        let crumb = section_label(&page.crumb());
+        crumb.set_ellipsize(gtk::pango::EllipsizeMode::None);
+        titles.append(&crumb);
         titles.append(
             &gtk::Label::builder()
                 .label(page.title)
@@ -49,4 +51,24 @@ pub fn wrap(page: &Page, content: &gtk::Widget) -> (gtk::Box, PageHeader) {
     content.set_hexpand(true);
     column.append(content);
     (column, header)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_breadcrumb_is_never_shortened() {
+        adw::init().unwrap();
+        let header = PageHeader::new(super::super::page("settings").unwrap());
+        let crumb = header
+            .root
+            .first_child()
+            .and_then(|titles| titles.first_child())
+            .and_downcast::<gtk::Label>()
+            .expect("breadcrumb label");
+        assert_eq!(crumb.text(), "FILEID / SETTINGS");
+        assert_eq!(crumb.ellipsize(), gtk::pango::EllipsizeMode::None);
+    }
 }

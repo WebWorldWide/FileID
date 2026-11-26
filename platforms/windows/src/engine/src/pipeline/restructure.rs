@@ -15,6 +15,23 @@ pub struct ProposedMove {
     pub reason: Option<String>,
 }
 
+impl ProposedMove {
+    /// True when the destination is where the file already is. A case-only difference counts only on a volume that ignores case.
+    pub fn is_noop(&self) -> bool {
+        names_the_same_file(&self.source, &self.destination)
+    }
+}
+
+pub fn names_the_same_file(source: &std::path::Path, destination: &std::path::Path) -> bool {
+    if source == destination {
+        return true;
+    }
+    match (std::fs::canonicalize(source), std::fs::canonicalize(destination)) {
+        (Ok(source), Ok(destination)) => source == destination,
+        _ => false,
+    }
+}
+
 /// Autonomy tier for a single proposed move: **Auto** = high confidence, safe to auto-file (still reversible); **Review** = medium, one-click confirm; **Ask** = low, hold or leave in place. Scores a move's placement certainty, orthogonal to [`FolderClassification`] (a source folder's homogeneity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Confidence {

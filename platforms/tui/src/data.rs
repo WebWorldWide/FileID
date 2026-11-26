@@ -65,6 +65,7 @@ pub struct DupeReport {
 #[derive(Clone)]
 pub struct PlanRow {
     pub source: String,
+    /// Relative to the library root when it sits under it.
     pub destination: String,
     pub category: String,
     pub confidence: &'static str,
@@ -540,9 +541,15 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let plan = restructure::classify(&files, &root)
         .into_iter()
+        .filter(|m| !m.is_noop())
         .map(|m| PlanRow {
             source: m.source.to_string_lossy().into_owned(),
-            destination: m.destination.to_string_lossy().into_owned(),
+            destination: m
+                .destination
+                .strip_prefix(&root)
+                .unwrap_or(&m.destination)
+                .to_string_lossy()
+                .into_owned(),
             category: m.category,
             confidence: m.confidence.as_str(),
         })
@@ -753,6 +760,28 @@ mod tests {
         assert!(truncated);
         assert_eq!(candidates, count);
         assert!(!plan.is_empty());
+    }
+
+    #[test]
+    fn restructure_preview_shows_full_relative_destinations_and_skips_files_already_in_place() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        insert_file(&tx, "/library/a/x.txt", 1_700_000_000.0);
+        insert_file(&tx, "/library/b/y.txt", 1_700_000_000.0);
+        tx.commit().unwrap();
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        let destination = plan[0].destination.clone();
+        assert!(!destination.starts_with('/'), "{destination}");
+        assert!(destination.matches('/').count() >= 2, "{destination}");
+
+        insert_file(&conn, &format!("/library/{destination}"), 1_700_000_000.0);
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        assert!(
+            plan.iter()
+                .all(|row| row.source != format!("/library/{destination}")),
+            "a file already at its destination is not a move"
+        );
     }
 
     #[test]

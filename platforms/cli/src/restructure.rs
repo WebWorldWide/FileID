@@ -19,6 +19,7 @@ use serde::{Serialize, Serializer};
 
 use fileid_engine::read::restructure::{PLAN_FILES_SQL, library_root, plan_row_to_file};
 use fileid_engine::util::path_safety::strip_extended_length;
+use fileid_engine::util::read_only::require_all_writable;
 
 use crate::context::{Ctx, display_path, print_json, terminal_text};
 
@@ -135,6 +136,8 @@ struct DryRunReport<'a> {
     use_symlinks: bool,
     library_root: String,
     move_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apply_refused: Option<String>,
     moves: SpoolMoves<'a>,
 }
 
@@ -265,6 +268,10 @@ pub fn run(
     );
     println!("  Files:        {file_count}");
     println!("  Moves:        {move_count}");
+    if move_count == 0 {
+        println!("  Nothing to move — the library is already organized.");
+        return Ok(());
+    }
     println!("  {}", ctx.bold("By category:"));
     for c in &counts {
         println!("    {:<22} {}", terminal_text(&c.category), c.count);
@@ -325,7 +332,10 @@ fn absorb_chunk(
                 .map(|identity| (file.file_id, identity))
         })
         .collect();
-    for proposed in classify(files, library_root) {
+    for proposed in classify(files, library_root)
+        .into_iter()
+        .filter(|proposed| !proposed.is_noop())
+    {
         *counts.entry(proposed.category.clone()).or_default() += 1;
         *move_count += 1;
         if sample.len() < MAX_PRINTED_MOVES {
@@ -406,6 +416,11 @@ fn apply_spooled(
     }
 
     let verb = if symlinks { "symlink" } else { "move" };
+    let refusal = if dry_run {
+        read_only_refusal(spool)?
+    } else {
+        None
+    };
 
     if ctx.json && dry_run {
         write_json(&DryRunReport {
@@ -415,6 +430,7 @@ fn apply_spooled(
             use_symlinks: symlinks,
             library_root: library_root.to_string_lossy().into_owned(),
             move_count,
+            apply_refused: refusal.clone(),
             moves: SpoolMoves(spool),
         })?;
         return Ok(());
@@ -425,7 +441,7 @@ fn apply_spooled(
         println!(
             "{} {} file(s) into {}:",
             if dry_run {
-                ctx.bold("DRY RUN — would")
+                ctx.bold(&format!("DRY RUN — would {verb}"))
             } else {
                 ctx.bold(&format!("Will {verb}"))
             },
@@ -458,6 +474,11 @@ fn apply_spooled(
     }
 
     if dry_run {
+        if let Some(sentence) = &refusal
+            && !ctx.json
+        {
+            println!("{}", ctx.bold(sentence));
+        }
         ctx.progress(&format!("  {}", ctx.dim("dry run — nothing was moved.")));
         return Ok(());
     }
@@ -529,6 +550,14 @@ fn apply_spooled(
     }
     apply_outcome(&result)?;
     Ok(())
+}
+
+/// The sentence a real apply would be refused with when planned sources sit on a read-only drive.
+fn read_only_refusal(spool: &PlanSpool) -> Result<Option<String>> {
+    let sources = spool.iter()?.flatten().map(|m| PathBuf::from(m.source));
+    Ok(require_all_writable(sources)
+        .err()
+        .map(|refusal| format!("{} Apply would be refused.", refusal.sentence())))
 }
 
 /// Maps an apply result to an exit status. Privilege refusals are not counted in `failed`, so `failed` alone would report success for a run that moved nothing.

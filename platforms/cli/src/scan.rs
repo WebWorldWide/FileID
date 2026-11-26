@@ -485,7 +485,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                         .context("mark unreadable existing file content as failed")?;
                     }
                     if warnings.len() < 5 {
-                        warnings.push(error.to_string());
+                        warnings.push(format!("{error:#}"));
                     }
                     continue;
                 }
