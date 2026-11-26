@@ -40,7 +40,9 @@ struct PipelineBlock: View {
         return .scan
     }
 
-    private var locationOffline: Bool { OfflineRoots(engine.libraryRoots).isOffline(pickedURL.path) }
+    private var locationOffline: Bool {
+        OfflineRoots(engine.libraryRoots).isOffline(pickedURL.path) || OfflineRoots.allOffline(engine.libraryRoots)
+    }
 
     private var showsUnfinishedScan: Bool {
         unfinishedScan != nil && !scanRunning && progress?.phase != .completed
