@@ -1,4 +1,4 @@
-// Stage 8 C entry points: AVFoundation probes, exports and frames, and Apple
+// C entry points: AVFoundation probes, exports and frames, and Apple
 // Speech, for the Rust engine's tools and timeline. Declared in the
 // "Stage 8" block of adapters/include/fileid_apple.h and src/apple/ffi.rs.
 // No entry point opens a URL, socket or HTTP client or launches a process.

@@ -3,8 +3,7 @@ import Foundation
 import Speech
 import Darwin
 
-/// On-device Apple Speech for timeline transcripts; the Swift engine's
-/// `TimelineSpeechTranscription` and `SpeechPermission`. Passage grouping and
+/// On-device Apple Speech for timeline transcripts. Passage grouping and
 /// persistence stay in the Rust engine.
 enum MediaSpeech {
     struct Segment: Sendable {

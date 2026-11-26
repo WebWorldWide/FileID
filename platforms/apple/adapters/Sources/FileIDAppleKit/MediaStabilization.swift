@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import Vision
 
-/// The Swift engine's `VideoStabilization`, hosted for the Rust engine's video export.
+/// Video stabilization for the Rust engine's video export.
 enum MediaStabilization {
     struct Observation: Sendable {
         var time: Double

@@ -588,9 +588,7 @@ struct SankeyFlowView: View {
                 isSource: true
             ))
         }
-        // Destination nodes: Okabe-Ito CVD-safe palette so each category gets a
-        // distinct, accessible color. Ribbons carry this color so the user can
-        // instantly see "what does each ribbon become?" (RESTRUCTURE.md §7)
+        // Destination nodes use the Okabe-Ito CVD-safe palette (RESTRUCTURE.md §7).
         var destinations: [Node] = visibleDsts.enumerated().map { (idx, entry) in
             Node(
                 id: "dst:\(entry.bucket)",
@@ -622,9 +620,7 @@ struct SankeyFlowView: View {
                          var sourceID: String; var destID: String;
                          var tint: Color; var count: Int; var outcomes: Set<RestructureOutcome> }
         var bucketsByKey: [String: Bucket] = [:]
-        // Tint per destination ID — each destination category has its own
-        // Okabe-Ito color; ribbons carry the destination color so the user
-        // reads "what does this become?" from the ribbon hue.
+        // Ribbons carry their destination's color.
         let tintByDestID: [String: Color] = Dictionary(
             uniqueKeysWithValues: destinations.map { ($0.id, $0.tint) }
         )

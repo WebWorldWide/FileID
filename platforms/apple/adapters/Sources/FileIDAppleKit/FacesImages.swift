@@ -1,5 +1,5 @@
-// Stage 6: the photos the Rust engine reads faces from. Decode, Vision landmarks, the RGBA buffer, the padded fallback crop and crop JPEGs
-// must match the Swift engine's FaceClustering, FaceAlign and ArcFaceService line for line, so the Rust alignment (face_align.rs) and SFace see the same pixels.
+// The photos the Rust engine reads faces from: decode, Vision landmarks, the RGBA buffer, the padded fallback crop and crop JPEGs.
+// The Rust alignment (face_align.rs) and SFace depend on these pixels exactly, so change the decode and draw settings with care.
 // The decoded image stays behind a handle; Rust frees it with fileid_apple_faces_close.
 import CoreGraphics
 import FileIDImaging
@@ -54,8 +54,8 @@ enum FacesExtraction {
         let faces: [Landmarks]
     }
 
-    /// `FaceClustering.loadCGImage`: files under 256 B are refused, the EXIF
-    /// orientation must be 1–8, the long edge is at most `maxPixelSize`.
+    /// Files under 256 B are refused, the EXIF orientation must be 1–8, the long
+    /// edge is at most `maxPixelSize`.
     static func load(path: String, maxPixelSize: Int) -> (image: CGImage, orientation: Int)? {
         let url = URL(fileURLWithPath: path)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -72,7 +72,7 @@ enum FacesExtraction {
         return (image, orientation)
     }
 
-    /// `FaceClustering.detectFaceLandmarks`: one landmark request on the whole
+    /// One landmark request on the whole
     /// image; per face its normalized bottom-left box and five points in
     /// top-left source pixels [hi-x eye, lo-x eye, nose, hi-x mouth corner,
     /// lo-x mouth corner], assigned by image x.
@@ -116,7 +116,7 @@ enum FacesExtraction {
         return result
     }
 
-    /// `FaceAlign.renderRGBA8`: tightly packed RGBX in device RGB, top-left origin.
+    /// Tightly packed RGBX in device RGB, top-left origin.
     static func renderRGBA8(_ src: CGImage) -> [UInt8]? {
         let w = src.width, h = src.height
         guard w > 0, h > 0 else { return nil }
@@ -134,8 +134,8 @@ enum FacesExtraction {
         return ok ? rgba : nil
     }
 
-    /// `ArcFaceService.makeNCHWTensor`'s resize: the crop drawn into a 112×112
-    /// device-RGB RGBX context with high interpolation.
+    /// The crop drawn into a 112×112 device-RGB RGBX context with high
+    /// interpolation, the face model's input size.
     static func tensorPixels(_ src: CGImage, side: Int = 112) -> [UInt8]? {
         var rgba = [UInt8](repeating: 0, count: side * side * 4)
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -151,7 +151,7 @@ enum FacesExtraction {
         return drawn ? rgba : nil
     }
 
-    /// `FaceAlign.makeCGImage`: an RGBX device-RGB image over the bytes.
+    /// An RGBX device-RGB image over the bytes.
     static func makeCGImage(_ rgba: [UInt8], width: Int, height: Int) -> CGImage? {
         var data = rgba
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -164,7 +164,7 @@ enum FacesExtraction {
         }
     }
 
-    /// `FaceClustering.faceCropJPEG`: quality 0.85.
+    /// Face crop JPEG at quality 0.85.
     static func jpeg(_ crop: CGImage) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }

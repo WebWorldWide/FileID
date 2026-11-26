@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import Vision
 
-/// The Swift engine's `VideoReframing`, hosted for the Rust engine's video export.
+/// People-aware reframing for the Rust engine's video export.
 enum MediaReframing {
     struct Observation: Sendable {
         var time: Double

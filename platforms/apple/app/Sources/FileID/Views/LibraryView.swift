@@ -1650,8 +1650,7 @@ struct FilePreviewSheet: View {
             previewFailed = false
             tags = []
             people = []
-            // Read DB tags off the main actor (detached read doesn't inherit
-            // `.task` cancellation; drop it once `.task(id:)` superseded us — R7).
+            // A detached read doesn't inherit `.task` cancellation, so it is re-checked below.
             let fileID = file.id
             let loadedTags = await Task.detached { [store] in
                 store.tags(forFileID: fileID)
@@ -1665,10 +1664,9 @@ struct FilePreviewSheet: View {
             var image = file.kind == "image" && !offline ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
             if image == nil { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 1600) }
             if image == nil, offline { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 256) }
-            // ThumbnailService doesn't honor Task cancellation, so a slow load for
-            // the prior file (network volume) can resolve AFTER the user arrowed on;
-            // drop it once `.task(id:)` superseded us, else it overwrites the current
-            // file's image. Mirrors the FinderTagsEditor read guard.
+            // ThumbnailService ignores cancellation, so a slow load for the prior file
+            // (network volume) can resolve after the user arrowed on; drop it once
+            // `.task(id:)` has been superseded, else it overwrites the current image.
             guard !Task.isCancelled else { return }
             preview = image
             previewFailed = image == nil

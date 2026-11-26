@@ -21,7 +21,7 @@ struct WelcomeSheet: View {
 
     @State private var vlmRequested = false
     @State private var vlmRequestedAt: Date?
-    @State private var vlmLastProgressAt: Date?   // progress-stall watchdog
+    @State private var vlmLastProgressAt: Date?
     @State private var installAllRequested = false
     @State private var vlmLockedTotalBytes: Int64?
     @State private var vlmLastError: String?
@@ -170,15 +170,12 @@ struct WelcomeSheet: View {
                 rateETA: vlmRateETA,
                 action: { triggerVLMInstall() },
                 cancel: {
-                    // Hide the row before sending the IPC — the cancel
-                    // takes ~1 s to land in swift-transformers' fetch
-                    // loop, during which stale progress events would
-                    // otherwise re-show the spinner.
+                    // The cancel takes about a second to land; stale progress
+                    // events in that window would re-show the spinner.
                     vlmRequested = false
                     resetVLMTracking()
-                    // Drop the engine's last mid-download fraction for this model
-                    // too — it isn't cleared by a Cancel and would otherwise fool a
-                    // fresh retry's watchdogs into thinking a download is underway.
+                    // A Cancel leaves the engine's last fraction behind, which would
+                    // fool a retry's watchdogs into seeing a download underway.
                     engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
                     engine.cancelPrewarm()
                 }
@@ -208,10 +205,8 @@ struct WelcomeSheet: View {
         .onChange(of: engine.vlmAdvice) { _, advice in adoptVLMAdvice(advice) }
         .onDisappear { installAllRequested = false }
         .onChange(of: essentialsInProgress) { _, inProgress in
-            // Once everything the essentials button kicked off has settled
-            // without completing the set — a cancel or a failure leaves models
-            // missing and idle — re-enable the button instead of latching it
-            // disabled for the rest of the session.
+            // A cancel or failure leaves models missing and idle: re-enable the
+            // button rather than leaving it disabled for the session.
             if !inProgress && !essentialsInstalled { installAllRequested = false }
         }
         .onChange(of: selectedVLM) { _, kind in
@@ -236,23 +231,20 @@ struct WelcomeSheet: View {
             guard vlmRequested,
                   let p = engine.modelDownloadProgress,
                   p.modelKind == selectedVLM.rawValue else { return }
-            vlmLastProgressAt = Date()   // Feed the stall watchdog
+            vlmLastProgressAt = Date()
             updateVLMRate(progress: p)
         }
-        // Key on `lastErrorSignal` (bumps on EVERY error write) not the
-        // message string, so a retry that fails with the identical message still
-        // flips the row to Failed instead of spinning forever.
+        // Keyed on `lastErrorSignal`, which bumps on every error write, so a retry
+        // that fails with an identical message still flips the row to Failed.
         .onChange(of: engine.lastErrorSignal) { _, _ in
-            // prewarm_cancelled is the engine echoing a user Cancel —
-            // local state is already cleared, no error UI needed.
+            // prewarm_cancelled echoes a user Cancel; local state is already cleared.
             guard vlmRequested, let err = engine.lastError else { return }
             if err.kind == "prewarm_cancelled" { return }
-            // Files already on disk → error is post-download MLX load,
-            // not an install failure. Real load issues resurface on
-            // first VLM use, where the banner has actual context.
+            // Files already on disk: the error came from the post-download MLX load,
+            // not the install. Real load problems resurface on first use.
             if ModelInstallStatus.isInstalled(kind: selectedVLM) { return }
             if let kind = err.modelKind, kind != selectedVLM.rawValue { return }
-            // `unknown_model` is an unrecognized model kind; route it like the prewarm_* family so the row flips to Failed.
+            // `unknown_model` is routed like the prewarm_* family so the row flips to Failed.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
                 || ModelFailureText.isModelFailure(err)
                 || err.modelKind == selectedVLM.rawValue
@@ -399,21 +391,17 @@ struct WelcomeSheet: View {
         }
         guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
         resetVLMTracking()
-        // Clear any residual progress from a just-cancelled attempt at the same
-        // model so both watchdogs below arm against a clean slate — otherwise a
-        // lingering fraction makes the 30 s "no response" guard see the old
-        // modelKind and bail, and a genuinely-hung retry spins forever.
+        // Residual progress from a just-cancelled attempt would make the 30 s guard
+        // below see the old modelKind and bail, so a hung retry would spin forever.
         engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
         vlmRequested = true
         let started = Date()
         vlmRequestedAt = started
         DeepAnalyzeSettings.shared.activeKind = selectedVLM
         engine.prewarmModel(selectedVLM.rawValue)
-        // If the engine never reports progress, surface a clear error
-        // after 30 s rather than spinning forever. A real download
-        // sends a fraction event well within that window. Files already on
-        // disk from an earlier attempt are re-checked first, silently, and
-        // that can take minutes for a multi-GB model — so wait longer then.
+        // A real download reports a fraction well within 30 s. Files already on
+        // disk are re-checked first, silently, which can take minutes for a
+        // multi-GB model, so wait longer then.
         let kind = selectedVLM
         let recheckingFiles = DescriptionModelStore.folder(for: kind)
             .map { ((try? FileManager.default.contentsOfDirectory(atPath: $0.path)) ?? []).contains { !$0.hasPrefix(".") } } ?? false
@@ -424,19 +412,15 @@ struct WelcomeSheet: View {
                   engine.modelDownloadProgress?.modelKind != kind.rawValue else { return }
             stopVLMRequest(kind, error: "The download didn’t start. Try again.")
         }
-        // started-then-stalled watchdog. A download that emits ≥1 progress
-        // event then goes silent (server hang / dropped link without RST) defeats
-        // the 30 s "never started" timer above. Poll for progress staleness.
+        // A download that reports progress and then goes silent (server hang, dropped
+        // link) defeats the timer above, so poll for stale progress.
         Task { @MainActor in
             while vlmRequested, vlmRequestedAt == started {
                 try? await Task.sleep(for: .seconds(5))
                 guard vlmRequested, vlmRequestedAt == started, !vlmInstalled else { return }
-                // Only treat silence as a stall while the DOWNLOAD is
-                // still in flight. Once it hits 100%, the post-download MLX cold-load
-                // (~10s+, no progress events, sentinel not yet written) is silent by
-                // design — without this gate the watchdog false-fired "Download
-                // stalled" on a legitimately-loading model. The vlmInstalled sentinel
-                // path owns the cold-load phase.
+                // Silence only counts as a stall while the download is in flight. After
+                // 100% the MLX cold load (10 s or more) reports nothing by design; the
+                // vlmInstalled sentinel owns that phase.
                 if vlmLastFraction < 0.999,
                    let last = vlmLastProgressAt,
                    Date().timeIntervalSince(last) > 45 {
@@ -447,8 +431,8 @@ struct WelcomeSheet: View {
         }
     }
 
-    /// A watchdog gave up: tell the engine to stop too, so a download that
-    /// comes back to life later can't run behind a row that says it failed.
+    /// Tells the engine to stop too, so a download that revives later cannot run
+    /// behind a row that says it failed.
     private func stopVLMRequest(_ kind: AIModelKind, error: String) {
         engine.cancelPrewarm()
         engine.clearModelDownloadProgress(forModelKind: kind.rawValue)
@@ -521,11 +505,9 @@ struct WelcomeSheet: View {
         return "Starting…"
     }
 
-    /// Trust engine totalBytes only once meaningful download progress
-    /// has accumulated (>5 %) AND the reported total is in the same
-    /// ballpark as our estimate (≥ 90 %). swift-transformers' Progress
-    /// is per-file, so an early per-file total can be misleading.
-    /// Locked once chosen so the size badge can't flicker.
+    /// Trusts the engine's totalBytes only once progress passes 5 % and the total is
+    /// at least 90 % of our estimate, because an early per-file total misleads.
+    /// Locked once chosen so the size badge cannot flicker.
     private var resolvedVLMTotalBytes: Int64 {
         if let locked = vlmLockedTotalBytes { return locked }
         if let p = engine.modelDownloadProgress,
@@ -556,9 +538,8 @@ struct WelcomeSheet: View {
         return DownloadFormat.rateAndETA(tick)
     }
 
-    /// EMA bandwidth derived from `fraction × resolvedTotal`. Fraction
-    /// is aggregate across files; raw byte fields are per-file and
-    /// would jump to a tiny total every time a new file starts.
+    /// Smoothed bandwidth from `fraction × resolvedTotal`. The fraction spans all
+    /// files; the raw byte fields are per-file and would jump at each new file.
     private func updateVLMRate(progress p: ModelDownloadProgress) {
         if vlmLockedTotalBytes == nil,
            let t = p.totalBytes, t > selectedVLM.approxBytes / 2 {
@@ -576,7 +557,7 @@ struct WelcomeSheet: View {
             return
         }
         let dt = now - vlmRateSampleAt
-        // Sample at most every 500 ms — first chunks are TCP slow-start.
+        // At most every 500 ms; the first chunks are TCP slow-start.
         if dt < 0.5 {
             vlmLastFraction = frac
             return
@@ -623,8 +604,6 @@ struct WelcomeSheet: View {
     }
 
     /// True while any of the four required downloads is still running.
-    /// Drives the essentials button's re-enablement once a cancel/failure
-    /// settles everything back to idle.
     private var essentialsInProgress: Bool {
         clipInProgress || ramplusInProgress || arcfaceInProgress || bgeInProgress
     }

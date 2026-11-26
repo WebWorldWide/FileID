@@ -1,20 +1,9 @@
-// Defensive helper for the Application Support directory.
-//
-// Every call site that reaches for FileManager.default.urls(for:
-// .applicationSupportDirectory, in: .userDomainMask).first! force-
-// unwraps the array. macOS guarantees the directory exists in
-// practice, but a sandboxed-then-broken environment crashes the
-// whole app on a render path. Replace with a single helper that
-// degrades gracefully to `~/tmp` instead of crashing.
 import Foundation
 import FileIDShared
 
 enum AppSupportPath {
-    /// `~/Library/Application Support` for the current user, with a
-    /// safe `temporaryDirectory` fallback if the lookup ever returns
-    /// an empty array (theoretical, but defensive — a single force-
-    /// unwrap deep in a SwiftUI render body would otherwise tear down
-    /// the whole app).
+    /// `~/Library/Application Support` for the current user, falling back to
+    /// `temporaryDirectory` if the lookup returns nothing, so a render path never force-unwraps.
     static var root: URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)

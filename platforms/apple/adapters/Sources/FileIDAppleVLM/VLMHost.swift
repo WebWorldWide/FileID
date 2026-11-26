@@ -226,7 +226,7 @@ public final class VLMHost: @unchecked Sendable {
         }
     }
 
-    /// MLX loads `mlx.metallib` from the folder of the binary that contains it (this library), as `DeepAnalyzeCapability.metallibPresent` checks.
+    /// MLX loads `mlx.metallib` from the folder of the binary that contains it (this library).
     static func metallibPresent() -> Bool {
         var info = Dl_info()
         guard dladdr(#dsohandle, &info) != 0, let name = info.dli_fname else { return false }
@@ -257,7 +257,7 @@ public final class VLMHost: @unchecked Sendable {
 
     private static func finite(_ value: Double) -> Any { value.isFinite ? value : NSNull() }
 
-    /// The Swift engine's selection-check decode (`ChatSelection.image`): a
+    /// The selection-check decode: a
     /// bounded ImageIO decode, or the middle frame of a video. With no size,
     /// the whole image (a contact sheet the host drew).
     static func decode(path: String, maxPixelSize: Int?) async -> CIImage? {

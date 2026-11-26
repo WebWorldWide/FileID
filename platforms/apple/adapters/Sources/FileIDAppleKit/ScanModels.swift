@@ -1,5 +1,4 @@
-// Stage 5: CLIP image embeddings and RAM++ tags on the GPU through MLX. Mirrors the Swift engine's MobileCLIPService and RamPlusService line for line
-// (same MLX graphs, GPURequestBatcher, one queue and MLX stream per model). The Rust engine checks model files against the manifest before a load;
+// CLIP image embeddings and RAM++ tags on the GPU through MLX (GPURequestBatcher, one queue and MLX stream per model). The Rust engine checks model files against the manifest before a load;
 // the ONNX Runtime fallback stays in Rust.
 import CoreGraphics
 import Foundation
@@ -121,7 +120,7 @@ final class ScanRamPlus: @unchecked Sendable {
     private var batcher: GPURequestBatcher?
     private var loadedDir: String?
 
-    /// `RamPlusService.load` with the GPU backend: ram_plus.onnx and
+    /// Loads the GPU backend: ram_plus.onnx and
     /// ram_plus_tags.txt, optional per-class thresholds and suppress list.
     func load(directory: String) -> Bool {
         lock.lock()
@@ -175,7 +174,7 @@ final class ScanRamPlus: @unchecked Sendable {
                           suppressExtra: extra)
     }
 
-    /// `RamPlusService.tag`; nil when the model is not loaded or inference failed.
+    /// Nil when the model is not loaded or inference failed.
     func tag(_ image: CGImage) -> [(tag: String, score: Float)]? {
         lock.lock()
         let batcher = batcher
@@ -201,7 +200,7 @@ final class ScanRamPlus: @unchecked Sendable {
         return refined
     }
 
-    /// `RamPlusService.refine`.
+    /// Drops redundant tags: a bare head word of a longer tag, a tag whose partner is present, and repeat people words.
     static func refine(_ hits: [(tag: String, score: Float)]) -> [(tag: String, score: Float)] {
         let names = Set(hits.map { $0.tag.lowercased() })
         let heads = Set(names.compactMap { name -> String? in

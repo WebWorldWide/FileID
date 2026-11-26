@@ -1,5 +1,5 @@
-// Stage 5: the scan's working images. A decoded CGImage stays here behind a handle so Vision, CLIP and RAM++ read the same pixels as the Swift engine's
-// Tagging.processImage. Decode, EXIF, dHash and the video keyframe must match the Swift engine; the shared scan conformance case pins the results.
+// The scan's working images. A decoded CGImage stays here behind a handle so Vision, CLIP and RAM++ read the same pixels.
+// Decode, EXIF, dHash and the video keyframe feed stored results; the shared scan conformance case pins them.
 import AVFoundation
 import CoreGraphics
 import Foundation
@@ -48,7 +48,7 @@ enum ScanDecode {
         var capturedAt: Date?
     }
 
-    /// `Tagging.loadImageAndEXIF`: files under 256 B are refused, the long edge
+    /// Files under 256 B are refused, the long edge
     /// is FILEID_SCAN_MAX_PIXELS (default 1536), EXIF comes from the same source.
     static func load(path: String, sizeBytes: Int64, maxPixels: Int?) -> (CGImage, EXIF)? {
         let url = URL(fileURLWithPath: path)
@@ -65,7 +65,7 @@ enum ScanDecode {
         return (image, readEXIF(from: src))
     }
 
-    /// `Tagging.computeDHash`: 9x8 grey through CoreGraphics, bit row*8+col set
+    /// 9x8 grey through CoreGraphics, bit row*8+col set
     /// when a pixel is brighter than its right neighbour.
     static func dHash(_ cgImage: CGImage) -> UInt64 {
         guard cgImage.width > 0, cgImage.height > 0 else { return 0 }
@@ -151,7 +151,7 @@ enum ScanDecode {
     }
 }
 
-/// `Tagging.boundedVideoKeyframe` over `DeepAnalyze.extractTimedVideoFrame`:
+/// The video keyframe:
 /// the frame at a quarter of the duration (1 s when unknown, then 0), at most
 /// `maxPixelSize` on the long edge, abandoned after `timeout`.
 enum ScanVideo {

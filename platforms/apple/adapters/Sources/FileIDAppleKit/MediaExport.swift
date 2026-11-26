@@ -71,7 +71,7 @@ enum MediaExport {
         guard !FileManager.default.fileExists(atPath: output.path) else { throw MediaFailure("The staged output is occupied.") }
     }
 
-    /// Trim, remux, audio, proxy and rotate; the Swift engine's `CommonMediaTools.export`.
+    /// Trim, remux, audio, proxy and rotate.
     static func common(source: URL, output: URL, recipe: MediaRecipe, cancel: CancelFlag) async throws -> MediaProbe {
         guard commonKinds.contains(recipe.kind) else { throw MediaFailure("Unsupported media recipe.") }
         try requireFreshOutput(output)
@@ -142,7 +142,7 @@ enum MediaExport {
     }
 
     /// The video export (fit or pad to a frame, optional stabilization and people
-    /// framing); the Swift engine's `VideoConversionWorker`. `output == nil` probes.
+    /// framing). `output == nil` probes.
     static func video(source: URL, output: URL?, recipe: MediaRecipe, cancel: CancelFlag) async throws -> Converted {
         let dimension = recipe.maxDimension
         guard recipe.kind == "video", recipe.format == "mp4", [1280, 1920, 3840].contains(dimension) else {
@@ -210,7 +210,7 @@ enum MediaExport {
     }
 
     /// The video export's input rules (one video, at most one audio, no subtitles,
-    /// alpha or HDR); the Swift engine's `VideoConversionWorker.inspect`.
+    /// alpha or HDR).
     static func inspectVideo(_ url: URL, mimeType: String? = nil) async throws -> MediaProbe {
         let asset = MediaInspect.asset(url, mimeType: mimeType)
         guard try await asset.load(.isPlayable), !(try await asset.load(.hasProtectedContent)) else { throw MediaFailure(MediaInspect.unreadable) }

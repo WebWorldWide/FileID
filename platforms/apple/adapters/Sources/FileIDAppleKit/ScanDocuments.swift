@@ -1,4 +1,4 @@
-// Stage 5: document text for the scan, matching the Swift engine's DocText.extract: capped plain-text reads, PDFKit page text, and
+// Document text for the scan: capped plain-text reads, PDFKit page text, and
 // Word/RTF/OpenDocument through the Cocoa text system, read in process (adapters launch no processes). PowerPoint, Excel, EPUB and HTML are left to the Rust extractor.
 import AppKit
 import Foundation
@@ -57,8 +57,7 @@ enum ScanDocuments {
         return utf8Text(data)
     }
 
-    /// `DocText.utf8Text`: a character cut by the cap is dropped, other invalid
-    /// UTF-8 yields nil.
+    /// A character cut by the cap is dropped; any other invalid UTF-8 yields nil.
     static func utf8Text(_ data: Data) -> String? {
         let bytes = [UInt8](data.suffix(4))
         var keep = data.count

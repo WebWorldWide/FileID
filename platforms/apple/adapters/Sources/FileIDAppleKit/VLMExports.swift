@@ -1,4 +1,4 @@
-// Stage 7 C entry points: MLX vision-language model sessions (Deep Analyze,
+// C entry points: MLX vision-language model sessions (Deep Analyze,
 // chat answers, selection checks, goal ranking, benchmarks, transcription,
 // timeline captions). See fileid_apple.h for the contract.
 import FileIDAppleVLM

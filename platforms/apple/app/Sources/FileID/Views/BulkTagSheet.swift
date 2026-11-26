@@ -67,12 +67,9 @@ struct BulkTagSheet: View {
         inFlight = true
         status = nil
         let urls = files.map(\.url)
-        // Off the MainActor via `Task.detached().value`, then back on MainActor for UI updates.
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                // journal: nil — the sheet owns the journal write so a
-                // total-failure batch can't clear a still-valid prior one
-                // (TagWriter clears on any empty batch).
+                // journal: nil because TagWriter clears the journal on any empty batch; the sheet writes it so a failed batch can't clear a still-valid prior one.
                 let detailed = TagWriter.addTagsBulkDetailed(tags, to: urls, journal: nil)
                 BulkTagSheet.recordOrPreserveJournal(outcomes: detailed.outcomes,
                                                      failed: detailed.failed)
@@ -97,13 +94,7 @@ struct BulkTagSheet: View {
 
     nonisolated static let lastBatchKey = "bulkTag.lastBatch.v1"
 
-    /// Update the undo journal for a finished bulk-tag batch:
-    /// • successful additions → record them so "Undo last tags" strips ONLY
-    ///   what FileID just added.
-    /// • a clean all-unchanged batch (no failures, nothing new added) → clear
-    ///   it, so a stale earlier batch can't be undone by mistake.
-    /// • a batch with failures and no successes → leave the prior journal
-    ///   intact; a failed batch must not destroy "Undo last tags".
+    /// Records added tags so "Undo last tags" strips only what FileID added. A clean all-unchanged batch clears the journal; a batch with failures and no successes leaves it intact.
     nonisolated static func recordOrPreserveJournal(outcomes: [TagWriter.TagOutcome],
                                                     failed: Int,
                                                     in defaults: UserDefaults = .standard) {
@@ -116,8 +107,7 @@ struct BulkTagSheet: View {
         }
     }
 
-    /// Decode the most recent tag batch from UserDefaults. Nil when no
-    /// batch has been recorded yet.
+    /// The most recent tag batch, or nil when none is recorded.
     nonisolated static func loadLastBatch() -> [TagWriter.TagOutcome]? {
         guard let data = UserDefaults.standard.data(forKey: lastBatchKey) else { return nil }
         return try? JSONDecoder().decode([TagWriter.TagOutcome].self, from: data)
