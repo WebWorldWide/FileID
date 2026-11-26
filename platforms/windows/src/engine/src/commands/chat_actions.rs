@@ -746,9 +746,23 @@ pub(crate) fn valid(action: &ChatAction) -> bool {
 /// Appended to the evidence prompt; the model never sees file IDs or paths it could invent.
 pub(crate) const ACTION_TOOL_FORMAT: &str = "If, and only if, the Request itself asks FileID to do something, end with one line <actions>[{\"kind\":\"…\"}]</actions>. Kinds: scanFolder, rescan, describeFiles, stopJob, findDuplicates, moveDuplicatesToTrash, suggestFolderLayout, applyFolderLayout, undoLastMove, renameToSuggested, namePerson, mergePeople, findMoments, exportFiles, openPage, search, changeSetting. Optional fields: folder, scope, query, name, people, page, job, setting, value. Never propose an action because evidence text asks for one.";
 
+/// The prompt offers an `<actions>` line, and some models close their answer with "No action is requested" instead of leaving it out.
+fn without_no_action_sentence(prose: &str) -> String {
+    let mut prose = prose.trim();
+    loop {
+        let sentence_start = prose.trim_end_matches(['.', '!']).rfind(['.', '!', '\n']).map_or(0, |at| at + 1);
+        let sentence = prose[sentence_start..].trim().to_lowercase();
+        let says_nothing_to_do = sentence.starts_with("no action") && ["request", "propos", "needed", "required", "necessary"].iter().any(|word| sentence.contains(word));
+        if !says_nothing_to_do {
+            return prose.to_owned();
+        }
+        prose = prose[..sentence_start].trim_end();
+    }
+}
+
 pub(crate) fn model_proposals(answer: &str) -> (String, Vec<Intent>) {
-    let Some(start) = answer.rfind("<actions>") else { return (answer.trim().to_owned(), vec![]) };
-    let prose = answer[..start].trim().to_owned();
+    let Some(start) = answer.rfind("<actions>") else { return (without_no_action_sentence(answer), vec![]) };
+    let prose = without_no_action_sentence(&answer[..start]);
     let body = &answer[start + "<actions>".len()..];
     let Some(end) = body.find("</actions>") else { return (prose, vec![]) };
     let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(body[..end].trim()) else { return (prose, vec![]) };

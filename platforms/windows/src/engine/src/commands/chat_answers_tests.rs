@@ -1,4 +1,5 @@
 use super::chat::execute;
+use super::chat_actions::model_proposals;
 use crate::ipc::{ChatRequest, ChatResponse};
 use rusqlite::Connection;
 
@@ -57,5 +58,16 @@ fn a_duration_question_says_chat_cannot_filter_by_length() {
         assert!(answer.hits.is_empty(), "{text}");
     }
     assert!(ask(&mut conn, "How many videos do I have?").message.starts_with("Found 1 video"));
+}
+
+#[test]
+fn a_model_answer_loses_its_closing_no_action_sentence() {
+    let (prose, intents) = model_proposals("Five photos show a watch [1][2]. No action is requested, so no action is proposed.");
+    assert_eq!(prose, "Five photos show a watch [1][2].");
+    assert!(intents.is_empty());
+    let (prose, _) = model_proposals("Two photos.\nNo action is requested.\n<actions>[]</actions>");
+    assert_eq!(prose, "Two photos.");
+    let (prose, _) = model_proposals("No action shots were found in this folder.");
+    assert_eq!(prose, "No action shots were found in this folder.");
 }
 
