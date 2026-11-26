@@ -12,6 +12,10 @@ use std::path::PathBuf;
 
 const VERSION: &str = "face-clustering-fingerprint-1";
 
+/// Names the grouping rules; change it whenever the rules change so the next pass regroups instead of returning the
+/// summary of a pass run under the old ones.
+const GROUPING_RULES: &str = "grouping-rules-2";
+
 const TABLES: [&str; 9] = [
     "SELECT fp.id,fp.file_id,fp.person_id,fp.bbox,fp.face_quality,fp.excluded,fp.arcface_embedding,fp.embedding_model,\
             fp.processing_version,fp.source_revision,f.path_text,f.size_bytes,f.modified_at,f.file_ref,f.failed,f.content_hash,r.revision \
@@ -38,9 +42,14 @@ fn put(hasher: &mut Sha256, bytes: &[u8]) {
 }
 
 pub(super) fn fingerprint(conn: &Connection) -> rusqlite::Result<String> {
+    fingerprint_under(conn, GROUPING_RULES)
+}
+
+fn fingerprint_under(conn: &Connection, rules: &str) -> rusqlite::Result<String> {
     let tx = conn.unchecked_transaction()?;
     let mut hasher = Sha256::new();
     put(&mut hasher, VERSION.as_bytes());
+    put(&mut hasher, rules.as_bytes());
     put(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
     put(&mut hasher, crate::commands::face_refresh::processing().as_bytes());
     put(&mut hasher, crate::commands::face_refresh::current_model().unwrap_or_default().as_bytes());
@@ -215,6 +224,15 @@ mod tests {
         fixture.conn.execute("UPDATE files SET scanned_at=99 WHERE id=1", []).unwrap();
         fixture.conn.execute("INSERT INTO scan_sessions(id,root_path,started_at,status) VALUES('s','/',1,'completed')", []).unwrap();
         assert!(unchanged(&fixture.conn).is_some(), "a scan that found nothing new does not force a pass");
+    }
+
+    #[test]
+    fn a_change_of_grouping_rules_forces_a_new_pass() {
+        let fixture = fixture();
+        remember(&fixture.conn, &summary());
+        let remembered = fingerprint(&fixture.conn).unwrap();
+        assert_ne!(fingerprint_under(&fixture.conn, "grouping-rules-next").unwrap(), remembered);
+        assert_eq!(fingerprint_under(&fixture.conn, GROUPING_RULES).unwrap(), remembered);
     }
 
     #[test]
