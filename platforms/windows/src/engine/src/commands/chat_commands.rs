@@ -44,15 +44,21 @@ pub(crate) fn resolve(conn: &Connection, text: &str, history: &[String], context
     if matches!(verb, Some("merge" | "combine" | "join")) && about_people {
         return Ok(Some(Resolution::say("Tell me which two people to merge, like “Merge Anna and Anne”, or merge them in People.")));
     }
-    let video_length = words.iter().any(|word| ["longest", "shortest", "duration", "length"].contains(&word.as_str()))
-        && words.iter().any(|word| ["video", "videos", "clip", "clips", "movie", "movies"].contains(&word.as_str()));
-    if video_length {
-        return Ok(Some(Resolution::say("FileID doesn't list videos by length yet. Ask for the largest, smallest, newest or oldest videos instead.")));
+    if asks_about_video_length(&words) {
+        return Ok(Some(Resolution::say("FileID doesn't know how long videos run, so it can't filter or list them by length. Ask for the largest, smallest, newest or oldest videos instead.")));
     }
     if let Some(answer) = rename_question(conn, text, &words, context)? {
         return Ok(Some(answer));
     }
     described_count(conn, &words, context)
+}
+
+fn asks_about_video_length(words: &[String]) -> bool {
+    let named = |any: &[&str]| words.iter().any(|word| any.contains(&word.as_str()));
+    let about_videos = named(&["video", "videos", "clip", "clips", "movie", "movies"]);
+    let by_length = named(&["longest", "shortest", "duration", "length"])
+        || (named(&["longer", "shorter", "long"]) && named(&["second", "seconds", "sec", "secs", "minute", "minutes", "min", "mins", "hour", "hours"]));
+    about_videos && by_length
 }
 
 fn asks_how_many(words: &[String]) -> bool {
