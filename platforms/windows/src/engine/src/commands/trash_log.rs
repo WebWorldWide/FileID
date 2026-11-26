@@ -1,6 +1,6 @@
 //! Sidecar undo log for `trashFiles` -> `restoreFromTrash`: append-only NDJSON capped at the last 1024 entries so the
-//! UndoStack survives restarts without bloating the SQLite schema. The canonical Trash journal on every platform: the
-//! Swift engine dual-writes it and `journal_import` converts its older `trash-journal.json`.
+//! UndoStack survives restarts without bloating the SQLite schema. `journal_import` converts the older Swift
+//! `trash-journal.json` into this log.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -65,8 +65,7 @@ pub(crate) const SNAPSHOT_TABLES: [(&str, &str); 5] = [
     ("face_prints", "file_id"),
 ];
 
-/// Same JSON shape as Swift's `TrashJournal.Value` (null is `{}`, blobs standard base64) so either engine reads the
-/// other's.
+/// Same JSON shape as the Swift `TrashJournal.Value` (null is `{}`, blobs standard base64), so imported journals decode.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SnapshotValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,8 +149,8 @@ pub(crate) fn snapshot_rows(
     Ok(out)
 }
 
-/// As Swift: only when neither the id nor the path is taken, every row `INSERT OR IGNORE`, only columns this catalog
-/// still has. Returns whether the `files` row was inserted.
+/// Restores only when neither the id nor the path is taken; every row is `INSERT OR IGNORE`, with only the columns this
+/// catalog still has. Returns whether the `files` row was inserted.
 pub(crate) fn restore_snapshot(
     conn: &rusqlite::Connection,
     file_id: i64,
@@ -265,8 +264,8 @@ pub(crate) fn append_at(
         std::fs::create_dir_all(parent).ok();
     }
     let json = serde_json::to_string(entry)?;
-    // HMAC-sign each entry so a local attacker's forged append can't be accepted by restoreFromTrash. Format:
-    // `{json}\t{hex_hmac}`.
+    // Each entry is HMAC-signed (`{json}\t{hex_hmac}`) so a local attacker's forged append is not accepted by
+    // restoreFromTrash.
     let mac = hmac::hmac_sha256_hex(key, json.as_bytes());
     {
         let mut file = std::fs::OpenOptions::new()
@@ -274,8 +273,7 @@ pub(crate) fn append_at(
             .append(true)
             .open(path)?;
         writeln!(file, "{json}\t{mac}")?;
-        // Force flush so a crash right after delete-to-trash doesn't lose the entry (which would orphan the Recycle Bin
-        // items).
+        // A crash right after delete-to-trash must not lose the entry, or the Recycle Bin items are orphaned.
         file.sync_all()?;
     }
     sync_parent(path)?;
@@ -309,9 +307,8 @@ pub(crate) fn latest_entries(raw: &[u8], key: &[u8]) -> Vec<TrashLogEntry> {
 }
 
 fn trim_to_cap(path: &std::path::Path) -> anyhow::Result<()> {
-    // Read bytes, not read_to_string: one torn line cut mid-codepoint (power loss before append's fsync) would fail the
-    // WHOLE read forever and silently disable the cap. Undecodable lines are dropped per line, like the HMAC-reject
-    // path.
+    // Read bytes, not read_to_string: a line torn mid-codepoint (power loss before the fsync) would otherwise fail the
+    // whole read and disable the cap. Undecodable lines are dropped per line.
     let raw = std::fs::read(path)?;
     let lines: Vec<&str> = raw
         .split(|b| *b == b'\n')
@@ -347,8 +344,8 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
         return Ok(None);
     }
     let key = hmac::log_hmac_key()?;
-    // Read bytes, not read_to_string: a torn line ending mid-character (power loss mid-append) would return InvalidData
-    // for the whole file and wedge restore for EVERY batch.
+    // Read bytes, not read_to_string: a line torn mid-character (power loss mid-append) would return InvalidData for the
+    // whole file and wedge restore for every batch.
     let raw = std::fs::read(&path)?;
     Ok(find_batch_in(&raw, &key, batch_id))
 }
@@ -363,7 +360,7 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
         if line.trim().is_empty() {
             continue;
         }
-        // Entries without the HMAC suffix (legacy writes or forged appends) are rejected.
+        // Entries without the HMAC suffix (forged appends) are rejected.
         let Some(tab) = line.find('\t') else {
             tracing::warn!("trash_log entry missing HMAC suffix -- rejecting");
             continue;
@@ -382,7 +379,7 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
     None
 }
 
-/// Claimed but not yet in the Trash or renamed back. Returns how many.
+/// Puts back files that were claimed but never reached the Trash or were never renamed back. Returns how many.
 pub(crate) fn recover_stranded_claims() -> usize {
     let Some(raw) = paths::trash_log_path().ok().and_then(|path| std::fs::read(path).ok()) else {
         return 0;
@@ -392,9 +389,9 @@ pub(crate) fn recover_stranded_claims() -> usize {
         .unwrap_or(0)
 }
 
-/// Before the app reads the library: claims a killed `trashFiles` left behind, renames a kill left half done, the Swift
-/// Trash journal when the Mac app hosts this engine, and (macOS) catalog rows of files a kill left in the Trash.
-/// Returns how many claims were put back.
+/// Before the app reads the library: recovers claims a killed `trashFiles` left behind and renames a kill left half
+/// done, imports the Swift Trash journal when the Mac app hosts this engine, and (macOS) repairs catalog rows of files
+/// a kill left in the Trash. Returns how many claims were put back.
 pub(crate) fn recover_at_startup(
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
 ) -> usize {

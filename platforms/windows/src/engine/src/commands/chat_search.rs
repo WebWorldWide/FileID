@@ -332,8 +332,7 @@ fn timestamp(value: &str) -> Option<f64> {
         values[0] * 3600 + values[1] * 60 + values[2]
     } as f64)
 }
-/// People named right after "without"/"except"/"not", with the words used, negation included (macOS
-/// `ChatSearchPlan.matchExclusions`).
+/// People named right after "without"/"except"/"not", with the words used, negation included.
 fn match_exclusions(
     words: &[String],
     negations: &[&str],

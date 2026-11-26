@@ -1,4 +1,4 @@
-//! Structured Chat answers from fixed SQL templates (mirrors macOS `ChatFacts.swift`). No model ever writes SQL: every
+//! Structured Chat answers from fixed SQL templates. No model ever writes SQL: every
 //! predicate is a constant with bound parameters.
 
 use super::chat_intent::{bytes_label, count_label, count_noun, noun, DateFilter, Question, MONTH_NAMES};
@@ -11,8 +11,7 @@ use std::path::Path;
 
 pub(crate) const ANALYZABLE: [&str; 6] = ["image", "video", "pdf", "doc", "audio", "model"];
 pub(crate) const SHOWN: usize = 50;
-/// Above this many matches a listing walks the date or size index; below it SQLite sorts. Same threshold in macOS
-/// `ChatFacts`.
+/// Above this many matches a listing walks the date or size index; below it SQLite sorts.
 pub(crate) const LARGE: i64 = 2_000;
 const TAKEN: &str = crate::util::SQL_TAKEN_DATE;
 
@@ -678,8 +677,7 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
     }
 }
 
-/// `None` when the catalog has no such folder, so the question is searched as words instead (Swift
-/// `ChatFacts.folderAnswer`).
+/// `None` when the catalog has no such folder, so the question is searched as words instead.
 pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
     let (count, bytes) = totals(conn, &filter)?;
@@ -857,7 +855,7 @@ fn ordinal_label(n: usize) -> String {
     NAMES.get(n - 1).map_or_else(|| format!("{n}th"), |name| (*name).to_owned())
 }
 
-/// The library records positions, not place names, so say how many files carry one (Swift `ChatFacts.placesAnswer`).
+/// The library records positions, not place names, so say how many files carry one.
 pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&RootScope>) -> Result<String> {
     let filter = Filter { kinds: kinds.to_vec(), root: root.cloned(), ..Filter::default() };
     let (total, _) = totals(conn, &filter)?;
@@ -983,7 +981,7 @@ const SUBJECT_FILLERS: [&str; 56] = [
 pub(crate) const SUBJECT_LIMIT: usize = 200_000;
 
 /// "beach or sunset" → [[beach], [sunset]]. Each word costs several index lookups, so a pasted paragraph is cut to the
-/// first few (Swift `ChatFacts.subjectGroups`).
+/// first few.
 pub(crate) const SUBJECT_MAX_GROUPS: usize = 6;
 pub(crate) const SUBJECT_MAX_WORDS: usize = 8;
 
@@ -1018,7 +1016,7 @@ pub(crate) fn subject_groups(query: &str) -> Vec<Vec<String>> {
 
 /// Counts, sizes and orders see all matches, not search's best hundred. A word matches name, description, scan tags,
 /// document/photo text or current video evidence, written or singular; every word must match, "or" joins alternatives.
-/// `None` when no subject word remains (macOS `ChatFacts.subjectIDs`).
+/// `None` when no subject word remains.
 pub(crate) fn subject_ids(conn: &Connection, query: &str) -> Result<Option<Vec<i64>>> {
     let groups = subject_groups(query);
     if groups.is_empty() {

@@ -92,7 +92,7 @@ fn platform() -> &'static str {
 pub(crate) fn build(role: Option<&str>, memory: Memory) -> Vec<ModelCatalogItem> {
     let mut items = Vec::new();
     let measured = crate::models::benchmark::local_results();
-    // The Mac-hosted engine serves the app's MLX models, as Swift does; GGUF models never run there.
+    // The Mac-hosted engine serves the app's MLX models; GGUF models never run there.
     if crate::paths::APP_HOSTED {
         return crate::models::mlx::catalog_items(role, memory, &measured);
     }

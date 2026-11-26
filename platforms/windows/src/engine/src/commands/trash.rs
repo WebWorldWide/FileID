@@ -1,5 +1,5 @@
 //! Trash-related IPC handlers: `restoreFromTrash` (with path-containment
-//! check against authorized scan roots, SEC-7) and `revertMerge` (split a
+//! check against authorized scan roots) and `revertMerge` (split a
 //! merged person cluster back into source + destination).
 
 use anyhow::Context;
@@ -9,11 +9,11 @@ use crate::ipc::{self, sink::Sink, BulkActionItem, BulkActionResult};
 use super::bulk::emit_bulk_result;
 use super::trash_log;
 
-/// Per-target restore decision made BEFORE touching the Recycle Bin, keeping the conflict rule and the SEC-7 containment rule in one pure, testable place.
+/// Per-target restore decision made before touching the Recycle Bin, keeping the conflict rule and the root-containment rule in one pure, testable place.
 #[derive(Debug, PartialEq, Eq)]
 enum RestoreDisposition {
     Restore,
-    /// Outside every authorized library root (SEC-7).
+    /// Outside every authorized library root.
     Refused,
     /// Destination already occupied: restoring would clobber it or the bin's Undelete would no-op, so report a conflict rather than a false success.
     Conflict,
@@ -818,7 +818,7 @@ const RB_PATH_SEP: &str = "\u{1f}";
 ///
 /// The match key is `DeletedFrom + name`, but `$i.Name` follows Explorer's "Hide extensions for known file types" and can omit the extension, which made the whole batch restore nothing on default shell settings. The recycled file (`$i.Path` → `...\$R######.txt`) keeps its extension, so BOTH the display-name path and display-name-plus-physical-extension are tested; two candidates also cover `archive.tar.gz`, where hiding ".gz" leaves an apparent ".tar".
 ///
-/// NOTE: concatenated into a SINGLE line, so no `#` comments (they would swallow the rest) and statements are `;`-separated.
+/// Concatenated into a single line, so no `#` comments (they would swallow the rest) and statements are `;`-separated.
 #[cfg(any(windows, test))]
 const RESTORE_BATCH_SCRIPT: &str = "\
 $shell = New-Object -ComObject Shell.Application; \
@@ -1814,7 +1814,7 @@ mod tests {
         );
     }
 
-    // SEC-7 still wins: an out-of-root target is Refused regardless of occupancy.
+    // Containment still wins: an out-of-root target is Refused regardless of occupancy.
     #[test]
     fn out_of_root_is_refused_before_conflict() {
         assert_eq!(

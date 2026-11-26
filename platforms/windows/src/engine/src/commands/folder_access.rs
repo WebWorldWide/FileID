@@ -1,7 +1,7 @@
-//! Folder access the Mac app hands over as security-scoped bookmarks (`grantFolderAccess`, `startScan.rootBookmark`),
-//! held as Swift's `SecurityScopedAccessRegistry` holds it: the granted root until the next grant, a scan's root for
-//! the scan. A bookmark that doesn't resolve to the path it names is refused with `folder_access_denied`. Builds the
-//! Mac app doesn't host have no bookmarks and accept every path.
+//! Folder access the Mac app hands over as security-scoped bookmarks (`grantFolderAccess`, `startScan.rootBookmark`):
+//! the granted root lasts until the next grant, a scan's root for the scan. A bookmark that doesn't resolve to the
+//! path it names is refused with `folder_access_denied`. Builds the Mac app doesn't host have no bookmarks and accept
+//! every path.
 
 use crate::ipc::{self, sink::Sink};
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]

@@ -1,6 +1,5 @@
 //! Zero-setup Best Takes: groups of tries from capture time + CLIP + pHash (near_duplicate_grouping with TAKES/CLIPS
-//! thresholds), cached model-free scores and Keep all / Skip choices. Keep thresholds and reasons in step with macOS
-//! `CatalogTakeAuto.swift`.
+//! thresholds), cached model-free scores and Keep all / Skip choices.
 
 use crate::models::face_geometry::Detection;
 use crate::ipc::{
@@ -36,8 +35,7 @@ pub(super) fn content_identity(hash: Option<Vec<u8>>, size: Option<i64>) -> Opti
     }
 }
 
-/// Copies of one file are one try: keep the lowest file id per content identity (as Duplicates verifies; Swift
-/// `distinctContents`).
+/// Copies of one file are one try: keep the lowest file id per content identity (as Duplicates verifies).
 fn distinct_contents<'a>(members: Vec<&'a Item>, contents: &HashMap<i64, (Vec<u8>, i64)>) -> Vec<&'a Item> {
     let mut by_id: Vec<&Item> = members.clone();
     by_id.sort_by_key(|m| m.id);
@@ -309,7 +307,7 @@ pub trait TakeFaceAnalyzer {
     fn detects(&self) -> bool {
         true
     }
-    /// Cropped as decoded (Swift hands Vision these crops). `None` when the analyzer could not run.
+    /// Cropped as decoded. `None` when the analyzer could not run.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     fn tile_faces(&mut self, _tiles: &crate::apple::faces::TakeTiles, _tile: &take_scoring::Tile) -> Option<Vec<Face>> {
         None
@@ -551,7 +549,7 @@ pub fn compute(job: ScoreJob, faces: &mut dyn TakeFaceAnalyzer) -> Scored {
     finish(job, measured)
 }
 
-/// One analyzer per worker, a photo each at a time (the Swift engine measures up to four at once).
+/// One analyzer per worker, a photo each at a time.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [A]) -> Scored {
     let queue = parking_lot::Mutex::new(missing(&job));
@@ -559,7 +557,7 @@ pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [
     std::thread::scope(|scope| {
         for faces in analyzers.iter_mut() {
             let (queue, measured) = (&queue, &measured);
-            // User-initiated QoS, as the Swift engine: Vision schedules by the caller's QoS.
+            // User-initiated QoS: Vision schedules by the caller's QoS.
             scope.spawn(move || {
                 crate::util::qos::interactive(|| loop {
                     // Bound first: a guard in the `while let` scrutinee would be held through the body and serialise

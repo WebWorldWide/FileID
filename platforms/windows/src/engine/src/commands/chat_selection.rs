@@ -1,6 +1,6 @@
 //! Exact-match questions over the files attached to a chat send (`ChatRequest.scopeFileIDs`): rank by stored evidence,
-//! then let the installed vision model check the likely ones with a strict yes/no/unsure question. Mirrors macOS
-//! `ChatSelection.swift` (`shared/test-corpus/chat-selection.json`).
+//! then let the installed vision model check the likely ones with a strict yes/no/unsure question. Fixture:
+//! `shared/test-corpus/chat-selection.json`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -718,8 +718,7 @@ where
     (results, ok)
 }
 
-/// `check` on the Swift engine's MLX model: decoded the Swift way (672 px bound, a video's middle frame) and asked with
-/// `benchmarkPass`.
+/// `check` on the MLX model: images decoded to a 672 px bound, a video's middle frame, asked with `benchmarkPass`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 async fn check_mlx<F, Fut>(model: &str, prepared: &Prepared, cancel: Arc<AtomicBool>, mut progress: F) -> (Vec<(Ranked, Verdict, String)>, bool)
 where

@@ -1,5 +1,5 @@
-//! Durable merge and split suggestion queues for People; keep thresholds, ordering, messages and journal shapes in step
-//! with macOS `FaceQueues.swift` (cross-engine conformance reads both journals).
+//! Durable merge and split suggestion queues for People. Thresholds, ordering, messages and journal shapes stay
+//! compatible with catalogs the retired Swift engine wrote.
 
 use std::collections::{HashMap, HashSet};
 
@@ -275,10 +275,9 @@ pub(crate) fn two_groups(vectors: &[&[f32]]) -> Option<(Vec<usize>, Vec<f32>, Ve
     Some((groups, centers.0, centers.1))
 }
 
-/// A person holding this share of every assigned face (and at least the minimum) is a chained cluster whose centroid
-/// has drifted to the average face: its two halves stay close in embedding space, so the separation gates would never
-/// offer it, yet nothing else lets the user take it apart. In a big library a chained cluster holds a smaller share
-/// (four of them held 11-13% each of 64,000 faces), so a person of thousands of faces counts at a smaller share too.
+/// A person holding this share of every assigned face (and at least the minimum) is a chained cluster: its centroid
+/// has drifted to the average face, so the separation gates never offer it. In a big library a chained cluster holds a
+/// smaller share, so a person of thousands of faces counts at a smaller share too.
 fn oversized(person: &Person, total: usize, settings: &QueueSettings) -> bool {
     let faces = person.members.len();
     let share = faces as f64 / total.max(1) as f64;

@@ -397,7 +397,7 @@ fn renamed_extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// True when `new_name` is the suggested name as-is or with the `_2`…`_99` bump the apps add when it's taken (same rule as the macOS engine).
+/// True when `new_name` is the suggested name as-is or with the `_2`…`_99` bump the apps add when it's taken.
 fn applies_proposed_name(proposed: &str, new_name: &str, original_extension: &str) -> bool {
     let proposed = proposed.trim();
     if proposed.is_empty() {
@@ -1141,7 +1141,7 @@ fn before_trash_move(path: &std::path::Path) {
     }
 }
 
-/// macOS trashes in place, as the Swift engine does, so the Trash shows the file's own name and Finder's Put Back works: identity and content checks run on the path itself and the backend re-checks identity on both sides of FileManager.trashItem.
+/// macOS trashes in place, so the Trash shows the file's own name and Finder's Put Back works: identity and content checks run on the path itself and the backend re-checks identity on both sides of FileManager.trashItem.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
     if let Err(error) = crate::util::read_only::require_source_mutation(&candidate.path) {
@@ -1981,7 +1981,7 @@ pub(crate) async fn emit_bulk_result(
     }
 }
 
-/// Stores a person's structured name as the macOS engine does: the display name joins every non-empty part, and naming a person clears the Unknown flag so they reappear in People.
+/// Stores a person's structured name: the display name joins every non-empty part, and naming a person clears the Unknown flag so they reappear in People.
 fn update_person_name(
     tx: &rusqlite::Transaction<'_>,
     payload: &ipc::RenamePersonPayload,
@@ -2372,7 +2372,7 @@ pub(crate) async fn handle_mark_persons_different(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let conn = db.lock();
-        // Each anchor face must still belong to its person, as in the Swift engine: a suggestion shown before a recluster or merge is stale.
+        // Each anchor face must still belong to its person: a suggestion shown before a recluster or merge is stale.
         let anchored = |face: i64, person: i64| -> bool {
             conn.query_row(
                 "SELECT person_id FROM face_prints WHERE id = ?1 AND file_id IS NOT NULL AND bbox IS NOT NULL",
@@ -3316,7 +3316,7 @@ mod tests {
         assert_eq!(v["dst"], r"C:\a\new.jpg");
     }
 
-    // A commit-failure path records EVERY on-disk move to the recovery sidecar (NDJSON, append-only); previously a failed end-of-batch commit left the whole batch silently desynced.
+    // A commit-failure path records EVERY on-disk move to the recovery sidecar (NDJSON, append-only), so a failed end-of-batch commit cannot leave the batch silently desynced.
     #[test]
     fn commit_failure_writes_recovery_sidecar_for_every_move() {
         let dir = unique_temp_dir("recover");

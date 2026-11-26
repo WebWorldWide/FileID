@@ -1,4 +1,4 @@
-//! Deterministic Chat parsing, line for line with macOS `ChatIntent.swift` (shared cases:
+//! Deterministic Chat parsing (shared cases:
 //! `shared/test-corpus/chat-intents.json`). Only the user's own words are parsed, so instructions inside retrieved
 //! documents cannot start actions.
 
@@ -813,7 +813,6 @@ fn peak_unit(words: &[String]) -> Option<(&'static str, &'static str, Vec<usize>
 }
 
 /// "bigger than 1 GB", "under 2.5 gb": byte bounds and the words used. Decimal units, as sizes are shown
-/// (`ChatIntent.sizeBounds`).
 pub fn size_bounds(words: &[String]) -> Option<(Option<i64>, Option<i64>, BTreeSet<usize>)> {
     let unit = |word: &str| -> Option<f64> {
         Some(match word {
@@ -1250,7 +1249,7 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
     None
 }
 
-/// Decimal units, round-half-up tenths, identical in both engines.
+/// Decimal units, round-half-up tenths.
 pub fn bytes_label(bytes: i64) -> String {
     let bytes = bytes.max(0);
     if bytes < 1000 {
@@ -1327,7 +1326,7 @@ fn capitalised_word(word: &str) -> bool {
 }
 
 /// One or two capitalised words after of/with/featuring/including/showing; longer runs are folder or event titles, and
-/// months, weekdays, holidays and brands are not people (`ChatIntent.spokenName`, corpus `spokenNames`).
+/// months, weekdays, holidays and brands are not people (corpus `spokenNames`).
 pub fn spoken_name(text: &str) -> Option<String> {
     let words: Vec<&str> = text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric())).collect();
     let lead = words.iter().position(|word| NAME_LEADS.contains(&word.to_lowercase().as_str()))?;
@@ -1443,7 +1442,7 @@ pub fn unreadable_ask(text: &str) -> bool {
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];
 const GEOTAG_WORDS: [&str; 5] = ["gps", "geotagged", "geotag", "geotags", "geolocated"];
 
-/// Returns the kinds named (empty for every file) (`ChatIntent.placeAsk`, corpus `placeAsks`).
+/// Returns the kinds named (empty for every file) (corpus `placeAsks`).
 pub fn place_ask(text: &str) -> Option<Vec<String>> {
     let words: Vec<String> = text.split_whitespace().map(|word| clean(word).replace('\'', "")).collect();
     let asks = (has(&words, &["where"]) && has(&words, &TAKEN_WORDS))
@@ -1467,7 +1466,7 @@ pub fn place_ask(text: &str) -> Option<Vec<String>> {
     Some(kinds)
 }
 
-/// Left for the catalog to say whether it is a folder (`ChatIntent.askedInside`, corpus `insideAsks`).
+/// Left for the catalog to say whether it is a folder (corpus `insideAsks`).
 pub fn asked_inside(text: &str) -> Option<String> {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
