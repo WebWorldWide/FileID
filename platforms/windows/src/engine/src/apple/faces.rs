@@ -319,7 +319,11 @@ pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
 
 /// Embeds every pending face except those of people marked Unknown. Without
 /// weights nothing runs.
-pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>, progress: crate::commands::face_extract_mac::Progress) {
+pub fn extract_before_clustering(
+    database: &std::sync::Arc<Mutex<rusqlite::Connection>>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: crate::commands::face_extract_mac::Progress,
+) {
     let processing = crate::commands::face_refresh::processing();
     if !processing.starts_with(crate::commands::face_clustering_mac::MAC_PREFIX) {
         return;
@@ -346,7 +350,7 @@ pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Conne
         }
     };
     let crops = crate::paths::faces_dir().ok();
-    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), &|| false, progress) {
+    match crate::commands::face_extract_mac::extract_pending(database, sface.as_ref(), processing, &unknown, crops.as_deref(), cancelled, progress) {
         Ok(summary) => tracing::info!(?summary, "face_print_extract_finished"),
         Err(error) => tracing::error!(?error, "face_print_persist_failed"),
     }

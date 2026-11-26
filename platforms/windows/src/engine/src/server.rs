@@ -217,6 +217,9 @@ async fn async_main() -> Result<()> {
     // Single-flight gate for face clustering: the writer lock is released during cluster()+consolidate(), so a second runFaceClustering must bounce rather than race the persist transaction.
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Set at shutdown so a grouping pass stops at its next safe point; its marker stays and the next launch finishes it.
+    let face_cluster_cancel: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
     let restructure_cancellations = RestructureCancelRegistry::default();
     // Single-flight for apply/undo: overlapping runs would race on-disk moves and the undo journal.
     let restructure_active: Arc<std::sync::atomic::AtomicBool> =
@@ -253,6 +256,7 @@ async fn async_main() -> Result<()> {
         deep_analyze_cancel: deep_analyze_cancel.clone(),
         deep_analyze_active,
         face_cluster_active,
+        face_cluster_cancel: face_cluster_cancel.clone(),
         restructure_cancellations: restructure_cancellations.clone(),
         restructure_active,
         mutation_gate: mutation_gate.clone(),
@@ -261,7 +265,7 @@ async fn async_main() -> Result<()> {
     };
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if let Some(db) = db_conn.clone() {
-        let after_scan = AfterScan { sink: sink.clone(), db: db.clone(), jobs: jobs.clone(), gate: mutation_gate.clone(), scan_state: scan_state.clone(), active: dispatcher.face_cluster_active.clone() };
+        let after_scan = AfterScan { sink: sink.clone(), db: db.clone(), jobs: jobs.clone(), gate: mutation_gate.clone(), scan_state: scan_state.clone(), active: dispatcher.face_cluster_active.clone(), cancel: face_cluster_cancel.clone() };
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
             if tokio::task::spawn_blocking(move || commands::face_clustering::interrupted_pass_to_resume(&db)).await.unwrap_or(false) {
@@ -340,6 +344,7 @@ async fn async_main() -> Result<()> {
         coordinator.request_cancel();
     }
     deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Release);
+    face_cluster_cancel.store(true, std::sync::atomic::Ordering::Release);
     restructure_cancellations.request_cancel();
     commands::prewarm::cancel_prewarm(None);
 
@@ -708,6 +713,7 @@ struct AfterScan {
     gate: Arc<tokio::sync::Mutex<()>>,
     scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     active: Flag,
+    cancel: Flag,
 }
 
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -723,6 +729,7 @@ impl AfterScan {
         }
         let guard = FaceClusterActiveGuard(self.active.clone());
         let terminal_active = self.active.clone();
+        let cancel = self.cancel.clone();
         let track = JobTrackGuard::start(&self.jobs, JobCategory::FaceCluster, "Group faces");
         tracing::info!("[CLUSTER] grouping faces after the scan");
         let mut pending = commands::face_clustering::mark_pending(&self.db);
@@ -737,7 +744,7 @@ impl AfterScan {
                 let _guard = guard;
                 let finding = track.finding_faces();
                 let _track = track;
-                commands::face_clustering::handle_run_face_clustering(sink, db, terminal_active, finding).await;
+                commands::face_clustering::handle_run_face_clustering(sink, db, terminal_active, cancel, finding).await;
             },
         )
         .await;
@@ -985,6 +992,7 @@ struct Dispatcher {
     deep_analyze_cancel: Flag,
     deep_analyze_active: Flag,
     face_cluster_active: Flag,
+    face_cluster_cancel: Flag,
     restructure_cancellations: RestructureCancelRegistry,
     restructure_active: Flag,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
@@ -1130,6 +1138,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
         deep_analyze_cancel,
         deep_analyze_active,
         face_cluster_active,
+        face_cluster_cancel,
         restructure_cancellations,
         restructure_active,
         mutation_gate,
@@ -1314,6 +1323,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                 gate: mutation_gate.clone(),
                 scan_state: scan_state.clone(),
                 active: face_cluster_active.clone(),
+                cancel: face_cluster_cancel.clone(),
             };
             spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _track = track;
@@ -1464,6 +1474,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             }
             let guard = FaceClusterActiveGuard(face_cluster_active.clone());
             let terminal_active = face_cluster_active.clone();
+            let cancel = face_cluster_cancel.clone();
             let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Group faces");
             let mut pending = commands::face_clustering::mark_pending(db);
             let sink_c = sink.clone();
@@ -1484,6 +1495,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
                         sink_c,
                         db_c,
                         terminal_active,
+                        cancel,
                         finding,
                     )
                     .await;
@@ -1594,6 +1606,7 @@ mod tests {
             deep_analyze_cancel: Arc::default(),
             deep_analyze_active: Arc::default(),
             face_cluster_active: Arc::default(),
+            face_cluster_cancel: Arc::default(),
             restructure_cancellations: RestructureCancelRegistry::default(),
             restructure_active: Arc::default(),
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
