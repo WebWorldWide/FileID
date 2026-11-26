@@ -41,10 +41,8 @@ pub fn run(ctx: &Ctx, target: &str) -> Result<()> {
                 "error": "not_found",
                 "target": target,
             }));
-        } else {
-            println!("No indexed file matches {}.", ctx.bold(target));
         }
-        return Ok(());
+        anyhow::bail!("no indexed file matches {}", terminal_text(target));
     };
 
     let tags = load_tags(&conn, row.id);

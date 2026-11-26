@@ -1153,6 +1153,12 @@ fn partial_scan_commits_results_and_exits_with_code_3() {
         "stdout header must not claim a clean completion: {}",
         stdout(&out)
     );
+    #[cfg(unix)]
+    assert!(
+        stdout(&out).contains("Permission denied"),
+        "the warning must say why the file was skipped: {}",
+        stdout(&out)
+    );
 
     #[cfg(unix)]
     {
@@ -1339,4 +1345,21 @@ mod without_recoverable_trash {
         let _ = std::fs::remove_dir_all(&corpus);
         let _ = std::fs::remove_dir_all(&dbdir);
     }
+}
+
+#[test]
+fn info_on_an_unknown_path_fails() {
+    let (corpus, dbdir, db) = scanned_text_library("info-unknown");
+    let db_s = db.to_str().unwrap();
+
+    let out = run(&["--db", db_s, "--no-color", "info", "/nonexistent/file.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no indexed file matches"));
+
+    let machine = run(&["--db", db_s, "--json", "info", "/nonexistent/file.txt"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert_eq!(json(&machine)["error"], "not_found");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
 }
