@@ -30,8 +30,12 @@ package final class _VisionUncheckedBox<T>: @unchecked Sendable {
     package init(_ v: T) { self.value = v }
 }
 
+/// The accurate text tier compiles a recognizer for the Neural Engine the first time it meets a script or a concurrent
+/// read, 30 to 60 s on a busy Mac. A read that waits for that compile has not failed, so it gets far longer than a classify call.
+package let accurateReadTimeoutSeconds: Double = 180
+
 @inline(__always)
-package func runVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
+package func runVisionWithTimeout(seconds: Double = visionPerformTimeoutSeconds, _ body: @escaping () -> Void) -> Bool {
     let sem = DispatchSemaphore(value: 0)
     let box = _VisionUncheckedBox(body)
     DispatchQueue.global(qos: .userInitiated).async {
@@ -39,7 +43,7 @@ package func runVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
         autoreleasepool { box.value() }
         sem.signal()
     }
-    return sem.wait(timeout: .now() + visionPerformTimeoutSeconds) == .success
+    return sem.wait(timeout: .now() + seconds) == .success
 }
 
 /// One reusable bundle of VNRequest objects. The pool guarantees exactly one owning task at a time.
@@ -224,7 +228,7 @@ public final class VisionWorker: @unchecked Sendable {
         accurateOCRGate.wait()
         visionConcurrencyGate.wait()
         let box = ScanSideResult<String?>()
-        let didReturn = runVisionWithTimeout {
+        let didReturn = runVisionWithTimeout(seconds: accurateReadTimeoutSeconds) {
             defer {
                 visionConcurrencyGate.signal()
                 accurateOCRGate.signal()
