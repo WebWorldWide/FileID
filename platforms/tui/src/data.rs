@@ -117,6 +117,11 @@ pub enum LoadMsg {
     /// the Library/People/Restructure tabs paint immediately instead of
     /// waiting out an up-to-64-GiB live full-file hash pass.
     Dupes(Box<DupeReport>),
+    /// Rows for the text typed so far in the Library search box, found with the same search a committed query uses.
+    LiveSearch {
+        query: String,
+        files: Vec<FileRow>,
+    },
     Error(String),
 }
 
@@ -173,6 +178,18 @@ pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>, generation: u
                 let _ =
                     send_versioned(&tx, generation, LoadMsg::Error(format!("load failed: {e}")));
             }
+        }
+    });
+}
+
+/// Searches on a worker thread so typing in the Library search box never waits on the database.
+pub fn spawn_live_search(db: PathBuf, query: String, tx: Sender<LoadMsg>) {
+    std::thread::spawn(move || {
+        let Ok(conn) = fileid_engine::db::open_read(&db) else {
+            return;
+        };
+        if let Ok((files, _)) = load_files(&conn, &query) {
+            let _ = tx.send(LoadMsg::LiveSearch { query, files });
         }
     });
 }
