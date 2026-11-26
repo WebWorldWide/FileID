@@ -1990,7 +1990,12 @@ impl RestructureApply {
                     file_id = m.file_id,
                     "[RESTRUCTURE] source identity is unavailable or changed; rescan before applying"
                 );
-                self.note_failure(&m.source, "it changed on disk since it was scanned; scan again");
+                let reason = if source_path.try_exists().unwrap_or(true) {
+                    "it changed on disk since it was scanned; scan again"
+                } else {
+                    "it is no longer there; scan again"
+                };
+                self.note_failure(&m.source, reason);
                 failed += 1;
                 continue;
             };
@@ -5333,6 +5338,31 @@ mod tests {
             !ci_starts_with(Path::new(r"D:\PhotosBackup"), Path::new(r"D:\Photos")),
             "a sibling must not prefix-match (component boundaries respected)"
         );
+    }
+
+    #[test]
+    fn a_file_deleted_after_the_scan_is_reported_as_gone_not_changed() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let gone = root.join("gone.jpg");
+        std::fs::write(&gone, b"data").unwrap();
+
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &gone.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        std::fs::remove_file(&gone).unwrap();
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let dest = root.join("Sorted").join("x.jpg").to_string_lossy().into_owned();
+        let res = apply.apply(&[move_fixture(1, &gone.to_string_lossy(), &dest)]).unwrap();
+
+        assert_eq!(res.failed, 1);
+        assert_eq!(
+            apply.take_first_failure().as_deref(),
+            Some("gone.jpg: it is no longer there; scan again")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A move whose source no longer matches the live DB row for its file_id is a stale plan and must be skipped.
