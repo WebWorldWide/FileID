@@ -756,7 +756,7 @@ const COUNT_PEOPLE_TAIL: &[&str] = &[
 const WHO_WORDS: &[&str] = &[
     "who", "whos", "is", "are", "in", "on", "my", "our", "the", "this", "all", "photos", "pictures", "images", "library", "collection", "files",
     "there", "here", "appear", "appears", "appearing", "featured", "shown", "do", "i", "we", "have", "got", "people", "persons", "everyone", "anyone",
-    "named", "unnamed",
+    "named", "unnamed", "most", "often", "frequently", "commonly", "regularly",
 ];
 const LIST_LEADS: &[&str] = &["which", "what", "whats", "list", "show", "give", "tell"];
 
@@ -777,7 +777,7 @@ fn people_ask(words: &[String]) -> Option<&'static str> {
         }
         return (words.get(at).is_some_and(|word| is_people(word)) && words[at + 1..].iter().all(|word| COUNT_PEOPLE_TAIL.contains(word))).then_some("count");
     }
-    let place = words.iter().any(|word| PLACE_WORDS.contains(word)) || words.iter().any(|word| ["everyone", "anyone"].contains(word));
+    let place = words.iter().any(|word| PLACE_WORDS.contains(word) || ["everyone", "anyone", "most", "often", "frequently", "commonly", "regularly"].contains(word));
     if words.iter().any(|word| ["who", "whos", "everyone", "anyone"].contains(word)) && place && words.iter().all(|word| WHO_WORDS.contains(word)) {
         return Some("who");
     }
@@ -1421,6 +1421,20 @@ const FILE_WORDS: [&str; 20] = [
     "folder", "folders", "library", "screenshots",
 ];
 
+/// "Summarize what my videos show", "what are they mostly about": a request to digest a whole set, which Chat cannot do.
+/// Returns the leading part that can still be answered ("how many photos do I have") when there is one.
+pub fn summary_ask(text: &str) -> Option<Option<String>> {
+    let lower = text.to_lowercase();
+    let words: Vec<String> = lower.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|word| !word.is_empty()).map(str::to_owned).collect();
+    let digest = has(&words, &["summarize", "summarise", "summary", "overview"]) || lower.contains("mostly about") || lower.contains("are they about");
+    if !digest {
+        return None;
+    }
+    let split = [" and what ", " and which ", " and tell ", ", and what ", ", what "].iter().filter_map(|marker| lower.find(marker)).min();
+    let head = split.map(|at| text[..at].trim().to_owned()).filter(|head| head.to_lowercase().starts_with("how many"));
+    Some(head)
+}
+
 /// A general-assistant question ("what's the weather", "tell me a joke") that names nothing in the library.
 pub fn off_topic(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -1708,6 +1722,14 @@ mod tests {
         assert_eq!(asked_inside("how many files are in my library"), None);
         assert_eq!(asked_inside("how many files are there"), None);
         assert_eq!(asked_inside("how many videos are in Vacation"), None);
+    }
+
+    #[test]
+    fn a_request_to_digest_a_set_of_files_is_recognised_with_its_answerable_head() {
+        assert_eq!(summary_ask("Summarize what my videos show"), Some(None));
+        assert_eq!(summary_ask("How many photos do I have and what are they mostly about?"), Some(Some("How many photos do I have".into())));
+        assert_eq!(summary_ask("How many photos do I have?"), None);
+        assert_eq!(summary_ask("What does DSC01691 show?"), None);
     }
 
     #[test]
