@@ -53,13 +53,12 @@ struct WelcomeSheet: View {
 
     /// The engine knows how much memory is free right now; until the user picks a model, the recommendation follows it.
     private func adoptVLMAdvice(_ advice: VLMAdvice?) {
-        guard let advice, selectedVLM == hardwareRecommendedVLM, !ModelInstallStatus.isInstalled(kind: selectedVLM),
-              UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")?.isEmpty != false else { return }
-        let recommended = AIModelKind.recommended(ramGB: systemRAMGB, advice: advice, freeDiskBytes: availableDiskBytes)
-        guard recommended != hardwareRecommendedVLM else { return }
-        hardwareRecommendedVLM = recommended
+        let settings = DeepAnalyzeSettings.shared
+        guard settings.followAdvice(advice, freeDiskBytes: availableDiskBytes) else { return }
+        hardwareRecommendedVLM = settings.activeKind
+        guard selectedVLM != settings.activeKind else { return }
         adoptingAdvice = true
-        selectedVLM = recommended
+        selectedVLM = settings.activeKind
     }
 
     private var recommendation: VLMRecommendation {

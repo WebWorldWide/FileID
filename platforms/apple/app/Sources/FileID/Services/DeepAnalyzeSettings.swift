@@ -11,7 +11,30 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
     static let maxExcludedFolders = 100
 
     var activeKind: AIModelKind {
-        didSet { UserDefaults.standard.set(activeKind.rawValue, forKey: key) }
+        didSet { if !followingAdvice { UserDefaults.standard.set(activeKind.rawValue, forKey: key) } }
+    }
+
+    @ObservationIgnored private var followingAdvice = false
+
+    /// With no saved choice and nothing downloaded, the active model follows the engine's pick for the memory free now, without saving it, so every screen shows the model Welcome offers. Returns whether it changed.
+    @discardableResult
+    func followAdvice(_ advice: VLMAdvice?, freeDiskBytes: Int64?) -> Bool {
+        guard let kind = Self.adoptedKind(
+            current: activeKind, persistedRawValue: UserDefaults.standard.string(forKey: key),
+            advice: advice, ramGB: systemRAMGB, freeDiskBytes: freeDiskBytes) else { return false }
+        followingAdvice = true
+        activeKind = kind
+        followingAdvice = false
+        return true
+    }
+
+    static func adoptedKind(
+        current: AIModelKind, persistedRawValue: String?, advice: VLMAdvice?, ramGB: Double, freeDiskBytes: Int64?,
+        isInstalled: (AIModelKind) -> Bool = ModelInstallStatus.isInstalled(kind:)
+    ) -> AIModelKind? {
+        guard advice != nil, persistedRawValue?.isEmpty != false, !isInstalled(current) else { return nil }
+        let recommended = AIModelKind.recommended(ramGB: ramGB, advice: advice, freeDiskBytes: freeDiskBytes)
+        return recommended == current ? nil : recommended
     }
 
     /// Absolute folder paths skipped by a whole-library Deep Analyze pass. Stored as a plain string array; sent with every deepAnalyzeAll and ignored when an explicit file selection is present.

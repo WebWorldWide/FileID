@@ -85,7 +85,8 @@ struct DeepAnalyzeModelPickerCard: View {
             onDiskBytes = await Task.detached(priority: .utility) { DescriptionModelStore.sizeOnDisk(kind) }.value
         }
         .onChange(of: settings.activeKind.rawValue) { _, _ in failure = nil }
-        .onAppear { engine.refreshVLMAdvice() }
+        .onAppear { engine.refreshVLMAdvice(); settings.followAdvice(engine.vlmAdvice, freeDiskBytes: DescriptionModelStore.freeDiskBytes()) }
+        .onChange(of: engine.vlmAdvice) { _, advice in settings.followAdvice(advice, freeDiskBytes: DescriptionModelStore.freeDiskBytes()) }
         .onChange(of: engine.lastErrorSignal) { _, _ in
             guard requested != nil, let error = engine.lastError else { return }
             if error.kind == "prewarm_cancelled" { requested = nil; return }
