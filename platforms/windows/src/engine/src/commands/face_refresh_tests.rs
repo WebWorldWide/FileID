@@ -141,7 +141,54 @@ fn faces_whose_crop_predates_the_upright_alignment_fix_are_outdated_until_their_
     assert!(states(conn).contains(&(5, "pending".to_string())));
 
     std::fs::write(&crop, b"jpeg again").unwrap();
+    conn.execute("UPDATE face_refresh_backlog SET state='done', updated_at=?1 WHERE face_id=5", [now()]).unwrap();
     assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 4);
+}
+
+fn library_with_a_stale_crop() -> (Library, PathBuf) {
+    let library = library();
+    library.conn.execute("UPDATE face_prints SET processing_version='macos-test' WHERE id=5", []).unwrap();
+    let crops = library.dir.path().join("face_crops");
+    std::fs::create_dir_all(&crops).unwrap();
+    let crop = crops.join("5.jpg");
+    std::fs::write(&crop, b"jpeg").unwrap();
+    std::fs::File::options().write(true).open(&crop).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+    (library, crops)
+}
+
+fn fail_as_source_changed(conn: &Connection, faces: &str) {
+    conn.execute(&format!("UPDATE face_refresh_backlog SET state='failed', reason='source_changed' WHERE face_id IN ({faces})"), []).unwrap();
+}
+
+#[test]
+fn faces_whose_photo_changed_after_the_scan_stop_counting_as_outdated_until_the_photo_matches_again() {
+    let (library, crops) = library_with_a_stale_crop();
+    let conn = &library.conn;
+    seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
+
+    conn.execute("UPDATE files SET size_bytes=size_bytes+1 WHERE id=1", []).unwrap();
+    fail_as_source_changed(conn, "1,2,5");
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 2, "faces 3 and 4 wait for their library; the changed photo's faces wait for a rescan");
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), Vec::<i64>::new());
+
+    conn.execute("UPDATE files SET size_bytes=size_bytes-1 WHERE id=1", []).unwrap();
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5, "a photo that matches the catalog again can be refreshed");
+}
+
+#[test]
+fn the_crop_folder_is_scanned_once_and_a_clean_scan_is_remembered() {
+    let (library, crops) = library_with_a_stale_crop();
+    let conn = &library.conn;
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5]);
+    std::fs::File::options().write(true).open(crops.join("5.jpg")).unwrap().set_modified(std::time::SystemTime::now()).unwrap();
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5], "the second look does not stat the crops again");
+
+    OLD_CROPS.lock().remove(&crop_space(&crops, "m", "macos-test"));
+    assert!(stale_crops(conn, "m", "macos-test", &crops).unwrap().is_empty());
+    assert!(crops.join(CROPS_VERIFIED).exists());
+    std::fs::File::options().write(true).open(crops.join("5.jpg")).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+    assert!(stale_crops(conn, "m", "macos-test", &crops).unwrap().is_empty(), "a folder verified clean is not scanned again");
 }
 
 #[test]

@@ -20,6 +20,10 @@ const MAX_MERGES: usize = 200;
 const MAX_SPLITS: usize = 100;
 const MAX_SPLIT_FACES: usize = 2000;
 const PREVIEW: usize = 8;
+/// Two people each in this many photos or more can share a few by grouping noise without being two individuals.
+const SHARED_PHOTO_TOLERANCE_MIN_PHOTOS: usize = 300;
+/// They may share this fraction of the smaller one's photos (one in fifty) and still be offered as one person.
+const SHARED_PHOTO_TOLERANCE_DIVISOR: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct QueueSettings {
@@ -199,6 +203,12 @@ fn keeps_first(a: &Person, b: &Person) -> bool {
     (a.named, a.faces, -a.id) >= (b.named, b.faces, -b.id)
 }
 
+fn shared_photos_rule_out_merge(shared: usize, left_photos: usize, right_photos: usize) -> bool {
+    let smaller = left_photos.min(right_photos);
+    let tolerated = if smaller >= SHARED_PHOTO_TOLERANCE_MIN_PHOTOS { smaller / SHARED_PHOTO_TOLERANCE_DIVISOR } else { 0 };
+    shared > tolerated
+}
+
 struct MergeRow {
     keep: i64,
     other: i64,
@@ -223,7 +233,7 @@ fn merges(people: &[Person], blocked: &HashSet<(i64, i64)>, files: &HashMap<i64,
             }
             let left = files.get(&people[i].id).unwrap_or(&empty);
             let right = files.get(&people[j].id).unwrap_or(&empty);
-            if !left.is_disjoint(right) {
+            if shared_photos_rule_out_merge(left.intersection(right).count(), left.len(), right.len()) {
                 continue;
             }
             let (keep, other) =
@@ -746,12 +756,16 @@ pub(super) fn blank(fields: &[Option<String>]) -> bool {
     fields.iter().all(|field| field.as_deref().is_none_or(|text| text.trim().is_empty()))
 }
 
-fn shares_photo(conn: &Connection, a: i64, b: i64) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM face_prints x JOIN face_prints y ON y.file_id=x.file_id WHERE x.person_id=?1 AND y.person_id=?2)",
+fn shares_too_many_photos(conn: &Connection, a: i64, b: i64) -> rusqlite::Result<bool> {
+    let photos = |person: i64| -> rusqlite::Result<usize> {
+        conn.query_row("SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=?1", [person], |row| row.get(0))
+    };
+    let shared: usize = conn.query_row(
+        "SELECT COUNT(DISTINCT x.file_id) FROM face_prints x JOIN face_prints y ON y.file_id=x.file_id WHERE x.person_id=?1 AND y.person_id=?2",
         params![a, b],
         |row| row.get(0),
-    )
+    )?;
+    Ok(shared_photos_rule_out_merge(shared, photos(a)?, photos(b)?))
 }
 
 pub(crate) fn resolve_in(conn: &Connection, payload: &ResolveFaceReviewPayload) -> rusqlite::Result<FaceReviewPage> {
@@ -783,7 +797,7 @@ fn merge_in(conn: &Connection, request: &str, resolution: &str, keep: i64, other
     let mut after = serde_json::json!({"resolution": resolution, "personID": keep, "otherPersonID": other});
     match resolution {
         "merge" => {
-            if shares_photo(conn, keep, other)? {
+            if shares_too_many_photos(conn, keep, other)? {
                 return refuse(SHARED_PHOTO);
             }
             if blocked_pairs(conn)?.contains(&pair) {

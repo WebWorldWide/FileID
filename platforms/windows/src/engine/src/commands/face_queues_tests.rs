@@ -151,6 +151,52 @@ fn merge_is_refused_when_the_people_now_share_a_photo() {
     assert_eq!(owner(&conn, 1), Some(1));
 }
 
+fn two_large_people(shared: usize) -> Connection {
+    let conn = db();
+    for file in 41..=700 {
+        insert_file(&conn, file, &format!("/photos/{file}.jpg"), "image");
+    }
+    person(&conn, 1, None, false);
+    person(&conn, 2, None, false);
+    for file in 1..=350 {
+        face(&conn, file, file, 1, (1.0, 0.0));
+        face(&conn, 1000 + file, 350 + file, 2, (0.97, 0.05));
+    }
+    for file in 1..=shared as i64 {
+        face(&conn, 2000 + file, file, 2, (0.97, 0.05));
+    }
+    conn
+}
+
+#[test]
+fn two_large_people_sharing_a_few_photos_are_still_offered_and_can_be_merged() {
+    let conn = two_large_people(0);
+    refresh_all(&conn);
+    assert_eq!(merge_pairs(&conn).len(), 1);
+
+    let conn = two_large_people(7);
+    refresh_all(&conn);
+    let pairs = merge_pairs(&conn);
+    assert_eq!(pairs.len(), 1, "seven shared photos in 350 is one in fifty");
+    let (keep, other) = pairs[0];
+    assert_eq!(act(&conn, keep, Some(other), "merge").status, "ok");
+}
+
+#[test]
+fn two_large_people_sharing_many_photos_are_neither_offered_nor_merged() {
+    let conn = two_large_people(0);
+    refresh_all(&conn);
+    for file in 1..=8 {
+        face(&conn, 2000 + file, file, 2, (0.97, 0.05));
+    }
+    let reply = act(&conn, 1, Some(2), "merge");
+    assert_eq!((reply.status.as_str(), reply.message.as_deref()), ("refused", Some(SHARED_PHOTO)));
+
+    let conn = two_large_people(8);
+    refresh_all(&conn);
+    assert!(merge_pairs(&conn).is_empty(), "eight shared photos in 350 is more than one in fifty");
+}
+
 #[test]
 fn not_same_person_records_a_verdict_that_keeps_the_pair_out_until_undone() {
     let conn = pair();
