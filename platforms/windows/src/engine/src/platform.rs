@@ -338,6 +338,19 @@ pub fn cpu_topology() -> CpuTopology {
     CpuTopology { p_cores: num_cpus::get_physical().max(1) as u32, e_cores: 0, logical }
 }
 
+/// The one-minute load average per logical core; 0 where the system does not report one.
+pub fn load_per_core() -> f64 {
+    #[cfg(unix)]
+    {
+        let mut load = [0.0f64; 1];
+        // SAFETY: `load` has room for the one sample requested.
+        if unsafe { libc::getloadavg(load.as_mut_ptr(), 1) } == 1 {
+            return load[0] / num_cpus::get().max(1) as f64;
+        }
+    }
+    0.0
+}
+
 pub fn performance_core_count() -> usize {
     #[cfg(target_os = "macos")]
     if let Some(count) = macos_perflevel_cores(0) {

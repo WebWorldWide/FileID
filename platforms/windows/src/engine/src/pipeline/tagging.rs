@@ -662,6 +662,17 @@ fn twin_reuse_enabled() -> bool {
 }
 
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The first file through the models waits for their one-time compile on the accelerator, which can outlast a normal file's whole budget.
+const COLD_START_TIMEOUT: Duration = Duration::from_secs(300);
+/// Most a busy machine stretches the per-file budget: a read slows with the load, so a loaded machine gets more time, not failed files.
+const MAX_LOAD_STRETCH: f64 = 20.0;
+static STACK_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long one file may take once its analysis has started.
+fn file_time_limit(load_per_core: f64, stack_warm: bool) -> Duration {
+    let limit = PER_FILE_TIMEOUT.mul_f64(load_per_core.clamp(1.0, MAX_LOAD_STRETCH));
+    if stack_warm { limit } else { limit.max(COLD_START_TIMEOUT) }
+}
 /// What a row says when a read timed out: the file is fine, the machine was too busy, and the engine reads it again.
 pub(crate) const TIMED_OUT_MESSAGE: &str = "FileID ran out of time reading this file; it will try again";
 /// What a row says when the scheduler refused the file for lack of time or memory; the row is transient, so the next scan reads it again.
@@ -1002,8 +1013,14 @@ impl Tagger {
                         let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                             process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
                         ));
-                        match tokio::time::timeout(PER_FILE_TIMEOUT, fut).await {
-                            Ok(Ok(t)) => Ok(t),
+                        let limit = file_time_limit(crate::platform::load_per_core(), STACK_WARM.load(Ordering::Relaxed));
+                        match tokio::time::timeout(limit, fut).await {
+                            Ok(Ok(t)) => {
+                                if !t.failed {
+                                    STACK_WARM.store(true, Ordering::Relaxed);
+                                }
+                                Ok(t)
+                            }
                             Ok(Err(_panic)) => {
                                 tracing::error!(
                                     path = %crate::platform::redact_path_for_log(path_for_timeout),
@@ -1014,9 +1031,10 @@ impl Tagger {
                             Err(_elapsed) => {
                                 tracing::warn!(
                                     path = %crate::platform::redact_path_for_log(path_for_timeout),
-                                    "per-file timeout after 60s; marking failed and continuing"
+                                    limit_seconds = limit.as_secs(),
+                                    "per-file timeout; marking failed and continuing"
                                 );
-                                Err((TIMED_OUT_MESSAGE.to_string(), 60000.0))
+                                Err((TIMED_OUT_MESSAGE.to_string(), limit.as_secs_f64() * 1000.0))
                             }
                         }
                     };
@@ -3228,6 +3246,20 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_busy_machine_gets_more_time_per_file_and_a_quiet_one_the_normal_budget() {
+        assert_eq!(file_time_limit(0.2, true), PER_FILE_TIMEOUT);
+        assert_eq!(file_time_limit(10.0, true), PER_FILE_TIMEOUT * 10);
+        assert_eq!(file_time_limit(500.0, true), PER_FILE_TIMEOUT.mul_f64(MAX_LOAD_STRETCH));
+    }
+
+    #[test]
+    fn the_first_files_through_the_models_get_the_cold_start_allowance() {
+        assert!(file_time_limit(0.0, false) >= COLD_START_TIMEOUT);
+        assert!(file_time_limit(0.0, false) > file_time_limit(0.0, true));
+        assert_eq!(file_time_limit(10.0, false), PER_FILE_TIMEOUT * 10);
+    }
+
     #[test]
     fn stored_failure_messages_never_carry_scheduler_or_codec_wording() {
         let production = production_source();

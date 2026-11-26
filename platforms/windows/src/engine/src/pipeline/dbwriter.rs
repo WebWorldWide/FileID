@@ -55,6 +55,8 @@ pub struct BatchStats {
     /// Cumulative processed Image/Video/Model files (the expensive vision path), for the kind-aware ETA: a blended files/sec oscillates by an order of magnitude on mixed libraries.
     pub processed_heavy: u64,
     pub failed_total: u64,
+    /// Part of `failed_total` that timed out and will be read again this scan, so it is not shown as failed.
+    pub retried_total: u64,
     pub wall_seconds: f64,
     pub files_per_second: f64,
     pub utilization: f64,
@@ -70,6 +72,8 @@ pub struct DbWriter {
     conn: Arc<Mutex<Connection>>,
     coordinator: ScanCoordinator,
     rename_heal_enabled: bool,
+    timeouts_are_retried: bool,
+    retried_timeouts: std::sync::atomic::AtomicU64,
 }
 
 impl DbWriter {
@@ -81,7 +85,13 @@ impl DbWriter {
                 row.get::<_, bool>(0)
             })
             .unwrap_or(true);
-        Self { conn, coordinator, rename_heal_enabled }
+        Self { conn, coordinator, rename_heal_enabled, timeouts_are_retried: false, retried_timeouts: std::sync::atomic::AtomicU64::new(0) }
+    }
+
+    /// Files that time out are read again by a later pass of the same scan, so their rows are counted apart from real failures.
+    pub fn with_timeouts_retried(mut self, retried: bool) -> Self {
+        self.timeouts_are_retried = retried;
+        self
     }
 
     /// Drains the receiver until the channel closes, flushing on `BATCH_SIZE` rows or `FLUSH_INTERVAL` after the first row. Returns total processed and failed counts.
@@ -805,6 +815,9 @@ impl DbWriter {
 
                 if f.failed {
                     *failed += 1;
+                    if self.timeouts_are_retried && f.error_message.as_deref() == Some(crate::pipeline::tagging::TIMED_OUT_MESSAGE) {
+                        self.retried_timeouts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 } else if matches!(
                     f.kind,
                     crate::pipeline::discovery::FileKind::Image | crate::pipeline::discovery::FileKind::Video
@@ -884,6 +897,7 @@ impl DbWriter {
             processed_total: *total,
             processed_heavy: *heavy,
             failed_total: *failed,
+            retried_total: self.retried_timeouts.load(std::sync::atomic::Ordering::Relaxed),
             wall_seconds: wall,
             files_per_second: if wall > 0.0 { f64::from(files_in_batch) / wall } else { 0.0 },
             utilization: 0.0,
@@ -3307,6 +3321,49 @@ mod failure_memory_tests {
     }
 }
 
+#[cfg(test)]
+mod timeout_retry_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    fn timed_out(path: PathBuf) -> TaggedFile {
+        let mut file = TaggedFile::bare(&DiscoveredFile {
+            path,
+            kind: FileKind::Image,
+            size_bytes: 4,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        });
+        file.failed = true;
+        file.error_message = Some(crate::pipeline::tagging::TIMED_OUT_MESSAGE.to_string());
+        file
+    }
+
+    fn flush_one(writer: &DbWriter, file: TaggedFile) -> BatchStats {
+        writer.flush(&mut vec![file], &mut 0, &mut 0, &mut 0, 0).unwrap()
+    }
+
+    #[test]
+    fn a_timed_out_file_that_a_later_pass_reads_again_is_not_counted_as_failed_yet() {
+        let folder = std::env::temp_dir().join(format!("fileid-timeout-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (a, b) = (folder.join("a.jpg"), folder.join("b.jpg"));
+        std::fs::write(&a, b"jpeg").unwrap();
+        std::fs::write(&b, b"jpeg").unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let retrying = DbWriter::new(conn.clone(), ScanCoordinator::new()).with_timeouts_retried(true);
+        let stats = flush_one(&retrying, timed_out(a));
+        assert_eq!((stats.failed_total, stats.retried_total), (1, 1));
+        let last_pass = DbWriter::new(conn, ScanCoordinator::new());
+        let stats = flush_one(&last_pass, timed_out(b));
+        assert_eq!((stats.failed_total, stats.retried_total), (1, 0), "no pass is left to read it again");
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
 
 #[cfg(test)]
 mod rescan_preservation_tests {

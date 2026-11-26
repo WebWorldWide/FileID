@@ -557,7 +557,7 @@ impl ScanSession {
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
-        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
+        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone()).with_timeouts_retried(self.retry_round < TIMEOUT_RETRY_ROUNDS);
         let known_twins = {
             let conn = self.db_conn.lock();
             crate::pipeline::twin_reuse::known_image_hashes(&conn, clip_can_embed()).unwrap_or_default()
@@ -2017,7 +2017,7 @@ fn maybe_emit_progress(
         total,
         discovered: discovered_total,
         processed: stats.processed_total,
-        failed: stats.failed_total,
+        failed: stats.failed_total.saturating_sub(stats.retried_total),
         files_per_second: fps,
         eta_seconds,
         resident_mb: crate::platform::process_memory_mb(),
@@ -2258,6 +2258,17 @@ mod tests {
             post_scan_owed: None,
             post_scan_done: None,
         }
+    }
+
+    #[test]
+    fn progress_does_not_show_timed_out_files_that_will_be_read_again_as_failed() {
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let state = Arc::new(Mutex::new(ProgressState::new()));
+        let stats = BatchStats { processed_total: 30, processed_heavy: 30, failed_total: 7, retried_total: 5, ..BatchStats::default() };
+        std::thread::sleep(Duration::from_millis(150));
+        maybe_emit_progress(&sink, &state, "s", &stats, 100, 100, false, &ProgressLift::default());
+        let EventPayload::Progress(progress) = events.try_recv().unwrap().payload else { panic!("expected a progress event") };
+        assert_eq!(progress.inner.failed, 2);
     }
 
     #[test]
