@@ -104,3 +104,21 @@ struct LibrarySearchProblemTests {
         #expect(problem.title == "Visual search is paused" && problem.canResume && !problem.needsModel)
     }
 }
+
+@Suite("Library search while the index is paused")
+struct LibraryPausedSearchTests {
+    private let pausedReply = "Keyword results only. Visual search is paused. Resume it to search by what’s in a picture; names and text still match."
+
+    @Test func keywordOnlyResultsAreLabelledAsNameAndTextMatchesWithAResumeOffer() {
+        let decision = LibrarySearchOutcome.decide(message: pausedReply, keywordCount: 3, showWeaker: false)
+        #expect(decision.label == "Matches by name and text only" && decision.addKeywordRows)
+        #expect(LibraryView.pausedSearchProblem(pausedReply)?.canResume == true)
+    }
+
+    @Test func aSearchThatIsSimplyPreparingOffersNoResume() {
+        let message = "Keyword results only. Preparing the local visual search index."
+        #expect(LibraryView.pausedSearchProblem(message) == nil)
+        #expect(LibraryView.pausedSearchProblem(nil) == nil)
+        #expect(LibrarySearchOutcome.decide(message: message, keywordCount: 3, showWeaker: false).label == "Matches by name and text only")
+    }
+}

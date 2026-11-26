@@ -388,12 +388,15 @@ struct LibraryView: View {
 
     static let pausedSearchTitle = "Visual search is paused"
 
+    static func pausedSearchProblem(_ message: String?) -> SearchProblem? {
+        guard let message, message.contains(pausedSearchTitle) else { return nil }
+        return SearchProblem(title: pausedSearchTitle, detail: "Resume it to search by what’s in a picture. Names and text still match.", canResume: true)
+    }
+
     /// Why a visual search gave nothing, in plain words.
     static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
         let title = similar ? "Couldn’t find similar files" : "Showing matches by name and text only"
-        if let message = response?.message, message.hasPrefix(pausedSearchTitle) {
-            return SearchProblem(title: pausedSearchTitle, detail: "Resume it to search by what’s in a picture. Names and text still match.", canResume: true)
-        }
+        if let paused = pausedSearchProblem(response?.message) { return paused }
         var installed = false
         if case .installed = CLIPModelInstaller.shared.status { installed = true }
         if !installed {
@@ -1308,6 +1311,7 @@ struct LibraryView: View {
                             pageable = false
                             summary = decision.label
                             hidden = decision.hiddenWeaker
+                            problem = Self.pausedSearchProblem(response.message)
                         } else {
                             problem = Self.searchProblem(response, similar: false)
                         }

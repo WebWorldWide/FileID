@@ -435,7 +435,7 @@ impl CatalogIndex {
                     }
                     response.status = if mode == "semantic" { "error" } else { "ok" }.into();
                     response.message = Some(match (&prepared, mode) {
-                        (Err(_), _) => "Keyword results only. The visual search index is paused; resume its job to add similar-image results.".into(),
+                        (Err(error), _) => format!("Keyword results only. {error}"),
                         (Ok(_), "semantic") => "Preparing the local visual search index. Similarity results are not available yet.".into(),
                         (Ok(_), _) => "Keyword results only. Preparing the local visual search index.".into(),
                     });

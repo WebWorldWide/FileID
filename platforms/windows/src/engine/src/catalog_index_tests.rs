@@ -1111,7 +1111,9 @@ fn a_paused_index_job_still_gives_hybrid_search_its_keyword_rows_on_a_catalog_pa
     let response = index.search(&hybrid).unwrap();
     assert_eq!(response.status, "ok");
     assert_eq!(response.hits.len(), 1);
-    assert!(response.message.as_deref().unwrap().contains("Keyword results only"));
+    let message = response.message.unwrap();
+    assert!(message.starts_with("Keyword results only"), "{message}");
+    assert!(message.contains(PAUSED_BY_USER_MESSAGE), "{message}");
     index.shutdown();
 }
 
