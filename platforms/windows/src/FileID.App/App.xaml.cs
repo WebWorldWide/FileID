@@ -1,10 +1,4 @@
-﻿// Application root — owns the single MainWindow and the lifetime of every
-// app-level service (EngineClient, model installers, settings store).
-//
-// On macOS this is FileIDApp.swift + AppDelegate. On Windows the WinUI
-// `Application` plays both roles: lifecycle hooks land in OnLaunched here.
-
-using FileID.Services;
+﻿using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 
@@ -22,14 +16,9 @@ public partial class App : Application
             DebugLog.Warn("[XAML-RESOURCE] " + e.Message);
         InitializeComponent();
         UnhandledException += OnUnhandledException;
-        // Background-thread exceptions (Task.Run continuations, ConfigureAwait(false)
-        // resumes that throw on a thread-pool thread) bypass WinUI's
-        // UnhandledException — they bubble through AppDomain. Log to disk
-        // so a tab-swap-mid-scan crash leaves a forensic trail next session.
+        // Thread-pool exceptions bypass WinUI's UnhandledException and surface only through AppDomain.
         System.AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandled;
-        // Tasks whose result/exception is never observed surface here only
-        // when the finalizer runs. Still worth logging — it identifies
-        // missing awaits / fire-and-forget bugs.
+        // Fires only when a faulted task is finalized; identifies missing awaits.
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
     }
 
@@ -70,10 +59,7 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        // defensive startup. Every step is wrapped so a single
-        // failure surfaces a Win32 MessageBox instead of silently
-        // closing the window. The fail-visibly path is what makes
-        // "opens then instantly closes" diagnosable.
+        // Every startup step is wrapped so a failure shows a Win32 MessageBox instead of silently closing the window.
         var traceLogPath = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
             "FileID", "logs", "startup-trace.txt");
@@ -104,30 +90,17 @@ public partial class App : Application
             {
                 Trace($"XAML resource audit failed (continuing): {ex.GetType().Name}: {ex.Message}");
             }
-            // Prime the disk thumbnail cache size counter so Settings →
-            // Diagnostics shows a real number without waiting for the
-            // first sweep. Off the UI thread: a warm cache is a recursive
-            // walk + per-file stat over tens of thousands of .bin files, which
-            // on a cold MFT / slow disk stalls first paint. _index is a
-            // ConcurrentDictionary and _cachedBytes uses Interlocked, so a write
-            // landing before Prime finishes is race-safe (worst case a transient
-            // diagnostics blip, not an eviction-correctness bug).
+            // Off the UI thread: priming walks tens of thousands of cache files and would stall first paint.
+            // Writes landing before Prime finishes are race-safe (the index is concurrent, the byte counter Interlocked).
             _ = Task.Run(ThumbnailDiskCache.Prime);
-            // last-session breadcrumb. Detects whether the
-            // previous session died via a native fast-fail (which
-            // bypasses every managed crash sink) and writes a
-            // forensic artifact if so. Always-run; idempotent.
+            // Detects a previous session that died by native fast-fail, which bypasses every managed crash sink.
             DebugLog.BeginSession();
-            // structured startup line so a `crash-*.txt` from any
-            // session can be correlated to a specific build + engine binary.
             var asmVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
             var enginePath = AppPaths.EngineExePath;
             DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={PathRedactor.Redact(AppPaths.Root)}, engine={PathRedactor.Redact(enginePath)}");
 
             Trace("EngineClient.StartAsync");
-            // Captured on EngineStartedTask so the install flow can poll
-            // / await readiness via EngineClient.WaitForReadyAsync. The
-            // continuation still logs faults locally (no telemetry).
+            // Kept on EngineStartedTask so the install flow can await readiness.
             EngineStartedTask = EngineClient.Instance.StartAsync();
             _ = EngineStartedTask.ContinueWith(t =>
             {
@@ -136,15 +109,8 @@ public partial class App : Application
                     Trace($"EngineClient.StartAsync faulted: {t.Exception?.GetBaseException()}");
                     DebugLog.Error("EngineClient.StartAsync faulted: " + t.Exception?.GetBaseException());
                 }
-                // Surface unrecoverable startup crashes visibly. The sidebar
-                // engine pill (round-2 auto-hide) shows them too, but new
-                // users won't know where to look — a Win32 MessageBox is
-                // hard to miss. Covers three classes:
-                //   1. Binary not found (path resolution failed)
-                //   2. Signature verdict was Untrusted (tamper / bad cert chain)
-                //   3. Release build refused an Unsigned binary (FILEID_EV_THUMBPRINT set)
-                // Recoverable crashes (pure spawn failures, runtime panics
-                // that respawn) keep using the pill alone.
+                // Unrecoverable startup crashes (binary missing, untrusted signature, unsigned binary in a
+                // release build) get a MessageBox; recoverable ones use the sidebar engine pill alone.
                 try
                 {
                     if (EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed)
@@ -214,11 +180,7 @@ public partial class App : Application
             catch (System.Exception ex) { Trace($"Window show failed: {ex.Message}"); }
             Trace("OnLaunched complete");
 
-            // harness auto-scan. When Program.AutoScanFolder is set
-            // (--auto-scan-folder CLI arg), kick off a scan once the engine
-            // reaches Ready. Fire-and-forget on purpose; failures land in
-            // app.log via the catch. The `[AUTO-SCAN]` marker lets the
-            // harness grep the log to assert the path actually ran.
+            // Test-harness hook (--auto-scan-folder). The [AUTO-SCAN] log lines let the harness assert it ran.
             if (!string.IsNullOrEmpty(Program.AutoScanFolder))
             {
                 _ = AutoScanAsync(Program.AutoScanFolder!, Program.AutoExitAfterScan, window);
@@ -226,8 +188,7 @@ public partial class App : Application
         }
         catch (System.Exception ex)
         {
-            // Last-resort: write to trace, log, and surface a Win32
-            // dialog so the user sees WHY the window closed.
+            // Last resort: trace, log, and show a dialog so the user sees why the window closed.
             Trace($"FATAL: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
             try { DebugLog.Error("OnLaunched FATAL: " + ex); } catch { }
             try
@@ -252,11 +213,7 @@ public partial class App : Application
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
 
-    /// <summary>harness entry point. Awaits engine readiness, sets
-    /// the folder on AppViewModel (so the UI reflects it), kicks off
-    /// StartScanAsync, and — if --auto-exit-after-scan was passed — closes
-    /// the window once ScanCompleteEvent fires so MarkCleanExit runs and
-    /// the harness can assert clean_exit=true.</summary>
+    /// <summary>Test-harness scan: waits for the engine, scans the folder, and with --auto-exit-after-scan closes the window afterwards so the clean-exit marker is written.</summary>
     private static async Task AutoScanAsync(string folderPath, bool exitAfterScan, Window window)
     {
         var engine = EngineClient.Instance;
@@ -366,25 +323,16 @@ public partial class App : Application
     }
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
-        // write a dedicated crash dump BEFORE deciding whether to
-        // recover. Captures last 50 lines of app.log for context — until
-        // this round we had no forensic data on UI-thread crashes.
+        // Dump first, then recover.
         var path = DebugLog.WriteCrashDump("WinUI Application.UnhandledException", e.Exception, terminating: false);
         DebugLog.Error("Unhandled: " + e.Exception + (string.IsNullOrEmpty(path) ? "" : $" (dump: {path})"));
-        // Recover rather than terminate. The user has unsaved scan state in
-        // the engine; killing the process loses progress. Unrecoverable
-        // exceptions (StackOverflow, OOM) bypass this handler anyway. WER
-        // crash dumps for diagnosis trade off against the user's open
-        // session — for an on-device app the user's session wins.
+        // Recover rather than terminate: the engine holds scan progress that a kill would lose.
         e.Handled = true;
     }
 
     private static void OnAppDomainUnhandled(object sender, System.UnhandledExceptionEventArgs e)
     {
-        // Cannot recover here (terminating == true means CLR is unwinding).
-        // Log to disk so the next session has forensic info; the user reported
-        // "clicking sidebar during a scan crashes the entire app" and these
-        // background-thread crashes are the most likely culprit.
+        // The CLR is unwinding; only log for the next session.
         try
         {
             var ex = e.ExceptionObject as Exception;

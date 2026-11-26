@@ -1,9 +1,4 @@
-﻿// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, the 48 px v3
-// title bar and its non-client passthrough regions, min size), sidebar
-// visibility binding, drag-drop folder, and the app-level keyboard
-// accelerators (Ctrl/Alt+1..9, Ctrl+K, Ctrl+O, Ctrl+R, Ctrl+F, Ctrl+Shift+S).
-
-using System;
+﻿using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using FileID.Services;
@@ -39,14 +34,8 @@ public sealed partial class MainWindow : Window
     private bool _closeSequenceRunning;
     private bool _closeFinalized;
 
-    // Per-monitor DPI re-scale. The WinUI framework auto-updates XamlRoot
-    // RasterizationScale + re-layouts content on a DPI change, but the
-    // top-level window keeps its OLD physical-pixel size unless we honor the
-    // OS-suggested rect that arrives with WM_DPICHANGED — so the window looks
-    // mis-sized after a drag to a different-DPI monitor. We subclass the HWND
-    // to catch that message and apply the suggested rect (lParam). The
-    // delegate is held in a field so it isn't GC'd while pinned as the
-    // subclass callback; the subclass is removed in OnClosed.
+    // WinUI rescales content on a DPI change but not the window itself, so the HWND is subclassed to apply the
+    // OS-suggested rect from WM_DPICHANGED. The delegate is held in a field so the GC can't collect it while pinned.
     private SubclassProc? _dpiSubclassProc;
     private IntPtr _subclassedHwnd = IntPtr.Zero;
     private const uint DpiSubclassId = 0xF11E1D;
@@ -55,20 +44,11 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
-        // every step in the constructor is independently
-        // wrapped so a single failure (e.g. backdrop unsupported on
-        // older Win10) doesn't kill the window before it shows. If
-        // ANY step fails the rest still run, and the failure goes to
-        // the startup-trace.
+        // Each constructor step is wrapped so one failure (e.g. backdrop unsupported on older Win10) doesn't stop the window showing.
         var traceLogPath = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
             "FileID", "logs", "startup-trace.txt");
-        // Buffer trace lines in memory and flush ONCE at the end of the
-        // ctor — the previous per-call File.AppendAllText opened/closed
-        // the file ~20 times during init, blocking the UI thread on a
-        // slow disk and inflating cold-start latency by 50–200 ms. The
-        // buffered approach is also crash-safe because we re-flush on
-        // each unrecoverable Step failure inside the try/catch.
+        // Trace lines are buffered and flushed once; per-line file appends slowed cold start on slow disks.
         var traceBuffer = new System.Text.StringBuilder(2048);
         void Trace(string msg)
         {
@@ -92,8 +72,7 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        // InitializeComponent MUST succeed; if it throws there's no
-        // window to show. Let it propagate up to the App handler.
+        // InitializeComponent must succeed; without it there is no window, so let it propagate.
         Trace("InitializeComponent");
         try
         {
@@ -127,10 +106,7 @@ public sealed partial class MainWindow : Window
             TextScaler.Instance.Attach(DetailHost);
         });
 
-        // First-launch model installer. Async-launched after the window
-        // has had a moment to layout so the user sees the chrome before
-        // the modal pops over it. Also force AppWindow.Show(true) so the window
-        // is guaranteed to be rendered and brought to front.
+        // Show the welcome sheet after first layout so the chrome appears first; AppWindow.Show(true) makes sure the window is up.
         Step("Welcome subscribe", () =>
             ((FrameworkElement)Content).Loaded += async (_, _) =>
             {
@@ -158,16 +134,9 @@ public sealed partial class MainWindow : Window
         var svc = ModelInstallerService.Instance;
         DebugLog.Info($"[INSTALL] sentinel state: clip={svc.Clip.Status} ramplus={svc.RamPlus.Status} arcface={svc.Arcface.Status} deep_vlm={svc.DeepVlm.Status}");
 
-        // Mirror macOS shouldShowWelcome() (FileIDApp.swift): show the sheet
-        // on first launch (welcomeSheetSeen == false) OR any time a CORE
-        // model (CLIP/RAM++/face) is missing on a subsequent launch. The
-        // opt-in multi-GB Deep Analyze VLM is excluded from the re-show gate
-        // (CoreModelsInstalled, not AllInstalled) so it can't re-nag.
-        // The second early-return (AllInstalled alone) used to suppress
-        // the sheet on first launch when models happened to already be
-        // present — e.g. after a partial wipe that left %LOCALAPPDATA%
-        // \FileID\Models on disk but recreated app-settings.json. A user
-        // who's never seen Welcome must see it.
+        // Show on first launch, and on later launches whenever a core model (CLIP/RAM++/face) is missing. The opt-in
+        // Deep Analyze VLM is excluded so it can't re-nag. A user who has never seen Welcome must see it even when
+        // model files already exist.
         var seen = false;
         try { seen = AppViewModel.Instance.Settings.WelcomeSheetSeen; }
         catch (Exception ex) { DebugLog.Warn("MaybeShowWelcomeSheet: read WelcomeSheetSeen threw: " + ex.Message); }
@@ -177,12 +146,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // host the sheet in an inline overlay confined to
-        // Row 1 of the main grid (NOT a ContentDialog). The dialog's
-        // full-window smoke layer was intercepting pointer events on
-        // the title bar (Row 0), making the window non-draggable while
-        // Welcome was visible. The inline overlay covers only the
-        // content area — title bar stays exposed + draggable.
+        // An inline overlay confined to Row 1, not a ContentDialog: the dialog's smoke layer would cover the title bar and block dragging.
         DebugLog.Info("[INSTALL] constructing WelcomeSheet + inline overlay.");
         var sheet = new Views.WelcomeSheet();
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -190,12 +154,7 @@ public sealed partial class MainWindow : Window
         void OnDismissed(object? _, EventArgs __)
         {
             DebugLog.Info("[INSTALL] WelcomeSheet.Dismissed fired; closing overlay.");
-            // Dismissed is typically raised on the UI thread by the
-            // sheet's button handler, but a future code path could raise
-            // from a background continuation. Marshal explicitly so
-            // mutating Visibility / Content can never run off-thread —
-            // that's the kind of cross-thread DispatcherObject access
-            // that fast-fails the process.
+            // Marshal to the UI thread: touching Visibility or Content off-thread fast-fails the process.
             var dq = DispatcherQueue;
             if (dq is not null && !dq.HasThreadAccess)
             {
@@ -249,9 +208,7 @@ public sealed partial class MainWindow : Window
     private void ApplyTitleBarChrome()
     {
         ExtendsContentIntoTitleBar = true;
-        // SetTitleBar registers a zero-bounds drag region if the
-        // element hasn't been laid out yet. Defer until Loaded so AppTitleBar
-        // has measurable bounds when WinUI captures the non-client region.
+        // SetTitleBar registers a zero-bounds drag region before layout, so wait for Loaded.
         AppTitleBar.Loaded += (_, _) =>
         {
             SetTitleBar(AppTitleBar);
@@ -263,12 +220,6 @@ public sealed partial class MainWindow : Window
         };
         TitleBarHost.InteractiveLayoutChanged += (_, _) => DispatcherQueue.TryEnqueue(UpdateTitleBarRegions);
 
-        // explicit AppWindow icon. The .exe already has the
-        // icon embedded via <ApplicationIcon>, so taskbar / Alt-Tab
-        // already work. SetIcon makes the WINDOW icon (top-left if a
-        // chrome'd window, system menu icon) match — defensive +
-        // explicit so any consumer (third-party window enumerators,
-        // WinUI's own internal title-bar code) sees the right icon.
         try
         {
             var iconPath = System.IO.Path.Combine(
@@ -318,11 +269,7 @@ public sealed partial class MainWindow : Window
 
     private void ApplyMinimumSize()
     {
-        // AppWindow.Resize + Move + DisplayArea.WorkArea all speak PHYSICAL
-        // PIXELS, not DIPs. Our LaunchWidth/Height + MinWidth/Height
-        // constants are in DIPs (the unit XAML uses everywhere else). Scale
-        // them by the per-monitor DPI factor before passing to AppWindow.
-        // Without this, a 200% scaled display sees a half-size window.
+        // AppWindow sizes are physical pixels; the constants are DIPs, so scale by the monitor DPI.
         uint dpi = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this));
         if (dpi == 0) { dpi = 96; }
         double scale = dpi / 96.0;
@@ -333,15 +280,13 @@ public sealed partial class MainWindow : Window
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
-            // PreferredMinimumWidth/Height are in DIPs (unlike Resize/Move
-            // which want pixels). Pass DIPs directly.
+            // Preferred minimums are DIPs, unlike Resize/Move.
             presenter.PreferredMinimumWidth = MinWidth;
             presenter.PreferredMinimumHeight = MinHeight;
             presenter.Restore();
         }
 
-        // Pick a launch size: prefer LaunchWidth/Height (in pixels) but
-        // cap at 90% of the work area so we never spill off small laptops.
+        // Launch at the preferred size, capped at 90% of the work area for small laptops.
         var displayArea = DisplayArea.GetFromWindowId(
             AppWindow.Id,
             DisplayAreaFallback.Primary);
@@ -374,9 +319,7 @@ public sealed partial class MainWindow : Window
             Theme = SystemBackdropTheme.Dark,
         };
 
-        // dispose the controller on a construction-time fault so
-        // we never leak a half-attached MicaController/DesktopAcrylicController.
-        // OnClosed handles the normal disposal path; this guards mid-init.
+        // Dispose on a construction-time fault so a half-attached controller never leaks; OnClosed handles normal disposal.
         if (MicaController.IsSupported())
         {
             try
@@ -434,9 +377,7 @@ public sealed partial class MainWindow : Window
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         if (hwnd == IntPtr.Zero) { return; }
 
-        // Keep the delegate alive in a field — the marshaled function pointer
-        // must outlive the subclass registration or the GC will collect it and
-        // the next WM_DPICHANGED will jump to freed memory.
+        // The delegate must outlive the subclass registration or the next WM_DPICHANGED calls freed memory.
         _dpiSubclassProc = DpiWndProc;
         if (SetWindowSubclass(hwnd, _dpiSubclassProc, DpiSubclassId, IntPtr.Zero))
         {
@@ -453,11 +394,7 @@ public sealed partial class MainWindow : Window
     {
         if (msg == WM_DPICHANGED && lParam != IntPtr.Zero)
         {
-            // wParam low word = new DPI; lParam = RECT* with the OS-suggested
-            // window bounds for the target monitor. WinUI re-scales the XAML
-            // content itself; our job is only to move/resize the top-level
-            // window to the suggested rect so its physical size matches the
-            // new monitor's scale. Returning 0 tells the OS we handled it.
+            // lParam points to the OS-suggested window rect for the new monitor; WinUI rescales content itself.
             var suggested = Marshal.PtrToStructure<RECT>(lParam);
             int width = suggested.Right - suggested.Left;
             int height = suggested.Bottom - suggested.Top;
@@ -501,11 +438,7 @@ public sealed partial class MainWindow : Window
             args.Handled = true;
         });
 
-        // Ctrl+R — start scan. Awaited so engine-not-ready exceptions
-        // surface to the debug log instead of being swallowed by a
-        // fire-and-forget Task. The visible symptom of the swallow was
-        // "press Ctrl+R, nothing happens" when the engine had failed
-        // to load models.
+        // Awaited so engine-not-ready errors reach the log instead of vanishing in a fire-and-forget task.
         AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, async (_, args) =>
         {
             if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
@@ -533,8 +466,7 @@ public sealed partial class MainWindow : Window
         AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, args) =>
         {
             if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
-            // Ctrl+Z undoes the showing page's own newest change, never one
-            // made on another page (those stay in Recent changes).
+            // Undoes the showing page's own newest change; other pages' changes stay in Recent changes.
             if (Services.UndoStack.PageForTab(AppViewModel.Instance.ActiveTab.Id) is not { } page) return;
             if (!Services.UndoStack.Instance.CanUndoOn(page)) return;
             var label = await Services.UndoStack.Instance.UndoAsync(page);
@@ -545,11 +477,7 @@ public sealed partial class MainWindow : Window
             }
         });
 
-        // BUG-13: Ctrl+, opens Settings (mirror of macOS Cmd+,).
-        // VirtualKey.Decimal is the NUMPAD period — wrong key. The
-        // ASCII comma reports as VK_OEM_COMMA = 0xBC = 188. Register
-        // ONLY the OEM comma. (Previous version also registered Decimal,
-        // which made numpad-period jump to Settings — surprise.)
+        // Ctrl+, opens Settings. VirtualKey.Decimal is the numpad period; the comma key is VK_OEM_COMMA (0xBC).
         AddAccelerator((VirtualKey)0xBC, VirtualKeyModifiers.Control,
             (_, args) =>
             {
@@ -558,7 +486,6 @@ public sealed partial class MainWindow : Window
                 args.Handled = true;
             });
 
-        // Ctrl+K — focus the title-bar "Search or ask" field (macOS Cmd+K).
         AddAccelerator(VirtualKey.K, VirtualKeyModifiers.Control,
             (_, args) =>
             {
@@ -566,9 +493,7 @@ public sealed partial class MainWindow : Window
                 args.Handled = true;
             });
 
-        // Ctrl+F — focus search. The accelerator is reserved here so the
-        // LibraryView wiring is a one-liner (raise an event the LibraryView
-        // subscribes to).
+        // Ctrl+F raises SearchFocusRequested for the Library view.
         AddAccelerator(VirtualKey.F, VirtualKeyModifiers.Control,
             (_, args) =>
             {
@@ -578,9 +503,7 @@ public sealed partial class MainWindow : Window
                 args.Handled = true;
             });
 
-        // Ctrl+1..9 jump to pages in area order (DESIGN_V3 shell, macOS
-        // Cmd+1..9); Alt+1..9 stays as the Windows-native alias (per
-        // shared/docs/DECISIONS.md 2026-05-02 entry).
+        // Ctrl+1..9 jump to pages in sidebar order; Alt+1..9 is the Windows-native alias.
         for (int i = 0; i < SidebarTab.ShortcutOrder.Count && i < 9; i++)
         {
             int idx = i;
@@ -777,13 +700,10 @@ public sealed partial class MainWindow : Window
 
         try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
 
-        // flush the debounced AppSettings.Save so pending edits
-        // (e.g. the user toggled sidebar then immediately closed the
-        // window) land on disk before exit.
+        // Flush the debounced settings save before exit.
         try { AppViewModel.Instance.Settings.SaveImmediately(); } catch { /* swallow */ }
 
-        // flip the last-session breadcrumb to clean_exit=true so the
-        // NEXT launch knows this session ended without a native fast-fail.
+        // Lets the next launch tell this session ended without a native fast-fail.
         try { DebugLog.MarkCleanExit(); } catch { /* swallow */ }
     }
 
@@ -810,8 +730,7 @@ public sealed partial class MainWindow : Window
 
     private void ApplySidebarVisibility()
     {
-        // Guard the ctor-time call + any post-teardown PropertyChanged: the
-        // named elements are only live between InitializeComponent and Close.
+        // The named elements only exist between InitializeComponent and Close.
         if (SidebarColumn is null || SidebarHost is null)
         {
             return;
@@ -819,8 +738,7 @@ public sealed partial class MainWindow : Window
         var visible = AppViewModel.Instance.SidebarVisible;
         if (visible)
         {
-            // Restore MinWidth FIRST so the Width assignment isn't clamped by
-            // the collapsed (MinWidth=0) state.
+            // Restore MinWidth first or the Width assignment is clamped.
             SidebarColumn.MinWidth = SidebarWidth;
             SidebarColumn.Width = new GridLength(SidebarWidth);
             var wasHidden = SidebarHost.Visibility != Visibility.Visible;
@@ -833,24 +751,19 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            // MinWidth (from XAML) overrides Width=0 silently — clear MinWidth
-            // FIRST or the column stays wide and the toggle no-ops visually.
+            // Clear MinWidth first: it overrides Width=0 and the column would stay wide.
             SidebarColumn.MinWidth = 0;
             SidebarColumn.Width = new GridLength(0);
             SidebarHost.Visibility = Visibility.Collapsed;
         }
     }
 
-    // ─── Drag-drop folder ──────────────────────────────────────────────
-
     private void OnDragOver(object sender, DragEventArgs e)
     {
         if (e.DataView.Contains(StandardDataFormats.StorageItems))
         {
             e.AcceptedOperation = DataPackageOperation.Copy;
-            // Show the overlay. e.DragUIOverride is provided by the OS and CAN be
-            // null (some drag sources / shell states don't supply it); guard it so
-            // we don't NRE and lose the accepted-operation + overlay.
+            // DragUIOverride can be null for some drag sources.
             if (e.DragUIOverride is { } dragUi)
             {
                 dragUi.IsCaptionVisible = false;
@@ -868,10 +781,7 @@ public sealed partial class MainWindow : Window
 
     private async void OnDrop(object sender, DragEventArgs e)
     {
-        // async-void handler: an escaping exception (a denied GetStorageItemsAsync,
-        // a broken XamlRoot on ShowAsync) would kill the dispatcher and crash the
-        // window. Wrap the whole body + each dialog in its own catch so the worst
-        // case is a logged failure.
+        // Async void: an escaping exception would crash the dispatcher, so every failure is caught and logged.
         try
         {
             await OnDropCoreAsync(e);
@@ -894,11 +804,7 @@ public sealed partial class MainWindow : Window
         {
             if (item is Windows.Storage.StorageFolder folder)
             {
-                // Validate the dropped path before assigning. StorageFolder.Path
-                // is normally trustworthy, but a junction/symlink that points
-                // at a sensitive location (System32, ProgramData) shouldn't
-                // be silently scanned. Resolve to a canonical absolute path
-                // and reject if Directory.Exists fails after resolution.
+                // Reject non-directories after canonicalizing the path.
                 string? canonical;
                 try { canonical = System.IO.Path.GetFullPath(folder.Path); }
                 catch (Exception ex)
@@ -911,12 +817,7 @@ public sealed partial class MainWindow : Window
                     DebugLog.Warn($"Drag-drop: rejected non-directory or missing path '{PathRedactor.Redact(canonical)}'.");
                     return;
                 }
-                // reject reparse points (symlinks/junctions). A
-                // user-writable directory could contain a junction to
-                // System32 or another sensitive location; FileID must not
-                // silently scan into that. The legitimate "I want to scan
-                // my Documents folder" case never traverses a junction
-                // at the root, so this is a safe block.
+                // Junctions and symlinks could redirect a scan into a sensitive location, so they are refused.
                 try
                 {
                     var attrs = System.IO.File.GetAttributes(canonical);
