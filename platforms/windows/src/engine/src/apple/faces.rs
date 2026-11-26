@@ -1,7 +1,7 @@
 //! Faces on the Mac: Vision (landmarks, capture quality, human rectangles) and ImageIO/HEIF decode run in
-//! FileIDAppleKit; landmark match, one-buffer alignment, SFace and every decision stay here, landing in the Swift
-//! engine's face space (`macos-landmark-overlap-v3-orientation`) so People computed by either engine keep comparing.
-//! [`extract_file`] is `FaceClustering.extractOneFile`; [`VisionFaces`] is the Mac `TakeFaceAnalyzer`.
+//! FileIDAppleKit; landmark match, one-buffer alignment, SFace and every decision stay here. Embeddings land in the
+//! `macos-landmark-overlap-v3-orientation` face space so people stored by earlier Mac catalogs keep comparing.
+//! [`extract_file`] extracts one file's faces; [`VisionFaces`] scores faces for Best Takes.
 
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
@@ -264,7 +264,7 @@ pub struct Extracted {
     pub jpeg: Option<Vec<u8>>,
 }
 
-/// `FaceClustering.extractOneFile` without the file-identity checks (callers hold the catalog's size and time): the
+/// Extracts one file's faces without file-identity checks (callers hold the catalog's size and time): the
 /// aligned crop when one landmark set matches the box clearly, else the padded box crop.
 pub fn extract_file(path: &Path, boxes: &[String], sface: &MacSFace) -> (Vec<Option<Extracted>>, usize) {
     let crops = face_crops(path, boxes);
@@ -298,7 +298,7 @@ impl crate::commands::face_extract_mac::Extractor for MacSFace {
     }
 }
 
-/// Loaded once (as `ArcFaceService.shared`) and again when the installed weights change.
+/// Loaded once and again when the installed weights change.
 pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
     static SHARED: Mutex<Option<std::sync::Arc<MacSFace>>> = Mutex::new(None);
     let installed = crate::commands::face_refresh::current_model()?;
@@ -317,7 +317,7 @@ pub fn shared_sface() -> Option<Result<std::sync::Arc<MacSFace>>> {
     }))
 }
 
-/// Phase 1 of the Swift `runClustering`: embeds every pending face except those of people marked Unknown. Without
+/// Embeds every pending face except those of people marked Unknown. Without
 /// weights nothing runs.
 pub fn extract_before_clustering(database: &std::sync::Arc<Mutex<rusqlite::Connection>>, progress: crate::commands::face_extract_mac::Progress) {
     let processing = crate::commands::face_refresh::processing();
@@ -485,13 +485,13 @@ fn mesh_detection(mesh: &MeshJson) -> crate::models::face_geometry::Detection {
     }
 }
 
-/// The Mac `TakeFaceAnalyzer`: eye openness from Face Mesh when installed, else from Vision's eye contours.
+/// Eye openness from Face Mesh when installed, else from Vision's eye contours.
 pub struct VisionFaces {
     mesh: Option<crate::models::face_mesh::FaceMesh>,
 }
 
 impl VisionFaces {
-    /// One per take worker (at most four, as `CatalogTakeAuto`).
+    /// One per take worker, at most four.
     pub fn load_workers() -> Vec<Self> {
         let workers = std::thread::available_parallelism().map_or(1, usize::from).clamp(1, 4);
         (0..workers).map(|_| Self::with_mesh(crate::models::face_mesh::FaceMesh::load_cpu)).collect()
@@ -632,7 +632,7 @@ pub fn take_image_signals(
     let (w, h) = (fitted.width, fitted.height);
     let luma = Luma::from_rgb(&fitted.rgb, w as usize, h as usize);
     let long_side = fitted.source_long_side;
-    // As Swift's `TakeDetailImage`: decoded only when Face Mesh reads it, or as the tile source.
+    // Decoded only when Face Mesh reads it, or as the tile source.
     let large = long_side > take_scoring::ANALYSIS_LONG_SIDE;
     let detail_decode = || take_decode(path, TakeDecode::Detail, take_scoring::TILE_LONG_SIDE);
     let mut view = large.then(|| Detail::deferred(move || detail_decode().map(|d| (d.rgb, d.width, d.height))));

@@ -271,7 +271,7 @@ fn frame_worker(args: &[OsString]) -> i32 {
     0
 }
 
-/// `<source> <interval> <maxPixelSize> <directory>`, the Swift engine's contract.
+/// `<source> <interval> <maxPixelSize> <directory>`, the frame worker's argument order.
 fn pool_worker(args: &[OsString]) -> i32 {
     let [source, interval, max_side, directory] = args else { return EXIT_INVALID };
     let (Some(interval), Some(max_side)) = (

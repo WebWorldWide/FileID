@@ -1,5 +1,5 @@
-//! MLX vision-language models for the Mac-hosted engine. The sessions are the Swift `DeepAnalyze` code in
-//! FileIDAppleKit, so prompts, decoding, prompt caches and the 5-minute idle park are Swift's own; this module picks
+//! MLX vision-language models for the Mac-hosted engine. The sessions run in FileIDAppleKit, which
+//! owns prompts, decoding, prompt caches and the 5-minute idle park; this module picks
 //! the model folder, checks the licence, holds the weights' memory in [`ResourceScheduler`] while resident, and
 //! serializes users through [`MlxLease`].
 

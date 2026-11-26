@@ -54,7 +54,7 @@ pub fn run_hosted() -> ! {
     hard_exit(code)
 }
 
-/// Skips atexit handlers and static destructors, as the Swift engine does: MLX's destructors crash during normal
+/// Skips atexit handlers and static destructors: MLX's destructors crash during normal
 /// teardown. The catalog is already checkpointed by `server::run`.
 pub fn hard_exit(code: i32) -> ! {
     // SAFETY: no arguments; idempotent in the adapter.
