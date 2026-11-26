@@ -105,7 +105,7 @@ final class ChatActionRunner {
             guard let progress = engine.lastProgress, [.discovering, .tagging, .postScan].contains(progress.phase) else { return fallback }
             if progress.phase == .discovering { return "Finding files · \(progress.discovered.formatted()) so far" }
             if progress.phase == .postScan {
-                guard let work = progress.postScanWork(baseline: engine.postScanBaseline) else { return "Finishing up" }
+                guard let work = progress.postScanWork else { return "Finishing up" }
                 return "Adding tags · " + PipelineBlock.postScanDetail(work, etaSeconds: progress.etaSeconds)
             }
             return "Scanning · \(progress.processed.formatted()) of \(Plural.noun(progress.total, "file", "files"))"

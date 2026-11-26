@@ -95,9 +95,7 @@ struct PipelineBlock: View {
             case .discovering:
                 return Status(title: "Counting files", fraction: 0, tone: .gold, color: Theme.gold, sub: "\(Plural.noun(p.discovered, "file", "files")) found so far", indeterminate: true)
             case .postScan:
-                // After the files are read, FileID's helper adds detailed tags and reads text: the
-                // total then runs past the files found by the number of files left to do.
-                if let work = p.postScanWork(baseline: engine.postScanBaseline) {
+                if let work = p.postScanWork {
                     return Status(title: "Tagging photos", fraction: work.fraction, tone: .gold, color: Theme.gold, sub: Self.postScanDetail(work, etaSeconds: p.etaSeconds))
                 }
                 return Status(title: "Finishing up", fraction: 0, tone: .gold, color: Theme.gold, sub: "Saving what FileID found", indeterminate: true)
@@ -118,7 +116,7 @@ struct PipelineBlock: View {
         }
         if let p = progress, p.phase == .cancelled || p.phase == .failed,
            let baseline = engine.postScanBaseline, baseline.sessionID == p.sessionID,
-           let work = p.postScanWork(baseline: baseline), work.left > 0 {
+           let work = p.postScanWork, work.left > 0 {
             return Status(title: p.phase == .cancelled ? "Scan stopped" : Self.unfinishedScanTitle(filesRead: baseline.filesRead),
                           fraction: work.fraction, tone: .paused,
                           color: p.phase == .cancelled ? Theme.text3 : Theme.warning,
