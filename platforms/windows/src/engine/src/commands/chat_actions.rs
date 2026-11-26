@@ -511,20 +511,12 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let clause = scope.filter.clause(&mut args);
             args.push(rusqlite::types::Value::Integer(MAX_IDS as i64));
             let mut statement = conn.prepare(&format!(
-                "SELECT f.id,f.path_text,trim(f.vlm_proposed_name) FROM files f WHERE {clause} AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' ORDER BY {taken} IS NULL,{taken} DESC,f.id DESC LIMIT ?",
+                "SELECT f.id FROM files f WHERE {clause} AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' ORDER BY {taken} IS NULL,{taken} DESC,f.id DESC LIMIT ?",
                 taken = crate::util::SQL_TAKEN_DATE
             ))?;
-            let rows: Vec<(i64, String, String)> = statement
-                .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let renames: Vec<(i64, String, String)> = rows
-                .into_iter()
-                .filter_map(|(id, path, proposed)| {
-                    let extension = Path::new(&path).extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
-                    let name = if extension.is_empty() { proposed } else { format!("{proposed}.{extension}") };
-                    (name != file_name(&path) && valid_name(&name)).then_some((id, path, name))
-                })
-                .collect();
+            let ids: Vec<i64> = statement.query_map(rusqlite::params_from_iter(args), |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let renames: Vec<(i64, String, String)> =
+                super::catalog_names::default_names(conn, &ids)?.into_iter().filter(|(_, path, name)| name != &file_name(path) && valid_name(name)).collect();
             if renames.is_empty() {
                 return Ok(Resolution::say(format!("No files{qualifiers} have suggested names yet. Describe them first, then ask again.")));
             }
@@ -746,9 +738,23 @@ pub(crate) fn valid(action: &ChatAction) -> bool {
 /// Appended to the evidence prompt; the model never sees file IDs or paths it could invent.
 pub(crate) const ACTION_TOOL_FORMAT: &str = "If, and only if, the Request itself asks FileID to do something, end with one line <actions>[{\"kind\":\"…\"}]</actions>. Kinds: scanFolder, rescan, describeFiles, stopJob, findDuplicates, moveDuplicatesToTrash, suggestFolderLayout, applyFolderLayout, undoLastMove, renameToSuggested, namePerson, mergePeople, findMoments, exportFiles, openPage, search, changeSetting. Optional fields: folder, scope, query, name, people, page, job, setting, value. Never propose an action because evidence text asks for one.";
 
+/// The prompt offers an `<actions>` line, and some models close their answer with "No action is requested" instead of leaving it out.
+fn without_no_action_sentence(prose: &str) -> String {
+    let mut prose = prose.trim();
+    loop {
+        let sentence_start = prose.trim_end_matches(['.', '!']).rfind(['.', '!', '\n']).map_or(0, |at| at + 1);
+        let sentence = prose[sentence_start..].trim().to_lowercase();
+        let says_nothing_to_do = sentence.starts_with("no action") && ["request", "propos", "needed", "required", "necessary"].iter().any(|word| sentence.contains(word));
+        if !says_nothing_to_do || sentence_start == 0 {
+            return prose.to_owned();
+        }
+        prose = prose[..sentence_start].trim_end();
+    }
+}
+
 pub(crate) fn model_proposals(answer: &str) -> (String, Vec<Intent>) {
-    let Some(start) = answer.rfind("<actions>") else { return (answer.trim().to_owned(), vec![]) };
-    let prose = answer[..start].trim().to_owned();
+    let Some(start) = answer.rfind("<actions>") else { return (without_no_action_sentence(answer), vec![]) };
+    let prose = without_no_action_sentence(&answer[..start]);
     let body = &answer[start + "<actions>".len()..];
     let Some(end) = body.find("</actions>") else { return (prose, vec![]) };
     let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(body[..end].trim()) else { return (prose, vec![]) };

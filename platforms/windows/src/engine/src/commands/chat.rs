@@ -1,6 +1,6 @@
 use super::chat_actions::{self, Context, Resolution};
 use super::chat_facts::{self, Filter};
-use super::chat_intent::{asked_inside, off_topic, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
+use super::chat_intent::{asked_inside, asks_why, files_named, off_topic, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
 use super::chat_search::SearchPlan;
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
@@ -1005,7 +1005,7 @@ fn plan_for(
     if previous.is_some()
         && bare
         && question.structured()
-        && !["overview", "folders", "formats"].contains(&question.measure.as_str())
+        && !["overview", "folders", "folder_count", "formats"].contains(&question.measure.as_str())
         && (!question.duplicates || points_back)
         && (question.formats.is_none() || points_back)
         && !words.iter().any(|word| library_wide.contains(&word.as_str()))
@@ -1156,10 +1156,13 @@ fn prepare_turn(
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if super::chat_intent::unreadable_ask(&text) {
-        let (message, hits) = chat_facts::unreadable_answer(conn, root.as_ref())?;
+        let (message, hits) = if asks_why(&text) { chat_facts::unreadable_reasons(conn, root.as_ref())? } else { chat_facts::unreadable_answer(conn, root.as_ref())? };
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if let Some(kinds) = place_ask(&text) {
+        if let Some((message, hits)) = chat_facts::file_location_answer(conn, &text, root.as_ref())? {
+            return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
+        }
         let message = chat_facts::places_answer(conn, &kinds, root.as_ref())?;
         return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false, counts_files: false });
     }
@@ -1186,7 +1189,14 @@ fn prepare_turn(
     let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
     let camera = chat_facts::camera_asked_about(conn, &text)?;
     let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
-    let (mut question, plan, continues) = plan_for(planned, previous.as_ref(), people, events);
+    let (mut question, mut plan, continues) = plan_for(planned, previous.as_ref(), people, events);
+    if question.folder.is_none()
+        && let Some(name) = files_named(&text)
+        && let Some(folder) = chat_facts::existing_folder(conn, &name, root.as_ref())?
+    {
+        question.folder = Some(folder);
+        plan.query.clear();
+    }
     question.folder = chat_facts::widened_folder(conn, question.folder.take(), root.as_ref())?;
     let camera = camera.map(|ask| ask.pick).or_else(|| {
         previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())
@@ -1549,7 +1559,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ask(&mut conn, "How many photos have been described?").message, "1 of 2 photos have a description. 1 still need one; ask me to describe them.");
-        assert_eq!(ask(&mut conn, "What would you rename DSC01698 to?").message, "Describe Files suggested “Dog on tiles” for DSC01698.JPG. Say “Rename DSC01698 to the suggested name” to get a card to confirm.");
+        assert_eq!(ask(&mut conn, "What would you rename DSC01698 to?").message, "Describe Files suggested “dog-tiles.JPG” for DSC01698.JPG. Say “Rename DSC01698 to the suggested name” to get a card to confirm.");
         assert!(ask(&mut conn, "What would you rename DSC01699 to?").message.starts_with("I have no suggested name"));
         assert!(ask(&mut conn, "Who appears most often?").message.starts_with("People in your library: Kyle (2 files)"));
         let summary = ask(&mut conn, "Summarize what my videos show");

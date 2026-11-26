@@ -44,15 +44,37 @@ pub(crate) fn resolve(conn: &Connection, text: &str, history: &[String], context
     if matches!(verb, Some("merge" | "combine" | "join")) && about_people {
         return Ok(Some(Resolution::say("Tell me which two people to merge, like “Merge Anna and Anne”, or merge them in People.")));
     }
-    let video_length = words.iter().any(|word| ["longest", "shortest", "duration", "length"].contains(&word.as_str()))
-        && words.iter().any(|word| ["video", "videos", "clip", "clips", "movie", "movies"].contains(&word.as_str()));
-    if video_length {
-        return Ok(Some(Resolution::say("FileID doesn't list videos by length yet. Ask for the largest, smallest, newest or oldest videos instead.")));
+    if asks_about_video_length(&words) {
+        return Ok(Some(Resolution::say("FileID doesn't know how long videos run, so it can't filter or list them by length. Ask for the largest, smallest, newest or oldest videos instead.")));
     }
     if let Some(answer) = rename_question(conn, text, &words, context)? {
         return Ok(Some(answer));
     }
-    described_count(conn, &words, context)
+    if let Some(answer) = described_count(conn, &words, context)? {
+        return Ok(Some(answer));
+    }
+    Ok(asks_beyond_the_catalog(text, &words).then(|| Resolution::say(CANNOT_ANSWER)))
+}
+
+const CANNOT_ANSWER: &str = "I can't answer that from the catalog. I can count and list files by type, folder, date, size, camera, people or description status, \
+    name the biggest folders, give a library overview, find duplicates, and find photos and videos by what they show. Try “How many photos are from 2023?”.";
+
+/// Questions about names, averages or reasons the catalog holds no data for; searching their words would only match files by accident.
+fn asks_beyond_the_catalog(text: &str, words: &[String]) -> bool {
+    let compares_names = words.windows(2).any(|pair| ["same", "similar"].contains(&pair[0].as_str()) && ["name", "names", "filename", "filenames"].contains(&pair[1].as_str()));
+    let aggregates = words.iter().any(|word| ["average", "median", "compare", "versus", "vs"].contains(&word.as_str()));
+    let explains = words.first().is_some_and(|word| word == "why") && !super::chat_intent::unreadable_ask(text);
+    let counts_folders = words.windows(2).any(|pair| pair == ["how", "many"]) && words.iter().any(|word| ["folders", "directories"].contains(&word.as_str()))
+        && !words.iter().all(|word| super::chat_intent::PLAIN_FOLDER_COUNT_WORDS.contains(&word.as_str()));
+    compares_names || aggregates || explains || counts_folders
+}
+
+fn asks_about_video_length(words: &[String]) -> bool {
+    let named = |any: &[&str]| words.iter().any(|word| any.contains(&word.as_str()));
+    let about_videos = named(&["video", "videos", "clip", "clips", "movie", "movies"]);
+    let by_length = named(&["longest", "shortest", "duration", "length"])
+        || (named(&["longer", "shorter", "long"]) && named(&["second", "seconds", "sec", "secs", "minute", "minutes", "min", "mins", "hour", "hours"]));
+    about_videos && by_length
 }
 
 fn asks_how_many(words: &[String]) -> bool {
@@ -61,7 +83,7 @@ fn asks_how_many(words: &[String]) -> bool {
 
 /// "How many photos have been described?": counts files that have a description against those that can have one.
 fn described_count(conn: &Connection, words: &[String], context: &Context<'_>) -> Result<Option<Resolution>> {
-    let describes = words.iter().any(|word| ["described", "analyzed", "captioned"].contains(&word.as_str()));
+    let describes = words.iter().any(|word| ["described", "analyzed", "captioned", "description", "descriptions", "caption", "captions"].contains(&word.as_str()));
     let negated = words.iter().any(|word| ["not", "no", "without", "missing", "havent", "hasnt", "need", "needs", "lacking", "undescribed", "unanalyzed"].contains(&word.as_str()));
     if !asks_how_many(words) || !describes || negated {
         return Ok(None);
@@ -104,19 +126,21 @@ fn rename_question(conn: &Connection, text: &str, words: &[String], context: &Co
     let stems: Vec<&str> = text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')).filter(|word| word.chars().any(|c| c.is_ascii_digit())).collect();
     for stem in stems {
         let mut statement = conn.prepare(&format!(
-            "SELECT f.path_text,trim(f.vlm_proposed_name) FROM files f WHERE lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {} \
+            "SELECT f.id,f.path_text FROM files f WHERE lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {} \
              AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' LIMIT 20",
             super::roots::clause("f.path_text", "?2")
         ))?;
         let pattern = format!("%{}.%", stem.to_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-        let found: Vec<(String, String)> = statement
+        let found: Vec<(i64, String)> = statement
             .query_map(params![pattern, context.root.map(super::roots::RootScope::param)], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let named = found.into_iter().find_map(|(path, proposed)| {
-            let current = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
-            current.rsplit_once('.').is_some_and(|(file_stem, _)| file_stem.eq_ignore_ascii_case(stem)).then_some((current, proposed))
-        });
-        if let Some((current, proposed)) = named {
+        let ids: Vec<i64> = found
+            .iter()
+            .filter(|(_, path)| path.rsplit(['/', '\\']).next().and_then(|name| name.rsplit_once('.')).is_some_and(|(file_stem, _)| file_stem.eq_ignore_ascii_case(stem)))
+            .map(|(id, _)| *id)
+            .collect();
+        if let Some((_, path, proposed)) = super::catalog_names::default_names(conn, &ids)?.into_iter().next() {
+            let current = path.rsplit(['/', '\\']).next().unwrap_or(&path);
             return Ok(Some(Resolution::say(format!("Describe Files suggested “{proposed}” for {current}. Say “Rename {stem} to the suggested name” to get a card to confirm."))));
         }
     }

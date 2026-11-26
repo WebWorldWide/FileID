@@ -44,6 +44,26 @@ pub(crate) fn propose(conn: &Connection, request: &CatalogRequest) -> Result<Vec
     if request.naming.as_ref().is_some_and(|naming| naming.learn) {
         options.learned = learned(conn)?;
     }
+    propose_ids(conn, options, ids)
+}
+
+/// New names with their extensions for files Chat renames, in the style Library offers before the person changes its
+/// settings, so both name files alike. Files whose name stays are left out.
+pub(crate) fn default_names(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, String, String)>> {
+    let options = Options { style: Style::Short, max_length: 40, people: true, event: true, date: false, learned: learned(conn)? };
+    let mut seen = HashSet::new();
+    let mut names = Vec::new();
+    for chunk in ids.chunks(MAX_FILES) {
+        for hit in propose_ids(conn, options.clone(), chunk)? {
+            if !hit.text.is_empty() && seen.insert(hit.file_id) {
+                names.push((hit.file_id, hit.path, hit.text));
+            }
+        }
+    }
+    Ok(names)
+}
+
+pub(crate) fn propose_ids(conn: &Connection, options: Options, ids: &[i64]) -> Result<Vec<CatalogHit>> {
     let mut run = Run {
         conn,
         options,

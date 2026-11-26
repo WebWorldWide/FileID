@@ -52,6 +52,8 @@ pub(crate) mod chat_commands;
 pub(crate) mod chat_intent;
 pub(crate) mod chat_facts;
 mod chat_actions;
+#[cfg(test)]
+mod chat_answers_tests;
 mod chat_selection;
 pub mod tools;
 pub mod models;
