@@ -302,9 +302,11 @@ pub enum SkipReason {
     Unsupported,
 }
 
-/// How many files and folders a walk left out, by reason.
+/// What a walk met and left out. `seen` counts files only; the reasons count files, and `folders` counts the whole folders pruned, so seen minus the file reasons is what the library holds.
 #[derive(Debug, Default)]
 pub struct SkippedCounts {
+    seen: AtomicU64,
+    folders: AtomicU64,
     hidden: AtomicU64,
     system: AtomicU64,
     empty: AtomicU64,
@@ -312,6 +314,20 @@ pub struct SkippedCounts {
 }
 
 impl SkippedCounts {
+    fn note_seen(&self) {
+        self.seen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_folder(&self) {
+        self.folders.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A file left out for `reason`, which is also a file the walk met.
+    fn note_left_out(&self, reason: SkipReason) {
+        self.note_seen();
+        self.note(reason);
+    }
+
     fn note(&self, reason: SkipReason) {
         let counter = match reason {
             SkipReason::Hidden => &self.hidden,
@@ -322,18 +338,25 @@ impl SkippedCounts {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The summary stored with the scan session: a JSON object of the reasons that occurred, `None` when nothing was left out. `cloud_only` counts files not downloaded from cloud storage.
+    /// The summary stored with the scan session: a JSON object with the files `seen`, how many the library holds (`catalogued`), the `folders` pruned and each file reason that occurred. `None` when the walk met nothing. `cloud_only` counts files not downloaded from cloud storage.
     pub fn summary_json(&self, cloud_only: u64) -> Option<String> {
-        let counts = [
+        let reasons = [
             ("hidden", self.hidden.load(Ordering::Relaxed)),
             ("system", self.system.load(Ordering::Relaxed)),
             ("empty", self.empty.load(Ordering::Relaxed)),
             ("unsupported", self.unsupported.load(Ordering::Relaxed)),
             ("cloudOnly", cloud_only),
         ];
+        let seen = self.seen.load(Ordering::Relaxed);
+        let folders = self.folders.load(Ordering::Relaxed);
+        if seen == 0 && folders == 0 {
+            return None;
+        }
+        let left_out: u64 = reasons.iter().map(|(_, count)| count).sum();
+        let counts = [("seen", seen), ("catalogued", seen.saturating_sub(left_out)), ("folders", folders)].into_iter().chain(reasons);
         let present: serde_json::Map<String, serde_json::Value> =
-            counts.into_iter().filter(|(_, count)| *count > 0).map(|(reason, count)| (reason.to_string(), count.into())).collect();
-        (!present.is_empty()).then(|| serde_json::Value::Object(present).to_string())
+            counts.filter(|(_, count)| *count > 0).map(|(name, count)| (name.to_string(), count.into())).collect();
+        Some(serde_json::Value::Object(present).to_string())
     }
 }
 
@@ -532,7 +555,7 @@ impl Discovery {
                         let name = name.to_string_lossy();
                         if file_type.is_dir() {
                             if is_noise_directory(&name) {
-                                context_for_dir.skipped.note(directory_skip_reason(&name));
+                                context_for_dir.skipped.note_folder();
                                 return false;
                             }
                             // User exclusions: normalized equality on the child's full path. dir_path carries the walk root's "\\?\" prefix when present; normalize strips it so verbatim and plain roots match the same stored exclusion.
@@ -544,7 +567,7 @@ impl Discovery {
                                 }
                             }
                             if is_ambiguous_build_directory(&name) && has_build_marker {
-                                context_for_dir.skipped.note(SkipReason::System);
+                                context_for_dir.skipped.note_folder();
                                 return false;
                             }
                             true
@@ -552,10 +575,10 @@ impl Discovery {
                             if !is_noise_file(&name) {
                                 return true;
                             }
-                            context_for_dir.skipped.note(if is_hidden_name(&name) { SkipReason::Hidden } else { SkipReason::System });
+                            context_for_dir.skipped.note_left_out(if is_hidden_name(&name) { SkipReason::Hidden } else { SkipReason::System });
                             false
                         } else {
-                            context_for_dir.skipped.note(SkipReason::Unsupported);
+                            context_for_dir.skipped.note_left_out(SkipReason::Unsupported);
                             false
                         }
                     });
@@ -709,6 +732,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
             };
         }
     };
+    context.skipped.note_seen();
     let size = metadata.len();
     // Compute the reconciliation hash BEFORE any eligibility early-return: "seen" means present under the root, not pipeline-eligible, or a clean-walk reconciliation would soft-hide the catalog row of a zero-byte or unsupported file that still exists.
     let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
@@ -889,10 +913,6 @@ fn path_extension_lower(path: &std::path::Path) -> Option<String> {
 /// True when `to_string_lossy` would mangle this path: the lossy text is the only identity the DB/app layers see, so such a file could never be targeted again.
 pub fn is_non_unicode_path(path: &std::path::Path) -> bool {
     path.to_str().is_none()
-}
-
-fn directory_skip_reason(name: &str) -> SkipReason {
-    if is_hidden_name(name) { SkipReason::Hidden } else { SkipReason::System }
 }
 
 /// A leading dot hides a file or a folder alike; the same rule decides both.
@@ -1463,7 +1483,10 @@ mod tests {
         });
         assert_eq!(kept.len(), 1, "{kept:?}");
         let summary: serde_json::Value = serde_json::from_str(&summary.unwrap()).unwrap();
-        assert_eq!(summary, serde_json::json!({"hidden": 2, "system": 2, "empty": 1, "unsupported": 1}));
+        assert_eq!(
+            summary,
+            serde_json::json!({"seen": 5, "catalogued": 1, "folders": 2, "hidden": 1, "system": 1, "empty": 1, "unsupported": 1})
+        );
     }
 
     #[test]

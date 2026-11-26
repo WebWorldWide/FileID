@@ -678,7 +678,10 @@ mod tests {
         let recorded: Option<String> =
             db.lock().query_row("SELECT skipped FROM scan_sessions ORDER BY started_at DESC LIMIT 1", [], |row| row.get(0)).unwrap();
         let recorded: serde_json::Value = serde_json::from_str(&recorded.expect("the scan recorded its skips")).unwrap();
-        assert_eq!(recorded, serde_json::json!({"hidden": 2, "system": 1, "empty": 1, "unsupported": 1}));
+        assert_eq!(
+            recorded,
+            serde_json::json!({"seen": 5, "catalogued": 1, "folders": 1, "hidden": 1, "system": 1, "empty": 1, "unsupported": 1})
+        );
     }
 
     #[cfg(unix)]
