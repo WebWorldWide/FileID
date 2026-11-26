@@ -351,6 +351,7 @@ pub(crate) async fn handle_start_scan(
         available_mb: 0,
         post_scan_owed: None,
         post_scan_done: None,
+        post_scan_step: None,
     }))))
     .await;
 

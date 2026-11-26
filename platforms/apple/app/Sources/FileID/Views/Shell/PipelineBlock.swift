@@ -72,6 +72,11 @@ struct PipelineBlock: View {
         return "\(work.done.formatted()) of \(Plural.noun(work.owed, "file", "files"))" + left
     }
 
+    nonisolated static func captureDateCheckDetail(_ work: PostScanWork, etaSeconds: Double?) -> String {
+        let left = etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
+        return "\(work.done.formatted()) of \(Plural.noun(work.owed, "photo or video", "photos and videos")) · one time for this folder" + left
+    }
+
     nonisolated static func stoppedDuringPostScanDetail(filesRead: Int, left: Int) -> String {
         "\(Plural.noun(filesRead, "file", "files")) read and ready to browse. \(Plural.noun(left, "file", "files")) still need tags. Press Scan again to finish; finished files are skipped."
     }
@@ -97,6 +102,9 @@ struct PipelineBlock: View {
             case .discovering:
                 return Status(title: "Counting files", fraction: 0, tone: .gold, color: Theme.gold, sub: "\(Plural.noun(p.discovered, "file", "files")) found so far", indeterminate: true)
             case .postScan:
+                if let work = p.captureDateCheck {
+                    return Status(title: "Checking capture dates", fraction: work.fraction, tone: .gold, color: Theme.gold, sub: Self.captureDateCheckDetail(work, etaSeconds: p.etaSeconds))
+                }
                 if let work = p.postScanWork {
                     return Status(title: "Tagging photos", fraction: work.fraction, tone: .gold, color: Theme.gold, sub: Self.postScanDetail(work, etaSeconds: p.etaSeconds))
                 }

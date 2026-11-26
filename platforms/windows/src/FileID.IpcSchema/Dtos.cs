@@ -210,7 +210,8 @@ public sealed record ScanProgress(
     [property: JsonPropertyName("residentMB")] ulong ResidentMb,
     [property: JsonPropertyName("availableMB")] ulong AvailableMb,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? PostScanOwed = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? PostScanDone = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? PostScanDone = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PostScanStep = null);
 
 public sealed record FileDoneEvent(
     string Path,

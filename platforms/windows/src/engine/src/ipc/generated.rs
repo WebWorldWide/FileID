@@ -1342,6 +1342,12 @@ pub struct ScanProgress {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_scan_done: Option<u64>,
+    /// Schema 1.31.0. postScan snapshots only: left out while the pass adds tags and reads text;
+    /// captureDates while it checks the capture dates of photos and videos in a catalog an older
+    /// version wrote, once per folder. postScanOwed and postScanDone then count those photos and
+    /// videos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scan_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

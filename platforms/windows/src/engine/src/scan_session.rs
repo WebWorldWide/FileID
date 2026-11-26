@@ -519,6 +519,7 @@ impl ScanSession {
                     available_mb: 0,
                     post_scan_owed: None,
                     post_scan_done: None,
+                    post_scan_step: None,
                 };
                 lift_for_tick.apply(&mut progress);
                 let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
@@ -829,6 +830,7 @@ impl ScanSession {
                             processed: total + self.carried.0,
                             failed: failed + self.carried.1,
                             lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
+                            step: Some(CAPTURE_DATES_STEP),
                             state: Mutex::new((0, 0, Instant::now())),
                             paused: {
                                 let coordinator = self.coordinator.clone();
@@ -896,6 +898,7 @@ impl ScanSession {
                             processed: total + self.carried.0,
                             failed: failed + self.carried.1,
                             lift: ProgressLift { floor: self.progress_floor, ..ProgressLift::default() },
+                            step: None,
                             state: Mutex::new((0, 0, Instant::now())),
                             paused: {
                                 let coordinator = self.coordinator.clone();
@@ -1135,10 +1138,14 @@ struct CatchUpProgress {
     processed: u64,
     failed: u64,
     lift: ProgressLift,
+    /// The `postScanStep` the snapshots carry; `None` for the pass that adds tags and reads text.
+    step: Option<&'static str>,
     /// (owed, done, started); `started` moves forward while paused, so a pause does not drag the rate down.
     state: Mutex<(u64, u64, Instant)>,
     paused: Arc<dyn Fn() -> bool + Send + Sync>,
 }
+
+const CAPTURE_DATES_STEP: &str = "captureDates";
 
 /// How often the post-scan phase repeats its progress while a read is slow, so the app never sees a silent minute.
 const CATCH_UP_HEARTBEAT: Duration = Duration::from_secs(1);
@@ -1195,6 +1202,7 @@ impl CatchUpProgress {
             available_mb: 0,
             post_scan_owed: Some(owed),
             post_scan_done: Some(done.min(owed)),
+            post_scan_step: self.step.map(str::to_owned),
         };
         self.lift.apply(&mut progress);
         progress
@@ -1216,6 +1224,7 @@ fn terminal_progress(session_id: &str, phase: ScanPhase, total: u64, discovered:
         available_mb: 0,
         post_scan_owed: None,
         post_scan_done: None,
+        post_scan_step: None,
     }
 }
 
@@ -2024,6 +2033,7 @@ fn maybe_emit_progress(
         available_mb: 0,
         post_scan_owed: None,
         post_scan_done: None,
+        post_scan_step: None,
     };
     lift.apply(&mut progress);
     // try_send: progress events are throttled to 10 Hz / 1k files, so a drop is rare and the next emit (within 100 ms) resyncs the UI.
@@ -2257,7 +2267,29 @@ mod tests {
             available_mb: 0,
             post_scan_owed: None,
             post_scan_done: None,
+            post_scan_step: None,
         }
+    }
+
+    #[test]
+    fn the_capture_date_check_names_its_step_and_the_tag_pass_does_not() {
+        let (sink, _events) = Sink::channel_for_test(4);
+        let progress = |step| CatchUpProgress {
+            sink: sink.clone(),
+            session_id: "s".into(),
+            discovered: 10,
+            processed: 10,
+            failed: 0,
+            lift: ProgressLift::default(),
+            step,
+            state: Mutex::new((8, 2, Instant::now())),
+            paused: Arc::new(|| false),
+        };
+        let checking = progress(Some(CAPTURE_DATES_STEP));
+        let snapshot = checking.snapshot(&checking.state.lock());
+        assert_eq!((snapshot.post_scan_step.as_deref(), snapshot.post_scan_owed, snapshot.post_scan_done), (Some("captureDates"), Some(8), Some(2)));
+        let tagging = progress(None);
+        assert_eq!(tagging.snapshot(&tagging.state.lock()).post_scan_step, None);
     }
 
     #[test]
@@ -3195,6 +3227,7 @@ mod tests {
             processed: 100,
             failed: 2,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         });
@@ -3232,6 +3265,7 @@ mod tests {
             processed: 10,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         });
@@ -3275,6 +3309,7 @@ mod tests {
             processed: 130_108,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         };
@@ -3310,6 +3345,7 @@ mod tests {
             processed: 10,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((100, 50, Instant::now())),
             paused: Arc::new(move || flag.load(std::sync::atomic::Ordering::Relaxed)),
         });
@@ -3331,6 +3367,7 @@ mod tests {
             processed: 480,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         };
@@ -3353,6 +3390,7 @@ mod tests {
             processed: 10,
             failed: 0,
             lift: ProgressLift::default(),
+            step: None,
             state: Mutex::new((0, 0, Instant::now())),
             paused: Arc::new(|| false),
         });
