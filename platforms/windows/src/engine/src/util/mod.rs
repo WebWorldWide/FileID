@@ -2,7 +2,7 @@ pub mod content_hash;
 pub(crate) mod face_crop_stamp;
 pub(crate) mod jpeg_complete;
 pub(crate) mod video_container_dates;
-#[cfg(any(test, all(not(windows), not(target_os = "linux"))))]
+#[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) mod video_cover_frame;
 pub(crate) mod video_creation_date;
 pub mod display;

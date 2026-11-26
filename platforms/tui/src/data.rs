@@ -884,7 +884,13 @@ mod tests {
         let names: Vec<&str> = groups[0]
             .paths
             .iter()
-            .map(|path| path.rsplit('/').next().unwrap())
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            })
             .collect();
         assert_eq!(names, ["oldest.bin", "newer.bin", "copy-of-it.bin"]);
         let _ = std::fs::remove_dir_all(dir);
