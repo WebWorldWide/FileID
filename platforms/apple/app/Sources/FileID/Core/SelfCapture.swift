@@ -222,7 +222,11 @@ enum SelfShot {
                 if view.scrollToBottom || view.scrollOffset != nil {
                     scrollContent(to: view.scrollOffset)
                     try? await Task.sleep(for: .seconds(0.6))
-                    await waitForLibraryThumbnails()
+                    if view.page == MainWindow.Tab.library.rawValue {
+                        await waitForLibraryThumbnails()
+                    } else {
+                        try? await Task.sleep(for: .seconds(plan.settle))
+                    }
                 }
                 if let name = view.preview {
                     NotificationCenter.default.post(name: .selfShotOpenPreview, object: name)
