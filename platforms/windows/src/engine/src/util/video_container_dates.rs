@@ -1,4 +1,3 @@
-use chrono::TimeZone;
 use std::io::{Read, Seek, SeekFrom};
 
 const ASF_HEADER_GUID: [u8; 16] = [0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C];
@@ -178,7 +177,7 @@ fn date_in<R: Read + Seek>(reader: &mut R, start: u64, end: u64, wanted: u32) ->
 
 /// The EBML element starting at `at` inside a region ending at `limit`: its ID, where its payload starts, where it
 /// ends. An unknown size (all value bits set) runs to the end of the region.
-fn element_at<R: Read + Seek>(reader: &mut R, at: u64, limit: u64) -> Option<(u32, u64, u64)> {
+pub(super) fn element_at<R: Read + Seek>(reader: &mut R, at: u64, limit: u64) -> Option<(u32, u64, u64)> {
     reader.seek(SeekFrom::Start(at)).ok()?;
     let mut first = [0u8; 1];
     reader.read_exact(&mut first).ok()?;
@@ -213,6 +212,7 @@ fn element_at<R: Read + Seek>(reader: &mut R, at: u64, limit: u64) -> Option<(u3
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::io::Cursor;
 
     pub(crate) fn asf_with_creation(unix: u64) -> Vec<u8> {
@@ -230,7 +230,7 @@ pub(crate) mod tests {
         bytes
     }
 
-    fn riff_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn riff_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut out = kind.to_vec();
         out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         out.extend_from_slice(payload);
@@ -240,17 +240,17 @@ pub(crate) mod tests {
         out
     }
 
-    fn avi_with(chunks: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn avi_with(chunks: Vec<u8>) -> Vec<u8> {
         let movi = riff_chunk(b"LIST", &[b"movi".as_slice(), &[0; 64]].concat());
         let body = [b"AVI ".to_vec(), chunks, movi].concat();
         riff_chunk(b"RIFF", &body)
     }
 
-    fn list(kind: &[u8; 4], children: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn list(kind: &[u8; 4], children: Vec<u8>) -> Vec<u8> {
         riff_chunk(b"LIST", &[kind.as_slice(), &children].concat())
     }
 
-    fn ebml_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn ebml_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
         let mut out = id.to_vec();
         out.push(0x80 | payload.len() as u8);
         out.extend_from_slice(payload);
