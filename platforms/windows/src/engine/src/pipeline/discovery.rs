@@ -716,10 +716,7 @@ fn classify_entry_in(entry_path: &std::path::Path, context: &WalkContext) -> Cla
         context.skipped.note(SkipReason::Empty);
         return ClassifiedEntry {
             discovered: None,
-            zero_byte: Some(ZeroByteObservation {
-                path,
-                file_ref: crate::platform::file_ref(entry_path),
-            }),
+            zero_byte: Some(ZeroByteObservation { path }),
             seen_path_hash: Some(seen_path_hash),
         };
     }
