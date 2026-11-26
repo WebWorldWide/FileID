@@ -53,6 +53,14 @@ struct DescriptionModelAdoptionTests {
         #expect(DeepAnalyzeSettings.adoptedKind(current: .qwen3VL8B, persistedRawValue: nil, advice: low, ramGB: 16, freeDiskBytes: nil, isInstalled: { _ in true }) == nil)
         #expect(DeepAnalyzeSettings.adoptedKind(current: .qwen3VL8B, persistedRawValue: nil, advice: nil, ramGB: 16, freeDiskBytes: nil, isInstalled: { _ in false }) == nil)
     }
+
+    @Test("Welcome starts from the shared active model and saves only a choice the person makes")
+    func welcomeUsesTheSharedModel() throws {
+        let welcome = try appSource("Views/WelcomeSheet.swift")
+        #expect(welcome.contains("State(initialValue: DeepAnalyzeSettings.shared.activeKind)"))
+        #expect(!welcome.contains("adoptingAdvice"))
+        #expect(!welcome.contains(".onChange(of: selectedVLM)"))
+    }
 }
 
 @Suite("Describe run summary")

@@ -15,7 +15,6 @@ struct WelcomeSheet: View {
 
     private let recommendedFace: FaceEmbedderKind
     @State private var hardwareRecommendedVLM: AIModelKind
-    @State private var adoptingAdvice = false
     private let availableDiskBytes: Int64?
     @State private var selectedVLM: AIModelKind
 
@@ -40,8 +39,7 @@ struct WelcomeSheet: View {
         let recommended = AIModelKind.safeDefaultFor(ramGB: ram,
                                                       freeDiskBytes: freeDisk)
         self._hardwareRecommendedVLM = State(initialValue: recommended)
-        self._selectedVLM = State(initialValue: DeepAnalyzeSettings.startingModel(
-            persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"), ramGB: ram, freeDiskBytes: freeDisk))
+        self._selectedVLM = State(initialValue: DeepAnalyzeSettings.shared.activeKind)
         #if DEBUG
         if SelfShot.welcomeDemoDownload {
             self._vlmRequested = State(initialValue: true)
@@ -56,8 +54,6 @@ struct WelcomeSheet: View {
         let settings = DeepAnalyzeSettings.shared
         guard settings.followAdvice(advice, freeDiskBytes: availableDiskBytes) else { return }
         hardwareRecommendedVLM = settings.activeKind
-        guard selectedVLM != settings.activeKind else { return }
-        adoptingAdvice = true
         selectedVLM = settings.activeKind
     }
 
@@ -121,6 +117,7 @@ struct WelcomeSheet: View {
                     ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
                         Button {
                             selectedVLM = kind
+                            DeepAnalyzeSettings.shared.activeKind = kind
                         } label: {
                             HStack {
                                 Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
@@ -203,10 +200,6 @@ struct WelcomeSheet: View {
             // A cancel or failure leaves models missing and idle: re-enable the
             // button rather than leaving it disabled for the session.
             if !inProgress && !essentialsInstalled { installAllRequested = false }
-        }
-        .onChange(of: selectedVLM) { _, kind in
-            if adoptingAdvice { adoptingAdvice = false; return }
-            DeepAnalyzeSettings.shared.activeKind = kind
         }
         .onChange(of: vlmInstalled) { _, nowInstalled in
             if nowInstalled {
