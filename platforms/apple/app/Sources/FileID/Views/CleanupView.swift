@@ -602,7 +602,7 @@ struct CleanupView: View {
         if outcome.engineUnavailable || outcome.timedOut {
             statusWarning = true
             status = outcome.engineUnavailable
-                ? "FileID is still getting ready. Try again in a moment."
+                ? HelperGate.unsentNote(engine)
                 : "Moving to Trash didn’t finish. Check the Trash before trying again."
             reload()
             return

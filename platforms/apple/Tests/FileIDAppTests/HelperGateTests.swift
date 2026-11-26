@@ -28,6 +28,18 @@ struct HelperGateTests {
         #expect(HelperGate.unsentNote(helperDown: false) == "FileID is still getting ready. Try again in a moment.")
     }
 
+    @Test func noPageHardCodesTheGettingReadyNoteForAnUnsentRequest() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let sources = root.appendingPathComponent("platforms/apple/app/Sources/FileID")
+        let files = try #require(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+        var hardCoded: [String] = []
+        for case let url as URL in files where url.pathExtension == "swift" && url.lastPathComponent != "HelperGate.swift" {
+            if try String(contentsOf: url, encoding: .utf8).contains("FileID is still getting ready. Try again in a moment.") { hardCoded.append(url.lastPathComponent) }
+        }
+        #expect(hardCoded == ["RestructureView.swift"], "A request the helper never received must use HelperGate.unsentNote so a stopped helper is not told to wait: \(hardCoded)")
+    }
+
     @Test func titleBarPillSaysHelperStoppedOnlyWhenDown() {
         #expect(HelperGate.pillLabel(for: .crashed(reason: "gone")) == "Helper stopped")
         #expect(HelperGate.pillLabel(for: .starting) == nil)

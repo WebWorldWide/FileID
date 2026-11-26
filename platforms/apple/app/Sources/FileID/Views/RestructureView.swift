@@ -430,7 +430,7 @@ struct RestructureView: View {
         if !engine.undoRestructure(libraryRoot: root.path) {
             applying = false
             undoing = false
-            status = "FileID is still getting ready. Try again in a moment."
+            status = HelperGate.unsentNote(engine)
             statusIsError = true
         }
     }
@@ -964,7 +964,7 @@ struct RestructureView: View {
         planDelivered = false
         if !engine.planRestructure(libraryRoot: root.path) {
             loading = false
-            status = "FileID is still getting ready. Open this page again in a moment to see your plan."
+            status = HelperGate.isDown(engine) ? HelperGate.stoppedNote : "FileID is still getting ready. Open this page again in a moment to see your plan."
             statusIsError = true
         }
     }
@@ -1124,7 +1124,7 @@ struct RestructureView: View {
             libraryRoot: root.path, moves: moves, planID: pendingPlanID)
         {
             applying = false
-            status = "FileID is still getting ready. Try again in a moment."
+            status = HelperGate.unsentNote(engine)
             statusIsError = true
         }
     }

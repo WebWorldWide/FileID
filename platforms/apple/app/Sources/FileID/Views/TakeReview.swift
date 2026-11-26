@@ -490,7 +490,7 @@ struct TakeReview: View {
         defer { trashing = false }
         let signal = engine.bulkActionResultSignal
         guard engine.send(.trashFiles(fileIDs: ids, exactIdentities: nil)) else {
-            trashProblem = "FileID is still getting ready. Try again in a moment."
+            trashProblem = HelperGate.unsentNote(engine)
             return
         }
         let commandID = engine.lastSentCommandID

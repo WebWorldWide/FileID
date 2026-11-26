@@ -8,8 +8,7 @@ import FileIDShared
 
 @MainActor
 enum CatalogWrites {
-    static let notReady = "FileID is still getting ready. Try again in a moment."
-    static let noAnswer = "FileID didn’t answer in time. Check the files before trying again."
+        static let noAnswer = "FileID didn’t answer in time. Check the files before trying again."
 
     /// Sends `command` and waits for its reply. `id` picks this request's
     /// reply out of others with the same action (a reply without per-item
@@ -19,7 +18,7 @@ enum CatalogWrites {
                         id: Int64?, timeout: Double) async -> BulkActionResult {
         var seen = engine.bulkActionResultSignal
         guard engine.send(command) else {
-            return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: notReady)])
+            return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: HelperGate.unsentNote(engine))])
         }
         let matcher = BulkResultMatcher(actionPrefix: action, sentID: engine.lastSentCommandID)
         func mine(_ result: BulkActionResult) -> Bool {
@@ -40,7 +39,7 @@ enum CatalogWrites {
     }
 
     private static func answered(_ result: BulkActionResult) -> Bool {
-        !result.messages.contains { $0.fileID == nil && ($0.message == notReady || $0.message == noAnswer) }
+        !result.messages.contains { $0.fileID == nil && ([HelperGate.notReadyNote, HelperGate.stoppedNote, noAnswer].contains($0.message)) }
     }
 
     // MARK: - People
@@ -368,7 +367,7 @@ final class MergeUndoModel {
         var message: String?
         for operation in operations.reversed() {
             guard let page = await engine.faceReview({ .undoFaceReview(requestID: $0, operationID: operation) }) else {
-                message = CatalogWrites.notReady
+                message = HelperGate.unsentNote(engine)
                 break
             }
             if page.status == "ok" { undone += 1 } else if message == nil { message = page.message }
