@@ -274,8 +274,17 @@ struct CleanupView: View {
         return "\(noun) couldn’t be read, so \(them) not in these results. \(timedOut.formatted()) of them ran out of time and may read next time"
     }
 
+    static func tilePlaceholderSymbol(for url: URL) -> String {
+        FileTypes.symbolName(forExtension: url.pathExtension)
+    }
+
+    /// Listed groups prove files exist even while the library's own counters are still loading.
+    static func nothingScanned(totalFiles: Int, listedGroups: Int) -> Bool {
+        totalFiles == 0 && listedGroups == 0
+    }
+
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
-        if store.totalFiles == 0 { return "Nothing scanned yet" }
+        if Self.nothingScanned(totalFiles: store.totalFiles, listedGroups: groups.count) { return "Nothing scanned yet" }
         let g = visible.count
         let skipped = skippedGroups.count
         let base: String
@@ -1088,7 +1097,9 @@ private struct CopyTile: View {
     }
 
     private var thumbContent: some View {
-        AsyncThumbnail(url: file.url, size: 264) { Image(systemName: "photo").foregroundStyle(Theme.text3) }
+        AsyncThumbnail(url: file.url, size: 264) {
+            Image(systemName: CleanupView.tilePlaceholderSymbol(for: file.url)).foregroundStyle(Theme.text3)
+        }
     }
 
     @ViewBuilder
