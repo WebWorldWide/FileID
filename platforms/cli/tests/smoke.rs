@@ -1163,3 +1163,31 @@ fn partial_scan_commits_results_and_exits_with_code_3() {
     drop(_guard);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn a_closed_stdout_ends_quietly_instead_of_panicking() {
+    let corpus = unique_dir("corpus-epipe");
+    let dbdir = unique_dir("db-epipe");
+    let db = dbdir.join("lib.sqlite");
+    for index in 0..5 {
+        std::fs::write(corpus.join(format!("note{index}.txt")), "text").unwrap();
+    }
+    let scan = run(&["--db", db.to_str().unwrap(), "scan", corpus.to_str().unwrap()]);
+    assert!(scan.status.success());
+
+    let mut child = command()
+        .args(["--db", db.to_str().unwrap(), "restructure", "--plan"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn fileid binary");
+    drop(child.stdout.take());
+    let out = child.wait_with_output().expect("wait for fileid");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_ne!(out.status.code(), Some(101), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}

@@ -289,7 +289,36 @@ fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
     }
 }
 
+/// Exit status of a process killed by SIGPIPE, which is what a Unix tool conventionally reports when its reader goes away.
+const EXIT_STDOUT_CLOSED: u8 = 141;
+
+fn is_stdout_closed_panic(payload: &(dyn std::any::Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    message.is_some_and(|message| {
+        message.starts_with("failed printing to stdout")
+            && (message.contains("Broken pipe") || message.contains("os error 232"))
+    })
+}
+
+/// `println!` panics when the reader of a pipe (`fileid ... | head`) has gone away; that is the reader's choice, not a crash.
 fn main() -> ExitCode {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !is_stdout_closed_panic(info.payload()) {
+            default_hook(info);
+        }
+    }));
+    match std::panic::catch_unwind(run) {
+        Ok(code) => code,
+        Err(payload) if is_stdout_closed_panic(&*payload) => ExitCode::from(EXIT_STDOUT_CLOSED),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn run() -> ExitCode {
     let cli = Cli::parse();
     let json_output = cli.global.json;
 
@@ -394,6 +423,18 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(args).is_err(), "accepted {args:?}");
         }
+    }
+
+    #[test]
+    fn only_a_closed_stdout_panic_counts_as_a_closed_pipe() {
+        let closed: Box<dyn std::any::Any + Send> =
+            Box::new("failed printing to stdout: Broken pipe (os error 32)".to_owned());
+        let other: Box<dyn std::any::Any + Send> = Box::new("index out of bounds");
+        let full: Box<dyn std::any::Any + Send> =
+            Box::new("failed printing to stdout: No space left on device (os error 28)".to_owned());
+        assert!(is_stdout_closed_panic(&*closed));
+        assert!(!is_stdout_closed_panic(&*other));
+        assert!(!is_stdout_closed_panic(&*full));
     }
 
     #[test]
