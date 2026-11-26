@@ -1106,6 +1106,40 @@ impl Dispatcher {
     }
 }
 
+/// The `requestID` of a `toolRequest` command whose body failed to decode, so the refusal can reach the request that sent it.
+fn tool_request_id(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    Some(value.pointer("/payload/toolRequest/request/requestID")?.as_str()?.to_owned())
+}
+
+fn undecodable_tool_request_response(request_id: &str, err: &serde_json::Error) -> IpcEvent {
+    let detail = err.to_string();
+    let detail = detail.split(" at line ").next().unwrap_or(&detail);
+    IpcEvent::now(EventPayload::ToolResponse(Wrap::new(ipc::ToolResponse {
+        request_id: request_id.into(),
+        status: "error".into(),
+        message: format!("That export request is incomplete or malformed ({detail})."),
+        operation_id: None,
+        outputs: vec![],
+        capabilities: vec![],
+    })))
+}
+
+/// Emits command_decode_failed so a slightly newer app learns its command was dropped; the C# app treats it as a non-fatal warning. serde's error carries position, not line content, so no user path can leak.
+async fn refuse_undecodable(d: &Dispatcher, line: &str, err: &serde_json::Error) {
+    tracing::warn!(%err, "ipc decode failed");
+    if let Some(request_id) = tool_request_id(line) {
+        d.sink.send(undecodable_tool_request_response(&request_id, err)).await;
+        return;
+    }
+    d.sink
+        .send(EngineError::event(
+            "command_decode_failed",
+            "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
+        ))
+        .await;
+}
+
 async fn handle_line(d: &Dispatcher, line: &str) {
     // Strip a leading UTF-8 BOM: the C# side sends BOM-less UTF-8, but older installs or wrappers may push `EF BB BF`.
     let line = line.trim_start_matches('\u{FEFF}').trim_start();
@@ -1115,13 +1149,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
     let mut cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
-            // Emit command_decode_failed so a slightly newer app learns its command was dropped; the C# app treats it as a non-fatal warning. serde's error carries position, not line content, so no user path can leak.
-            tracing::warn!(%err, "ipc decode failed");
-            d.sink.send(EngineError::event(
-                "command_decode_failed",
-                "FileID's helper got a request it didn't understand. Quit and reopen FileID; if it keeps happening, reinstall FileID.",
-            ))
-            .await;
+            refuse_undecodable(d, line, &err).await;
             return;
         }
     };
@@ -1756,6 +1784,22 @@ mod tests {
         let results = bulk_results(&mut events, 1).await;
         assert!(results.iter().all(|r| r.command_id.as_deref() == Some("cmd-refused")), "{results:?}");
         assert!(results.iter().all(|r| r.action == "mergeClusters" && r.succeeded == 0));
+    }
+
+    #[tokio::test]
+    async fn a_tool_request_that_does_not_decode_is_refused_for_its_request() {
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let d = test_dispatcher(None, sink);
+        let line = r#"{"id":"cmd","payload":{"toolRequest":{"request":{"requestID":"audio-1","action":"preview","fileIDs":[1],"destination":"/out","recipe":{"kind":"audio","format":"m4a"}}}}}"#;
+        handle_line(&d, line).await;
+        match next_event(&mut events).await {
+            EventPayload::ToolResponse(response) => {
+                assert_eq!(response.inner.request_id, "audio-1");
+                assert_eq!(response.inner.status, "error");
+                assert!(response.inner.message.contains("maxDimension"), "{}", response.inner.message);
+            }
+            other => panic!("expected a tool response, got {other:?}"),
+        }
     }
 
     #[tokio::test]

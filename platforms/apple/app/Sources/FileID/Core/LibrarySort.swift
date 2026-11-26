@@ -8,7 +8,7 @@ public enum LibrarySortKey: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .dateAdded: "Date added"
+        case .dateAdded: "Date scanned"
         case .dateTaken: "Date taken"
         case .name: "Name"
         case .size: "Size"
@@ -25,7 +25,7 @@ public struct LibrarySort: Equatable, Sendable {
     static let keyStorage = "library.sortKey"
     static let ascendingStorage = "library.sortAscending"
     static let layoutStorage = "library.layout"
-    public static let standard = LibrarySort(key: .dateAdded, ascending: false)
+    public static let standard = LibrarySort(key: .dateTaken, ascending: false)
 
     var key: LibrarySortKey
     var ascending: Bool
@@ -78,7 +78,7 @@ public struct LibrarySort: Equatable, Sendable {
 }
 
 extension LibrarySort {
-    /// The date a row shows under this sort: when it was added for Date added, the capture date otherwise, so the dates read in the order the rows come.
+    /// The date a row shows under this sort: when FileID last read the file for Date scanned, the capture date otherwise, so the dates read in the order the rows come.
     func shownDate(of row: FileRow) -> Date? {
         key == .dateAdded ? row.scannedAt : row.displayDate
     }

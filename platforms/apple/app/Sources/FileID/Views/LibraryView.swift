@@ -2220,6 +2220,12 @@ private struct LibrarySelectedPane: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
                 .onTapGesture(count: 2, perform: onOpen)
+                .help("Double-click to open the full preview")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Preview of \(row.url.lastPathComponent)")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction(named: "Open full preview", onOpen)
+                .accessibilityAction(.default, onOpen)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(row.url.lastPathComponent)

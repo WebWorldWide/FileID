@@ -3555,13 +3555,6 @@ mod tests {
         assert!(TWIN_WAIT_PATIENCE < PER_FILE_TIMEOUT);
     }
 
-    #[test]
-    fn a_timeout_failure_reads_as_unreadable_in_the_library_not_as_waiting_for_a_retry() {
-        for message in TIMEOUT_MESSAGES {
-            assert!(!message.contains("will retry"), "the Library leaves rows saying \"will retry\" out of its Unreadable count: {message}");
-        }
-    }
-
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     #[tokio::test]
     async fn identical_images_all_complete_when_no_analysis_can_be_shared() {

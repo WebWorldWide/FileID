@@ -438,6 +438,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     *worker().running.lock() = Some((id.to_owned(), cancel.clone()));
     let frames = frames_root().join(id);
     let mut skipped_videos = 0usize;
+    let mut speech_note = None;
     let outcome = async {
         let owned = id.to_owned();
         let Some(mut job) = with_db(database, move |conn| start(conn, &owned)).await? else {
@@ -466,7 +467,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
             skipped_videos = process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
             drop(model);
             if apple_speech {
-                apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
+                speech_note = apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
             }
             return Ok(());
         }
@@ -490,7 +491,7 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         skipped_videos = result?;
         cleanup?;
         if apple_speech {
-            apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
+            speech_note = apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
             return Ok(());
         }
         // Speech loads only after the visual model is released, so the two are never resident together.
@@ -514,7 +515,10 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     let _ = with_db(database, move |conn| {
         match terminal {
             Some(None) => {
-                conn.execute("UPDATE catalog_jobs SET state='completed',progress=1,updated_at=?1 WHERE id=?2 AND state='running'", params![now(), owned])?;
+                conn.execute(
+                    "UPDATE catalog_jobs SET state='completed',progress=1,error=?1,updated_at=?2 WHERE id=?3 AND state='running'",
+                    params![speech_note, now(), owned],
+                )?;
             }
             Some(Some(error)) => {
                 conn.execute(
@@ -527,10 +531,14 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         Ok(())
     })
     .await;
-    let note = (skipped_videos > 0).then(|| {
+    let skipped_note = (skipped_videos > 0).then(|| {
         let plural = if skipped_videos == 1 { "video" } else { "videos" };
         format!("{skipped_videos} {plural} couldn’t be read, so they stay incomplete. The rest were analysed.")
     });
+    let note = match (skipped_note, speech_note) {
+        (Some(skipped), Some(speech)) => Some(format!("{skipped} {speech}")),
+        (skipped, speech) => skipped.or_else(|| speech.map(str::to_owned)),
+    };
     publish_with_note(id, sink, database, note).await;
     let owned = id.to_owned();
     with_db(database, move |conn| {

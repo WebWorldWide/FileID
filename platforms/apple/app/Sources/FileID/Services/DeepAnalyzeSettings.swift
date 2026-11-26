@@ -24,24 +24,34 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
     private init() {
         let ram = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
         self.systemRAMGB = ram
-        if let persisted = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
-           !persisted.isEmpty {
-            self.activeKind = AIModelKind.migrated(rawValue: persisted)
-        } else {
-            self.activeKind = Self.preferredDefault(ramGB: ram)
-        }
+        self.activeKind = Self.startingModel(
+            persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"), ramGB: ram, freeDiskBytes: Self.freeDiskBytes())
         self.excludedFolders = Self.sanitizeExcludedFolders(
             UserDefaults.standard.stringArray(forKey: Self.excludedFoldersKey) ?? [])
     }
 
+    static func freeDiskBytes() -> Int64? {
+        try? FileManager.default.homeDirectoryForCurrentUser
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
+    }
+
+    /// The saved choice, else the default. Settings and the Welcome sheet both start from this, so they agree.
+    static func startingModel(
+        persistedRawValue: String?, ramGB: Double, freeDiskBytes: Int64?,
+        isInstalled: (AIModelKind) -> Bool = ModelInstallStatus.isInstalled(kind:)
+    ) -> AIModelKind {
+        if let persistedRawValue, !persistedRawValue.isEmpty { return AIModelKind.migrated(rawValue: persistedRawValue) }
+        return preferredDefault(ramGB: ramGB, freeDiskBytes: freeDiskBytes, isInstalled: isInstalled)
+    }
+
     /// First downloaded recommendation, else the safest fits-this-Mac pick.
-    static func preferredDefault(ramGB: Double) -> AIModelKind {
-        for kind in AIModelKind.recommendedFor(ramGB: ramGB) where kind.fits(ramGB: ramGB) {
-            if ModelInstallStatus.isInstalled(kind: kind) {
-                return kind
-            }
+    static func preferredDefault(
+        ramGB: Double, freeDiskBytes: Int64?, isInstalled: (AIModelKind) -> Bool = ModelInstallStatus.isInstalled(kind:)
+    ) -> AIModelKind {
+        for kind in AIModelKind.recommendedFor(ramGB: ramGB) where kind.fits(ramGB: ramGB) && isInstalled(kind) {
+            return kind
         }
-        return AIModelKind.safeDefaultFor(ramGB: ramGB)
+        return AIModelKind.safeDefaultFor(ramGB: ramGB, freeDiskBytes: freeDiskBytes)
     }
 
     /// Drop blank/relative entries, trim a trailing "/", dedupe, cap the

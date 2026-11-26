@@ -36,127 +36,131 @@ struct ModelCatalogBrowser: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("More AI models").font(Theme.Font.display(28))
-                    Text("For the curious: try a different AI for descriptions and Chat. The models suggested in Settings suit most people.")
-                        .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("\(MLXModelCatalog.entries.count) more models you can try · this Mac has \(Int(ramGB.rounded())) GB memory")
-                        .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                }
-                Spacer()
-                DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .offset(y: -2)
-            }
-            DSTextField(placeholder: "Search model, publisher or license", text: $query, icon: "magnifyingglass")
-            HStack {
-                if !visionOnly {
-                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")])
-                }
-                Spacer()
-                Toggle("Fits this Mac", isOn: $fitsOnly)
-                Toggle("Downloaded", isOn: $installedOnly)
-            }
-            .toggleStyle(DSCheckboxToggleStyle())
-            .font(Theme.Font.body(12))
-            ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                LazyVStack(spacing: 0) {
-                ForEach(filtered, id: \.rawValue) { kind in
-                    Button { selection = kind.rawValue } label: {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: kind.supportsVision ? "photo.on.rectangle" : "text.bubble")
-                            .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(kind.displayName).font(Theme.Font.body(13.5, .semibold)).lineLimit(1)
-                            Text(kind.supportsVision ? "Describes files and answers Chat" : "Answers Chat only")
-                                .font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(1)
+                            Text("More AI models").font(Theme.Font.display(28))
+                            Text("For the curious: try a different AI for descriptions and Chat. The models suggested in Settings suit most people.")
+                                .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("\(MLXModelCatalog.entries.count) more models you can try · this Mac has \(Int(ramGB.rounded())) GB memory")
+                                .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                         }
-                        .help("\(kind.sourceRepo) · \(kind.licenseName)")
-                        Spacer(minLength: 8)
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Text(ModelSize.label(kind.approxBytes)).monospacedDigit()
-                            Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
-                                .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : Theme.text3)
-                            if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
-                            if let decode = engine.benchmarkResults[kind.rawValue]?.generatedTokensPerSecond {
-                                Text("\(Int(decode.rounded())) words per second (approx.)").foregroundStyle(Theme.gold).monospacedDigit()
+                        Spacer()
+                        DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
+                            .keyboardShortcut(.cancelAction)
+                            .offset(y: -2)
+                    }
+                    DSTextField(placeholder: "Search model, publisher or license", text: $query, icon: "magnifyingglass")
+                    HStack {
+                        if !visionOnly {
+                            SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Describes files"), ("text", "Chat only")])
+                        }
+                        Spacer()
+                        Toggle("Fits this Mac", isOn: $fitsOnly)
+                        Toggle("Downloaded", isOn: $installedOnly)
+                    }
+                    .toggleStyle(DSCheckboxToggleStyle())
+                    .font(Theme.Font.body(12))
+                    ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                        ForEach(filtered, id: \.rawValue) { kind in
+                            Button { selection = kind.rawValue } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: kind.supportsVision ? "photo.on.rectangle" : "text.bubble")
+                                    .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(kind.displayName).font(Theme.Font.body(13.5, .semibold)).lineLimit(1)
+                                    Text(kind.supportsVision ? "Describes files and answers Chat" : "Answers Chat only")
+                                        .font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(1)
+                                }
+                                .help("\(kind.sourceRepo) · \(kind.licenseName)")
+                                Spacer(minLength: 8)
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    Text(ModelSize.label(kind.approxBytes)).monospacedDigit()
+                                    Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
+                                        .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : Theme.text3)
+                                    if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
+                                    if let decode = engine.benchmarkResults[kind.rawValue]?.generatedTokensPerSecond {
+                                        Text("\(Int(decode.rounded())) words per second (approx.)").foregroundStyle(Theme.gold).monospacedDigit()
+                                    }
+                                }.font(Theme.Font.body(11))
                             }
-                        }.font(Theme.Font.body(11))
-                    }
-                    .padding(.vertical, 8).padding(.horizontal, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(selection == kind.rawValue ? Theme.goldWash : Color.clear)
-                    .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
-                    }
-                    .buttonStyle(DSRowButtonStyle(radius: 0))
-                    .id(kind.rawValue)
-                    .accessibilityAddTraits(selection == kind.rawValue ? .isSelected : [])
-                }
-                }
-            }
-            .dsList()
-            .focusable()
-            .focusEffectDisabled()
-            .onKeyPress(.downArrow) { moveSelection(by: 1); return .handled }
-            .onKeyPress(.upArrow) { moveSelection(by: -1); return .handled }
-            .overlay {
-                if filtered.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
-                        Text("No models match these filters").font(Theme.Font.body(14, .semibold))
-                        Button("Reset filters") { query = ""; fitsOnly = true; installedOnly = false; role = "all" }
-                            .buttonStyle(.dsSecondary)
-                    }
-                }
-            }
-            .frame(minHeight: 220)
-            .onChange(of: selection) { _, id in
-                guard let id else { return }
-                withAnimation(reduceMotion ? nil : Theme.quick) { proxy.scrollTo(id) }
-            }
-            .onChange(of: engine.benchmarkModelKind) { _, _ in
-                if let selection { proxy.scrollTo(selection) }
-            }
-            .onAppear { if let id = initialSelection?.rawValue { proxy.scrollTo(id, anchor: .center) } }
-            }
-            if let selected {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(selected.displayName).font(Theme.Font.body(14, .semibold)).lineLimit(2)
-                    Group {
-                        if let peak = engine.benchmarkResults[selected.rawValue]?.peakResidentGB {
-                            Text("Uses about \(String(format: "%.1f", peak)) GB on this Mac (measured). Quality and speed vary by model.")
-                        } else {
-                            Text("Needs about \(String(format: "%.1f", selected.ramBudgetGB)) GB memory. Quality and speed vary by model; measure it below to see how it does on this Mac.")
+                            .padding(.vertical, 8).padding(.horizontal, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(selection == kind.rawValue ? Theme.goldWash : Color.clear)
+                            .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                            }
+                            .buttonStyle(DSRowButtonStyle(radius: 0))
+                            .id(kind.rawValue)
+                            .accessibilityAddTraits(selection == kind.rawValue ? .isSelected : [])
+                        }
                         }
                     }
-                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                    ModelBenchmarkPanel(engine: engine, kind: selected)
-                }
-                .help(selected.catalogEntry.map { "\(selected.sourceRepo) · \($0.quantization.bits)-bit · \($0.bases.count) audited upstream license\($0.bases.count == 1 ? "" : "s") · \(selected.licenseName)" } ?? selected.licenseName)
-            }
-            if let progress = engine.modelDownloadProgress {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(progress.fraction >= 0.99 ? "Getting the model ready…" : "Downloading… \(Int((progress.fraction * 100).rounded()))%")
-                            .font(Theme.Font.body(12)).monospacedDigit()
-                        ProgressView(value: min(max(progress.fraction, 0), 1)).tint(Theme.gold)
+                    .dsList()
+                    .focusable()
+                    .focusEffectDisabled()
+                    .onKeyPress(.downArrow) { moveSelection(by: 1); return .handled }
+                    .onKeyPress(.upArrow) { moveSelection(by: -1); return .handled }
+                    .overlay {
+                        if filtered.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
+                                Text("No models match these filters").font(Theme.Font.body(14, .semibold))
+                                Button("Reset filters") { query = ""; fitsOnly = true; installedOnly = false; role = "all" }
+                                    .buttonStyle(.dsSecondary)
+                            }
+                        }
                     }
-                    .help(progress.message)
-                    Button("Cancel") {
-                        engine.cancelPrewarm()
-                        engine.clearModelDownloadProgress(forModelKind: progress.modelKind)
-                        statusMessage = "Download cancelled."
-                        statusDetail = ""
+                    .containerRelativeFrame(.vertical) { height, _ in max(220, height * 0.4) }
+                    .onChange(of: selection) { _, id in
+                        guard let id else { return }
+                        withAnimation(reduceMotion ? nil : Theme.quick) { proxy.scrollTo(id) }
                     }
-                    .buttonStyle(.dsSecondary)
+                    .onChange(of: engine.benchmarkModelKind) { _, _ in
+                        if let selection { proxy.scrollTo(selection) }
+                    }
+                    .onAppear { if let id = initialSelection?.rawValue { proxy.scrollTo(id, anchor: .center) } }
+                    }
+                    if let selected {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(selected.displayName).font(Theme.Font.body(14, .semibold)).lineLimit(2)
+                            Group {
+                                if let peak = engine.benchmarkResults[selected.rawValue]?.peakResidentGB {
+                                    Text("Uses about \(String(format: "%.1f", peak)) GB on this Mac (measured). Quality and speed vary by model.")
+                                } else {
+                                    Text("Needs about \(String(format: "%.1f", selected.ramBudgetGB)) GB memory. Quality and speed vary by model; measure it below to see how it does on this Mac.")
+                                }
+                            }
+                            .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
+                            ModelBenchmarkPanel(engine: engine, kind: selected)
+                        }
+                        .help(selected.catalogEntry.map { "\(selected.sourceRepo) · \($0.quantization.bits)-bit · \($0.bases.count) audited upstream license\($0.bases.count == 1 ? "" : "s") · \(selected.licenseName)" } ?? selected.licenseName)
+                    }
+                    if let progress = engine.modelDownloadProgress {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(progress.fraction >= 0.99 ? "Getting the model ready…" : "Downloading… \(Int((progress.fraction * 100).rounded()))%")
+                                    .font(Theme.Font.body(12)).monospacedDigit()
+                                ProgressView(value: min(max(progress.fraction, 0), 1)).tint(Theme.gold)
+                            }
+                            .help(progress.message)
+                            Button("Cancel") {
+                                engine.cancelPrewarm()
+                                engine.clearModelDownloadProgress(forModelKind: progress.modelKind)
+                                statusMessage = "Download cancelled."
+                                statusDetail = ""
+                            }
+                            .buttonStyle(.dsSecondary)
+                        }
+                    }
+                    if !statusMessage.isEmpty {
+                        Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
+                            .fixedSize(horizontal: false, vertical: true).help(statusDetail)
+                    }
                 }
-            }
-            if !statusMessage.isEmpty {
-                Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
-                    .fixedSize(horizontal: false, vertical: true).help(statusDetail)
             }
             HStack {
                 Text("Nothing downloads unless you ask. The AI runs on this Mac.")
@@ -179,7 +183,7 @@ struct ModelCatalogBrowser: View {
                     Text("It downloads once from the internet (huggingface.co) and then works without a connection.")
                 }
             }
-        }.padding(24).frame(minWidth: 640, idealWidth: 780, minHeight: 680, idealHeight: 760)
+        }.padding(24).frame(minWidth: 640, idealWidth: 780, minHeight: 440, idealHeight: 760)
             .sheetSurface()
             .onAppear { selection = initialSelection?.rawValue; engine.refreshModelCatalog() }
             .onChange(of: engine.lastErrorSignal) { _, _ in

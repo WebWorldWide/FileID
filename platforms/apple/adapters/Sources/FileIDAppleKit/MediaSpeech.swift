@@ -21,14 +21,23 @@ enum MediaSpeech {
         case cannotAsk = -1
     }
 
-    /// TCC attributes the request to the responsible process, which is the app only
-    /// when the app launched the engine; started from a terminal or script, the
-    /// responsible process is that host, has no usage string, and macOS aborts us.
-    static func canAsk(bundle: Bundle = .main, parentExecutable: String? = parentExecutablePath()) -> Bool {
-        guard (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false,
+    /// TCC attributes the request to the responsible process. That is the app only when the system started
+    /// it (its parent is launchd, as for Finder, Dock and `open`); started from a terminal or script, the
+    /// responsible process is that host, has no usage string, and macOS aborts the engine.
+    static func canAsk(
+        bundle: Bundle = .main, parentExecutable: String? = parentExecutablePath(), appStartedBySystem: Bool = appStartedBySystem()
+    ) -> Bool {
+        guard appStartedBySystem,
+              (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false,
               let parentExecutable else { return false }
         let root = bundle.bundleURL.resolvingSymlinksInPath().path
         return root.hasSuffix(".app") && URL(fileURLWithPath: parentExecutable).resolvingSymlinksInPath().path.hasPrefix(root + "/")
+    }
+
+    static func appStartedBySystem() -> Bool {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        return proc_pidinfo(getppid(), PROC_PIDTBSDINFO, 0, &info, size) == size && info.pbi_ppid == 1
     }
 
     static func parentExecutablePath() -> String? {

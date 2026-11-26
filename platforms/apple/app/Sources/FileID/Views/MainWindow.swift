@@ -168,6 +168,12 @@ struct MainWindow: View {
                         .font(Theme.Font.body(13.5))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .engineUnavailableOverlay(engine: engine, activeTab: activeTab)
+                        .overlay(alignment: .bottom) {
+                            if let toast = toasts.current {
+                                ToastView(toast: toast).padding(.bottom, 22)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
+                        }
                         .focusSection()
                     // Chat stays beside the current page; the Chat page is the same conversation at full width.
                     if chatPresented && activeTab != .chat {
@@ -258,12 +264,6 @@ struct MainWindow: View {
                 toasts.show(DescribeRunSummary.toast(processed: done.processed, ran: done.modelKind, chosen: DeepAnalyzeSettings.shared.activeKind), actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
                     activeTabBinding.wrappedValue = .library
                 }
-            }
-
-            if let toast = toasts.current {
-                VStack { Spacer(); ToastView(toast: toast).padding(.bottom, 22) }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .allowsHitTesting(true)
             }
 
             if isDragHovering {

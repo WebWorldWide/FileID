@@ -204,7 +204,7 @@ struct LibraryListTable: NSViewRepresentable {
             applyingSort = true
             defer { applyingSort = false }
             let dateColumn = table.tableColumn(withIdentifier: LibraryListTable.dateColumn)
-            dateColumn?.title = sort.key == .dateAdded ? "Date added" : "Date taken"
+            dateColumn?.title = sort.key == .dateAdded ? "Date scanned" : "Date taken"
             table.headerView?.needsDisplay = true
             let key: String? = switch sort.key {
             case .name: "name"

@@ -264,12 +264,10 @@ public final class ReadStore: @unchecked Sendable {
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
                 let unreadableTimedOutFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(Self.timedOutSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
-                let retryFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.retryPendingSQL)") ?? 0
-                var scoped = (total: totalFiles - retryFiles, unreadable: unreadableFiles, other: otherFiles)
+                var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
                 if let scope {
                     let within = LibraryScope.sql("path_text")
-                    let scopedRetry = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.retryPendingSQL) AND \(within)", arguments: [scope.param]) ?? 0
-                    scoped = ((try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0) - scopedRetry,
+                    scoped = ((try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0),
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(within)", arguments: [scope.param]) ?? 0,
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0 AND \(within)", arguments: [scope.param]) ?? 0)
                 }
@@ -356,10 +354,8 @@ public final class ReadStore: @unchecked Sendable {
 
     /// `kindFilter` value that lists the files the scan could not read.
     public static let unreadableFilter = "unreadable"
-    /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
-    static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%' AND \(notEngineHiddenSQL)"
-    /// Failed rows waiting for the next scan to retry: counted by the catalog, listed nowhere, so the Library's own total leaves them out.
-    nonisolated static let retryPendingSQL = "failed = 1 AND COALESCE(error_message, '') LIKE '%will retry%' AND \(notEngineHiddenSQL)"
+    /// Every failed row the engine did not hide, including ones the next scan will retry, so the Library agrees with the scan's failed-file count.
+    static let unreadableSQL = notEngineHiddenSQL
     /// Stored `error_message` of a row that failed because the machine was too busy (`tagging.rs` `TIMEOUT_MESSAGES`, and the "ran out of time" wording that replaces them).
     nonisolated static let timedOutMessages = ["per-file timeout after 60s", "Vision pass timed out"]
     nonisolated static let timedOutSQL =

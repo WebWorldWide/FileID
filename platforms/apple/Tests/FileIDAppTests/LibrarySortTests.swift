@@ -118,12 +118,11 @@ struct LibrarySortTests {
         }
     }
 
-    @Test func theDefaultListingStillShowsTheNewestScanFirst() async throws {
+    @Test func theDefaultListingShowsTheNewestCaptureFirst() async throws {
         let fixture = try await makeCatalog()
         defer { fixture.store.close(); try? FileManager.default.removeItem(at: fixture.directory) }
         let defaultRows = fixture.store.files(limit: 50)
-        #expect(defaultRows.map(\.id) == fixture.store.files(limit: 50, sort: LibrarySort(key: .dateAdded, ascending: false)).map(\.id))
-        #expect(isOrdered(defaultRows, ascending: false) { $0.scannedAt })
+        #expect(defaultRows.map(\.id) == fixture.store.files(limit: 50, sort: LibrarySort(key: .dateTaken, ascending: false)).map(\.id))
     }
 
     @Test func aSortComposesWithTheKindFilterAndTheSearch() async throws {
@@ -153,11 +152,12 @@ struct LibrarySortTests {
 
     @Test func choosingTheKeyInUseFlipsItAndANewKeyStartsNaturally() {
         let standard = LibrarySort.standard
-        #expect(standard == LibrarySort(key: .dateAdded, ascending: false))
-        #expect(standard.choosing(.dateAdded) == LibrarySort(key: .dateAdded, ascending: true))
+        #expect(standard == LibrarySort(key: .dateTaken, ascending: false))
+        #expect(standard.choosing(.dateTaken) == LibrarySort(key: .dateTaken, ascending: true))
+        #expect(LibrarySortKey.dateAdded.title == "Date scanned")
         #expect(standard.choosing(.name) == LibrarySort(key: .name, ascending: true))
         #expect(standard.choosing(.size) == LibrarySort(key: .size, ascending: false))
-        #expect(LibrarySort(storedKey: "garbage", ascending: true) == LibrarySort(key: .dateAdded, ascending: true))
+        #expect(LibrarySort(storedKey: "garbage", ascending: true) == LibrarySort(key: .dateTaken, ascending: true))
         #expect(LibrarySort(storedKey: "kind", ascending: false).summary == "Kind ↓")
     }
 
@@ -213,7 +213,7 @@ struct LibrarySortTests {
         #expect(file(taken: fatZero, modified: real).displayDate == real)
     }
 
-    @Test func dateAddedShowsWhenItWasAddedAndOtherSortsShowTheCaptureDate() {
+    @Test func dateScannedShowsWhenFileIDReadTheFileAndOtherSortsShowTheCaptureDate() {
         let taken = Date(timeIntervalSince1970: 1_500_000_000), added = Date(timeIntervalSince1970: 1_600_000_000)
         let file = row(id: 1, taken: taken, added: added)
         #expect(LibrarySort(key: .dateAdded, ascending: false).shownDate(of: file) == added)

@@ -77,11 +77,11 @@ enum TakeProposals {
     }
 
     static let listLimit = 100
-    static let possibleGroupsOrder = "Photo bursts and repeated video takes from your scans. Bigger groups and more recent shots come first."
+    static let possibleGroupsOrder = "Photo bursts and repeated video takes from your scans. Recent groups and groups with more shots sit nearer the top."
 
     /// The engine returns at most `listLimit` groups with no way to page, so a full list may hide more.
     static func listLimitNote(shown: Int) -> String? {
-        shown >= listLimit ? "Showing the first \(listLimit). Finish with some of these and more appear." : nil
+        shown >= listLimit ? "Showing the first \(listLimit) groups. Finish with some of these and more appear." : nil
     }
 
     static func enqueueRequest(id: String) -> CatalogRequest {

@@ -36,4 +36,16 @@ struct FactoryResetTests {
         FactoryReset.erase(root: tree.root, keeping: [elsewhere])
         #expect(!FileManager.default.fileExists(atPath: tree.root.path))
     }
+
+    @Test("every key of the defaults domain is erased")
+    func erasesEveryDefaultsKey() throws {
+        let domain = "com.fileid.tests.reset-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        defaults.set(1, forKey: "zzMarker")
+        defaults.set("Library", forKey: "activeTabRawValue")
+        FactoryReset.eraseDefaults(domain: domain, defaults: defaults)
+        #expect(defaults.persistentDomain(forName: domain)?.isEmpty ?? true)
+        #expect(defaults.object(forKey: "zzMarker") == nil)
+    }
 }

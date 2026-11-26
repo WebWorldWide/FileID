@@ -315,10 +315,23 @@ fn coalesced_jobs_pause_resume_cancel_and_restart_without_writer_lock() {
     CatalogIndex::recover(&index.writer.lock()).unwrap();
     assert_eq!(state(&index), "paused");
     index.state.lock().cache = None;
-    assert!(index.search(&seed()).is_err());
-    index.control(&control("resumeJob")).unwrap();
+    index.search(&seed()).expect("a job paused by a restart resumes when a search needs it");
     wait(&index);
     assert_eq!(state(&index), "completed");
+    index.shutdown();
+}
+#[test]
+fn a_search_does_not_resume_a_job_the_user_paused() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index
+        .writer
+        .lock()
+        .execute("UPDATE catalog_jobs SET state='paused',error=NULL WHERE id=?1", [CatalogIndex::job_id()])
+        .unwrap();
+    index.state.lock().cache = None;
+    assert!(index.search(&seed()).is_err());
+    assert_eq!(state(&index), "paused");
     index.shutdown();
 }
 #[test]

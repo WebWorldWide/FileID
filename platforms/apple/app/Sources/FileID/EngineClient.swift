@@ -1127,8 +1127,7 @@ public final class EngineClient {
             FactoryReset.erase(root: AppSupportPath.fileID, keeping: [ModelCachePaths.huggingFaceRoot], fileManager: fm)
         }
         if let bundleID = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: bundleID)
-            UserDefaults.standard.synchronize()
+            FactoryReset.eraseDefaults(domain: bundleID)
         }
         #if os(macOS)
         NSApplication.shared.terminate(nil)

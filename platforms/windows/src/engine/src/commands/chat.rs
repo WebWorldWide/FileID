@@ -2420,6 +2420,19 @@ mod tests {
     }
 
     #[test]
+    fn files_waiting_for_a_retry_count_as_unreadable() {
+        let mut conn = adlon_like();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,error_message) VALUES(9001,'/lib/slow.pdf',9001,100,0,'pdf','pdf',1,'Could not open PDF (will retry next scan)')",
+            [],
+        )
+        .unwrap();
+        let answer = ask(&mut conn, "How many files couldn't be read?");
+        assert_eq!(answer.message, "3 files couldn't be read, so they're not in other answers.");
+        assert_eq!(answer.hits.len(), 3);
+    }
+
+    #[test]
     fn three_d_model_and_video_size_questions_use_the_kind_and_the_size() {
         let mut conn = adlon_like_readable();
         let models = ask(&mut conn, "Do I have any 3D models?");

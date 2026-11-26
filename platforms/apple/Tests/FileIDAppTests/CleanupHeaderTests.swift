@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import FileID
 
@@ -12,6 +13,17 @@ struct CleanupHeaderTests {
     @Test func singular_and_empty() {
         #expect(CleanupView.exactSummary(groups: 1, extraCopies: 1, bytes: 1_000).hasPrefix("1 extra copy in 1 group · "))
         #expect(CleanupView.exactSummary(groups: 0, extraCopies: 0, bytes: 0) == "No extra copies found")
+    }
+
+    @Test func groups_already_listed_mean_files_were_scanned_even_before_the_counters_load() {
+        #expect(CleanupView.nothingScanned(totalFiles: 0, listedGroups: 0))
+        #expect(!CleanupView.nothingScanned(totalFiles: 0, listedGroups: 3))
+        #expect(!CleanupView.nothingScanned(totalFiles: 40, listedGroups: 0))
+    }
+
+    @Test func a_tile_without_a_thumbnail_shows_an_icon_for_its_kind() {
+        #expect(CleanupView.tilePlaceholderSymbol(for: URL(fileURLWithPath: "/lib/backup.zip")) == "doc.zipper")
+        #expect(CleanupView.tilePlaceholderSymbol(for: URL(fileURLWithPath: "/lib/photo.jpg")) == "photo")
     }
 
     @Test func says_how_many_unreadable_files_are_missing_from_the_results() {

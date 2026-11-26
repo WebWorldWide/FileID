@@ -24,6 +24,8 @@ use std::{
 mod snapshot;
 
 const MAX_FILES: usize = 200_000;
+/// What a job interrupted by a restart says; a search resumes such a job, while a pause the user chose stays paused.
+const INTERRUPTED_MESSAGE: &str = "Interrupted. Resume visual index preparation from the last verified snapshot.";
 static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
 const MAX_GRAPH_BYTES: u64 = snapshot::max_graph_bytes(clip_space::DIMENSION, MAX_FILES);
 const LEGACY_MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
@@ -193,7 +195,7 @@ impl CatalogIndex {
         )
     }
     pub fn recover(conn: &Connection) -> Result<()> {
-        conn.execute("UPDATE catalog_jobs SET state='paused',error='Interrupted. Resume visual index preparation from the last verified snapshot.',updated_at=?1 WHERE kind='catalogIndex' AND state IN ('queued','running')", [now()])?;
+        conn.execute("UPDATE catalog_jobs SET state='paused',error=?1,updated_at=?2 WHERE kind='catalogIndex' AND state IN ('queued','running')", params![INTERRUPTED_MESSAGE, now()])?;
         Ok(())
     }
     pub(crate) fn reader(&self) -> Result<Reader<'_>> {
@@ -560,10 +562,11 @@ impl CatalogIndex {
             let id = Self::job_id();
             let recipe = serde_json::json!({"model":clip_space::model_id()}).to_string();
             conn.execute("INSERT OR IGNORE INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES(?1,'catalogIndex','[]',?2,'queued',1,?3,?3)",params![id,recipe,now()])?;
-            let current: String =
-                conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [&id], |row| row.get(0))?;
+            let (current, error): (String, Option<String>) =
+                conn.query_row("SELECT state,error FROM catalog_jobs WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let interrupted = current == "paused" && error.as_deref() == Some(INTERRUPTED_MESSAGE);
             ensure!(
-                ["queued", "completed"].contains(&current.as_str()),
+                interrupted || ["queued", "completed"].contains(&current.as_str()),
                 "Visual index preparation is stopped or failed. Resume its job; keyword search remains available."
             );
             conn.execute(

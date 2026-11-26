@@ -179,16 +179,6 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         return .gemma3_4B
     }
 
-    public static func onboardingSelection(persistedRawValue: String?,
-                                           ramGB: Double,
-                                           availableMB: UInt64? = nil,
-                                           freeDiskBytes: Int64? = nil) -> AIModelKind {
-        if let persistedRawValue, !persistedRawValue.isEmpty {
-            return migrated(rawValue: persistedRawValue)
-        }
-        return safeDefaultFor(ramGB: ramGB, availableMB: availableMB, freeDiskBytes: freeDiskBytes)
-    }
-
     /// Migrates a persisted rawValue that predates the commercial-clean lineup or the Windows-canonical token rename, so an old value maps to a supported model instead of failing to decode.
     public static func migrated(rawValue: String) -> AIModelKind {
         if let kind = AIModelKind(rawValue: rawValue) { return kind }

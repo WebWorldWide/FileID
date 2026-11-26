@@ -21,6 +21,8 @@ pub(super) trait Recognizer: Send + Sync + 'static {
     fn transcribe(&self, source: &Path, start: f64, end: f64, cancel: &AtomicBool) -> Result<Vec<Segment>>;
 }
 
+pub(super) const SPEECH_UNAVAILABLE_NOTE: &str = "Spoken words weren’t transcribed because Speech Recognition isn’t available to FileID. You can allow it in System Settings, under Privacy & Security, Speech Recognition.";
+
 /// On in the Mac-hosted engine unless FILEID_TIMELINE_SPEECH=0.
 pub(super) fn enabled() -> bool {
     cfg!(all(target_os = "macos", feature = "apple-adapters")) && std::env::var("FILEID_TIMELINE_SPEECH").as_deref() != Ok("0")
@@ -50,13 +52,13 @@ pub(super) async fn transcribe(
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
     visual_share: f64,
-) -> Result<()> {
+) -> Result<Option<&'static str>> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     return transcribe_with(Arc::new(AppleSpeech), super::timeline_media::probe, id, job, cancel, sink, database, visual_share).await;
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     {
         let _ = (id, job, cancel, sink, database, visual_share);
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -72,7 +74,8 @@ pub(super) async fn transcribe_with<R: Recognizer>(
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
     visual_share: f64,
-) -> Result<()> {
+) -> Result<Option<&'static str>> {
+    let mut speech_unavailable = false;
     let total = job.ids.len().max(1);
     for (index, &file_id) in job.ids.iter().enumerate() {
         let source = running_source(database, id, file_id).await?;
@@ -106,6 +109,7 @@ pub(super) async fn transcribe_with<R: Recognizer>(
             blocking(move || Ok(recognizer.available())).await?
         };
         if !available {
+            speech_unavailable = true;
             continue;
         }
         let mut complete = true;
@@ -152,7 +156,7 @@ pub(super) async fn transcribe_with<R: Recognizer>(
         })
         .await?;
     }
-    Ok(())
+    Ok(speech_unavailable.then_some(SPEECH_UNAVAILABLE_NOTE))
 }
 
 fn persist_chunk(
@@ -303,7 +307,8 @@ mod tests {
         let job = start(&database.lock(), &id).unwrap().unwrap();
         let (sink, _events) = Sink::channel_for_test(1_024);
         let recognizer = Arc::new(Scripted { available: false, chunks: Mutex::new(vec![None; 3]), calls: 0.into(), pause: None });
-        transcribe_with(recognizer.clone(), probe_100s, &id, &job, &Arc::new(AtomicBool::new(false)), &sink, &database, 0.8).await.unwrap();
+        let note = transcribe_with(recognizer.clone(), probe_100s, &id, &job, &Arc::new(AtomicBool::new(false)), &sink, &database, 0.8).await.unwrap();
+        assert_eq!(note, Some(SPEECH_UNAVAILABLE_NOTE));
         assert_eq!(recognizer.calls.load(Ordering::SeqCst), 0);
         let coverage = rows(&database, "SELECT id,status FROM catalog_coverage WHERE id LIKE 'speech-coverage:%'");
         assert_eq!(coverage.len(), 1);

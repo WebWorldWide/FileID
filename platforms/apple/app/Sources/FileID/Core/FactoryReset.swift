@@ -21,4 +21,13 @@ enum FactoryReset {
             try? fileManager.removeItem(at: root)
         }
     }
+
+    /// Removes every key of the app's defaults domain, then the domain itself, so none survives in the preferences file.
+    static func eraseDefaults(domain: String, defaults: UserDefaults = .standard) {
+        for key in (defaults.persistentDomain(forName: domain) ?? [:]).keys {
+            defaults.removeObject(forKey: key)
+        }
+        defaults.removePersistentDomain(forName: domain)
+        defaults.synchronize()
+    }
 }

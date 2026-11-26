@@ -111,3 +111,26 @@ struct AccessibilityKeyboardTests {
         #expect(opened == 1)
     }
 }
+
+@Suite("Detail pane preview")
+struct DetailPanePreviewAccessibilityTests {
+    @Test func theThumbnailCanBeOpenedWithoutADoubleClick() throws {
+        let source = try appSource("Views/LibraryView.swift")
+        let pane = try #require(source.range(of: "private struct LibrarySelectedPane"))
+        let thumbnail = try #require(source.range(of: ".onTapGesture(count: 2, perform: onOpen)", range: pane.upperBound..<source.endIndex))
+        let following = String(source[thumbnail.upperBound...].prefix(600))
+        #expect(following.contains(".accessibilityAddTraits(.isButton)"))
+        #expect(following.contains(".accessibilityAction(.default, onOpen)"))
+    }
+}
+
+@Suite("Toast placement")
+struct ToastPlacementTests {
+    @Test func theToastSitsInThePageAreaNotOverTheSidebar() throws {
+        let source = try appSource("Views/MainWindow.swift")
+        let page = try #require(source.range(of: "Detail(engine: engine"))
+        let chat = try #require(source.range(of: "// Chat stays beside the current page", range: page.upperBound..<source.endIndex))
+        #expect(source[page.upperBound..<chat.lowerBound].contains("ToastView(toast: toast)"))
+        #expect(source.components(separatedBy: "ToastView(toast: toast)").count == 2)
+    }
+}

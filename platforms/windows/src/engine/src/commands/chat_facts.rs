@@ -754,7 +754,7 @@ pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> 
         None => String::new(),
     };
     let mut statement = conn.prepare(&format!(
-        "SELECT f.id,f.path_text,f.kind,COALESCE(f.error_message,'') FROM files f WHERE f.failed=1 AND COALESCE(f.error_message,'') NOT LIKE '%will retry%' \
+        "SELECT f.id,f.path_text,f.kind,COALESCE(f.error_message,'') FROM files f WHERE f.failed=1 \
          AND COALESCE(f.error_message,'') NOT IN (?1,?2){within} ORDER BY f.path_text ASC,f.id ASC"
     ))?;
     let rows = statement
@@ -828,7 +828,7 @@ pub(crate) fn unreadable_files_note(conn: &Connection, root: Option<&RootScope>)
     };
     let count: i64 = conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM files f WHERE f.failed=1 AND COALESCE(f.error_message,'') NOT LIKE '%will retry%' \
+            "SELECT COUNT(*) FROM files f WHERE f.failed=1 \
              AND COALESCE(f.error_message,'') NOT IN (?1,?2){within}"
         ),
         rusqlite::params_from_iter(args),

@@ -151,10 +151,12 @@ struct MediaAdapterTests {
         try (info as NSDictionary).write(to: app.appendingPathComponent("Contents/Info.plist"))
         let bundle = try #require(Bundle(url: app))
         let root = bundle.bundleURL.resolvingSymlinksInPath().path
-        #expect(MediaSpeech.canAsk(bundle: bundle, parentExecutable: root + "/Contents/MacOS/FileID"))
-        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: "/usr/bin/python3"))
-        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: nil))
-        #expect(!MediaSpeech.canAsk(bundle: Bundle(for: MediaSpeechProbe.self), parentExecutable: root + "/Contents/MacOS/FileID"))
+        let appExecutable = root + "/Contents/MacOS/FileID"
+        #expect(MediaSpeech.canAsk(bundle: bundle, parentExecutable: appExecutable, appStartedBySystem: true))
+        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: appExecutable, appStartedBySystem: false))
+        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: "/usr/bin/python3", appStartedBySystem: true))
+        #expect(!MediaSpeech.canAsk(bundle: bundle, parentExecutable: nil, appStartedBySystem: true))
+        #expect(!MediaSpeech.canAsk(bundle: Bundle(for: MediaSpeechProbe.self), parentExecutable: appExecutable, appStartedBySystem: true))
     }
 
     @Test func speechReportsStatusWithoutAsking() throws {

@@ -20,6 +20,12 @@ struct OfflineRootsTests {
         #expect(!roots.isOffline("/elsewhere/c.jpg"))
     }
 
+    @Test func theSidebarCanNotRescanWhenEveryLocationIsOffline() {
+        #expect(OfflineRoots.allOffline([root(1, "/Volumes/A", online: false), root(2, "/Volumes/B", online: false)]))
+        #expect(!OfflineRoots.allOffline([root(1, "/Volumes/A", online: false), root(2, "/Users/me", online: true)]))
+        #expect(!OfflineRoots.allOffline([]))
+    }
+
     @Test func theMostSpecificLocationDecides() {
         let roots = OfflineRoots([root(1, "/Volumes/NAS", online: false), root(2, "/Volumes/NAS/Synced", online: true)])
         #expect(roots.isOffline("/Volumes/NAS/Old/a.jpg"))

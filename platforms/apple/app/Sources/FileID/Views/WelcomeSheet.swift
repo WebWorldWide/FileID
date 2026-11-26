@@ -34,18 +34,14 @@ struct WelcomeSheet: View {
     init(engine: EngineClient) {
         self.engine = engine
         let ram = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
-        let freeDisk = (try? FileManager.default.homeDirectoryForCurrentUser
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-            .volumeAvailableCapacityForImportantUsage
+        let freeDisk = DeepAnalyzeSettings.freeDiskBytes()
         self.recommendedFace = FaceEmbedderKind.defaultFor(ramGB: ram)
         self.availableDiskBytes = freeDisk
         let recommended = AIModelKind.safeDefaultFor(ramGB: ram,
                                                       freeDiskBytes: freeDisk)
         self._hardwareRecommendedVLM = State(initialValue: recommended)
-        self._selectedVLM = State(initialValue: AIModelKind.onboardingSelection(
-            persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
-            ramGB: ram,
-            freeDiskBytes: freeDisk))
+        self._selectedVLM = State(initialValue: DeepAnalyzeSettings.startingModel(
+            persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"), ramGB: ram, freeDiskBytes: freeDisk))
         #if DEBUG
         if SelfShot.welcomeDemoDownload {
             self._vlmRequested = State(initialValue: true)

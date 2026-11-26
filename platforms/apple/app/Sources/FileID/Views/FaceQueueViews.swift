@@ -121,6 +121,8 @@ private struct FaceMergeRow: View {
                 .buttonStyle(.dsPrimary).tint(Theme.gold).accessibilityLabel(FaceQueueText.mergeLabel(item))
                 .help(FaceQueueText.mergeHelp)
         }
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(1)
         .disabled(model.busy)
     }
 }

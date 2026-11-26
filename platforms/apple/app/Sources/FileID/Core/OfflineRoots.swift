@@ -24,6 +24,11 @@ struct OfflineRoots: Equatable, Sendable {
 
     var isEmpty: Bool { entries.isEmpty }
 
+    /// The library has locations and none of them is reachable, whichever folder the sidebar points at.
+    static func allOffline(_ roots: [LibraryRoot]) -> Bool {
+        !roots.isEmpty && roots.allSatisfy { !$0.online }
+    }
+
     func isOffline(_ path: String) -> Bool {
         guard !entries.isEmpty else { return false }
         return entries.first { Self.contains($0.path, path) }.map { !$0.online } ?? false
