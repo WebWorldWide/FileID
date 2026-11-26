@@ -153,19 +153,16 @@ fn anchored_groups(component: Vec<i64>, hashes: &HashMap<i64, i64>, threshold: u
     }
     let mut anchors: Vec<(u64, Vec<i64>)> = by_hash.into_iter().collect();
     anchors.sort_by_key(|(_, ids)| (std::cmp::Reverse(ids.len()), ids.iter().min().copied()));
-    let mut taken = vec![false; anchors.len()];
+    let mut waiting: std::collections::VecDeque<(u64, Vec<i64>)> = anchors.into();
     let mut groups = Vec::new();
-    for anchor in 0..anchors.len() {
-        if taken[anchor] {
-            continue;
-        }
-        let mut ids = Vec::new();
-        for (index, (hash, members)) in anchors.iter().enumerate() {
-            if !taken[index] && (hash ^ anchors[anchor].0).count_ones() <= threshold {
-                taken[index] = true;
+    while let Some((anchor, mut ids)) = waiting.pop_front() {
+        waiting.retain(|(hash, members)| {
+            let near = (hash ^ anchor).count_ones() <= threshold;
+            if near {
                 ids.extend_from_slice(members);
             }
-        }
+            !near
+        });
         if ids.len() > 1 {
             ids.sort_unstable();
             groups.push(ids);
