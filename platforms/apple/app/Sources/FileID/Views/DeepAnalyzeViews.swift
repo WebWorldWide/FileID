@@ -471,12 +471,14 @@ struct DeepAnalyzeView: View {
     private func refreshStatusCounts() {
         let modelKey = settings.activeKind.rawValue
         Task {
-            let counts = await Task.detached(priority: .userInitiated) { [store] in
-                (store.deepAnalyzePending(modelKey: modelKey), store.namedPersonCount() > 0, !store.persons().isEmpty)
+            pendingTotals = await Task.detached(priority: .userInitiated) { [store] in
+                store.deepAnalyzePending(modelKey: modelKey)
             }.value
-            pendingTotals = counts.0
-            hasNamedAnyone = counts.1
-            hasPeople = counts.2
+            let people = await Task.detached(priority: .userInitiated) { [store] in
+                (store.namedPersonCount() > 0, store.hasPersons())
+            }.value
+            hasNamedAnyone = people.0
+            hasPeople = people.1
         }
     }
 
