@@ -50,7 +50,21 @@ pub(crate) fn resolve(conn: &Connection, text: &str, history: &[String], context
     if let Some(answer) = rename_question(conn, text, &words, context)? {
         return Ok(Some(answer));
     }
-    described_count(conn, &words, context)
+    if let Some(answer) = described_count(conn, &words, context)? {
+        return Ok(Some(answer));
+    }
+    Ok(asks_beyond_the_catalog(text, &words).then(|| Resolution::say(CANNOT_ANSWER)))
+}
+
+const CANNOT_ANSWER: &str = "I can't answer that from the catalog. I can count and list files by type, folder, date, size, camera, people or description status, \
+    name the biggest folders, give a library overview, find duplicates, and find photos and videos by what they show. Try “How many photos are from 2023?”.";
+
+/// Questions about names, averages or reasons the catalog holds no data for; searching their words would only match files by accident.
+fn asks_beyond_the_catalog(text: &str, words: &[String]) -> bool {
+    let compares_names = words.windows(2).any(|pair| ["same", "similar"].contains(&pair[0].as_str()) && ["name", "names", "filename", "filenames"].contains(&pair[1].as_str()));
+    let aggregates = words.iter().any(|word| ["average", "median", "compare", "versus", "vs"].contains(&word.as_str()));
+    let explains = words.first().is_some_and(|word| word == "why") && !super::chat_intent::unreadable_ask(text);
+    compares_names || aggregates || explains
 }
 
 fn asks_about_video_length(words: &[String]) -> bool {
@@ -67,7 +81,7 @@ fn asks_how_many(words: &[String]) -> bool {
 
 /// "How many photos have been described?": counts files that have a description against those that can have one.
 fn described_count(conn: &Connection, words: &[String], context: &Context<'_>) -> Result<Option<Resolution>> {
-    let describes = words.iter().any(|word| ["described", "analyzed", "captioned"].contains(&word.as_str()));
+    let describes = words.iter().any(|word| ["described", "analyzed", "captioned", "description", "descriptions", "caption", "captions"].contains(&word.as_str()));
     let negated = words.iter().any(|word| ["not", "no", "without", "missing", "havent", "hasnt", "need", "needs", "lacking", "undescribed", "unanalyzed"].contains(&word.as_str()));
     if !asks_how_many(words) || !describes || negated {
         return Ok(None);

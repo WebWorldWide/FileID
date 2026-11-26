@@ -1,6 +1,6 @@
 use super::chat_actions::{self, Context, Resolution};
 use super::chat_facts::{self, Filter};
-use super::chat_intent::{asked_inside, off_topic, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
+use super::chat_intent::{asked_inside, asks_why, off_topic, parse_intent, parse_question, place_ask, reference_ask, spoken_name};
 use super::chat_search::SearchPlan;
 use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
@@ -1005,7 +1005,7 @@ fn plan_for(
     if previous.is_some()
         && bare
         && question.structured()
-        && !["overview", "folders", "formats"].contains(&question.measure.as_str())
+        && !["overview", "folders", "folder_count", "formats"].contains(&question.measure.as_str())
         && (!question.duplicates || points_back)
         && (question.formats.is_none() || points_back)
         && !words.iter().any(|word| library_wide.contains(&word.as_str()))
@@ -1156,10 +1156,13 @@ fn prepare_turn(
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if super::chat_intent::unreadable_ask(&text) {
-        let (message, hits) = chat_facts::unreadable_answer(conn, root.as_ref())?;
+        let (message, hits) = if asks_why(&text) { chat_facts::unreadable_reasons(conn, root.as_ref())? } else { chat_facts::unreadable_answer(conn, root.as_ref())? };
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if let Some(kinds) = place_ask(&text) {
+        if let Some((message, hits)) = chat_facts::file_location_answer(conn, &text, root.as_ref())? {
+            return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
+        }
         let message = chat_facts::places_answer(conn, &kinds, root.as_ref())?;
         return Ok(Prepared { text, message, hits: vec![], actions: vec![], summarize: false, counts_files: false });
     }

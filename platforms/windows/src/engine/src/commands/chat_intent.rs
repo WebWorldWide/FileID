@@ -973,14 +973,22 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
             {
                 return Some(("overview", "newest"));
             }
+    let how_many = words.windows(2).any(|pair| pair == ["how", "many"] || pair == ["number", "of"]);
+    if has(&words, &["folder", "folders", "directory", "directories"])
+        && how_many
+        && !has(&words, &["inside", "under", "from"])
+        && (!has(&words, &["in"]) || has(&words, &["library", "collection"]))
+    {
+        return Some(("folder_count", "newest"));
+    }
     if has(&words, &["format", "formats", "extension", "extensions"])
-        && has(&words, &["what", "which", "each", "every", "per", "by", "breakdown", "different", "list"])
+        && has(&words, &["what", "which", "each", "every", "per", "by", "breakdown", "different", "list", "many"])
         && !has(&words, &["folder", "folders", "directory"])
         && (!has(&words, &["in", "inside", "under", "from"]) || has(&words, &["library", "collection"]))
     {
         return Some(("formats", "newest"));
     }
-    if (has(&words, &["type", "types", "kind", "kinds"]) && has(&words, &["each", "every", "per", "by", "breakdown", "different"])
+    if (has(&words, &["type", "types", "kind", "kinds"]) && (has(&words, &["each", "every", "per", "by", "breakdown", "different"]) || (how_many && has(&words, &["file", "files"])))
         || has(&words, &["type", "types", "kinds"]) && has(&words, &["what", "which"]) && has(&words, &["files", "file"]))
         && !has(&words, &["folder", "folders", "in", "inside", "under", "from"])
     {
@@ -1457,6 +1465,10 @@ pub fn unreadable_ask(text: &str) -> bool {
     }
     has(&words, &["unreadable", "corrupt", "corrupted", "failed", "fail", "fails", "failing", "unopenable"])
         || (has(&words, &["read", "readable", "opened", "open"]) && has(&words, &["couldnt", "cant", "cannot", "unable", "wasnt", "werent", "didnt", "wont", "not"]))
+}
+
+pub fn asks_why(text: &str) -> bool {
+    text.split_whitespace().next().is_some_and(|word| clean(word) == "why")
 }
 
 const TAKEN_WORDS: [&str; 6] = ["taken", "shot", "photographed", "filmed", "recorded", "captured"];

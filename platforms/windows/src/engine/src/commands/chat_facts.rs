@@ -500,6 +500,13 @@ pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64, root: Option
     Ok(found)
 }
 
+fn folder_count(conn: &Connection, root: Option<&RootScope>) -> Result<i64> {
+    let path = "replace(f.path_text,char(92),'/')";
+    let within = super::roots::clause("f.path_text", "?1");
+    let sql = format!("SELECT COUNT(DISTINCT rtrim({path},replace({path},'/',''))) FROM files f WHERE f.failed=0 AND {within}");
+    Ok(conn.query_row(&sql, [root.map(RootScope::param)], |row| row.get(0))?)
+}
+
 fn folder_phrase(folder: &FolderTotal) -> String {
     format!("{} ({} {}, {})", folder.name, count_label(folder.count), if folder.count == 1 { "file" } else { "files" }, bytes_label(folder.bytes))
 }
@@ -518,6 +525,10 @@ fn library_answer(conn: &Connection, question: &Question, root: Option<&RootScop
         let top = folders(conn, by_size, 5, root)?;
         let list = top.iter().map(folder_phrase).collect::<Vec<_>>().join(", ");
         return Ok((format!("{}: {list}.", if by_size { "Biggest folders" } else { "Folders with the most files" }), hits));
+    }
+    if question.measure == "folder_count" {
+        let folders = folder_count(conn, root)?;
+        return Ok((format!("Your library has {} holding {}.", count_noun(folders, "folder", "folders"), count_noun(count, "file", "files")), hits));
     }
     if question.measure == "formats" {
         let mut statement = conn.prepare(&format!(
@@ -741,8 +752,9 @@ pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Opt
     Ok(Some(format!("{} folders are called “{name}” and their files are counted together: {}.", count_label(found.len() as i64), places.join(", "))))
 }
 
-/// The files the unreadable note counts, named, for "which files failed?" and "how many files couldn't be read?".
-pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+type UnreadableRow = (i64, String, String, String);
+
+fn unreadable_rows(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<UnreadableRow>> {
     let mut args = vec![
         Value::Text(crate::scan_session::HIDDEN_ROW_MESSAGE.to_owned()),
         Value::Text(crate::db::zero_byte::ZERO_BYTE_REASON.to_owned()),
@@ -759,14 +771,13 @@ pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> 
          AND COALESCE(f.error_message,'') NOT IN (?1,?2){within} ORDER BY f.path_text ASC,f.id ASC"
     ))?;
     let rows = statement
-        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
+        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if rows.is_empty() {
-        return Ok(("No files failed to read.".into(), vec![]));
-    }
-    let count = rows.len() as i64;
-    let hits: Vec<CatalogHit> = rows
-        .into_iter()
+    Ok(rows)
+}
+
+fn unreadable_hits(rows: Vec<UnreadableRow>) -> Vec<CatalogHit> {
+    rows.into_iter()
         .take(SHOWN)
         .map(|(file_id, path, kind, reason)| CatalogHit {
             file_id,
@@ -778,10 +789,39 @@ pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> 
             page: None,
             selection_match: None,
         })
-        .collect();
+        .collect()
+}
+
+/// The files the unreadable note counts, named, for "which files failed?" and "how many files couldn't be read?".
+pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+    let rows = unreadable_rows(conn, root)?;
+    if rows.is_empty() {
+        return Ok(("No files failed to read.".into(), vec![]));
+    }
+    let count = rows.len() as i64;
+    let hits = unreadable_hits(rows);
     let shown = if count as usize > hits.len() { format!(" Showing the first {}.", hits.len()) } else { String::new() };
     let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
     Ok((format!("{} {noun} couldn't be read, so {pronoun} not in other answers.{shown}", count_label(count)), hits))
+}
+
+/// "Why couldn't they be read?": the recorded reasons with how many files each covers, most common first.
+pub(crate) fn unreadable_reasons(conn: &Connection, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
+    let rows = unreadable_rows(conn, root)?;
+    if rows.is_empty() {
+        return Ok(("No files failed to read.".into(), vec![]));
+    }
+    let mut reasons: HashMap<String, i64> = HashMap::new();
+    for (_, _, _, reason) in &rows {
+        let reason = reason.trim();
+        *reasons.entry(if reason.is_empty() { "No reason was recorded".to_owned() } else { reason.to_owned() }).or_default() += 1;
+    }
+    let mut reasons: Vec<(String, i64)> = reasons.into_iter().collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let listed = reasons.iter().take(5).map(|(reason, files)| format!("“{reason}” ({})", count_noun(*files, "file", "files"))).collect::<Vec<_>>().join(", ");
+    let more = if reasons.len() > 5 { format!(" and {} more", reasons.len() - 5) } else { String::new() };
+    let count = rows.len() as i64;
+    Ok((format!("{} couldn't be read. Reasons: {listed}{more}.", count_noun(count, "file", "files")), unreadable_hits(rows)))
 }
 
 /// "Takeout" names one nested folder here and "Google Takeout Export" holds thousands of files: offer the longer
@@ -893,8 +933,38 @@ pub(crate) fn places_answer(conn: &Connection, kinds: &[String], root: Option<&R
     })
 }
 
+/// "Where was DSC02096 taken?": the position stored for the file a question names by its stem, `None` when it names none.
+pub(crate) fn file_location_answer(conn: &Connection, text: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
+    let within = super::roots::clause("f.path_text", "?2");
+    let mut statement = conn.prepare(&format!(
+        "SELECT f.id,f.path_text,f.location_lat,f.location_lon FROM files f WHERE f.failed=0 AND lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {within} ORDER BY f.path_text LIMIT 20"
+    ))?;
+    for stem in text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')) {
+        if stem.len() < 5 || !stem.chars().any(|c| c.is_ascii_digit()) || !stem.chars().any(|c| c.is_alphabetic()) {
+            continue;
+        }
+        let pattern = format!("%{}.%", like_escape(&stem.to_lowercase()));
+        let rows = statement
+            .query_map(rusqlite::params![pattern, root.map(RootScope::param)], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let found: Vec<_> = rows.into_iter().filter(|(_, path, _, _)| file_name(path).rsplit_once('.').is_some_and(|(file_stem, _)| file_stem.eq_ignore_ascii_case(stem))).collect();
+        let Some((_, path, _, _)) = found.first() else { continue };
+        let name = file_name(path);
+        let position = found.iter().find_map(|(_, _, lat, lon)| lat.zip(*lon));
+        let message = match position {
+            Some((lat, lon)) => format!("{name} has a location recorded ({lat:.4}, {lon:.4}), but I can't name places yet."),
+            None => format!("{name} has no location recorded, so I can't say where it was taken."),
+        };
+        let ids = found.iter().map(|(id, _, _, _)| *id).collect();
+        let filter = Filter { ids: Some(ids), root: root.cloned(), ..Filter::default() };
+        let (count, _) = totals(conn, &filter)?;
+        return Ok(Some((message, listed(conn, &filter, "newest", SHOWN, count)?)));
+    }
+    Ok(None)
+}
+
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
-    if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
+    if matches!(question.measure.as_str(), "overview" | "folders" | "folder_count" | "formats") {
         return library_answer(conn, question, filter.root.as_ref());
     }
     let qualifiers = filter.qualifiers();

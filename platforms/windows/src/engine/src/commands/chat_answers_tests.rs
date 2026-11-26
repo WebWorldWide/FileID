@@ -61,6 +61,48 @@ fn a_duration_question_says_chat_cannot_filter_by_length() {
 }
 
 #[test]
+fn folder_file_type_and_description_counts_come_from_the_catalog() {
+    let mut conn = library();
+    for text in ["How many folders do I have?", "How many folders are in my library?"] {
+        assert!(ask(&mut conn, text).message.starts_with("Your library has 4 folders holding 7 files."), "{text}");
+    }
+    let formats = ask(&mut conn, "How many formats do I have?").message;
+    assert!(formats.starts_with("Your 7 files use 3 formats: 5 JPG"), "{formats}");
+    let kinds = ask(&mut conn, "How many file types do I have?").message;
+    assert!(kinds.starts_with("Your library has 7 files using"), "{kinds}");
+    assert_eq!(ask(&mut conn, "How many files have descriptions?").message, "1 of 6 files have a description. 5 still need one; ask me to describe them.");
+}
+
+#[test]
+fn questions_the_catalog_cannot_answer_say_what_chat_can_do_instead_of_searching_their_words() {
+    let mut conn = library();
+    for text in ["How many files have the same name?", "What is the average file size?", "Why is my library so big?"] {
+        let answer = ask(&mut conn, text);
+        assert!(answer.message.starts_with("I can't answer that from the catalog."), "{text}: {}", answer.message);
+        assert!(answer.hits.is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn where_was_a_named_file_taken_reads_that_files_position() {
+    let mut conn = library();
+    let none = ask(&mut conn, "Where was the photo DSC02096 taken?");
+    assert_eq!(none.message, "DSC02096.jpg has no location recorded, so I can't say where it was taken.");
+    assert_eq!(none.hits.len(), 1);
+    let some = ask(&mut conn, "Where was DSC02097 taken?");
+    assert_eq!(some.message, "DSC02097.jpg has a location recorded (40.2500, -74.5000), but I can't name places yet.");
+    assert!(ask(&mut conn, "Where were my photos taken?").message.contains("of your"), "a question naming no file still reads the library");
+}
+
+#[test]
+fn why_files_could_not_be_read_lists_the_recorded_reasons() {
+    let mut conn = library();
+    let answer = ask(&mut conn, "Why couldn't they be read?");
+    assert_eq!(answer.message, "3 files couldn't be read. Reasons: “Could not parse the file” (2 files), “Image decode failed” (1 file).");
+    assert_eq!(answer.hits.len(), 3);
+}
+
+#[test]
 fn a_model_answer_loses_its_closing_no_action_sentence() {
     let (prose, intents) = model_proposals("Five photos show a watch [1][2]. No action is requested, so no action is proposed.");
     assert_eq!(prose, "Five photos show a watch [1][2].");
