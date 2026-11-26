@@ -161,6 +161,17 @@ struct PipelineBlock: View {
 
     @State private var showDetails = false
 
+    /// A running step keeps two lines so the card does not jump as counts change; a message at rest is shown whole.
+    @ViewBuilder
+    private func detail(_ text: String) -> some View {
+        let label = Text(text).font(Theme.ChromeFont.body(12)).monospacedDigit().foregroundStyle(Theme.text3)
+        if scanRunning || captionsRunning {
+            label.lineLimit(2, reservesSpace: true).fixedSize(horizontal: false, vertical: true)
+        } else {
+            label.fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var showsNextStep: Bool {
         !scanRunning && stage == .done && !captionsRunning && !engine.faceClusteringInFlight
             && (engine.deepAnalyzeComplete?.processed ?? 0) == 0 && store.totalFiles > 0
@@ -202,7 +213,7 @@ struct PipelineBlock: View {
                     .accessibilityLabel(showDetails ? "Hide scan details" : "Show scan details")
                 }
             }
-            Text(s.sub).font(Theme.ChromeFont.body(12)).monospacedDigit().foregroundStyle(Theme.text3).lineLimit(2, reservesSpace: scanRunning || captionsRunning).fixedSize(horizontal: false, vertical: true)
+            detail(s.sub)
             if engine.scanRunsOnCPU && scanRunning {
                 Text(Self.cpuScanNotice).font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
             }

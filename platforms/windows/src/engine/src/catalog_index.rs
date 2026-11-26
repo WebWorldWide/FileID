@@ -24,8 +24,9 @@ use std::{
 mod snapshot;
 
 const MAX_FILES: usize = 200_000;
-/// What a job interrupted by a restart says. A paused job carrying any message was stopped by the engine, so a search resumes it; a pause the user chose has none and stays paused.
+/// What a search says when the index job was paused by the user, who must resume it.
 pub const PAUSED_BY_USER_MESSAGE: &str = "Visual search is paused. Resume it to search by what’s in a picture; names and text still match.";
+/// What a job interrupted by a restart says. A paused job carrying any message was stopped by the engine, so a search resumes it; a pause the user chose has none and stays paused.
 const INTERRUPTED_MESSAGE: &str = "Interrupted. Resume visual index preparation from the last verified snapshot.";
 static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
 const MAX_GRAPH_BYTES: u64 = snapshot::max_graph_bytes(clip_space::DIMENSION, MAX_FILES);
