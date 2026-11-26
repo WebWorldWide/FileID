@@ -703,7 +703,7 @@ pub fn parse_question(text: &str) -> Question {
         question.max_bytes = maximum;
         used.extend(range);
     }
-    let named_folder = question_folder(&words, &raw);
+    let named_folder = question_folder(&words, &raw, !(words.first().is_some_and(|word| word == "whats" || word == "what") && asked_inside(text).is_some()));
     let outside_folder: Vec<String> = words
         .iter()
         .enumerate()
@@ -995,7 +995,8 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     None
 }
 
-fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::Range<usize>)> {
+/// `name_before_folder_word` lets any name stand before the word folder; "what's in X folder" asks leave that to `asked_inside`.
+fn question_folder(words: &[String], raw: &[&str], name_before_folder_word: bool) -> Option<(String, std::ops::Range<usize>)> {
     for (index, word) in words.iter().enumerate() {
         if !["in", "inside", "under", "from", "of"].contains(&word.as_str()) {
             continue;
@@ -1010,7 +1011,7 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             return Some((cased, index..at + 1));
         }
         let folder_after = words.get(at + 1).is_some_and(|word| word == "folder" || word == "directory");
-        if !folder_after
+        if !folder_after && (name_before_folder_word || KNOWN_FOLDERS.contains(&target.as_str()))
             && let Some(close) = (at + 2..words.len()).take_while(|&k| !FOLDER_NAME_BOUNDARIES.contains(&words[k].as_str())).find(|&k| words[k] == "folder" || words[k] == "directory") {
             let name = raw[at..close].iter().map(|part| original(part)).collect::<Vec<_>>().join(" ");
             return Some((format!("named:{name}"), index..close + 1));
