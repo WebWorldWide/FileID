@@ -1010,7 +1010,7 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             return Some((cased, index..at + 1));
         }
         let folder_after = words.get(at + 1).is_some_and(|word| word == "folder" || word == "directory");
-        if !folder_after && KNOWN_FOLDERS.contains(&target.as_str())
+        if !folder_after
             && let Some(close) = (at + 2..words.len()).take_while(|&k| !FOLDER_NAME_BOUNDARIES.contains(&words[k].as_str())).find(|&k| words[k] == "folder" || words[k] == "directory") {
             let name = raw[at..close].iter().map(|part| original(part)).collect::<Vec<_>>().join(" ");
             return Some((format!("named:{name}"), index..close + 1));
@@ -1684,6 +1684,19 @@ mod tests {
         assert_eq!(parse_question("how many files in the Pictures Backup folder").folder.as_deref(), Some("named:Pictures Backup"));
         assert_eq!(parse_question("how many files in the Pictures folder").folder.as_deref(), Some("named:Pictures"));
         assert_eq!(parse_question("how many files in Downloads").folder.as_deref(), Some("named:Downloads"));
+    }
+
+    #[test]
+    fn a_multi_word_folder_name_before_the_word_folder_drops_that_word() {
+        for (text, want) in [
+            ("How many files are in the Google Takeout folder?", "named:Google Takeout"),
+            ("how many photos in my Ryan Homecoming folder", "named:Ryan Homecoming"),
+            ("how many files in the Old Trip Photos directory from 2020", "named:Old Trip Photos"),
+        ] {
+            let question = parse_question(text);
+            assert_eq!(question.folder.as_deref(), Some(want), "{text}");
+            assert!(!question.reduced.to_lowercase().contains("folder"), "{text} → {}", question.reduced);
+        }
     }
 
     #[test]
