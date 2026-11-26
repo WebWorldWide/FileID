@@ -415,7 +415,6 @@ fn scan_folder(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                 // `path_text` (stored_path) — not the raw `\\?\` walk
                 // path, which would miss the existing row and leave stale content.
                 path: std::path::PathBuf::from(stored_path(path)),
-                file_ref: fileid_engine::platform::file_ref(path),
             }));
             // Respect the same batch-flush bound as the main path so a tree of
             // mostly-empty files can't grow the batch without limit.
@@ -1108,7 +1107,6 @@ mod tests {
         let (temp, root, ctx) = test_layout("zero-byte-race");
         let path = root.join("race.txt");
         std::fs::write(&path, b"").unwrap();
-        let observed_ref = fileid_engine::platform::file_ref(&path);
         let mut conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
         conn.execute(
             "INSERT INTO files(path_text, path_hash, size_bytes, scanned_at, kind, extension) \
@@ -1117,10 +1115,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&path, "grew after discovery").unwrap();
-        let mut batch = vec![ScanRecord::Zero(ZeroByteObservation {
-            path: path.clone(),
-            file_ref: observed_ref,
-        })];
+        let mut batch = vec![ScanRecord::Zero(ZeroByteObservation { path: path.clone() })];
         let result = commit_batch(&mut conn, &mut batch, 2.0).unwrap();
         assert_eq!(result, (0, 0, 1));
         let state: (i64, i64, f64) = conn
@@ -1208,10 +1203,7 @@ mod tests {
         )
         .unwrap();
         let mut batch = vec![
-            ScanRecord::Zero(ZeroByteObservation {
-                path: zero.clone(),
-                file_ref: fileid_engine::platform::file_ref(&zero),
-            }),
+            ScanRecord::Zero(ZeroByteObservation { path: zero.clone() }),
             ScanRecord::Seen {
                 path_text: stored_path(&regular),
                 file_ref: fileid_engine::platform::file_ref(&regular),
