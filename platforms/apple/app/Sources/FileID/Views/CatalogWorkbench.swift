@@ -613,7 +613,7 @@ struct CatalogWorkbench: View {
             guard !Task.isCancelled, pending.isCurrentSearch(id) else { return }
             if !engine.send(.catalogRequest(request: window.searchRequest(id: id, query: text, rootID: rootID, vector: vector))) {
                 pending.cancelSearch()
-                message = "FileID is still getting ready. Try again in a moment."
+                message = HelperGate.unsentNote(engine)
             }
         }
     }
@@ -623,7 +623,7 @@ struct CatalogWorkbench: View {
         message = ""
         if !engine.send(.catalogRequest(request: request)) {
             pending.cancelOther()
-            message = "FileID is still getting ready. Try again in a moment."
+            message = HelperGate.unsentNote(engine)
         }
     }
 

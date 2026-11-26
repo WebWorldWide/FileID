@@ -185,7 +185,20 @@ fn open_for_faces(path: &Path, boxes: &[String], landmarks: bool) -> Option<Face
     }
 }
 
-/// `None` per box that yields no crop; landmarks run only when `FILEID_FACE_ALIGN` is not `0`.
+/// The box crop, turned upright when the matched landmarks show the face sitting sideways or upside down in its photo.
+fn turned_upright(rgba: Vec<u8>, jpeg: Option<Vec<u8>>, landmarks: Option<&Landmarks>, width: u32, height: u32) -> FaceCrop {
+    let turns = landmarks.and_then(|found| {
+        let side = (found.bounds.w * f64::from(width)).min(found.bounds.h * f64::from(height));
+        face_align::quarter_turns_to_upright(&found.points, side as f32)
+    });
+    let Some(turns) = turns else { return FaceCrop { rgba, jpeg, aligned: false } };
+    let rgba = face_align::rotate_square_rgba(&rgba, 112, turns);
+    let jpeg = jpeg_rgba(&rgba, 112, 112);
+    FaceCrop { rgba, jpeg, aligned: false }
+}
+
+/// `None` per box that yields no crop; landmarks run only when `FILEID_FACE_ALIGN` is not `0`. A face that sits sideways or
+/// upside down in its photo is turned upright, so the crop and the vector built from it are the way up a person sees it.
 pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
     let align = std::env::var("FILEID_FACE_ALIGN").as_deref() != Ok("0");
     let Some(image) = open_for_faces(path, boxes, align) else { return Vec::new() };
@@ -194,11 +207,11 @@ pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
     boxes
         .iter()
         .map(|bbox| {
-            let aligned = pixels.as_ref().and_then(|pixels| {
-                let stored = face_landmark_match::parse_normalized(bbox, image.width, image.height, image.orientation)?;
-                let index = face_landmark_match::index(&stored, &detected)?;
-                face_align::landmarks_upright(&image.landmarks[index].points).then_some(())?;
-                face_align::align_112_rgba(pixels, image.width, image.height, &image.landmarks[index].points)
+            let matched = face_landmark_match::parse_normalized(bbox, image.width, image.height, image.orientation)
+                .and_then(|stored| face_landmark_match::index(&stored, &detected))
+                .map(|index| &image.landmarks[index]);
+            let aligned = matched.filter(|found| face_align::landmarks_upright(&found.points)).and_then(|found| {
+                face_align::align_112_rgba(pixels.as_ref()?, image.width, image.height, &found.points)
             });
             if let Some(rgba) = aligned {
                 let jpeg = jpeg_rgba(&rgba, 112, 112);
@@ -206,7 +219,7 @@ pub fn face_crops(path: &Path, boxes: &[String]) -> Vec<Option<FaceCrop>> {
             }
             let rect = face_landmark_match::padded_crop_rect(bbox, image.width, image.height, image.orientation)?;
             let (rgba, jpeg) = image.crop_112(rect)?;
-            Some(FaceCrop { rgba, jpeg, aligned: false })
+            Some(turned_upright(rgba, jpeg, matched, image.width, image.height))
         })
         .collect()
 }
@@ -734,6 +747,23 @@ mod tests {
         assert!(signals.faces.is_empty());
         assert_eq!(signals.face_long_side, Some(2048), "a large frame without faces is tiled");
         assert!(take_image_signals(&dir.path().join("missing.jpg"), &mut faces).is_none());
+    }
+
+    #[test]
+    fn a_face_sitting_sideways_in_its_photo_is_cut_out_upright() {
+        let mut rgba = vec![0u8; 112 * 112 * 4];
+        rgba[0..4].copy_from_slice(&[200, 100, 50, 255]);
+        let template = [[73.5318f32, 51.5014], [38.2946, 51.6963], [56.0252, 71.7366], [70.7299, 92.2041], [41.5493, 92.3655]];
+        let clockwise_quarter = template.map(|[x, y]| [300.0 - y, 200.0 + x]);
+        let sideways = Landmarks { bounds: NormRect::new(0.3, 0.3, 0.3, 0.3), points: clockwise_quarter };
+        let turned = turned_upright(rgba.clone(), None, Some(&sideways), 1000, 1000);
+        assert_eq!(turned.rgba, face_align::rotate_square_rgba(&rgba, 112, 3));
+        assert!(turned.jpeg.is_some_and(|bytes| bytes.starts_with(&[0xFF, 0xD8])));
+        let upright = Landmarks { bounds: NormRect::new(0.3, 0.3, 0.3, 0.3), points: template };
+        assert_eq!(turned_upright(rgba.clone(), None, Some(&upright), 1000, 1000).rgba, rgba);
+        assert_eq!(turned_upright(rgba.clone(), None, None, 1000, 1000).rgba, rgba);
+        let small = Landmarks { bounds: NormRect::new(0.3, 0.3, 0.02, 0.02), points: clockwise_quarter };
+        assert_eq!(turned_upright(rgba.clone(), None, Some(&small), 1000, 1000).rgba, rgba);
     }
 
     #[test]

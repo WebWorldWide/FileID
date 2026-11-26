@@ -4,7 +4,7 @@
 use std::io::Read;
 use std::path::Path;
 
-const TEXT: &[u8] = b"fileid-face-crop-upright-1";
+const TEXT: &[u8] = b"fileid-face-crop-upright-2";
 const SOI: [u8; 2] = [0xFF, 0xD8];
 const COM: [u8; 2] = [0xFF, 0xFE];
 

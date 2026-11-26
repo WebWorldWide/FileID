@@ -467,7 +467,7 @@ extension ExactDuplicateVerifier {
     @MainActor
     static func undoTrash(batchID: String, engine: EngineClient) async -> (restored: Int, message: String?) {
         let signal = engine.bulkActionResultSignal
-        guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, "FileID is still getting ready. Try again in a moment.") }
+        guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, HelperGate.unsentNote(engine)) }
         let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 300)
         return (result?.succeeded ?? 0, result == nil ? "Putting files back didn’t finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
     }

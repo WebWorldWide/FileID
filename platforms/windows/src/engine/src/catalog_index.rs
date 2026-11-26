@@ -24,6 +24,8 @@ use std::{
 mod snapshot;
 
 const MAX_FILES: usize = 200_000;
+/// What a search says when the index job was paused by the user, who must resume it.
+pub const PAUSED_BY_USER_MESSAGE: &str = "Visual search is paused. Resume it to search by what’s in a picture; names and text still match.";
 /// What a job interrupted by a restart says. A paused job carrying any message was stopped by the engine, so a search resumes it; a pause the user chose has none and stays paused.
 const INTERRUPTED_MESSAGE: &str = "Interrupted. Resume visual index preparation from the last verified snapshot.";
 static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
@@ -434,7 +436,7 @@ impl CatalogIndex {
                     }
                     response.status = if mode == "semantic" { "error" } else { "ok" }.into();
                     response.message = Some(match (&prepared, mode) {
-                        (Err(_), _) => "Keyword results only. The visual search index is paused; resume its job to add similar-image results.".into(),
+                        (Err(error), _) => format!("Keyword results only. {error}"),
                         (Ok(_), "semantic") => "Preparing the local visual search index. Similarity results are not available yet.".into(),
                         (Ok(_), _) => "Keyword results only. Preparing the local visual search index.".into(),
                     });
@@ -565,6 +567,7 @@ impl CatalogIndex {
             let (current, error): (String, Option<String>) =
                 conn.query_row("SELECT state,error FROM catalog_jobs WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
             let interrupted = current == "paused" && error.is_some();
+            ensure!(current != "paused" || interrupted, PAUSED_BY_USER_MESSAGE);
             ensure!(
                 interrupted || ["queued", "completed"].contains(&current.as_str()),
                 "Visual index preparation is stopped or failed. Resume its job; keyword search remains available."

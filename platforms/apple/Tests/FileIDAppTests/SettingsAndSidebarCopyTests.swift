@@ -46,4 +46,16 @@ struct SettingsAndSidebarCopyTests {
         #expect(PersonCardText.sheetTitle(isUnknown: false, nameParts: ["Uncle", "Ben", "", "", ""], personID: 3) == "Uncle Ben")
         #expect(PersonCardText.sheetTitle(isUnknown: true, nameParts: [], personID: 3) == "Unknown person")
     }
+
+    @Test("the sidebar card shows a message at rest whole, without a line limit")
+    func sidebarCardMessageAtRestIsNotClamped() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let source = try String(contentsOf: root.appendingPathComponent("platforms/apple/app/Sources/FileID/Views/Shell/PipelineBlock.swift"), encoding: .utf8)
+        #expect(!source.contains(".lineLimit(2, reservesSpace: scanRunning || captionsRunning)"))
+        let detail = try #require(source.range(of: "private func detail("))
+        let body = source[detail.upperBound...].prefix(600)
+        #expect(body.contains("if scanRunning || captionsRunning"))
+        #expect(body.components(separatedBy: "lineLimit").count == 2)
+    }
 }

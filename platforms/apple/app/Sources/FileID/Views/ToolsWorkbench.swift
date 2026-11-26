@@ -778,13 +778,13 @@ struct ToolsWorkbench: View {
         guard session.pending.isEmpty else { return }
         session.searchID = UUID().uuidString
         session.searchedQuery = session.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = "FileID is still getting ready. Try again in a moment." }
+        if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = HelperGate.unsentNote(engine) }
     }
     private func send(_ request: ToolRequest) {
         session.pending = request.requestID; session.pendingAction = request.action; session.pendingRecipeKind = request.recipe?.kind
         session.pendingEngineGeneration = engine.engineResetSignal
         session.searchID = ""
-        if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = "FileID is still getting ready. Try again in a moment." }
+        if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = HelperGate.unsentNote(engine) }
     }
     private func consume() {
         guard !session.pending.isEmpty, let response = engine.toolResponses[session.pending] else { return }

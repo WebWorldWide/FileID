@@ -348,7 +348,8 @@ fn a_search_does_not_resume_a_job_the_user_paused() {
         .execute("UPDATE catalog_jobs SET state='paused',error=NULL WHERE id=?1", [CatalogIndex::job_id()])
         .unwrap();
     index.state.lock().cache = None;
-    assert!(index.search(&seed()).is_err());
+    let error = index.search(&seed()).unwrap_err();
+    assert_eq!(error.to_string(), PAUSED_BY_USER_MESSAGE);
     assert_eq!(state(&index), "paused");
     index.shutdown();
 }
@@ -1110,7 +1111,9 @@ fn a_paused_index_job_still_gives_hybrid_search_its_keyword_rows_on_a_catalog_pa
     let response = index.search(&hybrid).unwrap();
     assert_eq!(response.status, "ok");
     assert_eq!(response.hits.len(), 1);
-    assert!(response.message.as_deref().unwrap().contains("Keyword results only"));
+    let message = response.message.unwrap();
+    assert!(message.starts_with("Keyword results only"), "{message}");
+    assert!(message.contains(PAUSED_BY_USER_MESSAGE), "{message}");
     index.shutdown();
 }
 

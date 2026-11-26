@@ -480,7 +480,7 @@ struct TakeWorkbench: View {
     private func findRelated() {
         Task {
             let response = await TakeRequests.send(engine, TakeProposals.enqueueRequest(id: UUID().uuidString), timeout: 30)
-            guard let response else { ToastCenter.shared.show("FileID is still getting ready. Try again in a moment."); return }
+            guard let response else { ToastCenter.shared.show(HelperGate.unsentNote(engine)); return }
             if let message = response.message, !message.isEmpty { ToastCenter.shared.show(message) }
             if response.status == "ok" { withAnimation(Theme.springStandard) { groupingJob = TakeProposals.job(response.jobs) } }
         }
@@ -691,7 +691,7 @@ struct TakeWorkbench: View {
         if !engine.send(.catalogRequest(request: request)) {
             pendingID = ""
             pendingAction = ""
-            ToastCenter.shared.show("FileID is still getting ready. Try again in a moment.")
+            ToastCenter.shared.show(HelperGate.unsentNote(engine))
         }
     }
 

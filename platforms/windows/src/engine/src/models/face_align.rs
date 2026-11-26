@@ -103,6 +103,60 @@ pub fn landmarks_upright(points: &[[f32; 2]; 5]) -> bool {
     eyes < nose && nose < mouth
 }
 
+/// Faces smaller than this are not turned: Vision's landmarks on a small face are sometimes upside down on an upright photo.
+const MIN_TURNED_FACE_PIXELS: f32 = 64.0;
+
+/// How many clockwise quarter turns bring a face that sits sideways or upside down in its photo (no orientation tag
+/// says so) upright, read from the line running from the mouth to the eyes. `None` when the face is already near
+/// upright, is small, or its five points do not form a plausible face.
+pub fn quarter_turns_to_upright(points: &[[f32; 2]; 5], face_pixels: f32) -> Option<u8> {
+    if face_pixels < MIN_TURNED_FACE_PIXELS || points.iter().flatten().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let middle = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let (eyes, mouth, nose) = (middle(points[0], points[1]), middle(points[3], points[4]), points[2]);
+    let up = [eyes[0] - mouth[0], eyes[1] - mouth[1]];
+    let length = up[0].hypot(up[1]);
+    let eye_gap = (points[0][0] - points[1][0]).hypot(points[0][1] - points[1][1]);
+    if eye_gap <= 0.0 || !(0.7..=1.8).contains(&(length / eye_gap)) {
+        return None;
+    }
+    let along = |from: [f32; 2], to: [f32; 2]| ((to[0] - from[0]) * up[0] + (to[1] - from[1]) * up[1]) / (length * length);
+    let nose_between_mouth_and_eyes = (0.1..=0.9).contains(&along(mouth, nose));
+    let eye_line_crosses_up = ((points[1][0] - points[0][0]) * up[0] + (points[1][1] - points[0][1]) * up[1]).abs() <= 0.5 * eye_gap * length;
+    if !nose_between_mouth_and_eyes || !eye_line_crosses_up {
+        return None;
+    }
+    let clockwise_from_up = f64::from(up[0]).atan2(f64::from(-up[1])).to_degrees();
+    let quarters = (clockwise_from_up / 90.0).round();
+    if (clockwise_from_up - quarters * 90.0).abs() > 30.0 {
+        return None;
+    }
+    match (-quarters as i32).rem_euclid(4) {
+        0 => None,
+        turns => Some(turns as u8),
+    }
+}
+
+/// A square RGBA image turned clockwise by `turns` quarter turns.
+pub fn rotate_square_rgba(rgba: &[u8], side: usize, turns: u8) -> Vec<u8> {
+    let mut out = vec![0u8; rgba.len()];
+    for y in 0..side {
+        for x in 0..side {
+            let (to_x, to_y) = match turns % 4 {
+                0 => (x, y),
+                1 => (side - 1 - y, x),
+                2 => (side - 1 - x, side - 1 - y),
+                _ => (y, side - 1 - x),
+            };
+            let from = (y * side + x) * 4;
+            let to = (to_y * side + to_x) * 4;
+            out[to..to + 4].copy_from_slice(&rgba[from..from + 4]);
+        }
+    }
+    out
+}
+
 pub fn fit_to_template(src: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
     fit_similarity(src, &TEMPLATE)
 }
@@ -210,6 +264,42 @@ mod tests {
     fn placed(angle_degrees: f32, scale: f32) -> [[f32; 2]; 5] {
         let (sin, cos) = angle_degrees.to_radians().sin_cos();
         TEMPLATE.map(|[x, y]| [300.0 + scale * (cos * x - sin * y), 200.0 + scale * (sin * x + cos * y)])
+    }
+
+    #[test]
+    fn a_sideways_or_upside_down_face_is_turned_upright_by_the_quarter_turns_that_fix_it() {
+        assert_eq!(quarter_turns_to_upright(&placed(0.0, 1.0), 100.0), None);
+        assert_eq!(quarter_turns_to_upright(&placed(35.0, 1.0), 100.0), None);
+        assert_eq!(quarter_turns_to_upright(&placed(90.0, 1.0), 100.0), Some(3));
+        assert_eq!(quarter_turns_to_upright(&placed(180.0, 1.0), 100.0), Some(2));
+        assert_eq!(quarter_turns_to_upright(&placed(-90.0, 1.0), 100.0), Some(1));
+        assert_eq!(quarter_turns_to_upright(&placed(75.0, 1.0), 100.0), Some(3));
+    }
+
+    #[test]
+    fn a_small_or_implausible_face_is_never_turned() {
+        assert_eq!(quarter_turns_to_upright(&placed(90.0, 1.0), 40.0), None);
+        let flipped_by_vision = [[1038.777, 417.5533], [1018.9976, 418.2268], [1024.962, 403.8286], [1043.3632, 393.6493], [1022.975, 395.21118]];
+        assert_eq!(quarter_turns_to_upright(&flipped_by_vision, 20.0), None);
+        let mut mouth_beside_eyes = placed(0.0, 1.0);
+        mouth_beside_eyes[3] = [mouth_beside_eyes[0][0] + 5.0, mouth_beside_eyes[0][1]];
+        mouth_beside_eyes[4] = [mouth_beside_eyes[1][0] - 5.0, mouth_beside_eyes[1][1]];
+        assert_eq!(quarter_turns_to_upright(&mouth_beside_eyes, 100.0), None);
+        let mut with_nan = placed(90.0, 1.0);
+        with_nan[2][0] = f32::NAN;
+        assert_eq!(quarter_turns_to_upright(&with_nan, 100.0), None);
+    }
+
+    #[test]
+    fn turning_a_square_clockwise_moves_its_top_left_pixel_to_the_top_right() {
+        let pixel = [9, 8, 7, 255];
+        let at = |image: &[u8], x: usize, y: usize| image[(y * 3 + x) * 4..(y * 3 + x) * 4 + 4].to_vec();
+        let mut image = vec![0u8; 3 * 3 * 4];
+        image[0..4].copy_from_slice(&pixel);
+        assert_eq!(at(&rotate_square_rgba(&image, 3, 1), 2, 0), pixel);
+        assert_eq!(at(&rotate_square_rgba(&image, 3, 2), 2, 2), pixel);
+        assert_eq!(at(&rotate_square_rgba(&image, 3, 3), 0, 2), pixel);
+        assert_eq!(rotate_square_rgba(&rotate_square_rgba(&image, 3, 1), 3, 3), image);
     }
 
     #[test]

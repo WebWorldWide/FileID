@@ -73,6 +73,8 @@ enum LibrarySearchOutcome {
         var hiddenWeaker: Int
     }
 
+    static let keywordOnlyPrefix = "Keyword results only"
+    static let keywordOnlyLabel = "Matches by name and text only"
     static let plainLabel = "Matches by name, text and what’s in the picture"
 
     /// The engine's summary recounted for the rows a kind filter keeps, in the engine's own wording.
@@ -88,6 +90,9 @@ enum LibrarySearchOutcome {
 
     /// `message` is the engine's reply message, nil when it sent none (older engine, no search model).
     static func decide(message: String?, keywordCount: Int, showWeaker: Bool) -> Decision {
+        if message?.hasPrefix(keywordOnlyPrefix) == true {
+            return Decision(source: .engine, addKeywordRows: true, label: keywordOnlyLabel, hiddenWeaker: 0)
+        }
         guard let strength = Strength(message: message) else {
             return Decision(source: .engine, addKeywordRows: true, label: plainLabel, hiddenWeaker: 0)
         }
