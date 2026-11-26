@@ -144,6 +144,15 @@ impl Sink {
     }
 }
 
+/// A client that has read the event it was waiting for and closed its end is not an engine error.
+fn log_wire_failure(err: &std::io::Error, what: &str) {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        tracing::debug!(?err, "{what}: the reader closed the pipe");
+    } else {
+        tracing::error!(?err, "{what}");
+    }
+}
+
 fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
     let mut scratch: Vec<u8> = Vec::new();
     // blocking_recv blocks for the first event of a burst; then every already-queued event is written with try_recv
@@ -174,7 +183,7 @@ fn drain_to<W: Write>(handle: &mut W, rx: &mut mpsc::Receiver<IpcEvent>) {
             }
         }
         if let Err(err) = handle.flush() {
-            tracing::error!(?err, "ipc sink flush failed");
+            log_wire_failure(&err, "ipc sink flush failed");
             break;
         }
     }
@@ -225,7 +234,7 @@ fn write_frame_too_large<W: Write>(w: &mut W, frame_bytes: usize) -> bool {
 fn write_raw_line<W: Write>(w: &mut W, bytes: &[u8]) -> bool {
     if let Err(err) = w.write_all(bytes).and_then(|_| w.write_all(b"\n")) {
         // stdout is the failing surface, so log via tracing (local file and stderr) instead of an IPC event.
-        tracing::error!(?err, "ipc sink write failed");
+        log_wire_failure(&err, "ipc sink write failed");
         return false;
     }
     true
@@ -268,6 +277,48 @@ mod tests {
             self.flushes += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_reader_that_closed_the_pipe_is_not_logged_as_an_error() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+            type Writer = Captured;
+            fn make_writer(&'a self) -> Captured {
+                self.clone()
+            }
+        }
+        struct ClosedPipe;
+        impl Write for ClosedPipe {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let (tx, mut rx) = mpsc::channel::<IpcEvent>(4);
+        tx.try_send(log_event("last".into())).unwrap();
+        drop(tx);
+        tracing::subscriber::with_default(subscriber, || drain_to(&mut ClosedPipe, &mut rx));
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(!logged.contains("ERROR"), "{logged}");
     }
 
     fn log_event(message: String) -> IpcEvent {
