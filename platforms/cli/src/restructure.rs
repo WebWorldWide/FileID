@@ -17,7 +17,9 @@ use rusqlite::params;
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
 
-use fileid_engine::read::restructure::{PLAN_FILES_SQL, library_root, plan_row_to_file};
+use fileid_engine::read::restructure::{
+    PLAN_FILES_SQL, library_root, plan_root_bounds, plan_row_to_file,
+};
 use fileid_engine::util::path_safety::strip_extended_length;
 use fileid_engine::util::read_only::require_all_writable;
 
@@ -25,6 +27,10 @@ use crate::context::{Ctx, display_path, print_json, terminal_text};
 
 const MAX_PRINTED_MOVES: usize = 200;
 const CLASSIFY_CHUNK: usize = 4_096;
+const PLAN_FILE_COUNT_SQL: &str = "SELECT COUNT(*) FROM files f
+ WHERE f.failed = 0
+   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+        OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))";
 
 #[derive(Debug)]
 struct PlanSpool {
@@ -164,12 +170,12 @@ pub fn run(
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
-    let file_count = conn
+    let library_files = conn
         .query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |r| {
             r.get::<_, i64>(0)
         })?
         .max(0) as u64;
-    if file_count == 0 {
+    if library_files == 0 {
         if ctx.json {
             print_json(&serde_json::json!({
                 "command": "restructure", "plan": true, "fileCount": 0, "moves": [],
@@ -181,6 +187,19 @@ pub fn run(
     }
 
     let library_root = resolve_library_root(&conn, root)?;
+    let (root_text, root_prefix, root_upper) =
+        plan_root_bounds(&library_root.to_string_lossy());
+    let file_count = conn
+        .query_row(PLAN_FILE_COUNT_SQL, params![root_text, root_prefix, root_upper], |r| {
+            r.get::<_, i64>(0)
+        })?
+        .max(0) as u64;
+    if file_count == 0 {
+        anyhow::bail!(
+            "no scanned files are under {}. Run `fileid scan` on that folder first.",
+            library_root.display()
+        );
+    }
     let needs_spool = apply || ctx.json;
     let (spool, mut spool_writer) = if needs_spool {
         let (spool, writer) = PlanSpool::create()?;
@@ -193,7 +212,7 @@ pub fn run(
     let mut move_count = 0_u64;
     let mut chunk = Vec::with_capacity(CLASSIFY_CHUNK);
     let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
-    let mut rows = stmt.query(params!["", "", ""])?;
+    let mut rows = stmt.query(params![root_text, root_prefix, root_upper])?;
     while let Some(row) = rows.next()? {
         chunk.push(plan_row_to_file(row)?);
         if chunk.len() >= CLASSIFY_CHUNK {
@@ -416,11 +435,11 @@ fn apply_spooled(
     }
 
     let verb = if symlinks { "symlink" } else { "move" };
-    let refusal = if dry_run {
-        read_only_refusal(spool)?
-    } else {
-        None
-    };
+    let refusal = read_only_refusal(spool)?;
+    if !dry_run && let Some(sentence) = &refusal {
+        anyhow::bail!("{sentence}");
+    }
+    let dry_run_notice = refusal.map(|sentence| format!("{sentence} Apply would be refused."));
 
     if ctx.json && dry_run {
         write_json(&DryRunReport {
@@ -430,7 +449,7 @@ fn apply_spooled(
             use_symlinks: symlinks,
             library_root: library_root.to_string_lossy().into_owned(),
             move_count,
-            apply_refused: refusal.clone(),
+            apply_refused: dry_run_notice.clone(),
             moves: SpoolMoves(spool),
         })?;
         return Ok(());
@@ -474,7 +493,7 @@ fn apply_spooled(
     }
 
     if dry_run {
-        if let Some(sentence) = &refusal
+        if let Some(sentence) = &dry_run_notice
             && !ctx.json
         {
             println!("{}", ctx.bold(sentence));
@@ -523,6 +542,7 @@ fn apply_spooled(
         spool.iter()?,
         Some(usize::try_from(move_count).context("restructure plan is too large")?),
     )?;
+    let first_failure = applier.take_first_failure();
 
     if ctx.json {
         print_json(&serde_json::json!({
@@ -532,7 +552,7 @@ fn apply_spooled(
             "failed": result.failed,
             "privilegeError": result.privilege_error,
         }));
-        apply_outcome(&result)?;
+        apply_outcome(&result, first_failure.as_deref())?;
         return Ok(());
     }
     let headline = if result.failed > 0 || result.privilege_error.is_some() {
@@ -548,20 +568,26 @@ fn apply_spooled(
     if let Some(pe) = &result.privilege_error {
         println!("  {} {}", ctx.bold("Symlink privilege:"), terminal_text(pe));
     }
-    apply_outcome(&result)?;
+    if let Some(failure) = &first_failure {
+        println!("  First failure: {}", terminal_text(failure));
+    }
+    apply_outcome(&result, first_failure.as_deref())?;
     Ok(())
 }
 
-/// The sentence a real apply would be refused with when planned sources sit on a read-only drive.
+/// The sentence a real apply is refused with when planned sources sit on a read-only drive.
 fn read_only_refusal(spool: &PlanSpool) -> Result<Option<String>> {
     let sources = spool.iter()?.flatten().map(|m| PathBuf::from(m.source));
     Ok(require_all_writable(sources)
         .err()
-        .map(|refusal| format!("{} Apply would be refused.", refusal.sentence())))
+        .map(|refusal| refusal.sentence()))
 }
 
 /// Maps an apply result to an exit status. Privilege refusals are not counted in `failed`, so `failed` alone would report success for a run that moved nothing.
-fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
+fn apply_outcome(
+    result: &RestructureApplyResult,
+    first_failure: Option<&str>,
+) -> anyhow::Result<()> {
     if let Some(pe) = &result.privilege_error {
         anyhow::bail!(
             "restructure: symlink mode was refused ({pe}); {} move(s) applied, the rest were abandoned",
@@ -569,7 +595,8 @@ fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
         );
     }
     if result.failed > 0 {
-        anyhow::bail!("restructure: {} move(s) failed", result.failed);
+        let reason = first_failure.map(|f| format!(" (first: {f})")).unwrap_or_default();
+        anyhow::bail!("restructure: {} move(s) failed{reason}", result.failed);
     }
     Ok(())
 }
