@@ -511,20 +511,12 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let clause = scope.filter.clause(&mut args);
             args.push(rusqlite::types::Value::Integer(MAX_IDS as i64));
             let mut statement = conn.prepare(&format!(
-                "SELECT f.id,f.path_text,trim(f.vlm_proposed_name) FROM files f WHERE {clause} AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' ORDER BY {taken} IS NULL,{taken} DESC,f.id DESC LIMIT ?",
+                "SELECT f.id FROM files f WHERE {clause} AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' ORDER BY {taken} IS NULL,{taken} DESC,f.id DESC LIMIT ?",
                 taken = crate::util::SQL_TAKEN_DATE
             ))?;
-            let rows: Vec<(i64, String, String)> = statement
-                .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let renames: Vec<(i64, String, String)> = rows
-                .into_iter()
-                .filter_map(|(id, path, proposed)| {
-                    let extension = Path::new(&path).extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
-                    let name = if extension.is_empty() { proposed } else { format!("{proposed}.{extension}") };
-                    (name != file_name(&path) && valid_name(&name)).then_some((id, path, name))
-                })
-                .collect();
+            let ids: Vec<i64> = statement.query_map(rusqlite::params_from_iter(args), |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let renames: Vec<(i64, String, String)> =
+                super::catalog_names::default_names(conn, &ids)?.into_iter().filter(|(_, path, name)| name != &file_name(path) && valid_name(name)).collect();
             if renames.is_empty() {
                 return Ok(Resolution::say(format!("No files{qualifiers} have suggested names yet. Describe them first, then ask again.")));
             }

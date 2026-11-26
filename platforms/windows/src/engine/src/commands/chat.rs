@@ -1549,7 +1549,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ask(&mut conn, "How many photos have been described?").message, "1 of 2 photos have a description. 1 still need one; ask me to describe them.");
-        assert_eq!(ask(&mut conn, "What would you rename DSC01698 to?").message, "Describe Files suggested “Dog on tiles” for DSC01698.JPG. Say “Rename DSC01698 to the suggested name” to get a card to confirm.");
+        assert_eq!(ask(&mut conn, "What would you rename DSC01698 to?").message, "Describe Files suggested “dog-tiles.JPG” for DSC01698.JPG. Say “Rename DSC01698 to the suggested name” to get a card to confirm.");
         assert!(ask(&mut conn, "What would you rename DSC01699 to?").message.starts_with("I have no suggested name"));
         assert!(ask(&mut conn, "Who appears most often?").message.starts_with("People in your library: Kyle (2 files)"));
         let summary = ask(&mut conn, "Summarize what my videos show");

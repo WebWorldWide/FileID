@@ -110,19 +110,21 @@ fn rename_question(conn: &Connection, text: &str, words: &[String], context: &Co
     let stems: Vec<&str> = text.split_whitespace().map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')).filter(|word| word.chars().any(|c| c.is_ascii_digit())).collect();
     for stem in stems {
         let mut statement = conn.prepare(&format!(
-            "SELECT f.path_text,trim(f.vlm_proposed_name) FROM files f WHERE lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {} \
+            "SELECT f.id,f.path_text FROM files f WHERE lower(f.path_text) LIKE ?1 ESCAPE '\\' AND {} \
              AND f.vlm_proposed_name IS NOT NULL AND trim(f.vlm_proposed_name)<>'' LIMIT 20",
             super::roots::clause("f.path_text", "?2")
         ))?;
         let pattern = format!("%{}.%", stem.to_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-        let found: Vec<(String, String)> = statement
+        let found: Vec<(i64, String)> = statement
             .query_map(params![pattern, context.root.map(super::roots::RootScope::param)], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let named = found.into_iter().find_map(|(path, proposed)| {
-            let current = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
-            current.rsplit_once('.').is_some_and(|(file_stem, _)| file_stem.eq_ignore_ascii_case(stem)).then_some((current, proposed))
-        });
-        if let Some((current, proposed)) = named {
+        let ids: Vec<i64> = found
+            .iter()
+            .filter(|(_, path)| path.rsplit(['/', '\\']).next().and_then(|name| name.rsplit_once('.')).is_some_and(|(file_stem, _)| file_stem.eq_ignore_ascii_case(stem)))
+            .map(|(id, _)| *id)
+            .collect();
+        if let Some((_, path, proposed)) = super::catalog_names::default_names(conn, &ids)?.into_iter().next() {
+            let current = path.rsplit(['/', '\\']).next().unwrap_or(&path);
             return Ok(Some(Resolution::say(format!("Describe Files suggested “{proposed}” for {current}. Say “Rename {stem} to the suggested name” to get a card to confirm."))));
         }
     }

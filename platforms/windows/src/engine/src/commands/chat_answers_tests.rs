@@ -71,3 +71,23 @@ fn a_model_answer_loses_its_closing_no_action_sentence() {
     assert_eq!(prose, "No action shots were found in this folder.");
 }
 
+#[test]
+fn the_rename_card_and_library_smart_names_use_one_style() {
+    let mut conn = crate::db::test_support::memory_db();
+    let dir = std::env::temp_dir().join(format!("fileid-chat-names-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::db::test_support::insert_file(&conn, 1, &dir.join("DSC02096.jpg").to_string_lossy(), "image");
+    conn.execute("UPDATE files SET vlm_proposed_name='Person Pointing At Car Tire' WHERE id=1", []).unwrap();
+    let request: crate::ipc::CatalogRequest = serde_json::from_value(serde_json::json!({
+        "requestID": "names", "action": "proposeNames", "fileIDs": [1],
+        "naming": {"style": "short", "maxLength": 40, "includePeople": true, "includeEvent": true, "learn": true}
+    }))
+    .unwrap();
+    let library_name = super::catalog_names::propose(&conn, &request).unwrap().remove(0).text;
+    assert!(!library_name.is_empty());
+    let card = ask(&mut conn, "Rename my photos to better names");
+    let renames = card.actions.unwrap_or_else(|| panic!("{}", card.message)).remove(0).renames.expect("renames");
+    assert_eq!(renames.iter().map(|rename| rename.new_name.as_str()).collect::<Vec<_>>(), vec![library_name.as_str()]);
+    assert!(library_name.chars().all(|c| c.is_lowercase() || c == '-' || c == '.' || c == '_' || c.is_ascii_digit()), "{library_name}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
