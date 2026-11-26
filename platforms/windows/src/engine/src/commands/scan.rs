@@ -652,6 +652,34 @@ mod tests {
         assert_eq!(progress.last().unwrap().phase, ScanPhase::Completed);
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_first_scan_that_could_not_read_every_folder_still_records_the_capture_dates_as_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = std::env::temp_dir().join(format!("fileid-first-scan-dates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("locked")).unwrap();
+        std::fs::write(folder.join("a.txt"), "a").unwrap();
+        std::fs::set_permissions(folder.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let db = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let (sink, _events) = Sink::channel_for_test(4096);
+        let payload = ipc::StartScanPayload {
+            root_path: folder.to_string_lossy().into_owned(),
+            root_bookmark: None,
+            root_display: None,
+            rescan: false,
+            excluded_paths: None,
+        };
+        handle_start_scan(sink, db.clone(), Arc::new(Mutex::new(None)), payload, Arc::new(AtomicBool::new(false)), None, None).await;
+        std::fs::set_permissions(folder.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let recorded: Option<String> = db
+            .lock()
+            .query_row("SELECT capture_dates_checked FROM library_roots WHERE path = ?1", [folder.to_string_lossy()], |row| row.get(0))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(recorded.is_some(), "rows written by this engine need no later check, even when the walk was partial");
+    }
+
     #[tokio::test]
     async fn gpu_failure_rejection_is_terminal_and_releases_scan_slot() {
         let coordinator = ScanCoordinator::new();

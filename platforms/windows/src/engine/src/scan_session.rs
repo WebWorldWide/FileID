@@ -280,6 +280,12 @@ impl ScanSession {
         let capture_dates_current = self.capture_dates_current.unwrap_or_else(|| {
             self.rescan || !crate::pipeline::capture_date_backfill::catalog_has_rows(&self.db_conn.lock(), root)
         });
+        if capture_dates_current && !self.rescan {
+            match crate::paths::root() {
+                Ok(state_dir) => crate::pipeline::capture_date_backfill::mark_done(&self.db_conn.lock(), &state_dir, root),
+                Err(error) => tracing::warn!(%error, "[SCAN] no state folder for the capture-date marker"),
+            }
+        }
 
         // Resolve user exclusions against this root and purge already-cataloged rows beneath them before the skip-set preload, so a stale excluded row cannot enter the skip set.
         let exclusions = crate::util::path_safety::resolve_exclusions(root, &self.excluded_paths);
