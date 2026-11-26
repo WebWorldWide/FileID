@@ -3,6 +3,8 @@
 
 mod app_settings;
 mod changes;
+#[cfg(test)]
+mod display_test;
 mod engine_client;
 mod engine_errors;
 mod event_queue;

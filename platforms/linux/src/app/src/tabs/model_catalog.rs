@@ -288,22 +288,28 @@ fn catalog(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&gtk::Label::builder()
         .label("Permissively licensed local models pinned to exact Hugging Face revisions. Candidates have not been measured on this machine yet; Benchmark runs locally rendered probes (colour, counting, text) and records speed, memory and answer accuracy here only. Tuning keeps the fastest llama.cpp settings that give identical answers. Nothing downloads until you press Download.")
         .xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
-    let controls = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
+    let controls = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(false)
+        .column_spacing(8)
+        .row_spacing(8)
+        .max_children_per_line(4)
         .build();
     let role = gtk::DropDown::from_strings(&ROLES.map(|(label, _)| label));
     let only_fit = gtk::CheckButton::with_label("Only models that fit this machine");
     only_fit.set_active(true);
     let refresh = gtk::Button::with_label("Refresh catalog");
     let cancel = gtk::Button::with_label("Stop benchmark");
-    controls.append(&role);
-    controls.append(&only_fit);
-    controls.append(&refresh);
-    controls.append(&cancel);
+    for control in [role.upcast_ref::<gtk::Widget>(), only_fit.upcast_ref(), refresh.upcast_ref(), cancel.upcast_ref()] {
+        controls.append(control);
+        if let Some(slot) = control.parent() {
+            slot.set_focusable(false);
+        }
+    }
     root.append(&controls);
     let hardware = gtk::Label::builder()
         .xalign(0.0)
+        .wrap(true)
         .css_classes(["dim-label"])
         .build();
     root.append(&hardware);
@@ -396,7 +402,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn locations_move_to_the_top_of_settings() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let engine = Rc::new(RefCell::new(EngineClient::new()));
         let settings = super::super::settings::build(engine);
         let context = glib::MainContext::default();
@@ -414,6 +422,19 @@ mod tests {
             .and_downcast::<gtk::Label>()
             .map(|label| label.text().to_string());
         assert_eq!(heading.as_deref(), Some("Locations"));
+    }
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn settings_wraps_its_rows_to_fit_beside_the_sidebar_in_an_800_wide_window() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let engine = Rc::new(RefCell::new(EngineClient::new()));
+        let settings = super::super::settings::build(engine);
+        let (minimum, _, _, _) = settings.measure(gtk::Orientation::Horizontal, -1);
+        let beside_the_sidebar = 800 - 248;
+        assert!(minimum <= beside_the_sidebar, "settings needs {minimum}px");
     }
 
     fn model(

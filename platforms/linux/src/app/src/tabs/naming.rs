@@ -1200,7 +1200,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn card_lists_rows_and_greys_out_rows_without_names() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let engine = Rc::new(RefCell::new(EngineClient::new()));
         let (card, ui) = new_ui(engine, adw::ToastOverlay::new(), Vec::new);
         let window = gtk::Window::builder().child(&card).default_width(720).default_height(600).build();

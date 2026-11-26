@@ -171,6 +171,16 @@ fn detail_page(has_folder: bool, total_files: u64, settings_requested: bool) -> 
     if !has_folder && total_files == 0 && !settings_requested { "first-run" } else { "pages" }
 }
 
+/// Pages report their width one at a time. A homogeneous stack would size the
+/// whole window for the widest page ever built and clip the page being shown.
+fn pages_stack() -> adw::ViewStack {
+    let stack = adw::ViewStack::new();
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    stack.set_hhomogeneous(false);
+    stack
+}
+
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     let (width, height) = std::env::var("FILEID_WIN_SIZE")
         .ok()
@@ -201,9 +211,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         })
     };
 
-    let stack = adw::ViewStack::new();
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
+    let stack = pages_stack();
     let title_bar = TitleBar::new(act.clone());
     let sidebar = Sidebar::new(act.clone());
 
@@ -1257,6 +1265,22 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str, tries_left: u32) {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_stack_is_only_as_wide_as_the_page_being_shown() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let stack = pages_stack();
+        let wide = gtk::Label::builder().width_request(900).build();
+        let narrow = gtk::Label::builder().width_request(200).build();
+        stack.add_named(&wide, Some("wide"));
+        stack.add_named(&narrow, Some("narrow"));
+        stack.set_visible_child_name("narrow");
+        let (minimum, _, _, _) = stack.measure(gtk::Orientation::Horizontal, -1);
+        assert_eq!(minimum, 200);
+    }
 
     #[test]
     fn progress_repaints_are_spaced_out() {

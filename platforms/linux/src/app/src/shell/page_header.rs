@@ -60,7 +60,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn the_breadcrumb_is_never_shortened() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let header = PageHeader::new(super::super::page("settings").unwrap());
         let crumb = header
             .root

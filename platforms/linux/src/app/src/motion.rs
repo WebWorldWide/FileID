@@ -302,7 +302,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn revealer_opens_to_its_child_and_closes_to_nothing() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let child = gtk::Label::new(Some("pane"));
         child.set_size_request(300, 40);
         let revealer = SpringRevealer::with_child(Slide::Left, &child);

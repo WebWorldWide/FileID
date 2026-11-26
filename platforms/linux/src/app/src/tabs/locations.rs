@@ -264,7 +264,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn the_card_fills_in_when_refresh_is_pressed() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let engine = Rc::new(RefCell::new(crate::engine_client::EngineClient::new()));
         let card = build(engine);
         let mut widgets = Vec::new();
