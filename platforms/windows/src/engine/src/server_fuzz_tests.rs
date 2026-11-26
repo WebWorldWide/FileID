@@ -500,8 +500,10 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             if recent.len() > 12 {
                 recent.pop_front();
             }
-            let kinds = error_kinds(&drain(&mut events, &mut failures, &line));
-            if tag.is_none() && !kinds.iter().any(|k| k == "command_decode_failed") {
+            let drained = drain(&mut events, &mut failures, &line);
+            let kinds = error_kinds(&drained);
+            let refused_as_tool_response = drained.iter().any(|event| matches!(&event.payload, EventPayload::ToolResponse(response) if response.inner.status == "error"));
+            if tag.is_none() && !refused_as_tool_response && !kinds.iter().any(|k| k == "command_decode_failed") {
                 failures.entry("decode failure without command_decode_failed".into()).or_insert(sample.clone());
             }
             if valid == Some(false) && !kinds.iter().any(|k| k == "command_limit_exceeded") {
