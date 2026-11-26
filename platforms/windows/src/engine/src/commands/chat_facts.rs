@@ -678,7 +678,6 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
     }
 }
 
-/// `None` when the catalog has no such folder, so the question is searched as words instead.
 /// Folder filter for names that begin with the asked name ("Ryan Homecoming" for "Ryan Homecoming Photos 9-26-26").
 const STARTS_WITH: &str = "startswith:";
 
@@ -694,6 +693,7 @@ pub(crate) fn widened_folder(conn: &Connection, folder: Option<String>, root: Op
     Ok(if totals(conn, &starts)?.0 > 0 { Some(widened) } else { folder })
 }
 
+/// `None` when the catalog has no such folder, so the question is searched as words instead.
 pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
     let (count, bytes) = totals(conn, &filter)?;
