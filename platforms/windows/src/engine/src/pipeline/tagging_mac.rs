@@ -622,7 +622,6 @@ mod tests {
         assert_eq!(decode_failure(&broken), DECODE_FAILED);
         assert_eq!(decode_failure(&dir.join("missing.jpg")), WENT_MISSING);
         assert!(!decode_failure(&dir.join("missing.jpg")).contains("decode"), "a vanished file is not a damaged image");
-        assert!(WENT_MISSING.contains("will retry"), "the Library's Unreadable count leaves out rows that say will retry");
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
         let denied = std::fs::File::open(&broken).is_err();
         if denied {

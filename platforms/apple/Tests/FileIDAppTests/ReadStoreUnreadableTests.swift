@@ -87,8 +87,8 @@ struct ReadStoreUnreadableTests {
     }
 
     @MainActor
-    @Test("files waiting for a retry are in no Library count, since the listing shows none of them")
-    func retryPendingRowsAreNotCounted() async throws {
+    @Test("files waiting for a retry are counted and listed as unreadable, matching the scan's failed-file count")
+    func retryPendingRowsAreUnreadable() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(component: "fileid-retry-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -122,8 +122,9 @@ struct ReadStoreUnreadableTests {
         store.openIfPossible()
         defer { store.close() }
         store.refreshCounters()
-        for _ in 0..<200 where store.scopedUnreadableFiles != 1 { try await Task.sleep(nanoseconds: 25_000_000) }
-        #expect(store.scopedUnreadableFiles == 1)
+        for _ in 0..<200 where store.scopedUnreadableFiles != 3 { try await Task.sleep(nanoseconds: 25_000_000) }
+        #expect(store.scopedUnreadableFiles == 3)
+        #expect(store.files(kindFilter: ReadStore.unreadableFilter).map(\.id).sorted() == [1, 2, 3])
         #expect(store.scopedTotalFiles - store.scopedUnreadableFiles == store.files().count)
     }
 

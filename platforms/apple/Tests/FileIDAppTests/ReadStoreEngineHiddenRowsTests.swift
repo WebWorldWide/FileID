@@ -48,9 +48,9 @@ struct ReadStoreEngineHiddenRowsTests {
         defer { store.close() }
         for _ in 0..<200 where store.totalFiles != 3 { try await Task.sleep(nanoseconds: 25_000_000) }
         #expect(store.totalFiles == 3)
-        #expect(store.unreadableFiles == 1)
+        #expect(store.unreadableFiles == 2)
         #expect(store.files().map(\.id) == [1])
-        #expect(store.files(kindFilter: ReadStore.unreadableFilter).map(\.id) == [4])
+        #expect(store.files(kindFilter: ReadStore.unreadableFilter).map(\.id).sorted() == [4, 5])
         #expect(store.files(search: "gone").isEmpty)
         #expect(store.files(search: "empty").isEmpty)
     }
