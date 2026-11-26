@@ -1,10 +1,11 @@
 //! Durable face refresh backlog: a `faceRefresh` catalog job re-embedding faces whose stored vector is missing or from
 //! another model, processing or file version, one namespace at a time.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -97,16 +98,30 @@ const NOT_YET_EMBEDDED: &str = "AND NOT (length(fp.print_data)=0 AND length(COAL
 /// their vectors were embedded from those crops. Refreshing a face rewrites its crop, which leaves this set.
 const UPRIGHT_ALIGNMENT_SINCE: u64 = 1_795_587_552;
 
-fn stale_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
-    if !processing.starts_with(super::face_clustering_mac::MAC_PREFIX) {
-        return Ok(Vec::new());
-    }
+const CROPS_VERIFIED: &str = ".upright-verified";
+
+struct OldCrops {
+    scanned_at: f64,
+    faces: HashSet<i64>,
+}
+
+type CropSpace = (PathBuf, String, String);
+
+/// Looking at every crop file costs seconds on a large catalog and the answer only shrinks, so one scan serves the
+/// whole run of the engine.
+static OLD_CROPS: LazyLock<Mutex<HashMap<CropSpace, OldCrops>>> = LazyLock::new(Mutex::default);
+
+const ELIGIBLE_FACES: &str = "FROM face_prints fp JOIN files f ON f.id=fp.file_id JOIN catalog_revisions r ON r.file_id=fp.file_id \
+     WHERE f.failed=0 AND length(fp.arcface_embedding)=512 AND fp.embedding_model=?1 AND fp.processing_version=?2 \
+       AND fp.source_revision=r.revision";
+
+fn crop_space(faces_dir: &Path, model: &str, processing: &str) -> CropSpace {
+    (faces_dir.to_path_buf(), model.to_string(), processing.to_string())
+}
+
+fn scan_old_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
     let cutoff = std::time::UNIX_EPOCH + Duration::from_secs(UPRIGHT_ALIGNMENT_SINCE);
-    let mut statement = conn.prepare(
-        "SELECT fp.id FROM face_prints fp JOIN files f ON f.id=fp.file_id JOIN catalog_revisions r ON r.file_id=fp.file_id \
-         WHERE f.failed=0 AND length(fp.arcface_embedding)=512 AND fp.embedding_model=?1 AND fp.processing_version=?2 \
-           AND fp.source_revision=r.revision ORDER BY fp.id",
-    )?;
+    let mut statement = conn.prepare(&format!("SELECT fp.id {ELIGIBLE_FACES} ORDER BY fp.id"))?;
     let faces: Vec<i64> = statement.query_map(params![model, processing], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
     Ok(faces
         .into_iter()
@@ -116,12 +131,74 @@ fn stale_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Pat
         .collect())
 }
 
+fn json_ids(ids: &[i64]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
+}
+
+/// Faces whose refresh failed because the photo no longer matches the catalog. Updating cannot help until a rescan
+/// reads the photo again, so they are not counted as outdated meanwhile.
+fn unrefreshable_faces(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<Vec<i64>> {
+    let mut statement = conn.prepare(
+        "SELECT b.face_id, f.path_text, f.size_bytes, f.modified_at FROM face_refresh_backlog b \
+         JOIN face_prints fp ON fp.id=b.face_id JOIN files f ON f.id=fp.file_id \
+         WHERE b.embedding_model=?1 AND b.processing_version=?2 AND b.state='failed' AND b.reason='source_changed'",
+    )?;
+    let rows = statement.query_map(params![model, processing], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<f64>>(3)?))
+    })?;
+    let mut faces = Vec::new();
+    for row in rows {
+        let (face, path, size, modified) = row?;
+        if !stat_matches(Path::new(&path), size, modified) {
+            faces.push(face);
+        }
+    }
+    Ok(faces)
+}
+
+fn stale_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
+    if !processing.starts_with(super::face_clustering_mac::MAC_PREFIX) || faces_dir.join(CROPS_VERIFIED).exists() {
+        return Ok(Vec::new());
+    }
+    let mut cache = OLD_CROPS.lock();
+    let scan = match cache.entry(crop_space(faces_dir, model, processing)) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let faces: HashSet<i64> = scan_old_crops(conn, model, processing, faces_dir)?.into_iter().collect();
+            if faces.is_empty() {
+                let _ = std::fs::write(faces_dir.join(CROPS_VERIFIED), b"");
+            }
+            entry.insert(OldCrops { scanned_at: now(), faces })
+        }
+    };
+    let unrefreshable: HashSet<i64> = unrefreshable_faces(conn, model, processing)?.into_iter().collect();
+    let mut statement = conn.prepare(&format!(
+        "SELECT fp.id {ELIGIBLE_FACES} \
+           AND NOT EXISTS (SELECT 1 FROM face_refresh_backlog b WHERE b.face_id=fp.id AND b.embedding_model=?1 \
+                             AND b.processing_version=?2 AND b.state='done' AND b.updated_at>=?3) ORDER BY fp.id"
+    ))?;
+    let faces = statement.query_map(params![model, processing, scan.scanned_at], |row| row.get::<_, i64>(0))?;
+    let mut stale = Vec::new();
+    for face in faces {
+        let face = face?;
+        if scan.faces.contains(&face) && !unrefreshable.contains(&face) {
+            stale.push(face);
+        }
+    }
+    Ok(stale)
+}
+
 fn outdated_in(conn: &Connection, model: &str, processing: &str, faces_dir: Option<&Path>) -> rusqlite::Result<i64> {
     let stale = match faces_dir {
         Some(dir) => stale_crops(conn, model, processing, dir)?.len() as i64,
         None => 0,
     };
-    let counted: i64 = conn.query_row(&format!("SELECT COUNT(*) {OUTDATED} {NOT_YET_EMBEDDED}"), params![model, processing], |row| row.get(0))?;
+    let unrefreshable = json_ids(&unrefreshable_faces(conn, model, processing)?);
+    let counted: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) {OUTDATED} {NOT_YET_EMBEDDED} AND fp.id NOT IN (SELECT value FROM json_each(?3))"),
+        params![model, processing, unrefreshable],
+        |row| row.get(0),
+    )?;
     Ok(counted + stale)
 }
 
@@ -199,7 +276,8 @@ pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) ->
 
 fn seed_in(conn: &Connection, model: &str, processing: &str, at: f64, faces_dir: Option<&Path>) -> rusqlite::Result<()> {
     if let Some(dir) = faces_dir {
-        let stale = serde_json::to_string(&stale_crops(conn, model, processing, dir)?).unwrap_or_else(|_| "[]".into());
+        OLD_CROPS.lock().remove(&crop_space(dir, model, processing));
+        let stale = json_ids(&stale_crops(conn, model, processing, dir)?);
         conn.execute(
             "INSERT INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,reason,updated_at) \
              SELECT value, ?1, ?2, 'pending', 0, NULL, ?3 FROM json_each(?4) WHERE true \
