@@ -325,7 +325,7 @@ struct Sidebar: View {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text(Self.errorTitle(err.kind, message: err.message)).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
-                Text(Self.errorText(kind: err.kind, message: err.message)).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
+                Text(Self.errorText(kind: err.kind, message: err.message)).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 4)
