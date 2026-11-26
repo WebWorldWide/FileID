@@ -624,14 +624,21 @@ struct PeopleView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !(faceModelInstalled ?? !FaceEmbedderKind.installedKinds().isEmpty) {
+        let modelInstalled = faceModelInstalled ?? !FaceEmbedderKind.installedKinds().isEmpty
+        switch PeopleContent.resolve(modelInstalled: modelInstalled, people: persons.count, faces: totalFacePrints) {
+        case .modelMissing:
             modelMissingBanner
-        } else if persons.isEmpty && totalFacePrints == 0 {
+        case .empty:
             emptyState
-        } else if persons.isEmpty {
+        case .ungrouped:
             noClustersYet
-        } else {
+        case .people(let modelMissing):
             ScrollView(.vertical) {
+                if modelMissing {
+                    modelMissingBanner
+                        .padding(.horizontal, Theme.Metrics.pageInsetX)
+                        .padding(.top, 16)
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 14)], spacing: 14) {
                     ForEach(persons) { person in
                         let inMode = mergeMode || unknownMode
@@ -740,9 +747,9 @@ struct PeopleView: View {
     }
 
     private var modelMissingBanner: some View {
-        FaceModelInstallPanel(engine: engine, detectedFaces: totalFacePrints)
+        FaceModelInstallPanel(engine: engine, detectedFaces: totalFacePrints, hasPeople: !persons.isEmpty)
             .frame(maxWidth: 560)
-            .padding(.top, 40)
+            .padding(.top, persons.isEmpty ? 40 : 0)
             .frame(maxWidth: .infinity)
     }
 
@@ -1864,6 +1871,7 @@ private struct MergeTargetPickerSheet: View {
 private struct FaceModelInstallPanel: View {
     let engine: EngineClient
     let detectedFaces: Int
+    let hasPeople: Bool
     @State private var installer = ModelInstaller.face
     private let kind = FaceEmbedderKind.defaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
 
@@ -1873,7 +1881,7 @@ private struct FaceModelInstallPanel: View {
                 MetaText(detectedFaces > 0 ? "\(Plural.noun(detectedFaces, "face", "faces")) detected" : "No faces yet", size: 11)
             }
             VStack(alignment: .leading, spacing: 10) {
-                Text("Download the Faces model to sort photos by person").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
+                Text(PeopleHeaderText.modelPanelTitle(hasPeople: hasPeople)).font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
                 Text("It finds the same person across your photos. Then you can name people, combine duplicates and tag every photo they appear in.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
                 statusRow
@@ -1970,7 +1978,26 @@ extension MergeSuggestionPair {
     }
 }
 
+enum PeopleContent: Equatable {
+    case modelMissing
+    case empty
+    case ungrouped
+    case people(modelMissing: Bool)
+
+    static func resolve(modelInstalled: Bool, people: Int, faces: Int) -> PeopleContent {
+        if people > 0 { return .people(modelMissing: !modelInstalled) }
+        if !modelInstalled { return .modelMissing }
+        return faces == 0 ? .empty : .ungrouped
+    }
+}
+
 enum PeopleHeaderText {
+    static func modelPanelTitle(hasPeople: Bool) -> String {
+        hasPeople
+            ? "Grouping new faces needs the Faces model. The people below stay as they are."
+            : "Download the Faces model to sort photos by person"
+    }
+
     static func ungroupedMessage(grouping: Bool) -> String {
         grouping
             ? "FileID is sorting them into one card per person. This can take a few minutes for a large library."
