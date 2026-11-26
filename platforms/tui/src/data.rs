@@ -772,14 +772,18 @@ mod tests {
         tx.commit().unwrap();
         let (plan, _, _) = compute_plan(&conn).unwrap();
         let destination = plan[0].destination.clone();
-        assert!(!destination.starts_with('/'), "{destination}");
-        assert!(destination.matches('/').count() >= 2, "{destination}");
+        let relative = std::path::Path::new(&destination);
+        assert!(relative.is_relative(), "{destination}");
+        assert!(relative.components().count() >= 3, "{destination}");
 
-        insert_file(&conn, &format!("/library/{destination}"), 1_700_000_000.0);
+        let in_place = std::path::Path::new("/library")
+            .join(relative)
+            .to_string_lossy()
+            .into_owned();
+        insert_file(&conn, &in_place, 1_700_000_000.0);
         let (plan, _, _) = compute_plan(&conn).unwrap();
         assert!(
-            plan.iter()
-                .all(|row| row.source != format!("/library/{destination}")),
+            plan.iter().all(|row| row.source != in_place),
             "a file already at its destination is not a move"
         );
     }
