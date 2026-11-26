@@ -490,7 +490,10 @@ impl DbWriter {
                     _ => false,
                 };
 
-                let created_unix = f.created_unix.and_then(|t| crate::util::not_in_the_future(t, f.scanned_unix));
+                let created_unix = f
+                    .created_unix
+                    .and_then(|t| crate::util::not_in_the_future(t, f.scanned_unix))
+                    .filter(|&t| f.captured_from_exif || t >= crate::util::EARLIEST_FILE_SYSTEM_DATE_UNIX);
                 let captured_from_exif = f.captured_from_exif && created_unix.is_some();
                 let (file_id, stored_modified): (i64, Option<f64>) = file_stmt
                     .query_row(
@@ -1487,6 +1490,24 @@ mod tests {
         assert_eq!(upsert(1_800_000_000.0, false), 1_800_000_000);
         assert_eq!(upsert(1_900_000_000.0, false), 1_800_000_000, "a copy's birth time must not replace the recorded date");
         assert_eq!(upsert(1_200_000_000.0, true), 1_200_000_000, "EXIF capture time corrects a copy date");
+    }
+
+    #[test]
+    fn a_fat_zero_date_is_not_stored_as_the_creation_date_but_a_captured_one_is() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let fat_zero = 315_532_800.0;
+        let mut copied = fixture(r"C:\lib\COPY.jpg");
+        copied.created_unix = Some(fat_zero);
+        let mut scanned_in = fixture(r"C:\lib\SCAN_1975.jpg");
+        scanned_in.created_unix = Some(160_000_000.0);
+        scanned_in.captured_from_exif = true;
+        let mut buffer = vec![copied, scanned_in];
+        DbWriter::new(conn.clone(), ScanCoordinator::new()).flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let stored = |path: &str| -> Option<f64> {
+            conn.lock().query_row("SELECT created_at FROM files WHERE path_text = ?1", params![path], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(stored(r"C:\lib\COPY.jpg"), None, "the volume's 1980 placeholder is not a date");
+        assert_eq!(stored(r"C:\lib\SCAN_1975.jpg"), Some(160_000_000.0), "a date the photo itself carries is kept");
     }
 
     #[test]
