@@ -1145,6 +1145,17 @@ public final class ReadStore: @unchecked Sendable {
         public var hasAnyName: Bool { isUnknown || !tagName.isEmpty }
     }
 
+    /// Whether `persons()` would return anything, without reading every face.
+    public func hasPersons() -> Bool {
+        guard let q = queue else { return false }
+        return (try? q.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM persons p WHERE IFNULL(p.is_unknown,0)=0 AND (
+                    EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR \(Self.personHasNameSQL("p."))))
+                """) ?? false
+        }) ?? false
+    }
+
     public func persons(includeUnknown: Bool = false) -> [PersonRow] {
         guard let q = queue else { return [] }
         let visible = "EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR COALESCE(p.is_unknown,0)=1 OR \(Self.personHasNameSQL("p."))"
@@ -1461,11 +1472,14 @@ public final class ReadStore: @unchecked Sendable {
     public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int, undescribed: Int) {
         guard let q = queue else { return (0, 0, 0) }
         return (try? q.read { db in
-            let describable = "kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0"
-            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable)") ?? 0
-            let pending = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND (vlm_full_model IS NULL OR vlm_full_model != ?)", arguments: [modelKey]) ?? 0
-            let undescribed = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(describable) AND vlm_full_model IS NULL") ?? 0
-            return (total, pending, undescribed)
+            let row = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(vlm_full_model IS NULL OR vlm_full_model != ?), 0) AS pending,
+                       COALESCE(SUM(vlm_full_model IS NULL), 0) AS undescribed
+                FROM files
+                WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
+                """, arguments: [modelKey])
+            return (row?["total"] ?? 0, row?["pending"] ?? 0, row?["undescribed"] ?? 0)
         }) ?? (0, 0, 0)
     }
 

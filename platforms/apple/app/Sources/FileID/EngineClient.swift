@@ -1089,7 +1089,7 @@ public final class EngineClient {
                 } else {
                     client.lastError = EngineError(
                         kind: "engine_exited",
-                        message: "The scan couldn’t start because FileID’s helper isn’t running. Wait a moment and press Scan again."
+                        message: "The scan couldn’t start because FileID’s helper isn’t running. Restart it, then press Scan again."
                     )
                 }
             }

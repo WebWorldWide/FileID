@@ -85,7 +85,8 @@ struct DeepAnalyzeModelPickerCard: View {
             onDiskBytes = await Task.detached(priority: .utility) { DescriptionModelStore.sizeOnDisk(kind) }.value
         }
         .onChange(of: settings.activeKind.rawValue) { _, _ in failure = nil }
-        .onAppear { engine.refreshVLMAdvice() }
+        .onAppear { engine.refreshVLMAdvice(); settings.followAdvice(engine.vlmAdvice, freeDiskBytes: DescriptionModelStore.freeDiskBytes()) }
+        .onChange(of: engine.vlmAdvice) { _, advice in settings.followAdvice(advice, freeDiskBytes: DescriptionModelStore.freeDiskBytes()) }
         .onChange(of: engine.lastErrorSignal) { _, _ in
             guard requested != nil, let error = engine.lastError else { return }
             if error.kind == "prewarm_cancelled" { requested = nil; return }
@@ -471,12 +472,14 @@ struct DeepAnalyzeView: View {
     private func refreshStatusCounts() {
         let modelKey = settings.activeKind.rawValue
         Task {
-            let counts = await Task.detached(priority: .userInitiated) { [store] in
-                (store.deepAnalyzePending(modelKey: modelKey), store.namedPersonCount() > 0, !store.persons().isEmpty)
+            pendingTotals = await Task.detached(priority: .userInitiated) { [store] in
+                store.deepAnalyzePending(modelKey: modelKey)
             }.value
-            pendingTotals = counts.0
-            hasNamedAnyone = counts.1
-            hasPeople = counts.2
+            let people = await Task.detached(priority: .userInitiated) { [store] in
+                (store.namedPersonCount() > 0, store.hasPersons())
+            }.value
+            hasNamedAnyone = people.0
+            hasPeople = people.1
         }
     }
 

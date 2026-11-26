@@ -321,6 +321,24 @@ fn coalesced_jobs_pause_resume_cancel_and_restart_without_writer_lock() {
     index.shutdown();
 }
 #[test]
+fn a_search_resumes_a_job_stopped_by_a_quit_mid_build() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index
+        .writer
+        .lock()
+        .execute(
+            "UPDATE catalog_jobs SET state='paused',error='Visual index preparation cancelled' WHERE id=?1",
+            [CatalogIndex::job_id()],
+        )
+        .unwrap();
+    index.state.lock().cache = None;
+    index.search(&seed()).expect("a job the engine stopped resumes when a search needs it");
+    wait(&index);
+    assert_eq!(state(&index), "completed");
+    index.shutdown();
+}
+#[test]
 fn a_search_does_not_resume_a_job_the_user_paused() {
     let (_directory, index) = fixture();
     ready(&index);

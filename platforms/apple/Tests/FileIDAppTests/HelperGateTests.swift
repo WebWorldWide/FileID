@@ -23,6 +23,11 @@ struct HelperGateTests {
         #expect(HelperGate.rescanDisabled(startRequested: false, captionsRunning: false, faceClusteringInFlight: true, helperDown: false))
     }
 
+    @Test func anUnsentRequestSaysTheHelperStoppedInsteadOfPromisingItWillBeReady() {
+        #expect(HelperGate.unsentNote(helperDown: true) == "FileID’s helper stopped. Restart it, then try again.")
+        #expect(HelperGate.unsentNote(helperDown: false) == "FileID is still getting ready. Try again in a moment.")
+    }
+
     @Test func titleBarPillSaysHelperStoppedOnlyWhenDown() {
         #expect(HelperGate.pillLabel(for: .crashed(reason: "gone")) == "Helper stopped")
         #expect(HelperGate.pillLabel(for: .starting) == nil)

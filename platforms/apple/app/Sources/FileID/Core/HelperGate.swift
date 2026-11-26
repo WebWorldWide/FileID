@@ -23,6 +23,19 @@ enum HelperGate {
         inProgress || helperDown
     }
 
+    static let notReadyNote = "FileID is still getting ready. Try again in a moment."
+    static let stoppedNote = "FileID’s helper stopped. Restart it, then try again."
+
+    /// What to tell someone whose request could not be sent: a stopped helper will not come back by waiting.
+    static func unsentNote(helperDown: Bool) -> String {
+        helperDown ? stoppedNote : notReadyNote
+    }
+
+    @MainActor
+    static func unsentNote(_ engine: EngineClient) -> String {
+        unsentNote(helperDown: isDown(engine))
+    }
+
     static func scanDisabled(startRequested: Bool, helperDown: Bool) -> Bool {
         startRequested || helperDown
     }

@@ -25,6 +25,21 @@ import Testing
         #expect(!body.contains("HStack(alignment: .center, spacing: 12) { controls }"))
     }
 
+    @Test func suggestedMergeRowKeepsItsMergeButtonWholeAtLargerText() throws {
+        let people = try appSource("Views/PeopleView.swift")
+        let row = try #require(people.range(of: "private func row(for cand: MergeSuggestionPair)"))
+        let body = String(people[row.lowerBound...].prefix(2200))
+        #expect(body.contains("                .fixedSize()\n            }\n            .padding(10)"))
+        let card = try #require(people.range(of: "private func miniCard("))
+        #expect(people[card.lowerBound...].prefix(1200).contains(".frame(minWidth: 120, maxWidth: 170, alignment: .leading)"))
+    }
+
+    @Test func theSidebarErrorCardShowsItsWholeSentence() throws {
+        let sidebar = try appSource("Views/Sidebar.swift")
+        let card = try #require(sidebar.range(of: "private func engineErrorRow("))
+        #expect(!sidebar[card.lowerBound...].prefix(900).contains(".lineLimit("))
+    }
+
     @Test func describeModelRowWrapsInsteadOfWideningThePage() throws {
         let deep = try appSource("Views/DeepAnalyzeViews.swift")
         let row = try #require(deep.range(of: "Text(\"AI model\").foregroundStyle(Theme.text3)"))

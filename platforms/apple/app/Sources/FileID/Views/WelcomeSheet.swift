@@ -15,7 +15,6 @@ struct WelcomeSheet: View {
 
     private let recommendedFace: FaceEmbedderKind
     @State private var hardwareRecommendedVLM: AIModelKind
-    @State private var adoptingAdvice = false
     private let availableDiskBytes: Int64?
     @State private var selectedVLM: AIModelKind
 
@@ -40,8 +39,7 @@ struct WelcomeSheet: View {
         let recommended = AIModelKind.safeDefaultFor(ramGB: ram,
                                                       freeDiskBytes: freeDisk)
         self._hardwareRecommendedVLM = State(initialValue: recommended)
-        self._selectedVLM = State(initialValue: DeepAnalyzeSettings.startingModel(
-            persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"), ramGB: ram, freeDiskBytes: freeDisk))
+        self._selectedVLM = State(initialValue: DeepAnalyzeSettings.shared.activeKind)
         #if DEBUG
         if SelfShot.welcomeDemoDownload {
             self._vlmRequested = State(initialValue: true)
@@ -53,13 +51,10 @@ struct WelcomeSheet: View {
 
     /// The engine knows how much memory is free right now; until the user picks a model, the recommendation follows it.
     private func adoptVLMAdvice(_ advice: VLMAdvice?) {
-        guard let advice, selectedVLM == hardwareRecommendedVLM, !ModelInstallStatus.isInstalled(kind: selectedVLM),
-              UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")?.isEmpty != false else { return }
-        let recommended = AIModelKind.recommended(ramGB: systemRAMGB, advice: advice, freeDiskBytes: availableDiskBytes)
-        guard recommended != hardwareRecommendedVLM else { return }
-        hardwareRecommendedVLM = recommended
-        adoptingAdvice = true
-        selectedVLM = recommended
+        let settings = DeepAnalyzeSettings.shared
+        guard settings.followAdvice(advice, freeDiskBytes: availableDiskBytes) else { return }
+        hardwareRecommendedVLM = settings.activeKind
+        selectedVLM = settings.activeKind
     }
 
     private var recommendation: VLMRecommendation {
@@ -122,6 +117,7 @@ struct WelcomeSheet: View {
                     ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
                         Button {
                             selectedVLM = kind
+                            DeepAnalyzeSettings.shared.activeKind = kind
                         } label: {
                             HStack {
                                 Text(Self.shortName(kind) + (vlmChoiceBlocker(kind).map { " — \($0)" } ?? ""))
@@ -204,10 +200,6 @@ struct WelcomeSheet: View {
             // A cancel or failure leaves models missing and idle: re-enable the
             // button rather than leaving it disabled for the session.
             if !inProgress && !essentialsInstalled { installAllRequested = false }
-        }
-        .onChange(of: selectedVLM) { _, kind in
-            if adoptingAdvice { adoptingAdvice = false; return }
-            DeepAnalyzeSettings.shared.activeKind = kind
         }
         .onChange(of: vlmInstalled) { _, nowInstalled in
             if nowInstalled {

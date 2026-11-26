@@ -270,7 +270,7 @@ final class ChatActionRunner {
             guard let path = action.path else { return }
             let signal = engine.restructurePlanSignal
             let interrupted = Self.folderJobInterrupted(engine)
-            guard engine.planRestructure(libraryRoot: path) else { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
+            guard engine.planRestructure(libraryRoot: path) else { phases[action.id] = .failed(HelperGate.unsentNote(engine)); return }
             handoff.navigate(.restructure)
             phases[action.id] = .running("Planning a tidier layout")
             await watch(action, started: { true }, finished: { engine.restructurePlanSignal != signal }, interrupted: interrupted) { [weak self] in
@@ -285,7 +285,7 @@ final class ChatActionRunner {
             let signal = engine.restructureApplyResultSignal
             let interrupted = Self.folderJobInterrupted(engine)
             guard engine.applyRestructure(libraryRoot: summary.root, moves: summary.moves, planID: summary.planID) else {
-                phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return
+                phases[action.id] = .failed(HelperGate.unsentNote(engine)); return
             }
             phases[action.id] = .running("Moving files")
             await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }, interrupted: interrupted) {
@@ -311,7 +311,7 @@ final class ChatActionRunner {
             }
             let signal = engine.restructureApplyResultSignal
             let interrupted = Self.folderJobInterrupted(engine)
-            guard engine.undoRestructure(libraryRoot: path) else { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
+            guard engine.undoRestructure(libraryRoot: path) else { phases[action.id] = .failed(HelperGate.unsentNote(engine)); return }
             phases[action.id] = .running("Moving files back")
             await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }, interrupted: interrupted) {
                 Self.movedBack(engine.restructureApplyResult?.applied)
@@ -415,7 +415,7 @@ final class ChatActionRunner {
         let outcome = await ExactDuplicateVerifier.trashThroughEngine(work, engine: engine) { [weak self] text in
             self?.phases[id] = .running(text)
         }
-        if outcome.engineUnavailable { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
+        if outcome.engineUnavailable { phases[action.id] = .failed(HelperGate.unsentNote(engine)); return }
         if outcome.timedOut { phases[action.id] = .failed("Moving to Trash didn’t finish. Check the Trash before trying again."); return }
         let changed = outcome.verificationFailed + missing
         if outcome.trashed.isEmpty {

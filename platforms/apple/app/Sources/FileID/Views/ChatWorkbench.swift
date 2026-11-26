@@ -504,7 +504,7 @@ struct ChatWorkbench: View {
                                       modelKind: activeModelKind, context: handoff.context, queryVector: vector,
                                       embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, scopeFileIDs: scope)
             if engine.send(.chatRequest(request: request)) { input = ""; openedSource = nil }
-            else { busy = false; message = "FileID is still getting ready. Try again in a moment." }
+            else { busy = false; message = HelperGate.unsentNote(engine) }
         }
     }
 
@@ -539,7 +539,7 @@ struct ChatWorkbench: View {
         if action == "history" { historyRequest = request.requestID }
         if engine.send(.chatRequest(request: request)) {
             if action == "clear" { messages = []; hits = []; actions = []; chosen = []; selectionNote = nil; player?.pause(); player = nil; openedSource = nil }
-        } else { message = "FileID is still getting ready. Try again in a moment." }
+        } else { message = HelperGate.unsentNote(engine) }
     }
 }
 
