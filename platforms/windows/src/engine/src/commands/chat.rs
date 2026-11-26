@@ -1156,7 +1156,13 @@ fn prepare_turn(
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if super::chat_intent::unreadable_ask(&text) {
-        let (message, hits) = if asks_why(&text) { chat_facts::unreadable_reasons(conn, root.as_ref())? } else { chat_facts::unreadable_answer(conn, root.as_ref())? };
+        let kinds = SearchPlan::resolve_known(&question.reduced, None, people, events, false).kinds;
+        let (message, hits) = if asks_why(&text) {
+            chat_facts::unreadable_reasons(conn, root.as_ref(), &kinds)?
+        } else {
+            let limit = question.limit.and_then(|limit| usize::try_from(limit).ok()).or_else(|| super::chat_intent::spelled_count(&text));
+            chat_facts::unreadable_answer(conn, root.as_ref(), &kinds, limit)?
+        };
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false, counts_files: false });
     }
     if let Some(kinds) = place_ask(&text) {
@@ -2427,6 +2433,26 @@ mod tests {
             assert_eq!(answer.message, "2 files couldn't be read, so they're not in other answers.", "{text}");
             assert_eq!(answer.hits.len(), 2, "{text}");
         }
+    }
+
+    #[test]
+    fn the_failed_files_answer_honours_the_kind_and_the_count_asked_for() {
+        let mut conn = adlon_like();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,error_message) VALUES(22,'/lib/Mail/broken3.pdf',22,10,0,'pdf','pdf',1,'Could not parse the file')",
+            [],
+        )
+        .unwrap();
+        let everything = ask(&mut conn, "Which files failed?");
+        assert_eq!(everything.hits.len(), 3);
+        for text in ["Show me the two PDFs that failed", "Which PDFs failed?"] {
+            let answer = ask(&mut conn, text);
+            assert_eq!(answer.hits.len(), 2, "{text}");
+            assert!(answer.hits.iter().all(|hit| hit.kind == "pdf"), "{text}");
+        }
+        let one = ask(&mut conn, "Show the first 1 files that failed");
+        assert_eq!(one.hits.len(), 1);
+        assert!(one.message.contains("Showing the first 1"), "{}", one.message);
     }
 
     #[test]

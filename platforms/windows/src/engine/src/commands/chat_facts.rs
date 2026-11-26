@@ -761,7 +761,7 @@ pub(crate) fn same_named_folders_note(conn: &Connection, folder: &str, root: Opt
 
 type UnreadableRow = (i64, String, String, String);
 
-fn unreadable_rows(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<UnreadableRow>> {
+fn unreadable_rows(conn: &Connection, root: Option<&RootScope>, kinds: &[String]) -> Result<Vec<UnreadableRow>> {
     let mut args = vec![
         Value::Text(crate::scan_session::HIDDEN_ROW_MESSAGE.to_owned()),
         Value::Text(crate::db::zero_byte::ZERO_BYTE_REASON.to_owned()),
@@ -780,12 +780,12 @@ fn unreadable_rows(conn: &Connection, root: Option<&RootScope>) -> Result<Vec<Un
     let rows = statement
         .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    Ok(rows.into_iter().filter(|(_, _, kind, _)| kinds.is_empty() || kinds.contains(kind)).collect())
 }
 
-fn unreadable_hits(rows: Vec<UnreadableRow>) -> Vec<CatalogHit> {
+fn unreadable_hits(rows: Vec<UnreadableRow>, limit: Option<usize>) -> Vec<CatalogHit> {
     rows.into_iter()
-        .take(SHOWN)
+        .take(limit.map_or(SHOWN, |limit| limit.min(SHOWN)))
         .map(|(file_id, path, kind, reason)| CatalogHit {
             file_id,
             path,
@@ -800,21 +800,21 @@ fn unreadable_hits(rows: Vec<UnreadableRow>) -> Vec<CatalogHit> {
 }
 
 /// The files the unreadable note counts, named, for "which files failed?" and "how many files couldn't be read?".
-pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
-    let rows = unreadable_rows(conn, root)?;
+pub(crate) fn unreadable_answer(conn: &Connection, root: Option<&RootScope>, kinds: &[String], limit: Option<usize>) -> Result<(String, Vec<CatalogHit>)> {
+    let rows = unreadable_rows(conn, root, kinds)?;
     if rows.is_empty() {
         return Ok(("No files failed to read.".into(), vec![]));
     }
     let count = rows.len() as i64;
-    let hits = unreadable_hits(rows);
+    let hits = unreadable_hits(rows, limit);
     let shown = if count as usize > hits.len() { format!(" Showing the first {}.", hits.len()) } else { String::new() };
     let (noun, pronoun) = if count == 1 { ("file", "it's") } else { ("files", "they're") };
     Ok((format!("{} {noun} couldn't be read, so {pronoun} not in other answers.{shown}", count_label(count)), hits))
 }
 
 /// "Why couldn't they be read?": the recorded reasons with how many files each covers, most common first.
-pub(crate) fn unreadable_reasons(conn: &Connection, root: Option<&RootScope>) -> Result<(String, Vec<CatalogHit>)> {
-    let rows = unreadable_rows(conn, root)?;
+pub(crate) fn unreadable_reasons(conn: &Connection, root: Option<&RootScope>, kinds: &[String]) -> Result<(String, Vec<CatalogHit>)> {
+    let rows = unreadable_rows(conn, root, kinds)?;
     if rows.is_empty() {
         return Ok(("No files failed to read.".into(), vec![]));
     }
@@ -828,7 +828,7 @@ pub(crate) fn unreadable_reasons(conn: &Connection, root: Option<&RootScope>) ->
     let listed = reasons.iter().take(5).map(|(reason, files)| format!("“{reason}” ({})", count_noun(*files, "file", "files"))).collect::<Vec<_>>().join(", ");
     let more = if reasons.len() > 5 { format!(" and {} more", reasons.len() - 5) } else { String::new() };
     let count = rows.len() as i64;
-    Ok((format!("{} couldn't be read. Reasons: {listed}{more}.", count_noun(count, "file", "files")), unreadable_hits(rows)))
+    Ok((format!("{} couldn't be read. Reasons: {listed}{more}.", count_noun(count, "file", "files")), unreadable_hits(rows, None)))
 }
 
 /// "Takeout" names one nested folder here and "Google Takeout Export" holds thousands of files: offer the longer

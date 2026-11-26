@@ -1471,6 +1471,12 @@ pub fn unreadable_ask(text: &str) -> bool {
         || (has(&words, &["read", "readable", "opened", "open"]) && has(&words, &["couldnt", "cant", "cannot", "unable", "wasnt", "werent", "didnt", "wont", "not"]))
 }
 
+/// A count spelled out before the thing asked for ("the two PDFs that failed"). "one" is skipped: it is mostly a pronoun.
+pub fn spelled_count(text: &str) -> Option<usize> {
+    const SPELLED: [&str; 9] = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    text.split_whitespace().find_map(|word| SPELLED.iter().position(|spelled| *spelled == clean(word)).map(|index| index + 2))
+}
+
 pub fn asks_why(text: &str) -> bool {
     text.split_whitespace().next().is_some_and(|word| clean(word) == "why")
 }
