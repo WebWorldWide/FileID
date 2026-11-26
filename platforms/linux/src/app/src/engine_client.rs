@@ -1,6 +1,11 @@
-// Engine client: the app side of the two-binary IPC design (`shared/docs/ARCHITECTURE.md`). Spawns the shared Rust engine and sends `IpcCommand`s as NDJSON on its stdin, reusing the engine crate's serde types so the wire contract can't drift. Bounded `IpcEvent` frames are parsed on a reader thread and fanned out to UI subscribers on the GTK main context, each with its own queue so the pump never waits on a listener. Commands are written on one ordered writer thread, never the GTK thread. Readiness is proven by a per-spawn health-check nonce, and the engine respawns with capped backoff.
-// File listing is NOT an IPC command: the engine is the single DB *writer*, and the app reads rows from the same SQLite WAL DB on one latest-request-wins worker, like macOS / Windows `ReadStore`.
-// Thumbnails are decoded by a bounded worker pool; only pixel buffers cross back to the main thread, where textures are built.
+// Engine client: the app side of the two-binary IPC design (`shared/docs/ARCHITECTURE.md`). Spawns the shared
+// Rust engine and exchanges `IpcCommand`/`IpcEvent` NDJSON with it, reusing the engine crate's serde types so the
+// wire contract cannot drift. Events are parsed on a reader thread and fanned out to UI subscribers on the GTK main
+// context, each with its own queue. Commands go through one ordered writer thread, never the GTK thread. Readiness
+// is proven by a per-spawn health-check nonce, and the engine respawns with capped backoff.
+// File listing is not an IPC command: the engine is the only DB writer, and the app reads rows from the same
+// SQLite WAL database on one latest-request-wins worker. Thumbnails are decoded by a bounded worker pool and only
+// pixel buffers cross back to the main thread, where textures are built.
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
