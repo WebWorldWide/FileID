@@ -47,6 +47,8 @@ struct LibraryKeysetTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let url = directory.appending(component: "fileid.sqlite")
         let queue = try DatabaseQueue(path: url.path)
+        // WAL like the engine's catalog, so the store's reads and these writes never lock each other out.
+        try await queue.writeWithoutTransaction { try $0.execute(sql: "PRAGMA journal_mode = WAL") }
         try await queue.write { db in
             try db.execute(sql: Self.schema)
             if applyIndexes {

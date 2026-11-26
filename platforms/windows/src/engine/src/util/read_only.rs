@@ -47,14 +47,20 @@ pub(crate) struct Volume {
 
 type Probe = dyn Fn(&Path) -> Option<(String, Volume)> + Send + Sync;
 
-fn cache() -> &'static Mutex<HashMap<String, (Instant, Volume)>> {
+type VolumeCache = Mutex<HashMap<String, (Instant, Volume)>>;
+
+fn cache() -> &'static VolumeCache {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<String, (Instant, Volume)>>> = std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
 /// Forget cached volume state so a remount is noticed now (scan start, an explicit listRoots refresh).
 pub fn refresh() {
-    if let Ok(mut cache) = cache().lock() {
+    forget(cache());
+}
+
+fn forget(cache: &VolumeCache) {
+    if let Ok(mut cache) = cache.lock() {
         cache.clear();
     }
 }
@@ -83,6 +89,10 @@ fn system_probe(path: &Path) -> Option<(String, Volume)> {
 }
 
 fn volume_read_only_with(path: &Path, probe: &Probe) -> Option<String> {
+    volume_read_only_in(cache(), path, probe)
+}
+
+fn volume_read_only_in(cache: &VolumeCache, path: &Path, probe: &Probe) -> Option<String> {
     #[cfg(test)]
     if let Some(name) = faked_volume(path) {
         return Some(name);
@@ -97,13 +107,13 @@ fn volume_read_only_with(path: &Path, probe: &Probe) -> Option<String> {
     let directory = if metadata.is_dir() { existing } else { existing.parent()? };
     let key = directory.to_string_lossy().into_owned();
     let now = Instant::now();
-    if let Some((at, cached)) = cache().lock().ok()?.get(&key)
+    if let Some((at, cached)) = cache.lock().ok()?.get(&key)
         && now.duration_since(*at) < VOLUME_TTL
     {
         return cached.read_only.then(|| cached.name.clone());
     }
     let (_, volume) = probe(directory)?;
-    let mut cache = cache().lock().ok()?;
+    let mut cache = cache.lock().ok()?;
     if cache.len() >= CACHE_LIMIT {
         cache.clear();
     }
@@ -267,12 +277,12 @@ mod volume_tests {
     fn a_probe_reporting_a_read_only_volume_marks_every_path_on_it() {
         let dir = std::env::temp_dir().join(format!("fileid-ro-probe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let cache = VolumeCache::default();
         let probe = |_: &Path| Some(("probe-volume".to_owned(), Volume { name: "Backup".into(), read_only: true }));
-        refresh();
-        assert_eq!(volume_read_only_with(&dir.join("not/yet/there.jpg"), &probe).as_deref(), Some("Backup"));
+        assert_eq!(volume_read_only_in(&cache, &dir.join("not/yet/there.jpg"), &probe).as_deref(), Some("Backup"));
         let writable = |_: &Path| Some(("probe-volume".to_owned(), Volume { name: "Backup".into(), read_only: false }));
-        refresh();
-        assert_eq!(volume_read_only_with(&dir, &writable), None);
+        forget(&cache);
+        assert_eq!(volume_read_only_in(&cache, &dir, &writable), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -280,6 +290,7 @@ mod volume_tests {
     fn a_batch_in_one_folder_asks_the_system_about_the_volume_once() {
         let dir = std::env::temp_dir().join(format!("fileid-ro-calls-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let cache = VolumeCache::default();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = calls.clone();
         let probe = move |_: &Path| {
@@ -287,10 +298,9 @@ mod volume_tests {
             Some(("calls-volume".to_owned(), Volume { name: "Backup".into(), read_only: false }))
         };
         for index in 0..50 {
-            assert_eq!(volume_read_only_with(&dir.join(format!("{index}.jpg")), &probe), None);
+            assert_eq!(volume_read_only_in(&cache, &dir.join(format!("{index}.jpg")), &probe), None);
         }
-        // Other tests clear the shared cache now and then, so allow a few probes; one per file would be 50.
-        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= 5);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -298,13 +308,13 @@ mod volume_tests {
     fn a_remount_is_noticed_after_the_ttl_or_a_refresh() {
         let dir = std::env::temp_dir().join(format!("fileid-ro-remount-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let cache = VolumeCache::default();
         let ro = |_: &Path| Some(("remount-volume".to_owned(), Volume { name: "Backup".into(), read_only: true }));
         let rw = |_: &Path| Some(("remount-volume".to_owned(), Volume { name: "Backup".into(), read_only: false }));
-        refresh();
-        assert!(volume_read_only_with(&dir, &ro).is_some());
-        assert!(volume_read_only_with(&dir, &rw).is_some(), "cached inside the TTL");
-        refresh();
-        assert!(volume_read_only_with(&dir, &rw).is_none(), "refresh forgets the cache");
+        assert!(volume_read_only_in(&cache, &dir, &ro).is_some());
+        assert!(volume_read_only_in(&cache, &dir, &rw).is_some(), "cached inside the TTL");
+        forget(&cache);
+        assert!(volume_read_only_in(&cache, &dir, &rw).is_none(), "refresh forgets the cache");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
