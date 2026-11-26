@@ -1,6 +1,6 @@
 ﻿# FileID -- icon asset generator.
 #
-# One-shot Windows-side asset pipeline:
+# Asset pipeline:
 #   shared/docs/assets/FileID-Windows.png  (master, Windows-specific design)
 #     |
 #     +--> platforms/windows/src/FileID.App/Assets/FileID.ico  (multi-res .ico)
@@ -9,18 +9,11 @@
 #     +--> website/assets/app-icon.png
 #     +--> platforms/windows/installer/FileID.Bundle/theme/logo.png  (130x102 letterboxed)
 #
-# Why FileID-Windows.png and not FileID-AppIcon.png? FileID-AppIcon.png
-# is the macOS-style squircle icon (rounded-square with iridescent border)
-# meant for the Dock; FileID-Windows.png is the Windows-style design with
-# its own framing. Use the Windows master so the .exe icon, taskbar, and
-# Welcome hero look native on Windows.
+# The master is FileID-Windows.png, not the macOS squircle FileID-AppIcon.png, so the .exe icon,
+# taskbar and Welcome hero look native on Windows.
 #
-# Run once per master change. Generated assets are committed; end users
-# do not need to run this script. Idempotent: re-running with no master
-# change is a no-op (compares mtimes).
-#
-# Tooling: System.Drawing.Common (built-in on .NET / .NET Framework 4.x
-# under Windows PowerShell 5.1). Zero external deps.
+# Run once per master change; generated assets are committed. Re-running with an unchanged master
+# is a no-op (compares mtimes). Uses System.Drawing only.
 
 param(
     [switch]$Force    # regenerate even if mtimes say up-to-date
@@ -144,11 +137,8 @@ foreach ($pair in @(
     $bundleBmp.Dispose()
     Write-Host "  $BundleLogo  (130x102)" -ForegroundColor DarkGreen
 
-    # ICO format: 6-byte header, 16-byte ICONDIRENTRY per image, then
-    # raw image data appended. We embed PNG-encoded images (modern Vista+
-    # ICO format) for sizes >= 64; classic uncompressed BMP DIB for the
-    # smaller sizes too (System.Drawing's PNG encoder is fine for all
-    # sizes -- Windows accepts PNG entries down to 16x16).
+    # ICO format: 6-byte header, a 16-byte ICONDIRENTRY per image, then the image data.
+    # Every size is PNG-encoded; Windows accepts PNG entries down to 16x16.
     Write-Host "Generating multi-resolution FileID.ico..." -ForegroundColor Cyan
     $sizes = @(16, 32, 48, 64, 128, 256)
 

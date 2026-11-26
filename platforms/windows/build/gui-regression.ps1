@@ -155,7 +155,6 @@ Assert "scan started"   $scanStarted
 Assert "scan ended"     $scanEnded
 Assert "scan ok"        $scanOk
 
-# clean_exit marker
 $cleanExit = $false
 if (Test-Path $LastSess) {
     $sess = Get-Content -Path $LastSess -Raw
@@ -163,7 +162,6 @@ if (Test-Path $LastSess) {
 }
 Assert "clean_exit=true" $cleanExit "(see $LastSess)"
 
-# WER dump delta
 $dumpsAfter = @()
 if (Test-Path $WerDir) {
     $dumpsAfter = Get-ChildItem -Path $WerDir -Filter "FileID*.dmp" -ErrorAction SilentlyContinue | ForEach-Object Name

@@ -41,11 +41,8 @@ if ($Clean) {
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 }
 
-# Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch
-# does a full re-scan + re-tag from scratch. Leaves Models\ (CLIP / ArcFace /
-# VLM — hundreds of MB) and thumbs.cache\ untouched, so nothing re-downloads
-# and thumbnails stay warm. Use after a tagging change when an incremental
-# rescan would skip files already in the DB. Close the app first — a running
+# Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch re-scans and
+# re-tags everything. Models\ and thumbs.cache\ are kept. Close the app first: a running
 # engine holds the SQLite file open.
 if ($WipeDb) {
     $FileIdData = Join-Path $env:LOCALAPPDATA "FileID"
@@ -95,7 +92,6 @@ if (-not (Test-Path $EngineExe)) {
 New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 Copy-Item $EngineExe (Join-Path $StagingDir "FileIDEngine.exe") -Force
 
-# Strip optional symbols / verify the binary is self-contained.
 $EngineSize = (Get-Item (Join-Path $StagingDir "FileIDEngine.exe")).Length / 1MB
 Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $EngineSize) -ForegroundColor Green
 

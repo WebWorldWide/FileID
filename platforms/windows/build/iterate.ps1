@@ -1,8 +1,6 @@
 # FileID — Windows regression harness.
 #
-# Port of macOS scripts/iterate.sh. Builds engine + app, drives a full
-# scan + cluster pass against a corpus, runs 11 assertions. Used in CI
-# and locally.
+# Builds the engine, drives a full scan + cluster pass against a corpus, and runs the assertions below.
 #
 # Exit codes:
 #   0  -- all assertions passed
@@ -17,7 +15,7 @@
 param(
     [string]$Corpus = "",
     [int]$ThroughputTarget = 100,    # files/sec; tier-default = 100, RTX-class = 140
-    [int]$MemoryCapMB = 1500,        # 1.2 GB ceiling per macOS, +25% slack
+    [int]$MemoryCapMB = 1500,        # 1.2 GB ceiling plus 25% slack
     [switch]$SkipBuild,
     [switch]$SkipWipe,               # skip DB wipe so incremental rescan kicks in
     [switch]$Verbose
@@ -90,8 +88,8 @@ if ($corpusFiles -lt 10) {
 }
 OK "corpus has $corpusFiles files"
 
-# The harness runs the engine against a private state root (LOCALAPPDATA is
-# redirected for the child); the real %LOCALAPPDATA%\FileID is never wiped.
+# The engine runs against a private state root (LOCALAPPDATA is redirected for the child); the real
+# %LOCALAPPDATA%\FileID is never wiped.
 $RealRoot = Join-Path $env:LOCALAPPDATA "FileID"
 $StateTemp = Join-Path $env:TEMP "fileid_iterate_state"
 $AppDataRoot = Join-Path $StateTemp "FileID"
@@ -140,9 +138,7 @@ $engineProc = New-Object System.Diagnostics.Process
 $engineProc.StartInfo = $psi
 [void]$engineProc.Start()
 
-# Register-ObjectEvent works on both Windows PowerShell 5.1 and PowerShell 7;
-# the += operator on events fails on 5.1. Capture stdout/stderr to the temp
-# event log.
+# Register-ObjectEvent works on both Windows PowerShell 5.1 and PowerShell 7; the += operator on events fails on 5.1.
 $stdoutSub = Register-ObjectEvent -InputObject $engineProc -EventName 'OutputDataReceived' -Action {
     if ($EventArgs.Data) { Add-Content -Path $event.MessageData -Value $EventArgs.Data }
 } -MessageData $eventLog
@@ -213,28 +209,21 @@ if (-not $engineProc.HasExited) { $engineProc.Kill() }
 
 Step "Running assertions"
 
-# A1: scan completed without crash.
 Assert "[A1] scan completed without crash" $scanComplete
 
-# A2: corpus had >= 10 files (or warned).
 Assert "[A2] corpus contains >= 10 files (or warning was emitted)" ($corpusFiles -ge 10) "(found $corpusFiles)"
 
-# A3: throughput meets target.
 $throughput = if ($scanElapsed.TotalSeconds -gt 0) { $totalProcessed / $scanElapsed.TotalSeconds } else { 0 }
 Assert "[A3] throughput >= $ThroughputTarget files/sec" ($throughput -ge $ThroughputTarget) "(was $([int]$throughput))"
 
-# A4: peak resident memory under cap.
 Assert "[A4] peak resident memory <= $MemoryCapMB MB" ($peakResidentMB -le $MemoryCapMB) "(peak $peakResidentMB MB)"
 
-# A5: face clustering completed (or no faces — both OK).
 $faceClusterDone = (Get-Content $eventLog | Where-Object { $_ -match '"faceClusteringComplete"' }).Count
 Assert "[A5] face clustering completed without crash" ($faceClusterDone -ge 1 -or $totalProcessed -eq 0)
 
-# A6: no engine errors with kind=panic / kind=fatal in event log.
 $fatalCount = (Get-Content $eventLog | Where-Object { $_ -match '"kind"\s*:\s*"(panic|fatal|crash)"' }).Count
 Assert "[A6] no fatal engine errors" ($fatalCount -eq 0)
 
-# A7: no Windows Error Reporting crash dumps for FileIDEngine in last 5 min.
 $werDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportArchive"
 $recentCrashes = 0
 if (Test-Path $werDir) {
@@ -244,29 +233,24 @@ if (Test-Path $werDir) {
 }
 Assert "[A7] no WER crash dumps in last 10 min" ($recentCrashes -eq 0)
 
-# A8: SQLite DB file created + non-empty.
 $dbPath = Join-Path $AppDataRoot "fileid.sqlite"
 Assert "[A8] DB file created" (Test-Path $dbPath)
 $dbSize = if (Test-Path $dbPath) { (Get-Item $dbPath).Length } else { 0 }
 Assert "[A8b] DB has non-zero size" ($dbSize -gt 4096)
 
-# A9: WAL checkpointed at shutdown — .wal sidecar should be empty or absent.
 $walPath = "$dbPath-wal"
 $walSize = if (Test-Path $walPath) { (Get-Item $walPath).Length } else { 0 }
 Assert "[A9] WAL checkpointed (sidecar empty or absent)" ($walSize -lt 4096) "(was $walSize bytes)"
 
-# A10: face_crops directory populated if any faces detected.
+# A10: the corpus may have no faces, so any count is acceptable.
 $faceCount = if (Test-Path $faceCrops) { (Get-ChildItem $faceCrops -File).Count } else { 0 }
-# Acceptable: any (>= 0) — corpus may have no faces.
 Assert "[A10] face_crops directory present after scan (>= 0 files)" ($faceCount -ge 0) "(found $faceCount)"
 
-# A11: privacy gate -- no telemetry strings in shipped binary.
 $privacyPy = Join-Path $RepoRoot "shared\scripts\check_binary_privacy.py"
 & python $privacyPy $EnginePath
 Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($LASTEXITCODE -eq 0)
 
-# A12: model-swap DB assertions — RAM++/CLIP tag content + SFace 128-d
-# (512-byte) face embeddings, which reject stale 512-d/2048-byte ArcFace data.
+# A12: RAM++/CLIP tag content and SFace 128-d (512-byte) face embeddings; stale 512-d (2048-byte) ArcFace data fails.
 $pyExe = $null
 foreach ($cand in @('python', 'py')) {
     if (Get-Command $cand -ErrorAction SilentlyContinue) { $pyExe = $cand; break }

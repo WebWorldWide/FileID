@@ -3,18 +3,11 @@ name: Release (Windows desktop + native tools)
 # Tag-triggered CD: cut the signed Windows desktop installers plus native
 # engine/CLI/TUI archives for supported Windows, macOS, and Linux architectures.
 #
-# Signed publishing is intentionally provider-neutral. The build script accepts
-# either a local certificate-store thumbprint or a provider adapter, but this
-# hosted workflow remains unsigned-validation-only until a provider-specific
-# authentication step is selected (see shared/docs/WINDOWS_SIGNING.md). Tagged
-# pushes build and upload clearly named unsigned CI artifacts but never publish.
-#
-# FIRST-RELEASE NOTE: validate this end-to-end on the first real tagged release.
-# The WiX MSI + Burn bundle build and the ARM64 engine cross-compile run HERE for
-# the first time (the CI workflows build the app + engine but never the
-# installer), so first-release surprises — e.g. the runner needing the ARM64 MSVC
-# VC tools for the aarch64 cross-compile, or WiX v4 SDK restore — are expected and
-# get ironed out then. publish-bundle.ps1 fails loudly if a toolchain is missing.
+# Signing is provider-neutral: the build script takes a certificate-store thumbprint or a provider
+# adapter, but this workflow only validates unsigned builds until a provider authentication step
+# is chosen (see shared/docs/WINDOWS_SIGNING.md). Tagged pushes upload unsigned CI artifacts and never publish.
+# The WiX MSI + Burn bundle and the ARM64 engine cross-compile are built only here;
+# publish-bundle.ps1 fails loudly if a toolchain is missing.
 
 on:
   push:

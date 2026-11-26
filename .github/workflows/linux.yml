@@ -31,21 +31,13 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref to save runner minutes on rapid
-# pushes. (The Windows/macOS workflows predate this; new workflows adopt it.)
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Engine — build + verify the cross-platform Rust engine on Linux. This is
-  # the concrete proof of the "engine is cross-platform-clean" claim: the same
-  # crate that ships on Windows compiles, clippy-clean (-D warnings), and tests
-  # green on a non-windows host (the Win32 surface is cfg(windows)-gated). The
-  # exact commands below are the ones the engine is verified green with on the
-  # macOS (non-windows) dev host, so they are high-confidence on Linux.
-  # ---------------------------------------------------------------------------
+  # Engine: builds and tests the shared Rust engine on Linux (its Win32 surface is cfg(windows)-gated).
   engine:
     name: Engine (cross-platform Rust) — Linux x64
     runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Linux","X64","fileid-adlon"]') || 'ubuntu-latest' }}
@@ -61,9 +53,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # MSRV pinned to 1.98 in rust-toolchain.toml (engine + CLI). Keep both
-          # in sync — drift here means CI builds with a different toolchain than
-          # contributors use locally.
+          # Keep in sync with rust-toolchain.toml.
           toolchain: 1.98
           components: rustfmt, clippy
 
@@ -79,29 +69,22 @@ jobs:
             cargo-engine-linux-
 
       - name: Format check
-        # rustfmt.toml sets disable_all_formatting=true, so this is a no-op gate
-        # (parity with windows-engine.yml). It starts enforcing if that flips.
+        # rustfmt.toml sets disable_all_formatting=true, so this only gates if that changes.
         run: cargo fmt --all -- --check
 
       - name: Clippy (-D warnings, full)
-        # Default features (pdf-analyze on). pdfium-render binds libpdfium at
-        # RUNTIME via libloading, so the crate compiles on Linux with no system
-        # library present — the same command the engine is verified green with
-        # on the macOS (non-windows) dev host.
+        # pdfium-render binds libpdfium at runtime, so this compiles with no system pdfium.
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Build (release)
         run: cargo build --release
 
       - name: Test (lib)
-        # `--lib` mirrors the proven non-windows local gate (macOS dev host, no
-        # system libpdfium): the pdf paths call Pdfium::bind_to_system_library()
-        # and map an absent lib to an Err rather than aborting the test run.
+        # `--lib` only: the pdf paths map an absent libpdfium to an Err instead of aborting.
         run: cargo test --lib
 
       - name: Engine conformance
-        # Shared suite in shared/test-corpus/conformance, run against the Rust
-        # engine alone (cross-engine cases need the macOS engine and skip).
+        # Cross-engine cases need the macOS engine and skip.
         timeout-minutes: 15
         run: python3 "${{ github.workspace }}/shared/scripts/conformance.py" --engine target/release/FileIDEngine
 
@@ -122,11 +105,7 @@ jobs:
           python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" \
             target/release/FileIDEngine
 
-  # ---------------------------------------------------------------------------
-  # CLI — the cross-OS `fileid` front-end. It's its own Cargo workspace and
-  # links the shared engine as a library (with default-features = false, so the
-  # no-pdfium engine path). clippy -D warnings + build + the smoke test.
-  # ---------------------------------------------------------------------------
+  # CLI: its own Cargo workspace, linking the engine as a library with default-features = false (no pdfium).
   cli:
     name: CLI (fileid) — Linux x64
     runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Linux","X64","fileid-adlon"]') || 'ubuntu-latest' }}
@@ -142,7 +121,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # Matches platforms/cli/rust-toolchain.toml (1.98, same as the engine).
+          # Matches platforms/cli/rust-toolchain.toml.
           toolchain: 1.98
           components: rustfmt, clippy
 
@@ -166,13 +145,7 @@ jobs:
       - name: Test (smoke)
         run: cargo test
 
-  # ---------------------------------------------------------------------------
-  # TUI — the cross-OS `fileid-tui` terminal front-end (ratatui + crossterm).
-  # Like the CLI it's its own Cargo workspace and links the shared engine as a
-  # library (default-features = false). ratatui + crossterm are pure-Rust with
-  # no system-library dependency, so this job needs no extra apt packages —
-  # same clippy -D warnings + build + headless test gate as the CLI.
-  # ---------------------------------------------------------------------------
+  # TUI: its own Cargo workspace, linking the engine as a library with default-features = false. Pure Rust, so no apt packages.
   tui:
     name: TUI (fileid-tui) — Linux x64
     runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Linux","X64","fileid-adlon"]') || 'ubuntu-latest' }}
@@ -188,7 +161,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # Matches platforms/tui/rust-toolchain.toml (1.98, same as the engine).
+          # Matches platforms/tui/rust-toolchain.toml.
           toolchain: 1.98
           components: rustfmt, clippy
 
@@ -212,14 +185,7 @@ jobs:
       - name: Test (headless — state + layout + render)
         run: cargo test
 
-  # ---------------------------------------------------------------------------
-  # App — the GTK4 + libadwaita Linux app. ubuntu-latest (24.04) ships gtk4
-  # 4.14 + libadwaita 1.5, matching the crates' v4_14 / v1_5 features.
-  #
-  # Both build and Clippy are required gates: this is a shipped six-tab app,
-  # not a scaffold, so warnings are release failures just as they are for the
-  # engine, CLI, and TUI.
-  # ---------------------------------------------------------------------------
+  # App: the GTK4 + libadwaita app. ubuntu-latest (24.04) ships gtk4 4.14 and libadwaita 1.5, matching the crates' v4_14 / v1_5 features.
   app:
     name: GTK4 app (fileid-linux) — Linux x64
     runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Linux","X64","fileid-adlon"]') || 'ubuntu-latest' }}
@@ -233,11 +199,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install GTK4 + libadwaita system deps
-        # gtk4-rs (v4_14) needs libgtk-4-dev, which pulls the glib/cairo/pango/
-        # gdk-pixbuf/graphene dev headers; libadwaita-rs (v1_5) needs
-        # libadwaita-1-dev. build-essential = C toolchain (cc/linker) for the
-        # engine's bundled SQLite + the gtk-rs -sys crates; pkg-config locates
-        # all of the above.
+        # build-essential compiles the engine's bundled SQLite and the gtk-rs -sys crates.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -250,8 +212,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # 1.98 to match the shared engine path dependency (the app's own
-          # rust-version floor is lower, but the engine pins 1.98).
+          # The shared engine path dependency pins 1.98.
           toolchain: 1.98
           components: rustfmt, clippy
 
@@ -295,8 +256,6 @@ jobs:
           size_mb=$(du -m "$bin" | cut -f1)
           echo "$bin OK (${size_mb} MB)"
 
-      # The GTK app is a directly shipped executable even though its platform
-      # libraries are dynamic; scan its complete binary with the shared gate.
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail

@@ -1,10 +1,8 @@
 # enable-crash-dumps.ps1 — turn on Windows Error Reporting LocalDumps for FileID.exe
 # so the NEXT crash drops a full native minidump we can open in WinDbg/VS.
 #
-# Why: the >1h scan crash is a NATIVE fast-fail (RaiseFailFastException) — it
-# bypasses every managed handler (Application.UnhandledException,
-# AppDomain.UnhandledException) so app.log just stops with no exception. The
-# only way to get the faulting native stack is a WER LocalDump.
+# A native fast-fail (RaiseFailFastException) bypasses every managed handler, so app.log just
+# stops; a WER LocalDump is the only way to get the faulting native stack.
 #
 # This writes under HKLM, so it needs an elevated shell. The script self-elevates.
 # Dumps land in %LOCALAPPDATA%\FileID\crashdumps (DumpType=2 = full).
