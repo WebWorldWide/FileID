@@ -318,7 +318,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _activeLoads);
         try
         {
-            // Linked token created inside the try: a Dispose() race after the _disposed check makes _disposalCts.Token throw ObjectDisposedException, caught below as a clean teardown no-op instead of escaping to the caller.
+            // Created inside the try so a Dispose() race becomes a clean teardown no-op instead of an ObjectDisposedException escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() =>
@@ -486,7 +486,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null, string? listedKind = null, string? summary = null, int hiddenWeaker = 0)
     {
-        // Drop results from a refresh a newer one has already superseded — checked on the UI thread right before the swap so it also catches a refresh that started during the dispatch gap.
+        // Drop results superseded by a newer refresh; checked on the UI thread right before the swap so a refresh started during the dispatch gap is caught too.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
@@ -671,7 +671,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     private void ReplaceItems(IReadOnlyList<FileTile> next)
     {
-        // The old Clear+ReplaceAll(Reset) recreated every FileTile and made ItemsRepeater re-realize every visible element ~1 Hz during a scan — nulling each tile's Thumbnail and racing the async reload, so thumbnails never persisted (the "blank tiles during scan" report).
+        // Merge in place rather than Clear+ReplaceAll(Reset): a Reset recreates every FileTile and makes ItemsRepeater re-realize every visible element, nulling each Thumbnail and racing the async reload.
         if (Items.Count > 0 && next.Count > 0 && NoOverlapById(Items, next))
         {
             foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;

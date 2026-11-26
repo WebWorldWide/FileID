@@ -1,17 +1,9 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    ShimmerView — gold→lavender diagonal band over a placeholder surface.
-    The band is static on purpose: it does not move. The Mac Library tiles
-    dropped their per-tile shimmer because of scroll cost, and animating
-    GradientStop.Offset would need a dependent animation, which WinUI only
-    runs with EnableDependentAnimation. Hidden when inactive or under
-    reduced-motion.
-
-    Used as a loading-state overlay (thumbnail tiles, model installer
-    cards, etc.).
-
-    The brush uses GoldColor + AiColor from Theme.xaml, with transparent
-    end stops to give the band cleanly defined edges.
+    Loading-state overlay (thumbnail tiles, model installer cards): a gold-to-lavender diagonal band over a
+    placeholder surface. The band is static because animating GradientStop.Offset needs a dependent animation,
+    which WinUI only runs with EnableDependentAnimation; Mac Library tiles dropped the scroll for the same cost.
+    It is hidden when inactive or under reduced motion.
 -->
 <UserControl
     x:Class="FileID.Theme.Motion.ShimmerView"

@@ -1,4 +1,4 @@
-﻿// TreeDiffControl — side-by-side current vs proposed folder tree.
+﻿// TreeDiffControl: side-by-side current vs proposed folder tree.
 
 using System;
 using System.Collections.Generic;

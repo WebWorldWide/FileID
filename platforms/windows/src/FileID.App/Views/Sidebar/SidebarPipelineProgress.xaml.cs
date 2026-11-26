@@ -1,4 +1,4 @@
-﻿// SidebarPipelineProgress code-behind. Five capsule segments plus a "Step N of 5 · Stage" line inside the v3 scan card (macOS PipelineBlock); the stage derivation is live engine signals over a DB-derived launch floor.
+﻿// SidebarPipelineProgress code-behind. Five capsule segments plus a "Step N of 5 · Stage" line in the scan card; the stage comes from live engine signals over a DB-derived launch floor.
 
 using System.ComponentModel;
 using System.Threading.Tasks;
@@ -121,7 +121,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
             }
         });
 
-    // Don't hard-blank the floor on the signal — that wrongly greyed the strip after a clear-then-repick of an intact library (the DB floor is seeded only once in the ctor, so it never re-derives).
+    // The floor is seeded once in the ctor and never re-derives, so blanking it here would grey the strip after a clear-then-repick of an intact library.
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("SidebarPipelineProgress.OnAppChanged", () =>
         {

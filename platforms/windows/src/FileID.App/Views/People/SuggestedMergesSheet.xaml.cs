@@ -1,5 +1,4 @@
-﻿// SuggestedMergesSheet code-behind. Binds EngineClient's
-// Rendering is data-template-driven (not imperative UIElement construction): the template resolves {ThemeResource} brushes natively and the ItemsRepeater recycles containers, so we never index theme brushes off Application.Resources (KeyNotFoundException) nor rebuild sibling UIElement subtrees per engine event (layout-pass fast-fail) — the two crash shapes the prior imperative BuildRow/BuildFaceImage path hit.
+﻿// SuggestedMergesSheet code-behind. Renders EngineClient's merge suggestions through a data template: it resolves {ThemeResource} brushes natively (no Application.Resources lookups, which throw KeyNotFoundException) and the ItemsRepeater recycles containers instead of rebuilding UIElement subtrees per engine event (a layout-pass fast-fail).
 
 using System;
 using System.Collections.ObjectModel;
@@ -23,7 +22,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         Unloaded += OnUnloaded;
         Loaded += async (_, _) =>
         {
-            // Trigger a fresh suggestion fetch whenever the sheet opens, and bound-wait the engine's reply so the sheet doesn't sit forever on the placeholder when clustering is still running.
+            // Fetch fresh suggestions on open; the bounded wait keeps the placeholder from lingering while clustering runs.
             HeaderText.Text = "Looking for similar clusters…";
             SetBusy(true);
             try
@@ -47,7 +46,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        // Guard any dispatcher tick that fires after the ContentDialog closes (Render would otherwise touch a torn-down sheet), and drop the engine subscription.
+        // A dispatcher tick after the dialog closes must not Render into a torn-down sheet.
         _unloaded = true;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
     }
@@ -220,7 +219,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
 
     private async Task MarkDifferentAsync(MergeSuggestionVm vm)
     {
-        // Route through the engine's single-writer connection (the app must not open its own DB writer).
+        // The app never opens its own DB writer; go through the engine.
         try
         {
             await EngineClient.Instance.MarkPersonsDifferentAsync(

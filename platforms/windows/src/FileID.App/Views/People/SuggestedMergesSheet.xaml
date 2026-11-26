@@ -1,11 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    SuggestedMergesSheet — modal listing pairs of clusters whose anchor
-    faces fall in the uncertain similarity band (0.45..0.70). Engine-side
-    `findMergeSuggestions` IPC computes the pairs; we render side-by-side
-    anchor faces + similarity %, with Merge / Different-people / Skip
-    buttons per pair.
--->
+<!-- SuggestedMergesSheet: modal listing cluster pairs whose anchor faces fall in the uncertain similarity band (0.45..0.70), computed by the engine's findMergeSuggestions IPC. Each pair shows both anchor faces with the similarity % and Merge / Different-people / Skip buttons. -->
 <UserControl
     x:Class="FileID.Views.People.SuggestedMergesSheet"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

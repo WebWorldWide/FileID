@@ -110,7 +110,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _activeLoads);
         try
         {
-            // Linked token created inside the try: a Dispose() race after the _disposed check makes _disposalCts.Token throw ObjectDisposedException, caught below as a clean teardown no-op instead of escaping to the caller.
+            // Created inside the try so a Dispose() race becomes a clean teardown no-op instead of an ObjectDisposedException escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
@@ -209,7 +209,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 
     private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
     {
-        // Drop results from a refresh a newer one has already superseded — checked on the UI thread right before the swap so it also catches a refresh that started during the dispatch gap.
+        // Drop results superseded by a newer refresh; checked on the UI thread right before the swap so a refresh started during the dispatch gap is caught too.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;

@@ -1,7 +1,4 @@
-﻿// ShimmerView code-behind. Shows or hides the fixed highlight band from
-// IsActive + ReducedMotion. The band does not animate (see ShimmerView.xaml).
-// When reduced-motion is on, the highlight stays hidden (BaseLayer alone
-// reads as "loading state at rest").
+﻿// Shows or hides the fixed highlight band from IsActive and ReducedMotion; the band itself does not animate.
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -18,11 +15,8 @@ public sealed partial class ShimmerView : UserControl
     public ShimmerView()
     {
         InitializeComponent();
-        // Subscribe on Loaded (not the ctor) so subscribe/unsubscribe are
-        // lifecycle-paired. This control lives in a virtualized
-        // ItemsRepeater: a ctor-time subscription leaks via the static event
-        // for any instance that's never Loaded, and after the first recycle
-        // (Unloaded → -=) it would stay deaf to reduced-motion toggles.
+        // Subscribe on Loaded, not the constructor: in a virtualized ItemsRepeater a constructor-time subscription
+        // leaks via the static event for never-loaded instances, and recycled ones (Unloaded unsubscribes) would miss toggles.
         Loaded += (_, _) =>
         {
             ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
@@ -34,9 +28,7 @@ public sealed partial class ShimmerView : UserControl
         };
     }
 
-    /// <summary>
-    /// Tile is currently loading → the highlight band shows. False → plain placeholder.
-    /// </summary>
+    /// <summary>True while the tile is loading: the highlight band shows. False: plain placeholder.</summary>
     public bool IsActive
     {
         get => (bool)GetValue(IsActiveProperty);

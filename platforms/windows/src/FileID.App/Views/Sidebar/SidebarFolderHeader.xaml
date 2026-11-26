@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SidebarFolderHeader: the title-bar folder switcher popover (Prototype v3).
+    SidebarFolderHeader: the title-bar folder switcher popover.
     Hosted in TitleBar.FolderFlyout. "Show" lists All locations and every scanned
     location (count, OFFLINE pill); picking one scopes Library, Search & Moments
     and Chat. Then the current folder with path and file count,

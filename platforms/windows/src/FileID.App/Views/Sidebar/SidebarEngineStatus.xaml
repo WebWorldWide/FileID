@@ -22,9 +22,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- MinHeight (not fixed Height) so long error messages can
-         expand the banner vertically. CornerRadius bumped to 12 since
-         the pill may now be taller than 32 DIP. -->
+    <!-- MinHeight, not a fixed Height, so long error messages can grow the banner; CornerRadius 12 suits a pill taller than 32 DIP. -->
     <Border Padding="12,8"
             MinHeight="32"
             CornerRadius="12"
@@ -55,10 +53,7 @@
                          VerticalAlignment="Center" />
             </Grid>
 
-            <!-- TextWrapping=Wrap so engine error messages
-                 (which can be long) are readable in the 240-DIP-narrow
-                 sidebar. Was CharacterEllipsis which silently truncated
-                 the actual reason. -->
+            <!-- TextWrapping=Wrap so long engine error messages stay readable in the narrow sidebar instead of truncating the reason. -->
             <TextBlock x:Name="StatusText"
                        Grid.Column="1"
                        Text="Getting ready…"

@@ -1,4 +1,4 @@
-﻿// Outcome class for a Restructure recommendation card — mirrors the macOS RestructureOutcome (Keep / Tidy / Reorganize), derived from the engine's per-move Tier: Mixed → Tidy, Junk → Reorganize, Anchor → Keep.
+﻿// Outcome of a Restructure recommendation card, derived from the engine's per-move Tier: Mixed → Tidy, Junk → Reorganize, Anchor → Keep.
 
 namespace FileID.ViewModels;
 

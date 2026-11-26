@@ -1,5 +1,4 @@
-﻿// WelcomeSheet code-behind. 1:1 port of platforms/apple/.../WelcomeSheet.swift.
-// Click handlers that delegate to ModelSlot.InstallAsync / ModelInstallerService.CancelAllAsync / dismiss. 3.
+﻿// WelcomeSheet code-behind: click handlers delegate to ModelSlot.InstallAsync, ModelInstallerService.CancelAllAsync and dismiss.
 
 using FileID.IpcSchema;
 using FileID.Services;
@@ -26,12 +25,12 @@ public sealed partial class WelcomeSheet : UserControl
     public WelcomeSheet()
     {
         InitializeComponent();
-        // Reverse order would race: a sentinel that flips Status synchronously during Seed fires PropertyChanged with no handler attached, the AllInstalled signal is lost, and the auto-dismiss never fires.
+        // Subscribe before SeedFromSentinels: a sentinel that flips Status synchronously would otherwise raise PropertyChanged with no handler and the auto-dismiss would never fire.
         Svc.PropertyChanged += OnServicePropertyChanged;
         Unloaded += (_, _) =>
         {
             Svc.PropertyChanged -= OnServicePropertyChanged;
-            // Cancel in-flight auto-dismiss + restart-prompt tasks so they don't fire TryEnqueue / ShowAsync on a detached control.
+            // Keeps in-flight auto-dismiss and restart-prompt tasks from touching a detached control.
             try { _lifetimeCts?.Cancel(); _lifetimeCts?.Dispose(); }
             catch { /* swallow — Cts may already be disposed */ }
             _lifetimeCts = null;
@@ -46,7 +45,7 @@ public sealed partial class WelcomeSheet : UserControl
             DebugLog.Warn("WelcomeSheet ctor SeedFromSentinels threw: " + ex.Message);
         }
 
-        // If the user opens the sheet with everything already installed (e.g. they re-opened it from Settings), the auto-dismiss should still fire so they're not staring at three green checkmarks.
+        // Reopened from Settings with everything installed: still auto-dismiss.
         if (Svc.AllInstalled) ScheduleAutoDismiss();
     }
 
@@ -66,8 +65,8 @@ public sealed partial class WelcomeSheet : UserControl
         if (_autoDismissScheduled) return;
         _autoDismissScheduled = true;
         var ct = _lifetimeCts?.Token ?? CancellationToken.None;
-        var dq = DispatcherQueue; // capture now while still attached
-        // Match macOS WelcomeSheet.swift:103-109: 800 ms before dismissing so the user sees the green checkmark transition land.
+        var dq = DispatcherQueue; // captured while still attached
+        // 800 ms lets the green checkmark transition land before dismissing.
         _ = Task.Run(async () =>
         {
             try
@@ -165,7 +164,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     internal bool InstallAllEnabled(bool allInstalled, bool isBusy) => !allInstalled && !isBusy;
 
-    // Passing `Svc.Clip` (the singleton slot) means the binding never updates because Svc.Clip is never reassigned — we have to pass the individual properties so x:Bind subscribes to each one's PropertyChanged.
+    // x:Bind callers pass each slot property individually: Svc.Clip is never reassigned, so binding the slot itself would never update.
 
     // RateEtaLabel still renders empty text when BytesPerSecond==0, so a stalled row shows a blank line instead of vanishing.
     internal Visibility ShowRateEta(ModelInstallStatus status, bool hasStarted) =>
@@ -174,7 +173,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
     {
-        // "Queued — starting download…") while we're still at 0% — otherwise the row reads "Starting…" forever even after the engine has acknowledged the prewarm.
+        // Show the engine's message (e.g. "Queued — starting download…") while still at 0%, so the row does not read "Starting…" after the engine has acknowledged the prewarm.
         string pct;
         if (fraction > 0) pct = $"{fraction * 100:0}%";
         else if (!string.IsNullOrEmpty(message)) pct = message;
@@ -182,7 +181,7 @@ public sealed partial class WelcomeSheet : UserControl
         var bytes = string.Empty;
         if (bytesDone is { } done && totalBytes is { } total && total > 0)
         {
-            // defensive `Max` so the user never sees "578 MB of 201 MB" when the engine's per-file total falls behind the bundle-cumulative BytesDone.
+            // Max: the engine's per-file total can fall behind the bundle-cumulative BytesDone ("578 MB of 201 MB").
             var shownTotal = Math.Max(done, total);
             bytes = $" · {FormatBytes(done)} of {FormatBytes(shownTotal)}";
         }
@@ -219,7 +218,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     private static string FormatEta(double seconds)
     {
-        // clamp pathological values (NaN, infinity, EMA-asymptote overflow) before any arithmetic so the user never sees "7726735523606260000000000h" again.
+        // Clamp NaN, infinity and EMA-asymptote overflow before any arithmetic.
         if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0)
         {
             return "—";
@@ -255,7 +254,7 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.DeepVlm);
     }
 
-    // On other vendors the button isn't shown (ShowAcceleratorButton returns Collapsed) so this handler can't fire.
+    // Only reachable where ShowAcceleratorButton is visible.
     private void OnAcceleratorActionClicked(object sender, RoutedEventArgs e)
     {
         DebugLog.Info("[INSTALL] GPU Acceleration Pack per-row button clicked.");
@@ -304,7 +303,6 @@ public sealed partial class WelcomeSheet : UserControl
         switch (slot.Status)
         {
             case ModelInstallStatus.Downloading:
-                // Pre-flip caption to "Cancelling…" so the user gets instant feedback.
                 slot.Message = "Cancelling…";
                 slot.BytesPerSecond = 0;
                 slot.EtaSeconds = 0;
@@ -343,12 +341,12 @@ public sealed partial class WelcomeSheet : UserControl
     {
         try
         {
-            // Use the ONE canonical in-memory instance, not a throwaway Load(): the long-lived AppViewModel instance would otherwise serialize its stale snapshot on its next Save() and revert this write (the Welcome sheet then re-appears every launch).
+            // Write through the canonical in-memory instance: a throwaway Load() would be overwritten by AppViewModel's stale snapshot on its next Save(), re-showing the sheet every launch.
             var settings = AppViewModel.Instance.Settings;
             if (!settings.WelcomeSheetSeen)
             {
                 settings.WelcomeSheetSeen = true;
-                // Synchronous flush, not the debounced Save(): dismissing the sheet then closing the app within the ~200 ms debounce window would otherwise drop the write and re-show the sheet next launch.
+                // Flush synchronously: closing the app inside the ~200 ms debounce window would drop the write.
                 settings.SaveImmediately();
                 DebugLog.Info("[INSTALL] welcomeSheetSeen=true persisted to app-settings.json");
             }

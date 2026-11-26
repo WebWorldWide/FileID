@@ -1,5 +1,4 @@
-﻿// PersonDetailSheet code-behind. Loads every face for a cluster + its
-// JPEG crop, populates the structured-name editor, and on commit fires a renamePerson IPC (DB write only — sidecar tags inherit from the per-file scan).
+﻿// PersonDetailSheet code-behind. Loads every face of a cluster with its JPEG crop, fills the structured-name editor, and on commit sends a renamePerson IPC (a DB write only; sidecar tags are not touched).
 
 using System;
 using System.Collections.Generic;
@@ -105,7 +104,7 @@ public sealed partial class PersonDetailSheet : UserControl
         var dispatcher = DispatcherQueue;
         long personId = _personId;
 
-        // Do all of it on a worker thread and marshal the UI writes back.
+        // Load on a worker thread, then marshal the UI writes back.
         LoadResult result = await Task.Run(() =>
         {
             var res = new LoadResult();
@@ -189,7 +188,7 @@ public sealed partial class PersonDetailSheet : UserControl
             SyncMoveToolbar();
         }
 
-        // ConfigureAwait(true) resumes on the captured UI context; the DispatcherQueue post is belt-and-suspenders in case the continuation resumes on a worker thread (no captured SyncContext).
+        // Without a captured SyncContext the continuation can resume on a worker thread, so post to the dispatcher.
         if (dispatcher is null || dispatcher.HasThreadAccess)
         {
             Apply();
@@ -411,7 +410,7 @@ public sealed partial class PersonDetailSheet : UserControl
         Load();
     }
 
-    // Read-only existence probe for the rename pre-write guard. persons.id is INTEGER PRIMARY KEY AUTOINCREMENT, so an id is never reused — a present row is proof it's still the same person we loaded. Throws on a genuine read error so the caller can distinguish "definitely gone" from "couldn't check" and avoid blocking a legit rename on a transient fault.
+    // Read-only probe for the rename guard. persons.id is AUTOINCREMENT and never reused, so a present row is still the same person. Throws on a read error so the caller can tell "gone" from "couldn't check".
     internal static bool PersonExists(string dbPath, long personId)
     {
         if (!File.Exists(dbPath)) return false;
@@ -438,7 +437,7 @@ public sealed partial class PersonDetailSheet : UserControl
 
     public async Task<bool> CommitAsync()
     {
-        // A background re-cluster can merge this person away while the sheet is open; because persons.id is AUTOINCREMENT the id is never reassigned, so a missing row means the person is genuinely gone (not a different person).
+        // A background re-cluster can merge this person away while the sheet is open; the id is never reassigned, so a missing row means the person is gone.
         long personId = _personId;
         StatusText.Text = "Saving...";
         try
@@ -450,7 +449,7 @@ public sealed partial class PersonDetailSheet : UserControl
             }
             catch (Exception ex)
             {
-                // Couldn't verify (transient read error) — don't block the rename on a check we couldn't run; fall through to the IPC.
+                // A transient read error must not block the rename.
                 Services.DebugLog.Warn("PersonDetailSheet existence check failed: " + ex.Message);
                 gone = false;
             }
@@ -475,7 +474,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 return true;
             }
 
-            // Route through the engine's single-writer connection so we don't contend SQLite locks with the engine writer or a sibling sheet in another window.
+            // The engine's single-writer connection avoids SQLite lock contention with the engine writer or another window.
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "renamePerson",
                 () => ViewModels.EngineClient.Instance.RenamePersonAsync(

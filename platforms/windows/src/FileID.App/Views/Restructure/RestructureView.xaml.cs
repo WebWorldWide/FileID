@@ -1,5 +1,4 @@
-﻿// RestructureView code-behind — recommendation-first + file-first reorg UI
-// Crash-safety (platforms/windows/CLAUDE.md): the recommendation + file lists are ItemsRepeater + DataTemplate over observable VMs (never imperative children); the engine subscription is SafeRun-wrapped, posts XAML writes via DispatcherQueue, logs [ENGINE-SUB:RestructureView], and is _unloaded-guarded; tints resolve via VM brushes / {ThemeResource}, never a code-side theme lookup.
+﻿// RestructureView code-behind: recommendation-first, file-first reorganize UI. Lists are ItemsRepeater over observable VMs, the engine subscription is SafeRun-wrapped, _unloaded-guarded and posts XAML writes via DispatcherQueue, and tints come from VM brushes or {ThemeResource}, never a code-side theme lookup.
 
 using System;
 using System.Collections.Generic;
@@ -26,7 +25,7 @@ public sealed partial class RestructureView : UserControl
     private readonly Dictionary<RestructureOutcome, List<RestructureFileRowVm>> _filesByOutcome = new();
     private readonly Dictionary<RestructureOutcome, RestructureRecommendationVm> _recByOutcome = new();
 
-    // The view is recreated on every tab switch (ctor re-subscribes, Unloaded unsubscribes), so the per-file IsSelected flags — which default to all-selected — would reset each return, silently discarding which files the user chose to exclude.
+    // The view is recreated on every tab switch; keeping the deselected ids here stops the all-selected default from discarding the user's exclusions.
     private static readonly HashSet<long> _deselectedFileIds = new();
 
     private bool _unloaded;
@@ -43,11 +42,11 @@ public sealed partial class RestructureView : UserControl
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     private static EngineError? _lastHandledError;
-    // Apply timeout: if the engine doesn't reply with a RestructureApplyResult within this window (crash / pipe death mid-apply), fire on the UI thread, release _applying, and surface an error.
+    // If no RestructureApplyResult arrives in this window (engine crash or pipe death mid-apply), release _applying and surface an error.
     private static readonly TimeSpan ApplyTimeout = TimeSpan.FromSeconds(90);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _applyTimeoutTimer;
 
-    // UI-thread brushes cached at ctor time (CLAUDE.md: never build brushes per event).
+    // Brushes are cached once; building them per event risks native fast-fails.
     private readonly SolidColorBrush _keepBrush;
     private readonly SolidColorBrush _tidyBrush;
     private readonly SolidColorBrush _reorgBrush;
@@ -93,7 +92,7 @@ public sealed partial class RestructureView : UserControl
             FileID.Theme.Motion.SpringEasing.SpringScale(ApplyMovesButton, 1.0f, spring);
     }
 
-    // Render a cached plan if the engine still has one; otherwise compute.
+    // Show the engine's cached plan if it has one; otherwise compute.
     private async void OnLoaded(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnLoaded), async () =>
         {
@@ -134,7 +133,7 @@ public sealed partial class RestructureView : UserControl
             }
             catch (Exception ex)
             {
-                // Without this the status freezes on "Computing plan..." forever (the plan event never arrives).
+                // Without this the status stays on "Computing plan..." forever when the plan event never arrives.
                 DebugLog.Warn("PlanRestructure (OnLoaded) send failed: " + ex.Message);
                 PlanStatusText.Text = "FileID is still getting ready. Open this page again in a moment to see your plan.";
             }
@@ -203,7 +202,7 @@ public sealed partial class RestructureView : UserControl
                     }
                 case nameof(EngineClient.DeepAnalyzeComplete):
                     {
-                        // macOS parity: re-plan when Deep Analyze finishes so the People/<name> buckets reflect newly-captioned files.
+                        // Re-plan when Deep Analyze finishes so the People/<name> buckets include newly captioned files.
                         var folder = AppViewModel.Instance.FolderPath;
                         DispatcherQueue.TryEnqueue(async () =>
                         {
@@ -211,7 +210,7 @@ public sealed partial class RestructureView : UserControl
                             await RefreshDeepAnalyzeHintAsync();
                             if (!string.IsNullOrEmpty(folder))
                             {
-                                // This recompute supersedes any prior plan, so the user's selection intent from the old plan must not leak forward (see _deselectedFileIds).
+                                // The new plan supersedes the old one, so the old selection must not carry over (see _deselectedFileIds).
                                 _deselectedFileIds.Clear();
                                 try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
                                 catch (Exception ex) { DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
@@ -346,7 +345,7 @@ public sealed partial class RestructureView : UserControl
         ReorgValue.Text = reorgFiles.ToString("N0");
         ReorgHint.Text = reorgFolders == 1 ? "from 1 generic folder" : $"from {reorgFolders:N0} generic folders";
 
-        // Stat-tile accessible names combine the value + its label so a screen reader announces the whole stat (e.g.
+        // Accessible names combine each value with its label so a screen reader announces the whole stat.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(TidyTile, $"Tidying: {TidyValue.Text} files {TidyHint.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ReorgTile, $"Reorganizing: {ReorgValue.Text} files {ReorgHint.Text}");
 
@@ -465,7 +464,7 @@ public sealed partial class RestructureView : UserControl
         RecomputeSelection();
     }
 
-    /// <summary>The count and the move set ApplyAsync sends both read the same _allFileRows, so they can never diverge (the macOS toggleSkip invariant).</summary>
+    /// <summary>The count and the move set ApplyAsync sends both read _allFileRows, so they cannot diverge.</summary>
     private void RecomputeSelection()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
@@ -483,7 +482,7 @@ public sealed partial class RestructureView : UserControl
         }
 
         bool hasWork = selected > 0;
-        // Single-flight: while an apply is in flight the buttons stay disabled even if a checkbox toggle re-runs this, so a stale plan can't be re-applied.
+        // While an apply is in flight the buttons stay disabled even if a checkbox toggle re-runs this, so a stale plan is never re-applied.
         ApplySymlinkButton.IsEnabled = hasWork && !_applying;
         ApplyMovesButton.IsEnabled = hasWork && !_applying;
         ApplyBarSelectedCount.Text = selected.ToString("N0");
@@ -1006,7 +1005,7 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = useSymlinks
             ? $"Creating {sel.Count:N0} shortcuts…"
             : $"Moving {sel.Count:N0} files…";
-        // The engine replies with RestructureApplyResult which SyncApplyResult cancels; if nothing arrives within ApplyTimeout (engine crash / pipe death) the timer fires, releases _applying, and shows an error so the UI doesn't freeze forever.
+        // SyncApplyResult cancels this timer; if no reply arrives within ApplyTimeout (engine crash or pipe death), release _applying and show an error.
         ArmApplyTimer();
         try
         {
@@ -1014,7 +1013,7 @@ public sealed partial class RestructureView : UserControl
         }
         catch (Exception ex)
         {
-            // Without this the status freezes on "Moving N files..." (the apply-result event never arrives).
+            // Without this the status stays on "Moving N files..." when the apply-result event never arrives.
             _applyTimeoutTimer?.Stop();
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
             ReleaseApplyGuard();
@@ -1151,7 +1150,7 @@ public sealed partial class RestructureView : UserControl
             catch (Exception ex)
             {
                 _undoRequestInFlight = false;
-                // A faulted send (engine respawning) — re-enable so the button isn't stuck, mirroring the apply path's fault handling.
+                // A faulted send (engine respawning) must re-enable the button, as the apply path does.
                 DebugLog.Warn("Undo restructure send failed: " + ex.Message);
                 ApplyStatusText.Text = "FileID is still getting ready. Try again in a moment.";
                 UndoButton.IsEnabled = true;
@@ -1169,13 +1168,13 @@ public sealed partial class RestructureView : UserControl
         _awaitingFreshPlan = r.Applied > 0;
         _applyTimeoutTimer?.Stop();
 
-        // Re-plan, exactly as macOS applySelected() does via regenerate(), and KEEP the single-flight guard engaged across the re-plan so the stale plan can't be re-applied in the gap before the fresh one lands (the false-alarm window); SyncPlan releases the guard when the new plan arrives.
+        // Re-plan as macOS applySelected() does, keeping the single-flight guard engaged so the stale plan cannot be re-applied before the fresh one lands; SyncPlan releases it.
         if (r.Applied > 0)
         {
             var folder = AppViewModel.Instance.FolderPath;
             if (!string.IsNullOrEmpty(folder))
             {
-                // OBSERVE the re-plan Task rather than discarding it: PlanRestructureAsync faults its returned Task (frame-too-large/not-Ready/pipe IO all run async) and never throws synchronously, so a sync try/catch is dead code -- a faulted send would leave the single-flight guard stuck and the Apply buttons disabled forever.
+                // Observe the re-plan Task: PlanRestructureAsync faults the Task and never throws synchronously, so a try/catch would miss a failed send and leave the guard stuck.
                 _ = EngineClient.Instance.PlanRestructureAsync(folder!).ContinueWith(t =>
                     DispatcherQueue.TryEnqueue(() =>
                     {
@@ -1213,7 +1212,7 @@ public sealed partial class RestructureView : UserControl
         }
         else if (r.Failed > 0)
         {
-            // Partial/total failure must be a dismissible, actionable surface - not a status line the user can scroll past thinking it worked.
+            // A partial or total failure needs a dismissible, actionable surface, not a status line the user can scroll past.
             _ = ShowFailedApplyAlertAsync(r);
         }
     }
@@ -1260,7 +1259,7 @@ public sealed partial class RestructureView : UserControl
             return;
         }
 
-        // The apply itself, or the post-apply re-plan, failed - release the single-flight guard so the buttons aren't stuck disabled.
+        // The apply or the post-apply re-plan failed; release the single-flight guard so the buttons are not stuck disabled.
         if (err.Kind == "apply_restructure" || (!_applyRequestInFlight && !_awaitingFreshPlan))
         {
             ReleaseApplyGuard();

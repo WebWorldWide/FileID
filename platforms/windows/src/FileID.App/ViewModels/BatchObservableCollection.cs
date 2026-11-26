@@ -1,5 +1,5 @@
-﻿// BatchObservableCollection — ObservableCollection<T> with an atomic
-// ReplaceAll that emits a single CollectionChanged(Reset) instead of Clear+N Adds (which fires N+1 events and re-runs XAML layout each time), and an AppendRange that emits one multi-item Add so an ItemsRepeater keeps its realized elements (a Reset would clear and reload every visible thumbnail).
+﻿// ObservableCollection with ReplaceAll (one Reset instead of Clear plus N Adds, which re-runs XAML layout each time)
+// and AppendRange (one multi-item Add, so an ItemsRepeater keeps its realized elements; a Reset would reload every visible thumbnail).
 
 using System.Collections.Generic;
 using System.Collections.ObjectModel;

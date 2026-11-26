@@ -1,12 +1,10 @@
-﻿// ThemedSegmentedControl — gold-pill segmented control. The Windows analog
-// of platforms/apple/app/Sources/FileID/Theme/Theme.swift:141.
+﻿// ThemedSegmentedControl — gold-pill segmented control.
 //
-// Why not <Pivot> or <SelectorBar>: WinUI's stock styles use accent colors
-// that don't match our gold token, and re-templating their internals to
-// hit the precise visual is more code than rolling our own ItemsControl.
+// Not <Pivot> or <SelectorBar>: their stock styles use accent colors that
+// don't match the gold token, and re-templating them is more code than this ItemsControl.
 //
-// Items are simple (Tag, Label) tuples bound to ItemsSource. SelectedTag
-// is the two-way value the host binds to.
+// Items are SegmentedOption values bound to ItemsSource; SelectedTag is the
+// two-way value the host binds to.
 
 using System.Collections;
 using Microsoft.UI.Xaml;
@@ -30,9 +28,7 @@ public sealed class ThemedSegmentedControl : Control
     }
 
     /// <summary>
-    /// Binds to a sequence of <see cref="SegmentedOption"/>. Other shapes
-    /// (anonymous tuples, plain strings) are not supported; the data
-    /// contract is intentionally narrow.
+    /// Binds to a sequence of <see cref="SegmentedOption"/>; other shapes are not supported.
     /// </summary>
     public IEnumerable? ItemsSource
     {

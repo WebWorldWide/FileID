@@ -1,4 +1,4 @@
-﻿// DrillDownSheet code-behind. Filters the engine's RestructurePlan.Moves list down to a single source-folder + category pair (Sankey ribbon) or a single proposed folder (TreeDiff click), then renders one row per file.
+﻿// DrillDownSheet code-behind. Filters the plan's moves down to one source-folder + category pair (Sankey ribbon) or one proposed folder (TreeDiff click) and renders a row per file.
 
 using System;
 using System.Collections.Generic;
@@ -37,7 +37,7 @@ public sealed partial class DrillDownSheet : UserControl
     private static uint Key(Windows.UI.Color c)
         => ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
-    // BuildRow builds a UIElement AND fires a shell thumbnail per move (ItemsRepeater over a UIElement list does not virtualize), so an unbounded "See all" on a large outcome group froze the UI thread and flooded the shell. 200 fills several screens; the rest are summarized in the count line.
+    // BuildRow creates a UIElement and a shell thumbnail request per move, and ItemsRepeater over UIElements does not virtualize; an unbounded list froze the UI thread. The rest is summarized in the count line.
     private const int MaxRenderedRows = 200;
 
     public DrillDownSheet()
@@ -164,7 +164,7 @@ public sealed partial class DrillDownSheet : UserControl
             Background = FileID.Services.ThemeHelper.GetBrushSafe("SubtleFillColorSecondaryBrush"),
             ColumnSpacing = 12,
         };
-        // Accessible name for the whole row = the file name, so a screen reader reading the drill-down list announces each file.
+        // A screen reader announces each row by its file name.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(grid, Path.GetFileName(m.Source));
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -272,7 +272,7 @@ public sealed partial class DrillDownSheet : UserControl
 
     private static async System.Threading.Tasks.Task LoadThumbAsync(Image img, string path)
     {
-        // Capture img.DispatcherQueue before any await; constructing the BitmapImage on the worker thread that resumes the await is a known native fast-fail shape.
+        // Capture the dispatcher before any await: building a BitmapImage on the thread the await resumes on is a native fast-fail.
         var dispatcher = img.DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try

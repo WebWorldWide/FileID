@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SidebarProcessingControl: the Prototype v3 scan card at the foot of the
+    SidebarProcessingControl: the scan card at the foot of the
     sidebar (macOS Views/Shell/PipelineBlock.swift). Title + percent, a 6 px
     capsule bar, the five-step indicator (SidebarPipelineProgress), one sub
     line, collapsible counters (found, tagged, memory, failures) and the scan

@@ -1,16 +1,5 @@
-﻿// ReducedMotion — surfaces the OS "minimize animations" preference as a
-// single observable bool that every motion primitive in this library
-// subscribes to.
-//
-// On Windows the preference lives at:
-//   Settings → Accessibility → Visual effects → Animation effects (toggle)
-// surfaced via Windows.UI.ViewManagement.UISettings.AnimationsEnabled.
-//
-// We poll on construction + listen to the AnimationsEnabledChanged event,
-// so toggles surfaced while the app is open take effect immediately.
-//
-// Every motion primitive (Shimmer, Ripple, IridescentBorder, LavaLamp,
-// springs) checks `ReducedMotion.IsReduced` before kicking off animation.
+﻿// Surfaces the OS "minimize animations" preference (Settings > Accessibility > Visual effects > Animation effects)
+// as one observable bool that every motion primitive subscribes to.
 
 using System.ComponentModel;
 using System.Diagnostics;
@@ -20,9 +9,7 @@ namespace FileID.Theme.Motion;
 
 public sealed class ReducedMotion : INotifyPropertyChanged
 {
-    /// <summary>
-    /// Process-wide singleton. Subscribe to PropertyChanged + read IsReduced.
-    /// </summary>
+    /// <summary>Process-wide singleton.</summary>
     public static ReducedMotion Instance { get; } = new();
 
     private readonly UISettings _settings;
@@ -35,11 +22,7 @@ public sealed class ReducedMotion : INotifyPropertyChanged
         _settings.AnimationsEnabledChanged += OnAnimationsEnabledChanged;
     }
 
-    /// <summary>
-    /// True when the user has asked the OS to minimize animations. All
-    /// motion primitives gate on this — Shimmer / IridescentBorder freeze,
-    /// CompletionRipple skips the pulse, LavaLamp halves its rate.
-    /// </summary>
+    /// <summary>True when the user has asked Windows to minimize animations; every motion primitive gates on it.</summary>
     public bool IsReduced
     {
         get => _isReduced;
@@ -77,10 +60,8 @@ public sealed class ReducedMotion : INotifyPropertyChanged
 
     private void OnAnimationsEnabledChanged(UISettings sender, UISettingsAnimationsEnabledChangedEventArgs args)
     {
-        // The event fires off the UI thread; consumers that touch UI in
-        // their PropertyChanged handler need to marshal back themselves.
-        // We deliberately do NOT marshal here so multiple consumers (XAML
-        // bindings + view-models) don't pay the dispatcher hop twice.
+        // Fires off the UI thread and is not marshalled here, so XAML bindings and view-models do not pay
+        // the dispatcher hop twice; subscribers that touch UI marshal themselves.
         IsReduced = !sender.AnimationsEnabled;
     }
 }
