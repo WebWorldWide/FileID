@@ -387,6 +387,10 @@ struct RestructureView: View {
         }
     }
 
+    static func readOnlyMoveNote(reason: String, moveCount: Int) -> String {
+        "\(reason) The \(Plural.noun(moveCount, "move", "moves")) in this plan can’t run. You can look at the plan, but Move is off."
+    }
+
     private var readOnlyReason: String? {
         guard let root = libraryRoot else { return nil }
         return engine.readOnlyGate.reasonIfAll([root.path])
@@ -489,7 +493,7 @@ struct RestructureView: View {
                             MetaText("Too large to check. Choose a smaller folder.", color: Theme.warning, size: 11.5)
                         }
                         if let readOnlyReason {
-                            MetaText("\(readOnlyReason) You can look at the plan, but Move is off.", size: 11.5)
+                            MetaText(Self.readOnlyMoveNote(reason: readOnlyReason, moveCount: applyCount), size: 11.5)
                         }
                     }
                     if moved {

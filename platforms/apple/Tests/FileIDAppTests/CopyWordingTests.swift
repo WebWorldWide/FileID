@@ -84,3 +84,14 @@ struct ChatScopeWordingTests {
         #expect(label(["/a/m.mov", "/a/n.mp4"]) == "2 selected videos")
     }
 }
+
+@Suite("Organize read-only note")
+struct RestructureReadOnlyNoteTests {
+    @Test func theNoteNamesTheDriveAndHowManyMovesCannotRun() {
+        let reason = ReadOnlyLocations.sentence(forDrive: "Adlon")
+        let note = RestructureView.readOnlyMoveNote(reason: reason, moveCount: 55)
+        #expect(note.hasPrefix(reason))
+        #expect(note.contains("The 55 moves in this plan can’t run."))
+        #expect(RestructureView.readOnlyMoveNote(reason: reason, moveCount: 1).contains("The 1 move in this plan"))
+    }
+}
