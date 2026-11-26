@@ -32,6 +32,22 @@ pub(crate) struct Space {
     pub processing: String,
 }
 
+/// Raised inside a pass that was asked to stop, so its transaction rolls back.
+#[derive(Debug)]
+struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("face grouping was stopped")
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+fn ensure_running(cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if cancelled() { Err(Stopped.into()) } else { Ok(()) }
+}
+
 pub(crate) struct Outcome {
     pub result: FaceClusteringResult,
     pub error: Option<(&'static str, &'static str)>,
@@ -469,17 +485,18 @@ fn l2_cosine(a: &[f32], b: &[f32]) -> f32 {
 /// does; rows are split over a few threads yet each depends only on its own query, so the lists never vary with
 /// scheduling. (A graph index would build on one thread here: its layout depends on insertion order, and that took
 /// minutes at 78,000 faces.)
-fn nearest_lists(vectors: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
+fn nearest_lists(vectors: &[Vec<f32>], k: usize, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<Vec<Neighbor>>> {
     const BLOCK: usize = 4;
     const CHUNK: usize = 32;
     let n = vectors.len();
     let dim = vectors.first().map_or(0, Vec::len);
     if n == 0 || dim == 0 || vectors.iter().any(|vector| vector.len() != dim) {
-        return vec![Vec::new(); n];
+        return Some(vec![Vec::new(); n]);
     }
     let flat: Vec<f32> = vectors.iter().flatten().copied().collect();
     let norms: Vec<f32> = vectors.iter().map(|vector| crate::util::vector_math::dot(vector, vector)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = std::sync::atomic::AtomicBool::new(false);
     let lists: Mutex<Vec<(usize, Vec<Vec<Neighbor>>)>> = Mutex::new(Vec::new());
     let threads = crate::platform::performance_core_count().clamp(1, 8).min(n.div_ceil(CHUNK));
     std::thread::scope(|scope| {
@@ -493,6 +510,10 @@ fn nearest_lists(vectors: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
                     let end = (start + CHUNK).min(n);
                     let mut done: Vec<Vec<Neighbor>> = Vec::with_capacity(end - start);
                     for first in (start..end).step_by(BLOCK) {
+                        if cancelled() {
+                            stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return;
+                        }
                         let rows: Vec<usize> = (first..(first + BLOCK).min(end)).collect();
                         let mut best: Vec<Vec<Neighbor>> = rows.iter().map(|_| Vec::with_capacity(k + 1)).collect();
                         for candidate in 0..n {
@@ -516,13 +537,16 @@ fn nearest_lists(vectors: &[Vec<f32>], k: usize) -> Vec<Vec<Neighbor>> {
             });
         }
     });
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
     let mut ordered = lists.into_inner();
     ordered.sort_by_key(|(start, _)| *start);
-    ordered.into_iter().flat_map(|(_, rows)| rows).collect()
+    Some(ordered.into_iter().flat_map(|(_, rows)| rows).collect())
 }
 
 /// Through the shared identity pipeline with exact nearest neighbours at every size.
-fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
+fn cluster(vectors: &[Vec<f32>], files: &[i64], cancelled: &(dyn Fn() -> bool + Sync)) -> Option<BTreeMap<usize, Vec<usize>>> {
     let (params, mutual) = hyperparameters();
     let k = params.k_nn + 1;
     let mut by_file: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
@@ -537,10 +561,16 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
             }
         }
     }
-    let nearest = (vectors.len() > BRUTE_FORCE_MAX).then(|| nearest_lists(vectors, k));
+    let nearest = match vectors.len() > BRUTE_FORCE_MAX {
+        true => Some(nearest_lists(vectors, k, cancelled)?),
+        false => None,
+    };
     let result = identity_clustering::cluster_with_options(
         vectors,
         |i| {
+            if cancelled() {
+                return Vec::new();
+            }
             let mut hits: Vec<Neighbor> = match &nearest {
                 Some(lists) => lists[i].clone(),
                 None => (0..vectors.len()).map(|j| Neighbor { idx: j, similarity: l2_cosine(&vectors[i], &vectors[j]) }).collect(),
@@ -557,6 +587,9 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
         &cannot_links,
         mutual,
     );
+    if cancelled() {
+        return None;
+    }
     tracing::info!(
         faces = vectors.len(),
         clusters = result.cluster_count,
@@ -570,7 +603,7 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     for (dense, cluster) in result.cluster_ids.iter().enumerate() {
         out.entry(*cluster).or_default().push(dense);
     }
-    out
+    Some(out)
 }
 
 #[derive(Debug, Default)]
@@ -878,7 +911,7 @@ struct Planned {
     radius: f32,
 }
 
-fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: &HashSet<i64>, now: f64) -> Result<i64> {
+fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: &HashSet<i64>, now: f64, cancelled: &dyn Fn() -> bool) -> Result<i64> {
     ensure!(now.is_finite(), "invalid plan");
     let mut seen: HashSet<i64> = HashSet::new();
     let mut reused: HashSet<i64> = HashSet::new();
@@ -921,6 +954,7 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
         params![selected, protected, output],
     )?;
     for cluster in clusters {
+        ensure_running(cancelled)?;
         let blob = encode(&cluster.centroid);
         let radius = f64::from(cluster.radius);
         let person = match cluster.person {
@@ -1015,7 +1049,9 @@ fn persist(
     min_size: usize,
     solo_floor: f64,
     presence: &Presence,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Stats> {
+    ensure_running(cancelled)?;
     let deferred = require_unchanged(tx, partition, space, skip, min_quality, presence)?;
     let face_ids: Vec<i64> = partition.rows.iter().map(|row| row.id).collect();
     let vectors: Vec<Vec<f32>> = partition.rows.iter().map(|row| decode(&row.blob)).collect();
@@ -1068,6 +1104,7 @@ fn persist(
         .collect();
     let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size };
     let attached = attach.run(kept, &candidates);
+    ensure_running(cancelled)?;
     let (finals, truncated_faces) = cap(attached, &protected_clusters, preserved_count)?;
 
     let mut cluster_of: HashMap<i64, usize> = HashMap::new();
@@ -1169,13 +1206,14 @@ fn persist(
     let scoped: Vec<(i64, Vec<i64>)> =
         fresh.iter().map(|p| (p.id, p.faces.iter().copied().filter(|f| pool.contains(f)).collect())).collect();
     let shapes: Vec<(Vec<i64>, i64)> = next.iter().map(|cluster| (cluster.2.clone(), cluster.3)).collect();
+    ensure_running(cancelled)?;
     let ids = stable_ids(&scoped, &shapes, &fixed, &preserve)?;
     let planned: Vec<Planned> = next
         .into_iter()
         .zip(ids)
         .map(|((center, radius, faces, rep), person)| Planned { person, faces, representative: rep, centroid: center, radius })
         .collect();
-    let person_count = apply(tx, &planned, &pool, &preserve, face_review::now())?;
+    let person_count = apply(tx, &planned, &pool, &preserve, face_review::now(), cancelled)?;
     Ok(Stats { person_count, suppressed_faces, truncated_faces, deferred })
 }
 
@@ -1848,7 +1886,8 @@ fn result(person_count: u32, face_count: usize, unmatched: usize, started: Insta
     }
 }
 
-pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
+/// `None` when `cancelled` stopped the pass. A stopped pass never leaves a half-written grouping: its transaction is rolled back, or committed whole before the stop was seen.
+pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Outcome> {
     let started = Instant::now();
     let min_quality = env_double("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0..=1.0);
     let presence = match Presence::build(database) {
@@ -1856,7 +1895,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
         Err(error) => {
             tracing::warn!(?error, "face clustering query failed");
             let count = person_count(&database.lock());
-            return Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) };
+            return Some(Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) });
         }
     };
     let loaded = {
@@ -1874,7 +1913,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
         Err(error) => {
             tracing::warn!(?error, "face clustering query failed");
             let count = person_count(&database.lock());
-            return Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) };
+            return Some(Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) });
         }
     };
     if partition.rows.is_empty() {
@@ -1883,14 +1922,14 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
         let mut summary = result(person_count(&conn), 0, 0, started);
         summary.deferred_faces = Some(partition.deferred);
         summary.review_queued = queued;
-        return Outcome { result: summary, error: None };
+        return Some(Outcome { result: summary, error: None });
     }
     let row_by_face: HashMap<i64, usize> = partition.rows.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
     let decoded: Vec<(i64, Vec<f32>)> =
         partition.rows.iter().filter(|row| !row.held).map(|row| (row.id, decode(&row.blob))).filter(|(_, v)| !v.is_empty()).collect();
     let Some(first_dim) = decoded.first().map(|(_, v)| v.len()) else {
         let count = person_count(&database.lock());
-        return Outcome { result: result(count, partition.rows.len(), partition.rows.len(), started), error: None };
+        return Some(Outcome { result: result(count, partition.rows.len(), partition.rows.len(), started), error: None });
     };
     let decoded: Vec<(i64, Vec<f32>)> = decoded.into_iter().filter(|(_, v)| v.len() == first_dim).collect();
     let file_by_face: HashMap<i64, i64> = partition.snapshots.iter().map(|s| (s.id, s.file_id)).collect();
@@ -1899,11 +1938,14 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let _lease = crate::resource_scheduler::ResourceScheduler::shared().reserve(
         crate::resource_scheduler::Demand { memory_mb: 64 + (vectors.len() as u64).saturating_mul(4096).div_ceil(1_048_576), cpu: 1, io: 1 },
         crate::resource_scheduler::Priority::Background,
-        || false,
+        cancelled,
     );
+    if cancelled() {
+        return None;
+    }
     let loaded_at = started.elapsed().as_secs_f64();
     let mut raw: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (cluster, members) in cluster(&vectors, &files) {
+    for (cluster, members) in cluster(&vectors, &files, cancelled)? {
         let rows: Vec<usize> = members.iter().filter_map(|dense| row_by_face.get(&decoded[*dense]).copied()).collect();
         raw.insert(cluster, rows);
     }
@@ -1913,20 +1955,24 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let mut conn = database.lock();
     let stats = (|| -> Result<Stats> {
         let tx = conn.transaction()?;
-        let stats = persist(&tx, &partition, space, &raw, &skip, min_quality, min_size, solo_floor, &presence)?;
+        let stats = persist(&tx, &partition, space, &raw, &skip, min_quality, min_size, solo_floor, &presence, cancelled)?;
         tx.commit()?;
         Ok(stats)
     })();
     let stats = match stats {
         Ok(stats) => stats,
+        Err(error) if error.is::<Stopped>() => return None,
         Err(error) => {
             tracing::warn!(?error, "face cluster persist failed");
             let mut summary = result(person_count(&conn), decoded.len(), 0, started);
             summary.deferred_faces = Some(partition.deferred);
-            return Outcome { result: summary, error: Some(("face_cluster_persist_failed", PERSIST_ERROR)) };
+            return Some(Outcome { result: summary, error: Some(("face_cluster_persist_failed", PERSIST_ERROR)) });
         }
     };
     let persisted_at = started.elapsed().as_secs_f64();
+    if cancelled() {
+        return None;
+    }
     let merged = auto_merge(&mut conn, space, &presence).unwrap_or_else(|error| {
         tracing::warn!(?error, "face auto-merge skipped");
         0
@@ -1948,7 +1994,7 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let mut summary = result(person_count(&conn), decoded.len(), stats.suppressed_faces + stats.truncated_faces, started);
     summary.deferred_faces = Some(stats.deferred);
     summary.review_queued = queued;
-    Outcome { result: summary, error: None }
+    Some(Outcome { result: summary, error: None })
 }
 
 #[cfg(test)]

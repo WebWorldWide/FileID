@@ -1481,19 +1481,26 @@ pub(crate) async fn handle_run_face_clustering(
         return;
     }
     let mac_db = db.clone();
+    let stop = cancel.clone();
     let mac = tokio::task::spawn_blocking(move || {
         let space = super::face_clustering_mac::selected_space(&mac_db.lock())?;
-        let outcome = super::face_clustering_mac::run(&mac_db, &space);
+        let Some(outcome) = super::face_clustering_mac::run(&mac_db, &space, &|| stop.load(Ordering::Acquire)) else {
+            return Some(None);
+        };
         skip::with_reader(&mac_db, |conn| match outcome.error {
             None => skip::remember(conn, &outcome.result),
             Some(_) => skip::forget(conn),
         });
-        Some(outcome)
+        Some(Some(outcome))
     })
     .await;
     match mac {
         Ok(None) => {}
-        Ok(Some(outcome)) => {
+        Ok(Some(None)) => {
+            stopped_for_shutdown(&cancel, &active);
+            return;
+        }
+        Ok(Some(Some(outcome))) => {
             skip::with_reader(&db, skip::mark_finished);
             release_active_before_terminal(&active);
             if let Some((kind, message)) = outcome.error {
