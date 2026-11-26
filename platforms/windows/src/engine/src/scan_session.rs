@@ -809,10 +809,10 @@ impl ScanSession {
             }
             match crate::paths::root() {
                 Ok(state_dir) if capture_dates_current => {
-                    crate::pipeline::capture_date_backfill::mark_done(&state_dir, root);
+                    crate::pipeline::capture_date_backfill::mark_done(&self.db_conn.lock(), &state_dir, root);
                 }
                 Ok(state_dir) => {
-                    if !crate::pipeline::capture_date_backfill::marker(&state_dir, root).exists() && !self.coordinator.is_cancelled() {
+                    if !crate::pipeline::capture_date_backfill::is_done(&self.db_conn.lock(), &state_dir, root) && !self.coordinator.is_cancelled() {
                         on_phase(SessionPhase::PostScan);
                         emit_phase(SessionPhase::PostScan);
                         post_scan_announced = true;
