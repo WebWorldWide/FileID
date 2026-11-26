@@ -1177,7 +1177,8 @@ fn prepare_turn(
     let previous = if asked_inside(&text).is_some() { None } else { earlier_turn(conn, history, people, events, root.as_ref())? };
     let camera = chat_facts::camera_asked_about(conn, &text)?;
     let planned = camera.as_ref().map_or(text.as_str(), |ask| ask.rest.as_str());
-    let (question, plan, continues) = plan_for(planned, previous.as_ref(), people, events);
+    let (mut question, plan, continues) = plan_for(planned, previous.as_ref(), people, events);
+    question.folder = chat_facts::widened_folder(conn, question.folder.take(), root.as_ref())?;
     let camera = camera.map(|ask| ask.pick).or_else(|| {
         previous.as_ref().filter(|_| continues).and_then(|earlier| earlier.camera.clone())
     });
@@ -2449,6 +2450,24 @@ mod tests {
         hits("How many files are in the File Cabinet folder?");
         assert_eq!(hits("How many of them are videos?").len(), 2);
         assert_eq!(hits("What are the biggest?"), vec![3, 2]);
+    }
+
+    #[test]
+    fn a_folder_asked_by_its_first_words_scopes_the_search_to_the_longer_folder() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES \
+             (1,'/lib/Ryan Homecoming Photos 9-26-26/a.jpg',1,100,0,'image','jpg','A person checks a black watch on a driveway'),\
+             (2,'/lib/Ryan Homecoming Photos 9-26-26/b.jpg',2,100,0,'image','jpg','A dog on a tiled floor'),\
+             (3,'/lib/Elsewhere/c.jpg',3,100,0,'image','jpg','A silver watch on a table'),\
+             (4,'/lib/Elsewhere/d.jpg',4,100,0,'image','jpg','A wrist watch beside a cup');",
+        )
+        .unwrap();
+        let found = ask(&mut conn, "Which photos show a watch in the Ryan Homecoming folder?");
+        assert_eq!(found.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![1], "{}", found.message);
+        assert_eq!(ask(&mut conn, "How many files are in the Ryan Homecoming folder?").message, "Found 2 files in Ryan Homecoming, using 200 bytes.");
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(5,'/lib/Ryan Homecoming/e.jpg',5,100,0,'image','jpg')", []).unwrap();
+        assert!(ask(&mut conn, "How many files are in the Ryan Homecoming folder?").message.starts_with("Found 1 file in Ryan Homecoming, using 100 bytes."));
     }
 
     #[test]

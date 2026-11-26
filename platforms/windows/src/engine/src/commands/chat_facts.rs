@@ -154,9 +154,10 @@ impl Filter {
             // Windows catalogs store `\` separators; accept either.
             parts.push("(f.path_text LIKE ? ESCAPE '\\' OR f.path_text LIKE ? ESCAPE '\\')".into());
             for separator in ["/", "\\\\"] {
-                args.push(Value::Text(match folder.strip_prefix("named:") {
-                    Some(name) => format!("%{separator}{}{separator}%", like_escape(name)),
-                    None => format!("{}{separator}%", like_escape(folder.trim_end_matches(['/', '\\']))),
+                args.push(Value::Text(match (folder.strip_prefix("named:"), folder.strip_prefix(STARTS_WITH)) {
+                    (Some(name), _) => format!("%{separator}{}{separator}%", like_escape(name)),
+                    (None, Some(start)) => format!("%{separator}{}%{separator}%", like_escape(start)),
+                    (None, None) => format!("{}{separator}%", like_escape(folder.trim_end_matches(['/', '\\']))),
                 }));
             }
         }
@@ -206,7 +207,7 @@ impl Filter {
             let _ = write!(text, " under {}", bytes_label(max));
         }
         if let Some(folder) = &self.folder {
-            let _ = write!(text, " in {}", folder.strip_prefix("named:").unwrap_or(folder));
+            let _ = write!(text, " in {}", folder.strip_prefix("named:").or_else(|| folder.strip_prefix(STARTS_WITH)).unwrap_or(folder));
         }
         if let Some(date) = &self.date {
             let _ = write!(text, " {}", date.phrase);
@@ -678,6 +679,21 @@ fn peak_lead(groups: &[(Option<String>, i64, i64)], question: &Question, peak: &
 }
 
 /// `None` when the catalog has no such folder, so the question is searched as words instead.
+/// Folder filter for names that begin with the asked name ("Ryan Homecoming" for "Ryan Homecoming Photos 9-26-26").
+const STARTS_WITH: &str = "startswith:";
+
+/// A folder asked about by a short name that no folder is exactly called widens to the folders that begin with it.
+pub(crate) fn widened_folder(conn: &Connection, folder: Option<String>, root: Option<&RootScope>) -> Result<Option<String>> {
+    let Some(name) = folder.as_deref().and_then(|folder| folder.strip_prefix("named:")) else { return Ok(folder) };
+    let exact = Filter { folder: folder.clone(), root: root.cloned(), ..Filter::default() };
+    if totals(conn, &exact)?.0 > 0 {
+        return Ok(folder);
+    }
+    let widened = format!("{STARTS_WITH}{name}");
+    let starts = Filter { folder: Some(widened.clone()), root: root.cloned(), ..Filter::default() };
+    Ok(if totals(conn, &starts)?.0 > 0 { Some(widened) } else { folder })
+}
+
 pub(crate) fn folder_answer(conn: &Connection, name: &str, root: Option<&RootScope>) -> Result<Option<(String, Vec<CatalogHit>)>> {
     let filter = Filter { folder: Some(format!("named:{name}")), root: root.cloned(), ..Filter::default() };
     let (count, bytes) = totals(conn, &filter)?;
