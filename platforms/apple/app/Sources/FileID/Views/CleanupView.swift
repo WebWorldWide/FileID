@@ -1,11 +1,8 @@
-// Cleanup: two modes. "Exact" groups live full-file SHA-256 matches;
-// "Similar" groups visually near-identical images by dHash Hamming distance
-// (resizes / re-encodes / crops / light edits). Per-tile selection; the user
-// can override the keeper per group or trash across all groups at once. Similar
-// mode never pre-selects — those copies are NOT byte-identical.
+// Cleanup: Exact groups are full-file SHA-256 matches; Similar groups are dHash look-alikes, which are NOT byte-identical, so Similar never pre-selects.
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 struct CleanupView: View {
     let engine: EngineClient
@@ -27,6 +24,20 @@ struct CleanupView: View {
     @State private var exactCandidateCount = 0
     @State private var exactSkipped = 0
     @State private var exactCapped = false
+    @State private var exactUnshownClasses = 0
+    @State private var exactUnshownBytes: Int64 = 0
+    @State private var exactTotals: ExactDuplicateVerifier.Totals?
+    @State private var exactBase: ExactDuplicateVerifier.Totals?
+    @State private var exactStored: [DuplicateGroup] = []
+    @State private var exactSettled: [DuplicateGroup] = []
+    @State private var exactBatch: [DuplicateGroup] = []
+    @State private var exactQueued: [DuplicateGroup] = []
+    @State private var exactSettledUnverified: Set<Int64> = []
+    @State private var exactSettledSkipped = 0
+    @State private var exactLoadingMore = false
+    @State private var exactVerify: (done: Int, total: Int)?
+    @State private var exactUnverified: Set<Int64> = []
+    @State private var verifyTask: Task<Void, Never>?
     /// Single-flight guard: a rapid double-tap on the confirmation would
     /// otherwise trash the same files twice (the 2nd fails "already in Trash").
     @State private var deleting = false
@@ -38,15 +49,14 @@ struct CleanupView: View {
     @State private var selection: Set<Int64> = []
     @State private var skippedGroups: Set<Int64> = CleanupSession.skipped["exact"] ?? []
     @State private var reloadTask: Task<Void, Never>?
+    @State private var exactChecking = true
     @State private var lastScanTimeReload = Date.distantPast
     @State private var reloadPending = false
     @Environment(\.pageActive) private var pageActive
     /// Files changed, or a comparison was cut short, while another page was shown.
     @State private var staleWhileHidden = false
 
-    /// Mirrors LibraryView: true while the engine is discovering, tagging, or
-    /// post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz
-    /// scan batch ticks (see the batch handler). (reload storm)
+    /// Mirrors LibraryView: true while the engine is discovering, tagging, or post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz scan batch ticks.
     private var scanActive: Bool {
         guard let p = engine.lastProgress else { return false }
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
@@ -56,8 +66,7 @@ struct CleanupView: View {
         skippedGroups.isEmpty ? groups : groups.filter { !skippedGroups.contains($0.id) }
     }
 
-    /// Counted once per render: the header reads these several times, and each
-    /// read used to walk every file of every group.
+    /// Counted once per render: the header reads these several times, and counting walks every file of every group.
     private struct SelectionTotals {
         var count = 0
         var bytes: Int64 = 0
@@ -82,8 +91,17 @@ struct CleanupView: View {
         let visible = visibleGroups
         VStack(spacing: 0) {
             header(visible: visible, totals: selectionTotals(in: visible))
-            Divider().opacity(0.4)
+            if let note = Self.unreadableNote(store.unreadableFiles, timedOut: store.unreadableTimedOutFiles) {
+                MetaText(note, color: Theme.text2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.bottom, 10)
+            }
+            Hairline()
             if visible.isEmpty {
+                if status != nil {
+                    statusBanner
+                        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
+                }
                 empty
             } else {
                 list(visible: visible)
@@ -97,7 +115,15 @@ struct CleanupView: View {
         .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, _ in
             if pageActive { scanBatchArrived() } else { staleWhileHidden = true }
         }
-        .onDisappear { reloadTask?.cancel() }
+        .onDisappear { reloadTask?.cancel(); verifyTask?.cancel(); exactVerify = nil }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+            guard let action = note.object as? String, action.hasPrefix("more:"), let pages = Int(action.dropFirst(5)) else { return }
+            Task { @MainActor in
+                for _ in 0..<pages { await loadMoreExactPage() }
+            }
+        }
+        #endif
         // Exact mode skips its per-batch reload during a live scan, so the final
         // verified set — and the last batch the scan-active skip drops — is computed
         // once here when the scan reaches a terminal phase. Mirrors LibraryView's
@@ -107,9 +133,7 @@ struct CleanupView: View {
             store.notifyChanged()
             reload()
         }
-        // Leaving stops an unfinished comparison, as it did when the page was
-        // rebuilt on every visit; coming back runs it again only if it was cut
-        // short or files changed meanwhile.
+        // Leaving stops an unfinished comparison; coming back re-runs it only if it was cut short or files changed.
         .onPageVisibility(shown: {
             guard staleWhileHidden else { return }
             staleWhileHidden = false
@@ -117,6 +141,8 @@ struct CleanupView: View {
             store.notifyChanged()
             reload()
         }, hidden: {
+            verifyTask?.cancel()
+            if exactVerify != nil { exactVerify = nil; staleWhileHidden = true }
             if reloadTask != nil {
                 reloadTask?.cancel()
                 reloadPending = false
@@ -140,6 +166,10 @@ struct CleanupView: View {
             exactCandidateCount = 0
             exactSkipped = 0
             exactCapped = false
+            exactUnshownClasses = 0; exactUnshownBytes = 0
+            verifyTask?.cancel()
+            exactTotals = nil; exactBase = nil; exactVerify = nil; exactUnverified = []
+            exactStored = []; exactSettled = []; exactBatch = []; exactQueued = []
             groups = []
             reload()
         }
@@ -150,13 +180,10 @@ struct CleanupView: View {
     @ViewBuilder
     private func header(visible: [DuplicateGroup], totals: SelectionTotals) -> some View {
         let totalSelected = totals.count
-        HStack(alignment: .center, spacing: 12) {
-            MetaText(headerSubtitle(visible: visible), color: Theme.text2)
-                .lineLimit(2)
-                .layoutPriority(-1)
+        let subtitle = MetaText(headerSubtitle(visible: visible), color: Theme.text2)
+        let controls = Group {
             SegmentedBar(selection: $mode, options: [("exact", "Exact copies"), ("similar", "Look-alikes")])
             .help("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
-            Spacer()
             if let batch = undoBatch, status == nil {
                 Button { Task { await undoTrash(batch) } } label: { Label("Put back last move", systemImage: "arrow.uturn.backward") }
                     .buttonStyle(.dsSecondary)
@@ -173,7 +200,9 @@ struct CleanupView: View {
                         Button("Select all extra copies") { selectAllNonKeepers() }
                             .buttonStyle(.dsSecondary)
                             .fixedSize()
-                            .help("Choose every copy except the one marked KEEP in each group")
+                            .disabled(engine.libraryReadOnlyReason != nil)
+                            .accessibilityHint(engine.libraryReadOnlyReason ?? "")
+                            .help(engine.libraryReadOnlyReason ?? "Choose every copy except the one marked KEEP in each group")
                     }
                     Button("Clear selection") { selection.removeAll() }
                         .buttonStyle(.dsSecondary)
@@ -188,21 +217,12 @@ struct CleanupView: View {
                         totalSelected == 0 ? "Move to Trash" : "Move \(totalSelected) to Trash · \(totals.size)",
                         systemImage: "trash"
                     )
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Theme.danger)
                     .fixedSize()
-                    .padding(.horizontal, 14)
-                    .frame(minHeight: Theme.Metrics.hitTarget)
-                    .background(Theme.danger.opacity(0.12), ignoresSafeAreaEdges: [])
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                            .stroke(Theme.danger.opacity(0.5), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
                 }
-                .buttonStyle(.plain)
-                .disabled(totalSelected == 0)
-                .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards.")
+                .buttonStyle(DSDangerButtonStyle(height: Theme.Metrics.control))
+                .disabled(totalSelected == 0 || trashReadOnlyReason != nil)
+                .accessibilityHint(trashReadOnlyReason ?? "")
+                .help(trashReadOnlyReason ?? (totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards."))
                 .confirmationDialog(
                     "Move \(confirmCount) file\(confirmCount == 1 ? "" : "s") to Trash?",
                     isPresented: $confirmDelete,
@@ -219,27 +239,85 @@ struct CleanupView: View {
                 }
             }
         }
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) { subtitle.fixedSize(); Spacer(); controls }
+            VStack(alignment: .leading, spacing: 8) {
+                subtitle.fixedSize(horizontal: false, vertical: true)
+                FlowLayout(spacing: 8) { controls }
+            }
+        }
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
     }
 
+    enum ExactEmptyPhase: Equatable { case checking, partial, none }
+
+    /// An empty list says "no copies" only after a check has finished; while one runs it says so.
+    static func exactEmptyPhase(checking: Bool, partial: Bool) -> ExactEmptyPhase {
+        if checking { return .checking }
+        return partial ? .partial : .none
+    }
+
+    static func exactSummary(groups: Int, extraCopies: Int, bytes: Int64) -> String {
+        if groups == 0 { return "No extra copies found" }
+        let freed = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return "\(extraCopies.formatted()) extra cop\(extraCopies == 1 ? "y" : "ies") in \(groups.formatted()) group\(groups == 1 ? "" : "s") · \(freed) can be freed"
+    }
+
+    /// Files that failed to read are in no group; Library's Unreadable chip counts the same rows. "Yet" only for the ones a later scan can still read.
+    static func unreadableNote(_ count: Int, timedOut: Int = 0) -> String? {
+        guard count > 0 else { return nil }
+        let noun = count == 1 ? "1 file" : "\(count.formatted()) files"
+        let them = count == 1 ? "it’s" : "they’re"
+        let timedOut = min(max(timedOut, 0), count)
+        if timedOut == 0 { return "\(noun) couldn’t be read, so \(them) not in these results" }
+        if timedOut == count { return "\(noun) couldn’t be read yet, so \(them) not in these results" }
+        return "\(noun) couldn’t be read, so \(them) not in these results. \(timedOut.formatted()) of them ran out of time and may read next time"
+    }
+
+    static func tilePlaceholderSymbol(for url: URL) -> String {
+        FileTypes.symbolName(forExtension: url.pathExtension)
+    }
+
+    /// Listed groups prove files exist even while the library's own counters are still loading.
+    static func nothingScanned(totalFiles: Int, listedGroups: Int) -> Bool {
+        totalFiles == 0 && listedGroups == 0
+    }
+
     private func headerSubtitle(visible: [DuplicateGroup]) -> String {
+        if Self.nothingScanned(totalFiles: store.totalFiles, listedGroups: groups.count) { return "Nothing scanned yet" }
         let g = visible.count
         let skipped = skippedGroups.count
         let base: String
         if isSimilar {
             base = g == 0
-                ? "Photos that look nearly the same but aren't identical"
+                ? "Photos that look nearly the same but aren’t identical"
                 : "\(g) group\(g == 1 ? "" : "s") of look-alikes · check each before removing"
         } else {
             let bytes = visible.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
-            base = g == 0
-                ? "No extra copies found"
-                : "\(g.formatted()) file\(g == 1 ? "" : "s") with extra copies · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) can be freed"
+            let extraCopies = visible.reduce(0) { $0 + max(0, $1.totalFileCount - 1) }
+            if let totals = exactTotals {
+                let hidden = groups.filter { skippedGroups.contains($0.id) }
+                base = Self.exactSummary(
+                    groups: max(0, totals.groups - hidden.count),
+                    extraCopies: max(0, totals.extra - hidden.reduce(0) { $0 + max(0, $1.totalFileCount - 1) }),
+                    bytes: max(0, totals.bytes - hidden.reduce(Int64(0)) { $0 + $1.reclaimableBytes }))
+            } else {
+                base = Self.exactSummary(groups: g, extraCopies: extraCopies, bytes: bytes)
+            }
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
+        if !isSimilar, let verify = exactVerify {
+            result += " · checking byte by byte (\(verify.done.formatted()) of \(verify.total.formatted()) groups)"
+        }
         if !isSimilar && exactPreviewPartial {
-            if exactCapped { result += " · more may exist" }
-            if exactSkipped > 0 { result += " · \(exactSkipped) couldn't be checked" }
+            if exactCapped {
+                result += exactTotals != nil
+                    ? " · showing the biggest \(g.formatted()) of \((exactTotals?.groups ?? g).formatted()) groups"
+                    : exactUnshownClasses > 0
+                    ? " · \(exactUnshownClasses.formatted()) more sets not listed (up to \(ByteCountFormatter.string(fromByteCount: exactUnshownBytes, countStyle: .file)))"
+                    : " · more may exist"
+            }
+            if exactSkipped > 0 { result += " · \(exactSkipped.formatted()) couldn’t be checked" }
         }
         return result
     }
@@ -255,46 +333,84 @@ struct CleanupView: View {
                 message: "Scan a folder first. Extra copies of the same file then show up here in groups, and you choose which copy to keep."
             )
         } else if !skippedGroups.isEmpty {
-            VStack(spacing: 14) {
-                EmptyStateView(
-                    icon: "checkmark.seal.fill",
-                    title: "Every group is hidden",
-                    message: "You skipped all the groups. Show them again to keep going."
-                )
-                Button("Show skipped groups again") { skippedGroups.removeAll() }
-                    .buttonStyle(.dsSecondary)
-            }
-        } else if !isSimilar && exactPreviewPartial {
+            EmptyStateView(
+                icon: "checkmark.seal.fill",
+                title: "Every group is hidden",
+                message: "You skipped all the groups. Show them again to keep going.",
+                primaryAction: (label: "Show skipped groups again", run: { skippedGroups.removeAll() })
+            )
+        } else if !isSimilar && Self.exactEmptyPhase(checking: exactChecking, partial: exactPreviewPartial) == .checking {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "Looking for extra copies",
+                message: "FileID compares the files byte by byte, so this can take a few minutes on a big library or an external drive.",
+                progressLabel: "Checking files"
+            )
+        } else if !isSimilar && Self.exactEmptyPhase(checking: exactChecking, partial: exactPreviewPartial) == .partial {
             EmptyStateView(
                 icon: "exclamationmark.magnifyingglass",
                 title: "No extra copies found so far",
                 message: exactCapped
                     ? "FileID compared the most likely files and found no exact copies. It checks a limited number at a time, so a very large library may still hold some."
-                    : "No exact copies among the files FileID could read. \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn't be opened, for example because a drive is disconnected."
+                    : "No exact copies among the files FileID could read. \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn’t be opened, for example because a drive is disconnected."
             )
         } else if isSimilar {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No look-alikes",
-                message: "None of the \(store.totalImages.formatted()) photos look nearly the same as another. Exact copies are under Exact copies."
+                message: "None of the \(Plural.noun(store.totalImages, "photo", "photos")) look nearly the same as another. Exact copies are under Exact copies."
             )
         } else {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No extra copies",
-                message: "None of the \(store.totalFiles.formatted()) files is an exact copy of another. Try Look-alikes for photos that are nearly the same."
+                message: "None of the \(Plural.noun(store.totalFiles, "file", "files")) is an exact copy of another. Try Look-alikes for photos that are nearly the same."
             )
+        }
+    }
+
+    /// The result of the last Move to Trash, with its Undo. Shown above the empty page too: trashing the last group leaves no list to carry it.
+    @ViewBuilder
+    private var statusBanner: some View {
+        if let s = status {
+            HStack(spacing: 10) {
+                Image(systemName: statusWarning
+                      ? "exclamationmark.triangle.fill" : "trash.fill")
+                    .foregroundStyle(statusWarning ? Theme.warning : Theme.delight)
+                Text(s)
+                    .font(Theme.Font.body(13.5))
+                Spacer()
+                if let batch = undoBatch {
+                    Button("Undo") { Task { await undoTrash(batch) } }
+                        .buttonStyle(.dsSecondary)
+                        .disabled(deleting)
+                }
+                Button("Open Trash") {
+                    NSWorkspace.shared.open(UserHome.trashURL)
+                }
+                .buttonStyle(.dsSecondary)
+                Button("Dismiss") {
+                    status = nil
+                    statusWarning = false
+                }
+                    .buttonStyle(.borderless)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
+                (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
+                (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
+                lineWidth: 1))
+            .help(undoBatch == nil ? "To put a file back, open Trash in Finder, right-click it and choose Put Back." : "Undo puts the moved copies back where they were.")
         }
     }
 
     @ViewBuilder
     private func list(visible: [DuplicateGroup]) -> some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 16) {
-                // First-timer explainer above the groups. Inline (not a
-                // tooltip) so the keeper concept is impossible to miss.
                 if isSimilar {
-                    // CRITICAL safety UX: similar groups are NOT byte-identical.
+                    // Similar groups are not byte-identical, so the user must be told to check before trashing.
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(Theme.warning)
@@ -336,44 +452,34 @@ struct CleanupView: View {
                         onSelectAllExceptKeeper: { setGroupNonKeepers(group) },
                         onInvert: { invertGroup(group) },
                         onSkip: { skippedGroups.insert(group.id) },
-                        onDeleteGroup: { confirmGroup = group; confirmDelete = true }
+                        onDeleteGroup: { confirmGroup = group; confirmDelete = true },
+                        gate: engine.readOnlyGate
                     )
                 }
-                if let s = status {
-                    HStack(spacing: 10) {
-                        Image(systemName: statusWarning
-                              ? "exclamationmark.triangle.fill" : "trash.fill")
-                            .foregroundStyle(statusWarning ? Theme.warning : Theme.delight)
-                        Text(s)
-                            .font(Theme.Font.body(13.5))
-                        Spacer()
-                        if let batch = undoBatch {
-                            Button("Undo") { Task { await undoTrash(batch) } }
-                                .buttonStyle(.dsSecondary)
-                                .disabled(deleting)
-                        }
-                        Button("Open Trash") {
-                            NSWorkspace.shared.open(UserHome.trashURL)
-                        }
-                        .buttonStyle(.dsSecondary)
-                        Button("Dismiss") {
-                            status = nil
-                            statusWarning = false
-                        }
-                            .buttonStyle(.borderless)
-                    }
-                    .padding(12)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
-                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
-                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
-                        lineWidth: 1))
-                    .help(undoBatch == nil ? "To put a file back, open Trash in Finder, right-click it and choose Put Back." : "Undo puts the moved copies back where they were.")
+                if !isSimilar, exactCapped, let totals = exactTotals {
+                    showMoreFooter(totals: totals)
                 }
+                statusBanner
             }
             .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
         }
         .hoverPausedWhileScrolling()
+    }
+
+    @ViewBuilder
+    private func showMoreFooter(totals: ExactDuplicateVerifier.Totals) -> some View {
+        let remaining = max(0, totals.groups - groups.count)
+        let next = min(ExactDuplicateVerifier.groupCap, remaining)
+        let freed = max(0, totals.bytes - groups.reduce(Int64(0)) { $0 + $1.reclaimableBytes })
+        if remaining > 0 {
+            HStack(spacing: 12) {
+                Button(exactLoadingMore ? "Loading…" : "Show \(next.formatted()) more groups") { loadMoreExact() }
+                    .buttonStyle(.dsSecondary)
+                    .disabled(exactLoadingMore)
+                MetaText("\(groups.count.formatted()) of \(totals.groups.formatted()) groups shown · up to \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)) more can be freed", size: 12)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - Selection helpers
@@ -400,6 +506,21 @@ struct CleanupView: View {
     private func selectAllNonKeepers() {
         selection.removeAll()
         for g in visibleGroups { setGroupNonKeepers(g) }
+        // Copies on a read-only drive can't be moved, so they are never offered for the Trash.
+        let gate = engine.readOnlyGate
+        if !gate.entries.isEmpty {
+            let locked = Set(visibleGroups.flatMap(\.files).filter { gate.drive(for: $0.url) != nil }.map(\.id))
+            selection.subtract(locked)
+        }
+    }
+
+    /// The reason the Trash button is off when every chosen copy sits on a read-only drive.
+    private var trashReadOnlyReason: String? {
+        guard !selection.isEmpty else { return nil }
+        let gate = engine.readOnlyGate
+        guard !gate.entries.isEmpty else { return nil }
+        let chosen = visibleGroups.flatMap(\.files).filter { selection.contains($0.id) }.map(\.url)
+        return gate.reasonIfAll(chosen)
     }
 
     // MARK: - Trash actions
@@ -424,12 +545,18 @@ struct CleanupView: View {
 
     private func partialNotice(shown: Int) -> LocalizedStringKey {
         let unread = exactSkipped > 0
-            ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn't be opened, so \(exactSkipped == 1 ? "it wasn't" : "they weren't") checked."
+            ? " \(exactSkipped.formatted()) file\(exactSkipped == 1 ? "" : "s") couldn’t be opened, so \(exactSkipped == 1 ? "it wasn’t" : "they weren’t") checked."
             : ""
-        if exactCapped {
-            return "**Showing the first \(shown.formatted()) group\(shown == 1 ? "" : "s").** Each one is an exact copy, checked byte by byte. Clear these and more will appear.\(unread)"
+        if exactVerify != nil || !exactUnverified.isEmpty {
+            let pending = exactVerify != nil
+                ? "**Checking the copies byte by byte.** These groups already match by their saved fingerprints; any that don’t hold up are removed when the check reaches them."
+                : "**\(exactUnverified.count.formatted()) large group\(exactUnverified.count == 1 ? "" : "s") match by saved fingerprint only.** FileID reads every copy byte by byte before anything moves to Trash. The other groups are checked byte by byte."
+            return LocalizedStringKey(pending + (exactCapped ? " The rest are one tap away below." : "") + unread)
         }
-        return "**Some files couldn't be checked.** Every group below is an exact copy, checked byte by byte.\(unread)"
+        if exactCapped {
+            return "**Showing the biggest \(shown.formatted()) of \((exactTotals?.groups ?? shown).formatted()) groups.** Each one is an exact copy, checked byte by byte. Show more below to see the rest.\(unread)"
+        }
+        return "**Some files couldn’t be checked.** Every group below is an exact copy, checked byte by byte.\(unread)"
     }
 
     private func confirmDeleteSelected() {
@@ -442,12 +569,8 @@ struct CleanupView: View {
         return group.files.filter { selection.contains($0.id) }.count
     }
 
-    private func trashSelectedInGroup(_ g: DuplicateGroup) async {
-        await trashSelected(across: [g])
-    }
-
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
-        guard !deleting else { return }   // re-entrancy guard
+        guard !deleting else { return }
         deleting = true
         statusWarning = false
         defer { deleting = false }
@@ -479,8 +602,8 @@ struct CleanupView: View {
         if outcome.engineUnavailable || outcome.timedOut {
             statusWarning = true
             status = outcome.engineUnavailable
-                ? "FileID is still getting ready. Try again in a moment."
-                : "Moving to Trash didn't finish. Check the Trash before trying again."
+                ? HelperGate.unsentNote(engine)
+                : "Moving to Trash didn’t finish. Check the Trash before trying again."
             reload()
             return
         }
@@ -496,15 +619,11 @@ struct CleanupView: View {
         }
         let keeperURLsToTag = Array(keeperURLSet)
 
-        // auto-tag keepers (Settings toggle, default on). Useful so
-        // the user can find "files I deduped this session" in Finder.
+        // Keepers get a Finder tag when the Settings toggle is on (default).
         let shouldTag = autoTagOn && !keeperURLsToTag.isEmpty
 
-        // Run the chunked DELETE (+ person reconciliation) and the per-keeper
-        // xattr writes OFF the MainActor — on a large dedup pass these are
-        // thousands of synchronous DB/FS ops and would re-freeze the UI the
-        // off-main trashing above just avoided. Resume on the MainActor only
-        // to mutate @State. (mirrors BulkTagSheet.apply)
+        // Run the chunked DELETE and per-keeper xattr writes off the MainActor: on a large pass they are thousands of synchronous DB/FS ops that would re-freeze the UI.
+        // Resume on the MainActor only to mutate @State.
         let taggedAdded: Int = await Task.detached(priority: .userInitiated) {
             [keeperURLsToTag, shouldTag] in
             guard shouldTag else { return 0 }
@@ -515,12 +634,10 @@ struct CleanupView: View {
         for id in trashedIDs { selection.remove(id) }
         if shouldTag { store.notifyChanged() }
 
-        // Plain-language status. "DB rows pruned" is internal noise —
-        // users care about file count + reclaimed space. Tag summary
-        // appended only when the auto-tag toggle did something.
+        // The status reports file count and reclaimed space; the tag summary is added only when tagging happened.
         var tagSummary = ""
         if taggedAdded > 0 {
-            tagSummary = " · tagged \(taggedAdded) kept file\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
+            tagSummary = " · tagged \(Plural.noun(taggedAdded, "kept file", "kept files")) with “\(AppSettings.cleanupAutoTagName)”"
         }
         var summary = "Moved \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
             + " to Trash · freed \(freed)"
@@ -532,10 +649,10 @@ struct CleanupView: View {
             summary += " · \(verificationRejected) skipped because the file changed since the scan"
         }
         if protectedCount > 0 {
-            summary += " · \(protectedCount) left alone because \(protectedCount == 1 ? "it is" : "they are") in a protected location, such as a Photos library"
+            summary += " · " + ExactDuplicateVerifier.protectedSummary(outcome)
         }
         if trashFailures > 0 {
-            summary += " · \(trashFailures) couldn't be moved to Trash"
+            summary += " · \(trashFailures.formatted()) couldn’t be moved to Trash"
         }
         statusWarning = verificationRejected > 0 || trashFailures > 0 || keepOneSkipped > 0 || protectedCount > 0
         status = summary
@@ -563,14 +680,7 @@ struct CleanupView: View {
         guard new != lastSeenBatchIndex else { return }
         lastSeenBatchIndex = new
         store.notifyChanged()
-        // Exact mode's reload() runs a live full-file SHA-256 pass over up
-        // to ExactDuplicateVerifier.candidateCap candidates; the digest
-        // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch
-        // keeps the whole candidate set hot and contends with the engine's
-        // scan reads on the same drive for the entire scan. Defer the exact
-        // re-verify to scan completion (the lastTerminalEventAt handler).
-        // Similar mode's perceptual index is cheap and drive-light,
-        // so it keeps refreshing live. (reload storm)
+        // Exact re-verify runs once at scan completion: it hashes up to ExactDuplicateVerifier.candidateCap files, and its 30 s digest cache would be cold on every ~1 Hz batch while contending with the scan's reads. Similar mode is cheap, so it refreshes live.
         if !scanActive {
             reload()
         } else if isSimilar, Date().timeIntervalSince(lastScanTimeReload) > 15 {
@@ -582,23 +692,13 @@ struct CleanupView: View {
     }
 
     private func reload() {
-        // Exact mode reads bounded same-size candidates and full-hashes them on
-        // a dedicated queue; Similar mode performs its perceptual index off-main.
-        //
-        // COALESCE instead of cancel-and-restart: hashing and database reads are
-        // not interrupted mid-file, so spawning a fresh task each scan tick would
-        // pile up superseded work. If a
-        // reload is already running, mark it dirty and let it re-run once when it
-        // finishes — at most one in-flight + one pending. A result known-stale
-        // (a newer reload was requested mid-query) is skipped, not assigned, so the
-        // final assignment is always the freshest (latest-wins). (05 delta fix)
-        // Freeze the duplicate re-query + selection re-derivation while a
-        // destructive confirmation is on screen, so the count the user is
-        // confirming can't drift mid-scan. Re-runs on dialog dismissal
-        // (onChange of confirmDelete), which re-applies the keeper protection.
+        // Coalesce instead of cancel-and-restart: hashing and DB reads are not interrupted mid-file. At most one run in flight plus one pending; a result superseded mid-query is dropped so the latest assignment wins.
+        // Frozen while the confirmation is on screen so the count being confirmed can't drift mid-scan; re-runs when the dialog is dismissed.
         if confirmDelete { return }
         if reloadTask != nil { reloadPending = true; return }
         reloadTask = Task { @MainActor in
+            exactChecking = true
+            defer { exactChecking = false }
             repeat {
                 reloadPending = false
                 // Read the mode fresh each iteration so a mid-flight mode switch
@@ -608,20 +708,27 @@ struct CleanupView: View {
                 let newExactCandidateCount: Int
                 let newExactSkipped: Int
                 var newExactCapped = false
+                var newExactTotals: ExactDuplicateVerifier.Totals?
+                var newUnshown: (Int, Int64) = (0, 0)
                 var stopped = false
                 if isSimilar {
-                    newGroups = await store.similarImageGroupsAsync()
+                    let engine = engine
+                    let threshold = ReadStore.defaultNearDupHamming
+                    newGroups = await store.similarImageGroupsAsync(maxHamming: threshold) { offset, limit in
+                        await engine.similarClusters(offset: offset, limit: limit, threshold: threshold)
+                    }
                     newExactPartial = false
                     newExactCandidateCount = 0
                     newExactSkipped = 0
                 } else {
-                    let snapshot = await store.exactDuplicateSnapshotAsync()
-                    newGroups = snapshot.groups
-                    newExactPartial = snapshot.partial
-                    newExactCandidateCount = snapshot.candidateCount
-                    newExactSkipped = snapshot.skipped
-                    newExactCapped = snapshot.capped
-                    stopped = snapshot.cancelled
+                    let load = await store.exactStoredGroupsAsync(limit: max(ExactDuplicateVerifier.groupCap, exactStored.count))
+                    newGroups = load.groups
+                    newExactCapped = load.totalGroups > load.groups.count
+                    newExactPartial = newExactCapped
+                    newExactCandidateCount = load.totalExtraCopies + load.totalGroups
+                    newExactSkipped = 0
+                    newUnshown = (max(0, load.totalGroups - load.groups.count), max(0, load.totalBytes - load.shownBytes))
+                    newExactTotals = ExactDuplicateVerifier.Totals(groups: load.totalGroups, extra: load.totalExtraCopies, bytes: load.totalBytes)
                 }
                 // Cancelled when the tab went away: drop the unfinished result. A
                 // reload asked for since then (the tab came back) starts a fresh task.
@@ -636,22 +743,24 @@ struct CleanupView: View {
                 // A newer reload landed while this query ran — its result is stale;
                 // loop and re-query rather than assigning it.
                 if reloadPending { continue }
-                // Prior keeper of each group (by phash id) before we overwrite `groups`,
-                // so we can tell which copies *became* the keeper across this reload.
+                // Keepers before `groups` is replaced, to tell which copies became the keeper in this reload.
                 let priorKeepers = Set(groups.compactMap { $0.files.first?.id })
                 groups = newGroups
+                #if DEBUG
+                if !isSimilar { print("cleanup: exact groups listed \(newGroups.count) of \(newExactTotals?.groups ?? 0) at \(ProcessInfo.processInfo.systemUptime)") }
+                #endif
                 exactPreviewPartial = newExactPartial
                 exactCandidateCount = newExactCandidateCount
                 exactSkipped = newExactSkipped
                 exactCapped = newExactCapped
+                (exactUnshownClasses, exactUnshownBytes) = newUnshown
+                exactTotals = newExactTotals
+                exactBase = newExactTotals
+                exactStored = isSimilar ? [] : newGroups
+                exactUnverified = []
                 let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
                 selection.formIntersection(visibleIDs)
-                // Selection is stored by file id, but a mid-scan re-rank can change
-                // which copy is the keeper (index 0). Only drop a copy that *became*
-                // the keeper this reload — a copy that was already the keeper and is
-                // still selected was explicitly checked by the user ("trash the keeper
-                // too", see header/CopyTile help) and must not be silently reverted on
-                // every throttled batch during a live scan.
+                // A mid-scan re-rank can change the keeper. Only a copy that became the keeper in this reload is deselected; a keeper the user checked on purpose stays checked.
                 for g in newGroups {
                     guard let keeper = g.files.first else { continue }
                     if !priorKeepers.contains(keeper.id) {
@@ -660,6 +769,105 @@ struct CleanupView: View {
                 }
             } while reloadPending
             reloadTask = nil
+            if !isSimilar { startExactVerification(of: groups) }
+        }
+    }
+
+    /// The stored-hash groups are already on screen; this re-reads them byte by byte off the main thread and swaps in what held up. Groups added later by "Show more" queue behind the batch in flight.
+    private func startExactVerification(of stored: [DuplicateGroup]) {
+        verifyTask?.cancel()
+        exactSettled = []
+        exactBatch = []
+        exactQueued = stored
+        exactSettledUnverified = []
+        exactSettledSkipped = 0
+        guard !stored.isEmpty else { exactVerify = nil; return }
+        exactVerify = (0, stored.count)
+        exactPreviewPartial = true
+        runNextExactBatch(baseSkipped: exactSkipped)
+    }
+
+    private func runNextExactBatch(baseSkipped: Int) {
+        let batch = exactQueued
+        guard !batch.isEmpty else { exactVerify = nil; refreshExactPartial(); return }
+        exactQueued = []
+        exactBatch = batch
+        let settledCount = exactStored.count - batch.count
+        verifyTask = Task { @MainActor in
+            let final = await ExactDuplicateVerifier.verifyStored(batch) { update in
+                Task { @MainActor in
+                    guard !Task.isCancelled, exactVerify != nil else { return }
+                    adopt(update, baseSkipped: baseSkipped, settledCount: settledCount)
+                }
+            }
+            guard !Task.isCancelled, !final.cancelled else { return }
+            adopt(final, baseSkipped: baseSkipped, settledCount: settledCount)
+            exactSettled += final.groups
+            exactBatch = []
+            exactSettledUnverified.formUnion(final.unverified)
+            exactSettledSkipped += final.skipped
+            if exactQueued.isEmpty {
+                exactVerify = nil
+                refreshExactPartial()
+            } else {
+                exactVerify = (exactStored.count - exactQueued.count, exactStored.count)
+                runNextExactBatch(baseSkipped: baseSkipped)
+            }
+        }
+    }
+
+    private func loadMoreExact() {
+        Task { @MainActor in await loadMoreExactPage() }
+    }
+
+    private func loadMoreExactPage() async {
+        guard !exactLoadingMore, !isSimilar else { return }
+        exactLoadingMore = true
+        let offset = exactStored.count
+        do {
+            defer { exactLoadingMore = false }
+            let load = await store.exactStoredGroupsAsync(offset: offset, limit: ExactDuplicateVerifier.groupCap)
+            guard !isSimilar, exactStored.count == offset else { return }
+            let known = Set(exactStored.map(\.id))
+            let fresh = load.groups.filter { !known.contains($0.id) }
+            guard !fresh.isEmpty else { return }
+            let wasIdle = exactQueued.isEmpty && exactBatch.isEmpty
+            exactStored += fresh
+            exactQueued += fresh
+            groups = exactSettled + exactBatch + exactQueued
+            refreshExactTotals()
+            if wasIdle {
+                exactVerify = (offset, exactStored.count)
+                exactPreviewPartial = true
+                runNextExactBatch(baseSkipped: exactSkipped - exactSettledSkipped)
+            } else if exactVerify != nil {
+                exactVerify = (exactVerify?.done ?? 0, exactStored.count)
+            }
+        }
+    }
+
+    private func refreshExactTotals() {
+        guard let base = exactBase else { return }
+        exactCapped = base.groups > exactStored.count
+        exactTotals = ExactDuplicateVerifier.adjustedTotals(base: base, stored: exactStored, current: groups)
+    }
+
+    private func refreshExactPartial() {
+        exactPreviewPartial = exactCapped || !exactUnverified.isEmpty || exactSkipped > 0
+    }
+
+    private func adopt(_ update: ExactDuplicateVerifier.VerifyUpdate, baseSkipped: Int, settledCount: Int) {
+        let priorKeepers = Set(groups.compactMap { $0.files.first?.id })
+        exactBatch = update.groups
+        groups = exactSettled + exactBatch + exactQueued
+        exactUnverified = exactSettledUnverified.union(update.unverified)
+        exactSkipped = baseSkipped + exactSettledSkipped + update.skipped
+        if !update.finished { exactVerify = (settledCount + update.done, exactStored.count) }
+        refreshExactTotals()
+        exactPreviewPartial = exactCapped || !exactUnverified.isEmpty || exactSkipped > 0 || !update.finished || !exactQueued.isEmpty
+        selection.formIntersection(Set(groups.flatMap { $0.files.map(\.id) }))
+        for group in groups {
+            if let keeper = group.files.first, !priorKeepers.contains(keeper.id) { selection.remove(keeper.id) }
         }
     }
 }
@@ -675,8 +883,13 @@ private struct GroupCard: View {
     let onInvert: () -> Void
     let onSkip: () -> Void
     let onDeleteGroup: () -> Void
+    var gate: ReadOnlyGate = .none
     @State private var hoveredFile: Int64?
     @Environment(\.hoverPaused) private var hoverPaused
+
+    private var readOnlyReason: String? {
+        gate.reasonIfAll(group.files.filter { selection.contains($0.id) }.map(\.url))
+    }
 
     private var selectedInGroup: Int {
         group.files.reduce(0) { $0 + (selection.contains($1.id) ? 1 : 0) }
@@ -690,7 +903,7 @@ private struct GroupCard: View {
         Panel {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    SectionLabel(group.isSimilar ? "Look-alikes · \(group.totalFileCount) photos" : "Same file · \(group.totalFileCount) copies")
+                    SectionLabel(group.isSimilar ? "Look-alikes · \(Plural.noun(group.totalFileCount, "photo", "photos"))" : "Same file · \(Plural.noun(group.totalFileCount, "copy", "copies"))")
                     if group.isSimilar {
                         BadgePill(label: "Looks the same", color: Theme.warning)
                             .help("These look nearly the same but are not identical. Check each before removing.")
@@ -714,30 +927,22 @@ private struct GroupCard: View {
                         Button("None") { onSelectNone() }
                         Button("Invert") { onInvert() }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle")
-                            Text("Choose…")
-                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                        }
-                        .font(Theme.Font.body(12, .medium))
-                        .foregroundStyle(Theme.text1)
-                        .padding(.horizontal, 9).frame(height: 26)
-                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                        DSMenuLabel(title: "Choose…", systemImage: "checkmark.circle", height: Theme.Metrics.hitTarget)
                     }
                     .menuStyle(.button)
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     .menuIndicator(.hidden)
                     .fixedSize()
 
                     Button { onDeleteGroup() } label: { Label(selectedInGroup == 0 ? "Move to Trash" : "Move \(selectedInGroup) to Trash", systemImage: "trash") }
-                    .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle(height: 26)))
-                    .disabled(selectedInGroup == 0)
-                    .help(selectedInGroup == 0 ? "Click the copies you want to remove first" : "Move the chosen copies in this group to Trash")
+                    .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle()))
+                    .disabled(selectedInGroup == 0 || readOnlyReason != nil)
+                    .accessibilityHint(readOnlyReason ?? "")
+                    .help(readOnlyReason ?? (selectedInGroup == 0 ? "Click the copies you want to remove first" : "Move the chosen copies in this group to Trash"))
 
                     Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
                     .buttonStyle(DSSecondaryButtonStyle(height: 26))
-                    .help("Hide this group if these aren't really copies. Nothing is deleted.")
+                    .help("Hide this group if these aren’t really copies. Nothing is deleted.")
 
                     Spacer()
                 }
@@ -806,6 +1011,7 @@ private struct CopyTile: View {
     let isSimilar: Bool
     let isSelected: Bool
     let hovering: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var fullFolder: String {
         (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
@@ -827,15 +1033,15 @@ private struct CopyTile: View {
         VStack(alignment: .leading, spacing: 4) {
             Color.white.opacity(0.04)
                 .frame(width: CopyStrip.tile, height: CopyStrip.tile)
-                .overlay(thumbContent)
+                .overlay(thumbContent.accessibilityHidden(true))
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .stroke(borderColor, lineWidth: borderWidth)
                 )
                 .overlay(badgeOverlay)
-                .scaleEffect(hovering ? 1.02 : 1.0)
-                .animation(.easeInOut(duration: 0.12), value: hovering)
+                .scaleEffect(hovering && !reduceMotion ? 1.02 : 1.0)
+                .animation(Theme.quick, value: hovering)
                 .contentShape(Rectangle())
                 .onTapGesture { onToggle() }
                 .contextMenu {
@@ -852,17 +1058,20 @@ private struct CopyTile: View {
                 .lineLimit(1).truncationMode(.middle)
                 .frame(width: CopyStrip.tile, alignment: .leading)
                 .padding(.top, 2)
-            Text(folder)
-                .font(Theme.Font.body(11.5))
-                .foregroundStyle(Theme.text2)
-                .lineLimit(1).truncationMode(.head)
+            PathLabel(path: folder, font: Theme.Font.body(11.5), color: Theme.text2)
                 .frame(width: CopyStrip.tile, alignment: .leading)
                 .help(fullFolder)
-            HStack(spacing: 4) {
-                Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
-                Spacer(minLength: 4)
-                if let date = file.displayDate {
-                    Text(date.formatted(date: .numeric, time: .omitted))
+            let sizeText = Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
+            let dateText = file.displayDate.map { Text($0.formatted(date: .numeric, time: .omitted)) }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
+                    sizeText.fixedSize()
+                    Spacer(minLength: 4)
+                    if let dateText { dateText.fixedSize() }
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    sizeText
+                    if let dateText { dateText }
                 }
             }
             .font(Theme.Font.body(11.5))
@@ -873,6 +1082,7 @@ private struct CopyTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
+        .accessibilityAction(.default, onToggle)
         .accessibilityHint(isSelected
             ? "Chosen. It goes to Trash when you press Move to Trash. Click to unchoose."
             : isKeeper
@@ -887,7 +1097,9 @@ private struct CopyTile: View {
     }
 
     private var thumbContent: some View {
-        AsyncThumbnail(url: file.url, size: 264) { Image(systemName: "photo").foregroundStyle(Theme.text3) }
+        AsyncThumbnail(url: file.url, size: 264) {
+            Image(systemName: CleanupView.tilePlaceholderSymbol(for: file.url)).foregroundStyle(Theme.text3)
+        }
     }
 
     @ViewBuilder
@@ -900,14 +1112,16 @@ private struct CopyTile: View {
                           ? "FileID suggests keeping this photo: the best-looking one, then the largest file, then the oldest. Check the others before removing them."
                           : "FileID suggests keeping this copy: the oldest one, then the one in the shortest folder path. Every copy here is identical, so any of them is safe to keep.")
             }
-            // Top-right checkbox.
             Button(action: onToggle) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 22))
                     .foregroundStyle(isSelected ? Theme.danger : Color.white.opacity(0.85))
-                    .background(Circle().fill(.black.opacity(0.4)))
+                    .background(Circle().fill(.black.opacity(0.5)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: 11))
+            .help(isSelected ? "Don’t move this copy to Trash" : "Choose this copy for Trash")
+            .accessibilityLabel(isSelected ? "Chosen for Trash" : "Choose for Trash")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }

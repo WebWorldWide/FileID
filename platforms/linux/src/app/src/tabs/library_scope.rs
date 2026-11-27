@@ -71,7 +71,6 @@ pub fn location_count_text(count: usize) -> String {
     }
 }
 
-/// Spoken name of one location row in the switcher.
 pub fn spoken(root: &LibraryRoot) -> String {
     let offline = if root.online { "" } else { ", offline" };
     format!("{}, {}{offline}", root.display, file_count_text(root.file_count))
@@ -146,7 +145,6 @@ pub fn choose(root_id: Option<i64>) {
     apply();
 }
 
-/// Takes a fresh location list.
 pub fn apply_roots(roots: Vec<LibraryRoot>) {
     let stored = crate::app_settings::library_scope_root_id();
     let kept = reconciled(stored, &roots);
@@ -199,6 +197,7 @@ mod tests {
             total_bytes: 1,
             last_scan_at: None,
             last_status: None,
+            read_only: None,
         }
     }
 

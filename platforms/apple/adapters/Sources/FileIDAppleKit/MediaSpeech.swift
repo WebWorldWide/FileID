@@ -1,9 +1,9 @@
 import AVFoundation
 import Foundation
 import Speech
+import Darwin
 
-/// On-device Apple Speech for timeline transcripts; the Swift engine's
-/// `TimelineSpeechTranscription` and `SpeechPermission`. Passage grouping and
+/// On-device Apple Speech for timeline transcripts. Passage grouping and
 /// persistence stay in the Rust engine.
 enum MediaSpeech {
     struct Segment: Sendable {
@@ -21,8 +21,29 @@ enum MediaSpeech {
         case cannotAsk = -1
     }
 
-    static func canAsk(bundle: Bundle = .main) -> Bool {
-        (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false
+    /// TCC attributes the request to the responsible process. That is the app only when the system started
+    /// it (its parent is launchd, as for Finder, Dock and `open`); started from a terminal or script, the
+    /// responsible process is that host, has no usage string, and macOS aborts the engine.
+    static func canAsk(
+        bundle: Bundle = .main, parentExecutable: String? = parentExecutablePath(), appStartedBySystem: Bool = appStartedBySystem()
+    ) -> Bool {
+        guard appStartedBySystem,
+              (bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String)?.isEmpty == false,
+              let parentExecutable else { return false }
+        let root = bundle.bundleURL.resolvingSymlinksInPath().path
+        return root.hasSuffix(".app") && URL(fileURLWithPath: parentExecutable).resolvingSymlinksInPath().path.hasPrefix(root + "/")
+    }
+
+    static func appStartedBySystem() -> Bool {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        return proc_pidinfo(getppid(), PROC_PIDTBSDINFO, 0, &info, size) == size && info.pbi_ppid == 1
+    }
+
+    static func parentExecutablePath() -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(getppid(), &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
     }
 
     /// Asks once when the user has not decided and `ask` is set; the system shows

@@ -109,6 +109,15 @@ struct EngineQueryRepliesTests {
         #expect(replies.waiting == 0)
     }
 
+    @Test func anEmptyReplyEndsTheWaitAtOnceAsNoFrame() async {
+        let replies = EngineQueryReplies()
+        let waiting = Task { await replies.videoThumbnail(path: "/v/clip.mkv", modifiedAt: 3, maxPixelSize: 448) { true } }
+        await waitFor(replies, count: 1)
+        replies.deliver(ThumbnailGenerated(path: "/v/clip.mkv", modifiedAt: 3, bytes: ""))
+        #expect(await waiting.value == nil)
+        #expect(replies.waiting == 0, "the empty reply answered the wait; no 15 second timeout was needed")
+    }
+
     @Test func eachThumbnailSizeGetsItsOwnFrame() async throws {
         let replies = EngineQueryReplies()
         let grid = Task { await replies.videoThumbnail(path: "/v/a.mov", modifiedAt: 1, maxPixelSize: 512) { true } }
@@ -332,6 +341,30 @@ struct VideoThumbnailSourceTests {
         #expect(calls.value == 1)
     }
 
+    @Test func aJPEGNamedPNGStillGetsAThumbnailWhenQuickLookCannotReadIt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("thumb-sniff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try #require(CGContext(data: nil, width: 64, height: 48, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(),
+                                             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(red: 0.8, green: 0.2, blue: 0.2, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
+        let image = try #require(context.makeImage())
+        let jpeg = try #require(ThumbnailService.jpegData(image))
+        let misnamed = directory.appendingPathComponent("hangout_snapshot_0.png")
+        try jpeg.write(to: misnamed)
+        let data = await ThumbnailService.render(url: misnamed, size: 256, scale: 2, modifiedAt: nil, videoSource: nil) { _, _, _ in nil }
+        let thumbnail = try #require(data)
+        let decoded = try #require(CGImageSourceCreateWithData(thumbnail as CFData, nil))
+        #expect(CGImageSourceGetCount(decoded) == 1)
+
+        let notAnImage = directory.appendingPathComponent("notes.png")
+        try Data("not an image".utf8).write(to: notAnImage)
+        let none = await ThumbnailService.render(url: notAnImage, size: 256, scale: 2, modifiedAt: nil, videoSource: nil) { _, _, _ in nil }
+        #expect(none == nil)
+    }
+
     @Test func noEngineMeansQuickLook() async {
         let calls = QuickLookCalls()
         #expect(await render(URL(fileURLWithPath: "/v/photo.jpg"), source: nil, calls: calls) == Self.quickLookJPEG)
@@ -419,14 +452,15 @@ struct EngineQueryRepliesProcessTests {
     }
 
     nonisolated private static var engineBinary: URL? {
-        guard let path = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"],
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["FILEID_TEST_HOSTED_ENGINE_PATH"],
               FileManager.default.isExecutableFile(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)
     }
 
     @Test("Real engine replies reach the waiting caller",
           .enabled(if: engineBinary != nil && ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == nil,
-                   "needs FILEID_TEST_ENGINE_PATH; process-spawning tests hang the GitHub macOS runner"),
+                   "needs FILEID_TEST_HOSTED_ENGINE_PATH; process-spawning tests hang the GitHub macOS runner"),
           .timeLimit(.minutes(3)))
     func realEngineRepliesAreRouted() async throws {
         let binary = try #require(Self.engineBinary)
@@ -518,8 +552,48 @@ struct AppCLIPTextSessionTests {
         #expect(files.count > 20)
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
-            for forbidden in ["CLIPTextEncoder.shared", "CLIPTextEncoder(", "CLIPTokenizer.shared", "ORTSession("] {
+            for forbidden in ["CLIPTextEncoder", "CLIPTokenizer.shared", "ORTSession(", "ORTPrivacy", "OnnxRuntimeBindings"] {
                 #expect(!text.contains(forbidden), "\(file.lastPathComponent) uses \(forbidden)")
+            }
+        }
+    }
+}
+
+@Suite("The shipped app links no ONNX Runtime")
+struct ShippedAppWithoutONNXRuntimeTests {
+    private static let appleRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
+    private static let shippedTargets = [
+        "FileIDModelInfo", "FileIDShared", "FileIDImaging", "FileIDVLMCore",
+        "FileID", "FileIDAppleVLM", "FileIDAppleKit",
+    ]
+
+    @Test func shippedTargetsDoNotDependOnONNXRuntime() throws {
+        let manifest = try String(contentsOf: Self.appleRoot.appendingPathComponent("Package.swift"), encoding: .utf8)
+        let starts = ["\n        .target(", "\n        .executableTarget(", "\n        .testTarget("]
+        let declarations = starts.flatMap { start in manifest.ranges(of: start).map(\.lowerBound) }.sorted()
+        #expect(declarations.count > 8)
+        for target in Self.shippedTargets {
+            let name = try #require(manifest.range(of: "(\n            name: \"\(target)\","), "Package.swift declares \(target)")
+            let start = try #require(declarations.last { $0 < name.lowerBound })
+            let end = declarations.first { $0 > name.lowerBound } ?? manifest.endIndex
+            let block = manifest[start..<end]
+            #expect(!block.contains("onnxruntime"), "\(target) depends on onnxruntime")
+        }
+    }
+
+    @Test func shippedSourcesDoNotImportONNXRuntime() throws {
+        let manager = FileManager.default
+        for folder in ["app/Sources", "adapters/Sources", "shared/Sources/FileIDShared", "shared/Sources/FileIDImaging",
+                       "shared/Sources/FileIDModelInfo", "shared/Sources/FileIDVLMCore"] {
+            let files = try #require(manager.enumerator(at: Self.appleRoot.appendingPathComponent(folder), includingPropertiesForKeys: nil))
+                .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+            #expect(!files.isEmpty, "\(folder) has sources")
+            for file in files {
+                let text = try String(contentsOf: file, encoding: .utf8)
+                #expect(!text.contains("OnnxRuntimeBindings"),
+                        "\(file.lastPathComponent) imports ONNX Runtime")
             }
         }
     }

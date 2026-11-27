@@ -1,7 +1,6 @@
-//! Undo journal for ordinary People merges (mergeClusters). Each merge is one
-//! catalog operation of kind person_merge, written in the merge's transaction
-//! and undone through undoFaceReview. The JSON matches the Swift engine's
-//! `PersonMergeJournal` so either engine can undo the other's merge.
+//! Undo journal for ordinary People merges: one catalog operation of kind person_merge written in the merge's
+//! transaction and undone through undoFaceReview. The JSON matches the retired Swift engine's `PersonMergeJournal`, so its
+//! merges can still be undone; `candidates`, `runnerUpFaces`, `suggestions` and `splits` are additions its reader ignores.
 
 use std::collections::BTreeMap;
 
@@ -9,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use super::face_queues::{anchor, blank, id_list, journal, names, ordered, person_exists, person_json, queue_page, queue_refused};
-use super::face_review::recount;
+use super::face_review::{recount, restore_candidate};
 use crate::ipc::FaceReviewPage;
 
 pub(crate) const KIND: &str = "person_merge";
@@ -22,8 +21,6 @@ const VERDICT_COLUMNS: &str = "person_a, person_b, same_person, confidence, vlm_
 
 type Verdicts = BTreeMap<(i64, i64), Value>;
 
-/// The verdicts a merge can replace or drop: every "different people" row, the
-/// pair's own row and any row naming the person being merged in.
 fn verdicts(conn: &Connection, pair: (i64, i64), source: i64) -> rusqlite::Result<Verdicts> {
     let mut statement = conn.prepare(&format!(
         "SELECT {VERDICT_COLUMNS} FROM face_verifications \
@@ -53,8 +50,7 @@ fn verdicts(conn: &Connection, pair: (i64, i64), source: i64) -> rusqlite::Resul
         .collect()
 }
 
-/// What a merge looked like before it ran. Take it first, run the merge, then
-/// `record` it in the same transaction.
+/// Take it first, run the merge, then `record` it in the same transaction.
 pub(crate) struct Pending {
     target: i64,
     source: i64,
@@ -63,6 +59,71 @@ pub(crate) struct Pending {
     faces: Vec<i64>,
     anchor_file: Option<i64>,
     verdicts: Verdicts,
+    candidates: Vec<Value>,
+    runner_up_faces: Vec<i64>,
+    suggestions: Vec<Value>,
+    splits: Vec<Value>,
+}
+
+fn pending_candidates(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = conn.prepare(
+        "SELECT face_id,person_id,score,reason,runner_up_person_id,runner_up_score,namespace,created_at \
+         FROM face_review_candidates WHERE person_id=?1 ORDER BY face_id",
+    )?;
+    statement
+        .query_map([source], |row| {
+            Ok(json!({
+                "faceID": row.get::<_, i64>(0)?,
+                "personID": row.get::<_, i64>(1)?,
+                "score": row.get::<_, f64>(2)?,
+                "reason": row.get::<_, String>(3)?,
+                "runnerUpPersonID": row.get::<_, Option<i64>>(4)?,
+                "runnerUpScore": row.get::<_, Option<f64>>(5)?,
+                "namespace": row.get::<_, String>(6)?,
+                "createdAt": row.get::<_, f64>(7)?,
+            }))
+        })?
+        .collect()
+}
+
+pub(super) fn pending_suggestions(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = conn.prepare(
+        "SELECT person_id,other_person_id,score,namespace,created_at FROM face_merge_suggestions \
+         WHERE person_id=?1 OR other_person_id=?1 ORDER BY person_id,other_person_id",
+    )?;
+    statement
+        .query_map([source], |row| {
+            Ok(json!({
+                "personID": row.get::<_, i64>(0)?,
+                "otherPersonID": row.get::<_, i64>(1)?,
+                "score": row.get::<_, f64>(2)?,
+                "namespace": row.get::<_, String>(3)?,
+                "createdAt": row.get::<_, f64>(4)?,
+            }))
+        })?
+        .collect()
+}
+
+pub(super) fn pending_splits(conn: &Connection, source: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut statement =
+        conn.prepare("SELECT person_id,score,keep_json,split_json,namespace,created_at FROM face_split_suggestions WHERE person_id=?1")?;
+    statement
+        .query_map([source], |row| {
+            Ok(json!({
+                "personID": row.get::<_, i64>(0)?,
+                "score": row.get::<_, f64>(1)?,
+                "keepJSON": row.get::<_, String>(2)?,
+                "splitJSON": row.get::<_, String>(3)?,
+                "namespace": row.get::<_, String>(4)?,
+                "createdAt": row.get::<_, f64>(5)?,
+            }))
+        })?
+        .collect()
+}
+
+fn runner_up_faces(conn: &Connection, source: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut statement = conn.prepare("SELECT face_id FROM face_review_candidates WHERE runner_up_person_id=?1 ORDER BY face_id")?;
+    statement.query_map([source], |row| row.get(0))?.collect()
 }
 
 pub(crate) fn begin(conn: &Connection, target: i64, source: i64) -> rusqlite::Result<Option<Pending>> {
@@ -79,11 +140,14 @@ pub(crate) fn begin(conn: &Connection, target: i64, source: i64) -> rusqlite::Re
         faces,
         anchor_file: anchor(conn, target)?.map(|found| found.file),
         verdicts: verdicts(conn, ordered(target, source), source)?,
+        candidates: pending_candidates(conn, source)?,
+        runner_up_faces: runner_up_faces(conn, source)?,
+        suggestions: pending_suggestions(conn, source)?,
+        splits: pending_splits(conn, source)?,
     }))
 }
 
 impl Pending {
-    /// Journals the finished merge and returns the operation to undo.
     pub(crate) fn record(self, conn: &Connection, at: f64) -> rusqlite::Result<String> {
         let now = verdicts(conn, ordered(self.target, self.source), self.source)?;
         let replaced: Vec<Value> =
@@ -97,6 +161,10 @@ impl Pending {
             "keepUnknown": self.keep["is_unknown"],
             "keepRepresentative": self.keep["representative_face_id"],
             "verifications": replaced,
+            "candidates": self.candidates,
+            "runnerUpFaces": self.runner_up_faces,
+            "suggestions": self.suggestions,
+            "splits": self.splits,
         });
         let after = json!({"resolution": "merge", "personID": self.target, "otherPersonID": self.source, "faceIDs": self.faces});
         journal(conn, KIND, self.anchor_file, &before, &after, at)
@@ -111,8 +179,6 @@ fn movable(conn: &Connection, faces: &[i64], keep: i64) -> rusqlite::Result<Vec<
         .collect()
 }
 
-/// The people and the faces that can still go back, or None when the merged-in
-/// person's id is in use again or none of its faces can return.
 fn undoable(conn: &Connection, after: &Value) -> rusqlite::Result<Option<(i64, i64, Vec<i64>)>> {
     let (Some(keep), Some(other)) = (after["personID"].as_i64(), after["otherPersonID"].as_i64()) else { return Ok(None) };
     if person_exists(conn, other)? {
@@ -126,7 +192,6 @@ fn undoable(conn: &Connection, after: &Value) -> rusqlite::Result<Option<(i64, i
     Ok(Some((keep, other, back)))
 }
 
-/// The newest merge from the last day that can still be undone.
 pub(crate) fn latest(conn: &Connection, at: f64) -> rusqlite::Result<Option<(String, i64, i64)>> {
     let rows: Vec<(String, String)> = {
         let mut statement = conn.prepare(
@@ -157,6 +222,38 @@ pub(crate) fn list(conn: &Connection, request: &str, at: f64) -> rusqlite::Resul
         operation_id: found.map(|found| found.0),
         ..queue_page(request, "list", "ok", QUEUE)
     })
+}
+
+/// Puts back the merge and split suggestions the merge cascaded away with `other`.
+pub(super) fn restore_pending(conn: &Connection, other: i64, before: &Value, at: f64) -> rusqlite::Result<()> {
+    for suggestion in before["suggestions"].as_array().into_iter().flatten() {
+        let (Some(a), Some(b)) = (suggestion["personID"].as_i64(), suggestion["otherPersonID"].as_i64()) else { continue };
+        let both_exist: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?1) AND EXISTS(SELECT 1 FROM persons WHERE id=?2)",
+            [a, b],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if both_exist {
+            conn.execute(
+                "INSERT OR IGNORE INTO face_merge_suggestions(person_id,other_person_id,score,namespace,created_at) VALUES(?1,?2,?3,?4,?5)",
+                params![a, b, suggestion["score"].as_f64().unwrap_or(0.0), suggestion["namespace"].as_str().unwrap_or_default(), suggestion["createdAt"].as_f64().unwrap_or(at)],
+            )?;
+        }
+    }
+    for split in before["splits"].as_array().into_iter().flatten() {
+        conn.execute(
+            "INSERT OR IGNORE INTO face_split_suggestions(person_id,score,keep_json,split_json,namespace,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                other,
+                split["score"].as_f64().unwrap_or(0.0),
+                split["keepJSON"].as_str().unwrap_or("[]"),
+                split["splitJSON"].as_str().unwrap_or("[]"),
+                split["namespace"].as_str().unwrap_or_default(),
+                split["createdAt"].as_f64().unwrap_or(at)
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn undo(conn: &Connection, request: &str, before: &Value, after: &Value, at: f64) -> rusqlite::Result<FaceReviewPage> {
@@ -220,6 +317,22 @@ pub(crate) fn undo(conn: &Connection, request: &str, before: &Value, after: &Val
             ],
         )?;
     }
+    for candidate in before["candidates"].as_array().into_iter().flatten() {
+        let Some(face) = candidate["faceID"].as_i64() else { continue };
+        let open: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM face_prints WHERE id=?1 AND person_id IS NULL) \
+                AND NOT EXISTS(SELECT 1 FROM face_review_candidates WHERE face_id=?1)",
+            [face],
+            |row| row.get(0),
+        )?;
+        if open {
+            restore_candidate(conn, face, candidate)?;
+        }
+    }
+    for face in id_list(&before["runnerUpFaces"]) {
+        conn.execute("UPDATE face_review_candidates SET runner_up_person_id=?1 WHERE face_id=?2 AND runner_up_person_id IS NULL", params![other, face])?;
+    }
+    restore_pending(conn, other, before, at)?;
     if let Some(representative) = before["keepRepresentative"].as_i64() {
         conn.execute(
             "UPDATE persons SET representative_face_id=?1 WHERE id=?2 AND EXISTS(SELECT 1 FROM face_prints WHERE id=?1 AND person_id=?2)",

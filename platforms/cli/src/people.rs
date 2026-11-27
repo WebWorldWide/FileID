@@ -1,6 +1,4 @@
-//! `fileid people` — list person clusters (id, display name, face count).
-//! Read-only. People are produced by the engine's face detection + clustering,
-//! so this is empty until a full engine scan (with face models) has run.
+//! People come from the engine's face clustering, so this is empty until a full scan with face models has run.
 
 use anyhow::Result;
 use fileid_engine::read::people::active_people;
@@ -42,13 +40,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     println!("{} person cluster(s):", people.len());
-    println!(
-        "  {:<6} {:<28} {:>6} {:>6}",
-        ctx.bold("id"),
-        ctx.bold("name"),
-        ctx.bold("faces"),
-        ctx.bold("files")
-    );
+    println!("{}", header(ctx));
     for p in &people {
         println!(
             "  {:<6} {:<28} {:>6} {:>6}",
@@ -59,4 +51,41 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn header(ctx: &Ctx) -> String {
+    format!(
+        "  {} {} {} {}",
+        ctx.bold(&format!("{:<6}", "id")),
+        ctx.bold(&format!("{:<28}", "name")),
+        ctx.bold(&format!("{:>6}", "faces")),
+        ctx.bold(&format!("{:>6}", "files"))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colored_header_columns_line_up_with_plain_rows() {
+        let strip = |s: &str| s.replace("\x1b[1m", "").replace("\x1b[0m", "");
+        let mut ctx = Ctx {
+            json: false,
+            quiet: false,
+            color: false,
+            color_allowed: false,
+            db: std::path::PathBuf::new(),
+            db_explicit: false,
+        };
+        let plain = header(&ctx);
+        ctx.color = true;
+        let colored = header(&ctx);
+        assert_ne!(plain, colored);
+        assert_eq!(strip(&colored), plain);
+        assert_eq!(
+            plain,
+            format!("  {:<6} {:<28} {:>6} {:>6}", "id", "name", "faces", "files")
+        );
+    }
 }

@@ -17,12 +17,8 @@ internal sealed record ChatActionPhase(ChatActionStage Stage, string Text = "")
     public static ChatActionPhase Failed(string text) => new(ChatActionStage.Failed, text);
 }
 
-/// <summary>What an applyFolderLayout card shows and sends: the Auto tier of the current plan.</summary>
 internal sealed record ChatPlanSummary(string Root, int Count, IReadOnlyList<string> Examples, IReadOnlyList<RestructureMove> Moves, bool TooLarge);
 
-/// <summary>Client copy of the engine's Chat action rules (CHAT.md "Actions"), so a reply
-/// whose confirmation flag disagrees, whose kind is unknown or whose fields are missing
-/// never shows a card and never runs.</summary>
 internal static class ChatActionPolicy
 {
     public const int MaxContextFiles = 10_000;
@@ -125,7 +121,6 @@ internal static class ChatActionPolicy
         _ => "Library",
     };
 
-    /// <summary>The WinUI page id (<see cref="SidebarTab"/>) for a ChatPage value.</summary>
     public static string TabId(string? page) => page switch
     {
         "people" => "people",
@@ -183,7 +178,6 @@ internal static class ChatActionPolicy
         return source.Take(3).Select(ExampleName).ToArray();
     }
 
-    /// <summary>A full path shows as its file name; other examples stay as written.</summary>
     public static string ExampleName(string example) => IsRooted(example) ? HitPresentation.FileName(example) : example;
 
     private static bool IsRooted(string value) =>
@@ -339,7 +333,6 @@ internal static class ChatActionPolicy
         return text + ".";
     }
 
-    /// <summary>The batch id the engine appends to a trashFiles result ("trashFiles:&lt;batch&gt;").</summary>
     public static string? TrashBatch(BulkActionResult result)
     {
         var separator = result.Action.IndexOf(':');

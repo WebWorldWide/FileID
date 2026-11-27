@@ -52,43 +52,20 @@
     ]
   },
   {
-    "name": "cross-restructure-swift-apply-rust-undo",
-    "description": "One catalog and one undo journal pass Swift → Rust: Swift plans and applies the respect-stage moves, Rust reads that journal and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and Rust plans the same moves again.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
+    "name": "restructure-apply-undo-after-restart",
+    "description": "One catalog and one undo journal across a restart: the engine plans and applies the respect-stage moves, reads that journal after the restart and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and it plans the same moves again.",
     "extends": "restructure-respect-stage",
     "steps": [
-      {"label": "swift plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
-      {"label": "swift applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
-      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
-      {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
-      {"restart": "rust"},
-      {"label": "rust undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
-      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
-      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
-      {"label": "rust second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
-      {"label": "rust plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
-    ]
-  },
-  {
-    "name": "cross-restructure-rust-apply-swift-undo",
-    "description": "One catalog and one undo journal pass Rust → Swift: Rust plans and applies the respect-stage moves, Swift reads that journal and undoes them; files, rows and the empty event folders come back, a second undo does nothing, and Swift plans the same moves again.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "rust",
-    "extends": "restructure-respect-stage",
-    "steps": [
-      {"label": "rust plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
-      {"label": "rust applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
-      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
-      {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
-      {"restart": "swift"},
-      {"label": "swift undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
-      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
-      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
-      {"label": "swift second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
-      {"label": "swift plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
+        {"label": "rust plans", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+        {"label": "rust applies", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+        {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"]}},
+        {"label": "feedback learned", "db": "SELECT token, folder, weight FROM restructure_feedback ORDER BY token, folder", "expect": [["dsc00001", "2026-10-04", 1], ["dsc00002", "2026-10-04", 1], ["dsc00003", "2026-10-04", 1], ["dsc00004", "2026-10-04", 1], ["dsc00005", "2026-10-04", 1]]},
+        {"restart": true},
+        {"label": "rust undoes", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+        {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
+        {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,5,13,15) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [5, "{path:DCIM/100MSDCF/DSC00005.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"], [15, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}"]]},
+        {"label": "rust second undo is a no-op", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 0, "failed": 0}},
+        {"label": "rust plans the same moves again", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}}
     ]
   },
   {
@@ -133,14 +110,13 @@
     "requiresSymlinks": true,
     "description": "Shortcut mode (useSymlinks) links each planned destination to its file and leaves the originals and rows in place; undo with the run's token removes exactly those links.",
     "extends": "restructure-respect-stage",
-    "knownDivergences": [{"engine": "swift", "reason": "The Swift engine has no shortcut mode and refuses useSymlinks: true (DECISIONS 2026-06-14); the Mac app never sends it. The Rust engine keeps it for Windows and Linux and on the Mac it is checked here."}],
     "steps": [
-      {"label": "plan", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
-      {"label": "apply as shortcuts", "save": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": true}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0, "shortcutUndoToken": {"$tol": "present"}}},
-      {"label": "links beside originals", "fs": {"symlinks": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "contents": {"Photos/2026/2026-10-04/DSC00001.JPG": "dsc1"}}},
-      {"label": "rows unchanged", "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"]]},
-      {"label": "undo the shortcuts", "command": {"undoRestructure": {"libraryRoot": "{root}", "shortcutUndoToken": {"$var": "apply.shortcutUndoToken"}}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
-      {"label": "links gone, originals kept", "fs": {"absent": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1"}}}
+        {"label": "plan", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+        {"label": "apply as shortcuts", "save": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": true}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0, "shortcutUndoToken": {"$tol": "present"}}},
+        {"label": "links beside originals", "fs": {"symlinks": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "contents": {"Photos/2026/2026-10-04/DSC00001.JPG": "dsc1"}}},
+        {"label": "rows unchanged", "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"]]},
+        {"label": "undo the shortcuts", "command": {"undoRestructure": {"libraryRoot": "{root}", "shortcutUndoToken": {"$var": "apply.shortcutUndoToken"}}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+        {"label": "links gone, originals kept", "fs": {"absent": ["Photos/2026/2026-10-04/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"], "exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1"}}}
     ]
   },
   {
@@ -747,6 +723,358 @@
     "steps": [
       {"label": "missing folder", "command": {"planRestructure": {"libraryRoot": "{state}/no-such-folder"}}, "await": "error", "filter": {"kind": "plan_restructure_root"}, "timeout": 60, "expect": {"kind": "plan_restructure_root", "message": "Organize Folders can't find that folder. Choose the folder again."}},
       {"label": "a file is not a folder", "command": {"planRestructure": {"libraryRoot": "{path:DCIM/100MSDCF/DSC00001.JPG}"}}, "await": "error", "filter": {"kind": "plan_restructure_root"}, "timeout": 60, "expect": {"kind": "plan_restructure_root"}}
+    ]
+  },
+  {
+    "name": "restructure-clusters-by-single-linkage",
+    "description": "Two 13-photo folders (Lisbon 2022 and Beta Trip) and a Downloads photo that is nearer to Lisbon 2022 than to Beta Trip by 0.01 cosine, and in none of their 12-nearest lists. Single linkage clusters the photo with Lisbon 2022 (a mutual-kNN gate would leave it alone, and the margin rule then keeps it out of both). The semantic pass routes it to 'Lisbon 2022', which the respect stage drops (a year-like folder name is not a name it will mint), and the photo was captured during Backups only, so no move survives; a plan that clusters differently files it into Backups as 'Captured during Backups'. Both engines must plan nothing.",
+    "tree": [
+      {
+        "path": "Lisbon 2022/l01.jpg",
+        "content": "lisbon1",
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l02.jpg",
+        "content": "lisbon2",
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l03.jpg",
+        "content": "lisbon3",
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l04.jpg",
+        "content": "lisbon4",
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l05.jpg",
+        "content": "lisbon5",
+        "row": {
+          "id": 5,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l06.jpg",
+        "content": "lisbon6",
+        "row": {
+          "id": 6,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l07.jpg",
+        "content": "lisbon7",
+        "row": {
+          "id": 7,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l08.jpg",
+        "content": "lisbon8",
+        "row": {
+          "id": 8,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l09.jpg",
+        "content": "lisbon9",
+        "row": {
+          "id": 9,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l10.jpg",
+        "content": "lisbon10",
+        "row": {
+          "id": 10,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l11.jpg",
+        "content": "lisbon11",
+        "row": {
+          "id": 11,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Lisbon 2022/l12.jpg",
+        "content": "lisbon12",
+        "row": {
+          "id": 12,
+          "kind": "image",
+          "created_at": 1791114840
+        }
+      },
+      {
+        "path": "Lisbon 2022/l13.jpg",
+        "content": "lisbon13",
+        "row": {
+          "id": 13,
+          "kind": "image",
+          "created_at": 1791121680
+        }
+      },
+      {
+        "path": "Beta Trip/b01.jpg",
+        "content": "beta1",
+        "row": {
+          "id": 14,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b02.jpg",
+        "content": "beta2",
+        "row": {
+          "id": 15,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b03.jpg",
+        "content": "beta3",
+        "row": {
+          "id": 16,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b04.jpg",
+        "content": "beta4",
+        "row": {
+          "id": 17,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b05.jpg",
+        "content": "beta5",
+        "row": {
+          "id": 18,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b06.jpg",
+        "content": "beta6",
+        "row": {
+          "id": 19,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b07.jpg",
+        "content": "beta7",
+        "row": {
+          "id": 20,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b08.jpg",
+        "content": "beta8",
+        "row": {
+          "id": 21,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b09.jpg",
+        "content": "beta9",
+        "row": {
+          "id": 22,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b10.jpg",
+        "content": "beta10",
+        "row": {
+          "id": 23,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b11.jpg",
+        "content": "beta11",
+        "row": {
+          "id": 24,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b12.jpg",
+        "content": "beta12",
+        "row": {
+          "id": 25,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Beta Trip/b13.jpg",
+        "content": "beta13",
+        "row": {
+          "id": 26,
+          "kind": "image",
+          "created_at": 1791108000
+        }
+      },
+      {
+        "path": "Backups/k1.jpg",
+        "content": "backup1",
+        "row": {
+          "id": 27,
+          "kind": "image",
+          "created_at": 1791128520
+        }
+      },
+      {
+        "path": "Backups/k2.jpg",
+        "content": "backup2",
+        "row": {
+          "id": 28,
+          "kind": "image",
+          "created_at": 1791128580
+        }
+      },
+      {
+        "path": "Backups/k3.jpg",
+        "content": "backup3",
+        "row": {
+          "id": 29,
+          "kind": "image",
+          "created_at": 1791128640
+        }
+      },
+      {
+        "path": "Backups/k4.jpg",
+        "content": "backup4",
+        "row": {
+          "id": 30,
+          "kind": "image",
+          "created_at": 1791128700
+        }
+      },
+      {
+        "path": "Backups/k5.jpg",
+        "content": "backup5",
+        "row": {
+          "id": 31,
+          "kind": "image",
+          "created_at": 1791128760
+        }
+      },
+      {
+        "path": "Downloads/stray.jpg",
+        "content": "stray",
+        "row": {
+          "id": 32,
+          "kind": "image",
+          "created_at": 1791128580
+        }
+      }
+    ],
+    "sql": [
+      "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES (1,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(2,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(3,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(4,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(5,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(6,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(7,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(8,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(9,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(10,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(11,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(12,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(13,CAST(X'0000803f0000000000000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(14,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(15,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(16,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(17,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(18,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(19,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(20,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(21,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(22,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(23,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(24,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(25,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(26,CAST(X'bd1b4f3f1879163f00000000'||zeroblob(2036) AS BLOB),'{clip_model}'),(27,CAST(X'00000000000000000000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(28,CAST(X'00000000000000000000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(29,CAST(X'00000000000000000000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(30,CAST(X'00000000000000000000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(31,CAST(X'00000000000000000000803f'||zeroblob(2036) AS BLOB),'{clip_model}'),(32,CAST(X'63d0743fbeb1953e00000000'||zeroblob(2036) AS BLOB),'{clip_model}')"
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": []
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "restructure-clusters-by-single-linkage-without-the-respect-stage",
+    "description": "The same library with FILEID_RESTRUCTURE_RESPECT=0: the semantic pass's clustering decides alone, and the Downloads photo is filed into 'Lisbon 2022' with the folder's photos.",
+    "extends": "restructure-clusters-by-single-linkage",
+    "env": {
+      "FILEID_RESTRUCTURE_RESPECT": "0"
+    },
+    "steps": [
+      {
+        "label": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "libraryRoot": "{root}",
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 32,
+                "source": "{path:Downloads/stray.jpg}",
+                "destination": "{path:Lisbon 2022/stray.jpg}",
+                "category": "Lisbon 2022"
+              }
+            ]
+          }
+        }
+      }
     ]
   }
 ]

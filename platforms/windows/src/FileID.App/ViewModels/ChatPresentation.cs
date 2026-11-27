@@ -2,9 +2,7 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Chat message and citation layout rules (macOS ChatWorkbench):
-/// who said what, which answer carries the citation chips, and whether a new
-/// reply only adds to the messages already shown.</summary>
+/// <summary>Chat message and citation layout rules (macOS ChatWorkbench): who said what, which answer carries the citation chips, and whether a new reply only adds to the messages already shown.</summary>
 internal static class ChatPresentation
 {
     public const int MaxChips = 8;
@@ -19,8 +17,7 @@ internal static class ChatPresentation
 
     public static IReadOnlyList<CatalogHit> ChipHits(IReadOnlyList<CatalogHit> hits) => hits.Take(MaxChips).ToArray();
 
-    /// <summary>True when <paramref name="next"/> keeps every shown message in
-    /// order, so the views can be updated and extended instead of rebuilt.</summary>
+    /// <summary>True when next keeps every shown message in order, so the views can be updated and extended instead of rebuilt.</summary>
     public static bool ExtendsShown(IReadOnlyList<string> shown, IReadOnlyList<ChatMessage> next)
     {
         if (next.Count < shown.Count) return false;

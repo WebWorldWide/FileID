@@ -199,10 +199,11 @@ fn number(value: &Value) -> Option<f64> {
 fn parse_probe(data: &[u8]) -> Result<Probe> {
     let document: Value = serde_json::from_slice(data).context("Invalid video metadata")?;
     let streams = document["streams"].as_array().context("Missing video streams")?;
-    ensure!((1..=2).contains(&streams.len()), "Video must have one video and at most one audio stream");
     let video = streams.iter().filter(|stream| stream["codec_type"] == "video").collect::<Vec<_>>();
     let audio = streams.iter().filter(|stream| stream["codec_type"] == "audio").collect::<Vec<_>>();
-    ensure!(video.len() == 1 && audio.len() <= 1 && video.len() + audio.len() == streams.len(), "Video must have one video and at most one audio stream");
+    // Phone clips carry timecode and metadata tracks and sometimes a second audio track. The export maps only the first
+    // video and audio stream and drops the rest, so they are not a reason to refuse.
+    ensure!(video.len() == 1, "Video must have exactly one video stream");
     let video = video[0];
     let width = video["width"].as_u64().context("Missing video width")?;
     let height = video["height"].as_u64().context("Missing video height")?;
@@ -236,7 +237,7 @@ fn parse_probe(data: &[u8]) -> Result<Probe> {
         video_start: number(&video["start_time"]).context("Invalid video timestamps")?,
         audio_start,
         audio_duration,
-        audio_count: audio.len(),
+        audio_count: audio.len().min(1),
         video_codec: video["codec_name"].as_str().unwrap_or("").to_owned(),
         audio_codec: audio_stream.and_then(|stream| stream["codec_name"].as_str()).map(str::to_owned),
     })
@@ -443,7 +444,6 @@ const AUDIO_TIMEOUT: Duration = Duration::from_secs(120);
 /// 16 kHz mono 16-bit PCM: what on-device speech models expect.
 pub(crate) const SPEECH_SAMPLE_RATE: u32 = 16_000;
 
-/// The first audio stream of `[start, start + length)` as a 16 kHz mono WAV.
 pub(crate) fn audio_wav(source: &Path, start: f64, length: f64, cancelled: &AtomicBool) -> Result<Vec<u8>> {
     ensure!(start.is_finite() && start >= 0.0 && length.is_finite() && length > 0.0 && length <= 600.0, "Invalid audio interval");
     let runtime = runtime()?;
@@ -490,7 +490,6 @@ pub(crate) fn fitted_size(width: u32, height: u32, max_side: u32) -> (u32, u32) 
     (even(f64::from(width) * scale), even(f64::from(height) * scale))
 }
 
-/// One RGB frame at `seconds`, scaled to `width`×`height`.
 pub(crate) fn frame_rgb(source: &Path, seconds: f64, width: u32, height: u32, cancelled: &AtomicBool) -> Result<Vec<u8>> {
     let runtime = runtime()?;
     let filter = format!("scale={width}:{height}:flags=bicubic");
@@ -504,7 +503,6 @@ pub(crate) fn frame_rgb(source: &Path, seconds: f64, width: u32, height: u32, ca
     Ok(data)
 }
 
-/// Silent clip from a lavfi source such as `testsrc2=size=64x36:rate=5:duration=6`.
 #[cfg(test)]
 pub(super) fn generate_silent_test_video(source: &Path, lavfi: &str) {
     let runtime = runtime().unwrap();
@@ -541,8 +539,8 @@ mod tests {
         let good = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","codec_name":"h264","width":640,"height":360,"start_time":"0","pix_fmt":"yuv420p"}]}"#;
         let probe = parse_probe(good).unwrap();
         assert_eq!((probe.width, probe.height), (640, 360));
-        let extra = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0"},{"codec_type":"subtitle"}]}"#;
-        assert!(parse_probe(extra).is_err());
+        let two_videos = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0"},{"codec_type":"video","width":640,"height":360,"start_time":"0"}]}"#;
+        assert!(parse_probe(two_videos).is_err());
         let hdr = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0","pix_fmt":"yuv420p10le"}]}"#;
         assert!(parse_probe(hdr).is_err());
         let hdr_transfer = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0","pix_fmt":"yuv420p","color_transfer":"arib-std-b67"}]}"#;
@@ -551,6 +549,27 @@ mod tests {
         assert!(parse_probe(wide_gamut).is_err());
         let subsampling = br#"{"format":{"duration":"2.0"},"streams":[{"codec_type":"video","width":640,"height":360,"start_time":"0","pix_fmt":"yuv422p"}]}"#;
         assert!(parse_probe(subsampling).is_err());
+    }
+
+    #[test]
+    fn a_phone_clip_with_metadata_tracks_and_two_audio_tracks_is_accepted() {
+        let clip = br#"{"format":{"duration":"2.0"},"streams":[
+            {"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"start_time":"0","pix_fmt":"yuv420p"},
+            {"codec_type":"audio","codec_name":"aac","start_time":"0","duration":"2.0"},
+            {"codec_type":"audio","codec_name":"aac","start_time":"0","duration":"2.0"},
+            {"codec_type":"data","codec_tag_string":"mebx"},
+            {"codec_type":"data","codec_tag_string":"tmcd"}]}"#;
+        let probe = parse_probe(clip).unwrap();
+        assert_eq!((probe.width, probe.height, probe.audio_count), (1920, 1080, 1));
+        assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
+    }
+
+    #[test]
+    fn real_ffprobe_output_for_a_timecoded_clip_with_two_audio_tracks_is_accepted() {
+        let clip = br#"{"streams":[{"index":0,"codec_name":"h264","codec_long_name":"H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10","profile":"High","level":13,"codec_type":"video","codec_tag_string":"avc1","codec_tag":"0x31637661","mime_codec_string":"avc1.64000d","width":320,"height":180,"coded_width":320,"coded_height":180,"has_b_frames":2,"sample_aspect_ratio":"1:1","display_aspect_ratio":"16:9","pix_fmt":"yuv420p","chroma_location":"left","field_order":"progressive","is_avc":"true","nal_length_size":"4","id":"0x1","r_frame_rate":"30/1","avg_frame_rate":"30/1","time_base":"1/15360","start_pts":0,"start_time":"0.000000","duration_ts":30720,"duration":"2.000000","bit_rate":"6688","bits_per_raw_sample":"8","nb_frames":"60","extradata_size":47},{"index":1,"codec_name":"aac","codec_long_name":"AAC (Advanced Audio Coding)","profile":"LC","codec_type":"audio","codec_tag_string":"mp4a","codec_tag":"0x6134706d","mime_codec_string":"mp4a.40.2","sample_fmt":"fltp","sample_rate":"44100","channels":1,"channel_layout":"mono","bits_per_sample":0,"initial_padding":1024,"seek_preroll":1024,"id":"0x2","r_frame_rate":"0/0","avg_frame_rate":"0/0","time_base":"1/44100","start_pts":0,"start_time":"0.000000","duration_ts":88200,"duration":"2.000000","bit_rate":"67766","nb_frames":"88","extradata_size":5},{"index":2,"codec_name":"aac","codec_long_name":"AAC (Advanced Audio Coding)","profile":"LC","codec_type":"audio","codec_tag_string":"mp4a","codec_tag":"0x6134706d","mime_codec_string":"mp4a.40.2","sample_fmt":"fltp","sample_rate":"44100","channels":1,"channel_layout":"mono","bits_per_sample":0,"initial_padding":1024,"seek_preroll":1024,"id":"0x3","r_frame_rate":"0/0","avg_frame_rate":"0/0","time_base":"1/44100","start_pts":0,"start_time":"0.000000","duration_ts":88200,"duration":"2.000000","bit_rate":"67504","nb_frames":"88","extradata_size":5},{"index":3,"codec_type":"data","codec_tag_string":"tmcd","codec_tag":"0x64636d74","id":"0x4","r_frame_rate":"0/0","avg_frame_rate":"30/1","time_base":"1/30","start_pts":0,"start_time":"0.000000","duration_ts":60,"duration":"2.000000","bit_rate":"16","nb_frames":"1","extradata_size":20}],"format":{"duration":"2.000000"}}"#;
+        let probe = parse_probe(clip).unwrap();
+        assert_eq!((probe.width, probe.height, probe.audio_count), (320, 180, 1));
+        assert_eq!(probe.video_codec, "h264");
     }
 
     #[test]

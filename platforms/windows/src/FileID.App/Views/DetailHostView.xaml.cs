@@ -1,9 +1,4 @@
-﻿// DetailHostView code-behind. Subscribes to AppViewModel and swaps the
-// hosted view when the active tab or folder-picked state changes.
-//
-// tab swap is animated with a 220 ms opacity crossfade (the same
-// timing macOS uses). Reduce-motion gates the animation so the swap is
-// instant for users who prefer it.
+﻿// Swaps the detail child on tab or folder changes with a fade; reduced motion makes the swap instant.
 
 using System.ComponentModel;
 using FileID.Services;
@@ -17,10 +12,6 @@ namespace FileID.Views;
 
 public sealed partial class DetailHostView : UserControl
 {
-    /// <summary>The currently-running tab-swap Storyboard, if any. Tracked
-    /// so it can be Stopped on Unloaded — otherwise the animation keeps
-    /// running past view detach, holding a reference to the (now orphaned)
-    /// Host element and preventing GC.</summary>
     private Storyboard? _activeStoryboard;
 
     public DetailHostView()
@@ -60,16 +51,7 @@ public sealed partial class DetailHostView : UserControl
             return;
         }
 
-        // Crossfade: fade the current content out (110 ms), THEN build + swap
-        // the new view, then fade it in (110 ms). The new view is built inside
-        // the fade-out completion (not up front) for a load-bearing reason: a
-        // rapid second tab click Stops this storyboard, so its Completed never
-        // runs. If we built the view eagerly here, that view would have already
-        // subscribed to EngineClient.PropertyChanged in its ctor but never be
-        // added to the tree — so it would never Unload, never unsubscribe, and
-        // become a zombie that keeps refreshing a never-shown ReadStore on
-        // every engine event. Lazy-building in Completed means a superseded
-        // swap constructs nothing.
+        // The new view is built inside the fade-out completion (not up front) for a load-bearing reason: a rapid second tab click Stops this storyboard, so its Completed never runs.
         var fadeOut = new DoubleAnimation
         {
             To = 0.0,
@@ -80,14 +62,12 @@ public sealed partial class DetailHostView : UserControl
         Storyboard.SetTargetProperty(fadeOut, "Opacity");
         var sbOut = new Storyboard();
         sbOut.Children.Add(fadeOut);
-        // Stop any prior in-flight animation before starting a new one;
-        // racing storyboards on the same target leak references.
+        // Stop any prior in-flight animation before starting a new one; racing storyboards on the same target leak references.
         try { _activeStoryboard?.Stop(); } catch { }
         _activeStoryboard = sbOut;
         sbOut.Completed += (_, _) =>
         {
-            // Superseded by a newer swap (defensive — Stop() shouldn't raise
-            // Completed, but never build/dispose for a stale storyboard).
+            // Superseded by a newer swap (defensive — Stop() shouldn't raise Completed, but never build/dispose for a stale storyboard).
             if (!ReferenceEquals(_activeStoryboard, sbOut)) return;
 
             CommitChild(BuildChild());
@@ -113,16 +93,10 @@ public sealed partial class DetailHostView : UserControl
         sbOut.Begin();
     }
 
-    /// <summary>Build the view for the currently-active tab. Pure construction;
-    /// no tree mutation — call <see cref="CommitChild"/> to mount it.</summary>
     private UIElement BuildChild()
     {
         var vm = AppViewModel.Instance;
-        // Settings is reachable WITHOUT a folder (matches the special-case
-        // in SidebarTabList that keeps the Settings entry enabled at the
-        // pre-folder onboarding stage). Without this short-circuit the
-        // build falls through to OnboardingSplash and the user never
-        // sees the Settings view they just clicked.
+        // Without this short-circuit the build falls through to OnboardingSplash and the user never sees the Settings view they just clicked.
         if (vm.ActiveTab.Id == "settings")
         {
             return new Settings.SettingsView();
@@ -146,10 +120,6 @@ public sealed partial class DetailHostView : UserControl
         };
     }
 
-    // File Tools keeps its session (selection, plan, running export) across
-    // page switches, so it is built once and re-hosted like the old overlay.
-    // Search & Moments does the same so its results are still there after a
-    // trip to Best Takes (the macOS sheet returns to the same search).
     private Workbenches.ToolsWorkbench? _toolsWorkbench;
     private Workbenches.CatalogWorkbench? _catalogWorkbench;
 
@@ -168,10 +138,7 @@ public sealed partial class DetailHostView : UserControl
     private static System.IntPtr HostWindowHandle() =>
         App.HostWindow is { } window ? WinRT.Interop.WindowNative.GetWindowHandle(window) : System.IntPtr.Zero;
 
-    /// <summary>Atomically swap the hosted view: dispose any IDisposable
-    /// outgoing child, clear the host (which fires the outgoing view's Unloaded
-    /// → its subscription teardown), then mount the new child. Always run
-    /// synchronously so the outgoing view is never disposed mid-animation.</summary>
+    /// <summary>Always run synchronously so the outgoing view is never disposed mid-animation.</summary>
     private void CommitChild(UIElement child)
     {
         DisposePriorChild();
@@ -179,12 +146,7 @@ public sealed partial class DetailHostView : UserControl
         Host.Children.Add(child);
     }
 
-    /// <summary>explicitly dispose the outgoing tab's UserControl
-    /// if it implements IDisposable, then clear the host. Without this the
-    /// old view became unreachable and waited on GC to finalize, leaving its
-    /// ReadStore / ClipSearchService / thumbnail cache alive for an
-    /// unbounded window — during which engine event callbacks could still
-    /// fire into a detached XAML element and crash the dispatcher.</summary>
+    /// <summary>Disposes the outgoing view deterministically; waiting for GC would keep its ReadStore, ClipSearchService and thumbnail cache alive while engine callbacks could still fire into a detached element.</summary>
     private void DisposePriorChild()
     {
         if (Host.Children.Count == 0) return;

@@ -1,15 +1,8 @@
-//! The Mac app's MLX models as the engine it hosts (`apple-adapters`) sees
-//! them: the favourite repos pinned in `shared/models/manifest.json`
-//! (`vlmRepos`), the audited MLX catalog the app bundles
-//! (`FileIDModelInfo/Resources/model-catalog.json`), the Swift engine's install
-//! locations, and its verified-install records (`.fileid-verified-<revision>`
-//! plus the `-v2` file-identity record). Every rule here is a port of
-//! `MLXModelCatalog.swift`, `AIModels.swift`, `VLMDownloader.swift` and
-//! `ModelLicenseAcceptance.swift`, so a model either engine installed serves the
-//! other without a download.
-//!
-//! Network access is not here: the file listing is fetched by
-//! `downloader::fetch_repo_listing` and the files by the prewarm download path.
+//! The Mac app's MLX models as seen by the engine it hosts (`apple-adapters`): favourite repos from
+//! `shared/models/manifest.json` (`vlmRepos`), the bundled audited catalog, the Swift engine's install locations and
+//! verified-install records (`.fileid-verified-<revision>` plus the `-v2` file-identity record). Every rule ports
+//! `MLXModelCatalog.swift`, `AIModels.swift`, `VLMDownloader.swift` and `ModelLicenseAcceptance.swift`, so a model
+//! either engine installed serves the other.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
@@ -30,7 +23,6 @@ const MAC_CATALOG_JSON: &str = "";
 const RUNTIME: &str = "mlx-swift-lm 3.32.3";
 const CATALOG_LICENSES: [&str; 5] = ["apache-2.0", "mit", "bsd-2-clause", "bsd-3-clause", "isc"];
 
-/// `MLXModelCatalog.textArchitectures` / `visionArchitectures`.
 const TEXT_ARCHITECTURES: &[&str] = &[
     "acereason", "afmoe", "apertus", "baichuan_m1", "bailing_moe", "bitnet", "cohere", "deepseek_v2", "deepseek_v3", "ernie4_5",
     "exaone4", "falcon_h1", "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n", "gemma4", "gemma4_text", "gemma4_unified", "glm4",
@@ -43,11 +35,10 @@ const VISION_ARCHITECTURES: &[&str] = &[
     "fastvlm", "gemma3", "gemma4", "gemma4_unified", "glm_ocr", "idefics3", "lfm2-vl", "lfm2_vl", "llava_qwen2", "mistral3",
     "muse_glimmer", "paligemma", "pixtral", "qwen2_5_vl", "qwen2_vl", "qwen3_5", "qwen3_5_moe", "qwen3_vl", "qwen3_vl_moe", "smolvlm",
 ];
-/// `MLXModelCatalog.runtimeIncompatibleRepos`.
 const RUNTIME_INCOMPATIBLE: [&str; 2] = ["mlx-community/SmolVLM-256M-Instruct-4bit", "mlx-community/SmolVLM-500M-Instruct-4bit"];
 
 /// `AIModelKind.favorites`: kind, display name, resident-memory budget (GB).
-const FAVORITES: [(&str, &str, f64); 9] = [
+const FAVORITES: [(&str, &str, f64); 10] = [
     ("qwen2_5_vl_7b", "Qwen2.5-VL 7B (4-bit)", 7.0),
     ("qwen3_vl_2b", "Qwen3-VL 2B (4-bit)", 3.0),
     ("qwen3_vl_4b", "Qwen3-VL 4B (4-bit)", 5.0),
@@ -56,10 +47,10 @@ const FAVORITES: [(&str, &str, f64); 9] = [
     ("gemma_3_4b", "Gemma 3 4B (QAT 4-bit)", 4.5),
     ("gemma_3_12b", "Gemma 3 12B (QAT 4-bit)", 9.0),
     ("mistral_small_3_2", "Mistral Small 3.2 24B (4-bit)", 16.0),
+    ("qwen3_5_122b", "Qwen3.5 122B-A10B (4-bit)", 72.0),
     ("paligemma_3b", "PaliGemma 3B (8-bit)", 4.0),
 ];
 
-/// `ModelLicenseAcceptance.reviewedAt`.
 const LICENSE_REVIEWED_AT: &str = "2026-07-16";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -145,7 +136,6 @@ fn entry_is_valid(model: &CatalogModel) -> bool {
         && model.weight_bytes == model.files.iter().map(|file| file.size).sum::<i64>()
 }
 
-/// `MLXModelCatalog.load`: one invalid entry rejects the whole catalog.
 pub(crate) fn parse_catalog(json: &str) -> Vec<CatalogModel> {
     let Ok(document) = serde_json::from_str::<CatalogDocument>(json) else {
         return Vec::new();
@@ -157,7 +147,6 @@ pub(crate) fn parse_catalog(json: &str) -> Vec<CatalogModel> {
     document.entries.into_iter().filter(|entry| !RUNTIME_INCOMPATIBLE.contains(&entry.repo.as_str())).collect()
 }
 
-/// One installable MLX model: a favourite or a catalog entry (`AIModelKind`).
 #[derive(Debug)]
 pub struct Repo {
     pub kind: &'static str,
@@ -170,13 +159,11 @@ pub struct Repo {
     pub ram_budget_gb: f64,
     pub vision: bool,
     pub favorite: bool,
-    /// The catalog entry for this repo (`AIModelKind.catalogEntry`).
     pub catalog: Option<&'static CatalogModel>,
 }
 
 impl Repo {
-    /// Catalog weights the listing and the verified record must match: only
-    /// for catalog models, never for the manifest favourites (VLMDownloader).
+    /// Only catalog models; never the manifest favourites (VLMDownloader).
     pub fn audited_weights(&self) -> Option<&'static CatalogModel> {
         if self.favorite { None } else { self.catalog }
     }
@@ -205,7 +192,6 @@ fn spdx_policy(license: &str) -> &'static str {
     }
 }
 
-/// Every entry of the bundled Mac catalog, or none when it fails validation.
 pub fn catalog_entries() -> &'static [CatalogModel] {
     static CATALOG: OnceLock<Vec<CatalogModel>> = OnceLock::new();
     CATALOG.get_or_init(|| parse_catalog(MAC_CATALOG_JSON))
@@ -233,7 +219,6 @@ fn repos() -> &'static [Repo] {
                 catalog: by_repo.get(pin.repo.as_str()).copied(),
             });
         }
-        // Names are leaked once so catalog kinds are `&'static` like favourites.
         for entry in catalog {
             let approx_bytes = u64::try_from(entry.weight_bytes).unwrap_or(0);
             repos.push(Repo {
@@ -253,57 +238,53 @@ fn repos() -> &'static [Repo] {
     })
 }
 
-/// Look a kind up whatever the build (tests and tooling).
 pub fn lookup(kind: &str) -> Option<&'static Repo> {
     repos().iter().find(|repo| repo.kind == kind)
 }
 
-/// The MLX model a prewarm or catalog request names. Only the engine the Mac
-/// app hosts serves MLX; every other build keeps its GGUF bundles.
+/// Only the Mac-hosted engine serves MLX; every other build keeps its GGUF bundles.
 pub fn repo(kind: &str) -> Option<&'static Repo> {
     if crate::paths::APP_HOSTED { lookup(kind) } else { None }
 }
 
-/// `AIModelKind.allCases`: favourites, then catalog models whose repo is not
-/// already a favourite. A catalog copy of a favourite stays reachable by its
-/// `hf:` kind, as `AIModelKind(rawValue:)` allows.
+/// Favourites, then catalog models not already a favourite; a catalog copy stays reachable by its `hf:` kind.
 pub fn listed() -> impl Iterator<Item = &'static Repo> {
     let favorites: HashSet<&str> = repos().iter().filter(|repo| repo.favorite).map(|repo| repo.repo).collect();
     repos().iter().filter(move |repo| repo.favorite || !favorites.contains(repo.repo))
 }
 
-/// The user's home as CoreFoundation resolves it (`CFFIXED_USER_HOME` first).
 fn home() -> Option<PathBuf> {
     ["CFFIXED_USER_HOME", "HOME"].iter().filter_map(std::env::var_os).find(|value| !value.is_empty()).map(PathBuf::from)
 }
 
-/// `ModelCachePaths.huggingFaceModels`: `FILEID_HF_CACHE_ROOT` when absolute;
-/// inside the App Store sandbox `Application Support/FileID/Models/huggingface`;
-/// otherwise `~/Documents/huggingface`; then `models`.
+/// `cache_root()` then `models`.
 pub fn models_root() -> Option<PathBuf> {
     Some(cache_root()?.join("models"))
 }
 
-/// The folder `models` lives in. One rule for every reader, so an engine given
-/// a home for a test or a sandbox never looks in another home's models.
+/// `FILEID_HF_CACHE_ROOT` when absolute; otherwise `Application Support/FileID/Models/huggingface`, except that a
+/// Developer ID install which already holds models in `~/Documents/huggingface/models` keeps using that folder
+/// (nothing is moved). Same rule as `ModelCachePaths.swift`, so new weights never land in a folder iCloud uploads.
 pub fn cache_root() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("FILEID_HF_CACHE_ROOT").filter(|root| Path::new(root).is_absolute()) {
         return Some(PathBuf::from(root));
     }
     let home = home()?;
+    let support = home.join("Library/Application Support/FileID/Models/huggingface");
     let sandboxed = std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some_and(|id| !id.is_empty());
-    Some(if sandboxed {
-        home.join("Library/Application Support/FileID/Models/huggingface")
-    } else {
-        home.join("Documents/huggingface")
-    })
+    if sandboxed {
+        return Some(support);
+    }
+    let legacy = home.join("Documents/huggingface");
+    let legacy_in_use = std::fs::read_dir(legacy.join("models"))
+        .is_ok_and(|mut entries| entries.any(|entry| entry.is_ok_and(|entry| !entry.file_name().to_string_lossy().starts_with('.'))));
+    Some(if legacy_in_use { legacy } else { support })
 }
 
 pub fn model_dir(repo: &Repo) -> Option<PathBuf> {
     Some(repo.repo.split('/').fold(models_root()?, |path, part| path.join(part)))
 }
 
-/// `AIModelKind.isInstalledOnDisk()`: what `listModels` reports.
 pub fn has_config(repo: &Repo) -> bool {
     model_dir(repo).is_some_and(|dir| dir.join("config.json").is_file())
 }
@@ -319,10 +300,9 @@ fn tier(gigabytes: f64) -> &'static str {
     }
 }
 
-/// The Swift engine's `listModels` reply: favourites, then the bundled catalog.
-pub fn catalog_items<S: std::hash::BuildHasher>(
+pub(crate) fn catalog_items<S: std::hash::BuildHasher>(
     role: Option<&str>,
-    physical_memory_gb: f64,
+    memory: crate::commands::models::Memory,
     benchmarks: &HashMap<String, ModelBenchmark, S>,
 ) -> Vec<ModelCatalogItem> {
     listed()
@@ -331,6 +311,7 @@ pub fn catalog_items<S: std::hash::BuildHasher>(
             if role.is_some_and(|role| role != kind_role) {
                 return None;
             }
+            let (fits, fits_now) = crate::commands::models::fits("mlx", 0, repo.ram_budget_gb, memory);
             Some(ModelCatalogItem {
                 id: repo.kind.into(),
                 name: repo.display_name.into(),
@@ -348,14 +329,14 @@ pub fn catalog_items<S: std::hash::BuildHasher>(
                 status: if repo.favorite { "curated" } else { "candidate" }.into(),
                 runnable: true,
                 installed: has_config(repo),
-                fits: repo.ram_budget_gb <= physical_memory_gb * 0.6,
+                fits,
+                fits_now,
                 benchmark: benchmarks.get(repo.kind).cloned(),
             })
         })
         .collect()
 }
 
-/// `ModelLicenseAcceptance`: the policy terms a model needs, when any.
 fn terms(repo: &Repo) -> Option<&'static str> {
     if !repo.favorite {
         return None;
@@ -386,9 +367,6 @@ pub fn license_name(repo: &Repo) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Verified-install records (`VLMDownloader.VerifiedSentinel` / `IdentitySentinel`)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VerifiedFile {
@@ -397,7 +375,6 @@ pub struct VerifiedFile {
     pub size: i64,
 }
 
-/// Field order is the Swift encoder's sorted-key order.
 #[derive(Debug, Serialize, Deserialize)]
 struct VerifiedManifest {
     files: Vec<VerifiedFile>,
@@ -463,7 +440,6 @@ pub fn file_identity(file: &Path, path: &str) -> Option<FileIdentity> {
     })
 }
 
-/// Darwin's `st_dev` is a signed 32-bit value that Swift widens with its sign.
 #[cfg(target_os = "macos")]
 fn device_number(dev: u64) -> i64 {
     dev as i32 as i64
@@ -545,9 +521,6 @@ fn read_manifest(dir: &Path, revision: &str) -> Option<(Vec<u8>, VerifiedManifes
     Some((bytes, manifest))
 }
 
-/// `VLMDownloader.verifiedSentinelIsValid`: the identity record proves the
-/// files untouched since they were hashed; otherwise every file is hashed
-/// again and, when nothing changed meanwhile, the identity record rewritten.
 pub fn verified_record_is_valid(dir: &Path, revision: &str) -> bool {
     let Some((bytes, manifest)) = read_manifest(dir, revision) else {
         return false;
@@ -575,8 +548,6 @@ pub fn verified_record_is_valid(dir: &Path, revision: &str) -> bool {
     true
 }
 
-/// `VLMDownloader.catalogSentinelIsValid`: a catalog model's record must list
-/// exactly the audited weights.
 pub fn catalog_record_is_valid(dir: &Path, repo: &Repo) -> bool {
     let Some(entry) = repo.audited_weights() else {
         return true;
@@ -590,9 +561,7 @@ pub fn catalog_record_is_valid(dir: &Path, repo: &Repo) -> bool {
         && entry.files.iter().all(|expected| weights.iter().any(|file| file.path == expected.path && file.sha256 == expected.sha256 && file.size == expected.size))
 }
 
-/// A complete, verified install of `repo` that needs no network. A record
-/// that no longer verifies is removed, as the Swift engine does, so the next
-/// fetch re-proves every file.
+/// A record that no longer verifies is removed so the next fetch re-proves every file.
 pub fn installed(repo: &Repo) -> bool {
     let Some(dir) = model_dir(repo) else {
         return false;
@@ -610,8 +579,6 @@ pub fn installed(repo: &Repo) -> bool {
     false
 }
 
-/// `DeepAnalyze.writeInstalledSentinel`: the empty marker the app's Deep
-/// Analyze cards read.
 pub fn mark_installed(repo: &Repo) -> Result<()> {
     let dir = model_dir(repo).context("no Hugging Face model folder")?;
     let marker = installed_marker_path(&dir);
@@ -621,15 +588,11 @@ pub fn mark_installed(repo: &Repo) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Repo listing and install plan
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoFile {
     pub path: String,
     pub size: i64,
-    /// The LFS oid, which is the file's SHA-256; small files have none.
     pub sha256: Option<String>,
 }
 
@@ -648,7 +611,6 @@ struct TreeLfs {
     oid: Option<String>,
 }
 
-/// The `api/models/<repo>/tree/<revision>?recursive=true` reply's files.
 pub fn parse_listing(bytes: &[u8]) -> Result<Vec<RepoFile>> {
     let entries: Vec<TreeEntry> = serde_json::from_slice(bytes).context("the model file listing could not be read")?;
     Ok(entries
@@ -662,7 +624,6 @@ pub fn parse_listing(bytes: &[u8]) -> Result<Vec<RepoFile>> {
         .collect())
 }
 
-/// `VLMDownloader.shouldDownload`.
 fn should_download(file: &RepoFile) -> bool {
     let path = file.path.to_lowercase();
     let image = path.rsplit_once('.').is_some_and(|(_, extension)| extension == "png" || extension == "jpg");
@@ -682,8 +643,6 @@ fn encode_path(path: &str) -> String {
     out
 }
 
-/// What a prewarm still has to fetch, and everything the verified record will
-/// attest once it has.
 #[derive(Debug)]
 pub struct Plan {
     pub repo: &'static Repo,
@@ -692,9 +651,8 @@ pub struct Plan {
     pub fetch: Model,
 }
 
-/// `VLMDownloader.fetchRepo` from the listing on: catalog weights must match
-/// the audit; files already on disk at the listed size whose SHA-256 matches
-/// their LFS oid are kept. Blocking (hashes files).
+/// Catalog weights must match the audit; files on disk at the listed size whose SHA-256 matches their LFS oid are kept.
+/// Blocking.
 pub fn plan(repo: &'static Repo, listing: Vec<RepoFile>) -> Result<Plan> {
     let dir = model_dir(repo).context("no Hugging Face model folder")?;
     crate::util::read_only::require_writable(&dir)?;
@@ -728,9 +686,7 @@ pub fn plan(repo: &'static Repo, listing: Vec<RepoFile>) -> Result<Plan> {
     Ok(Plan { repo, dir, files, fetch: Model { id: repo.kind, display_name: repo.display_name, files: fetch } })
 }
 
-/// `VLMDownloader.writeVerifiedSentinel` plus the `.fileid-installed` marker:
-/// hash every listed file, refuse a mismatch, and record identities when no
-/// file changed while hashing. Blocking.
+/// Hashes every listed file, refuses a mismatch, records identities when no file changed meanwhile. Blocking.
 pub fn finish(plan: &Plan) -> Result<()> {
     let mut sorted: Vec<&RepoFile> = plan.files.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));

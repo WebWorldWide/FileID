@@ -1,6 +1,3 @@
-// "Changes this session": every change FileID made since launch, newest first,
-// with Undo while it can still be put back (Windows `SessionChangesSheet`).
-
 use adw::prelude::*;
 use gtk::glib;
 use std::rc::Rc;
@@ -35,7 +32,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
         move || fill(&list)
     });
     rebuild();
-    changes::subscribe(Rc::new({
+    let subscription = changes::subscribe(Rc::new({
         let weak = list.downgrade();
         let rebuild = rebuild.clone();
         move || {
@@ -44,6 +41,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
             }
         }
     }));
+    dialog.connect_closed(move |_| changes::unsubscribe(subscription));
     dialog.present(Some(parent));
 }
 

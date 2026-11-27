@@ -2,8 +2,7 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Related-take proposals from the library-wide takeGrouping job: the relation chip,
-/// plain-language evidence and the job requests. Lockstep with macOS TakeProposals and GTK takes_model.</summary>
+/// <summary>Lockstep with macOS TakeProposals and GTK takes_model.</summary>
 internal static class TakeProposalPolicy
 {
     public const string JobKind = "takeGrouping";
@@ -49,7 +48,6 @@ internal static class TakeProposalPolicy
     public static string EvidenceText(IEnumerable<string>? codes) =>
         string.Join(" ", (codes ?? Array.Empty<string>()).Select(EvidenceSentence).OfType<string>());
 
-    /// <summary>The review page's intro: the evidence and what the relation means, then how to pick.</summary>
     public static string Summary(CatalogTakeAutoGroup group)
     {
         const string pick = "FileID starred the one that looks best. Check it, then keep it and clear out the rest.";
@@ -59,17 +57,14 @@ internal static class TakeProposalPolicy
 
     public static CatalogJob? Job(IEnumerable<CatalogJob>? jobs) => jobs?.FirstOrDefault(job => job.Kind == JobKind);
 
-    /// <summary>Find related tries is offered unless a run is already queued or running.</summary>
     public static bool CanFind(CatalogJob? job) => job?.State is not ("queued" or "running");
 
     /// <summary>True when the job has just finished a run, so the proposals should be read again.</summary>
     public static bool Finished(CatalogJob? previous, CatalogJob? current) =>
         current?.State == "completed" && (previous?.State != "completed" || previous.UpdatedAt != current.UpdatedAt);
 
-    /// <summary>The job row shows while a run is pending, paused or stopped; a finished run hides it.</summary>
     public static bool ShowJob(CatalogJob? job) => job is not null && job.State != "completed";
 
-    /// <summary>A catalog response the engine pushed while the job runs (its request ID is the job's).</summary>
     public static bool IsJobPush(CatalogResponse? response) => response is not null && response.RequestID == JobId && Job(response.Jobs) is not null;
 
     public static CatalogRequest EnqueueRequest(string requestId) =>
@@ -92,14 +87,12 @@ internal static class TakeProposalPolicy
         return $"{TakeReviewPolicy.GroupTitle(group)}{relation}, {date}{skipped}" + (evidence.Length == 0 ? "" : ". " + evidence);
     }
 
-    /// <summary>The members to put in a new group when the person saves a proposal: one per try.</summary>
     public static IReadOnlyList<CatalogHit> SaveHits(CatalogTakeAutoGroup group)
     {
         var kind = group.Kind == "videos" ? "video" : "image";
         return group.Shots.Select(shot => new CatalogHit(shot.PrimaryFileID, shot.Path, kind, "", null, null, null)).ToArray();
     }
 
-    /// <summary>The next proposal to open after one is resolved, keeping the reviewer's place.</summary>
     public static int? NextAfter(IReadOnlyList<CatalogTakeAutoGroup> before, IReadOnlyList<CatalogTakeAutoGroup> after, string resolved)
     {
         var position = before.Select(g => g.GroupKey).ToList().IndexOf(resolved);

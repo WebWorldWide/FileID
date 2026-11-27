@@ -5,7 +5,7 @@
   -> merge suggestions) against a real corpus, capturing throughput, peak RSS,
   the bound execution provider, per-stage timings, and any panics/errors.
 
-  SAFETY: the engine is pointed at an ISOLATED temp state dir via LOCALAPPDATA,
+  The engine is pointed at an ISOLATED temp state dir via LOCALAPPDATA,
   with the real Models/ folder junctioned in. The user's real library DB
   (%LOCALAPPDATA%\FileID\fileid.sqlite, ~24k files) is NEVER touched. No
   destructive command (applyRestructure / renameFiles / trash / applyTags) is
@@ -35,7 +35,6 @@ if (-not (Test-Path $EnginePath)) { Bad "engine not built: $EnginePath"; exit 2 
 if (-not (Test-Path $Corpus))     { Bad "corpus not found: $Corpus"; exit 2 }
 if (-not (Test-Path $RealModels)) { Bad "real Models dir missing: $RealModels"; exit 2 }
 
-# --- isolated state dir (preserves the user's real library) -----------
 # The engine's root() = %LOCALAPPDATA%\FileID, so with LOCALAPPDATA=$Temp the
 # real state dir is $Temp\FileID. The junction + DB must live THERE, not in $Temp.
 $Temp  = Join-Path $env:TEMP "fileid_audit_state"
@@ -52,7 +51,6 @@ $appSettings = Join-Path $RealRoot "app-settings.json"
 if (Test-Path $appSettings) { Copy-Item $appSettings (Join-Path $State "app-settings.json") -Force }
 OK "isolated state dir: $State  (Models junctioned; real library untouched)"
 
-# --- colocate ORT + DirectML beside the engine -----------------------
 $fetch = Join-Path $BuildDir "fetch-runtime-deps.ps1"
 $outDir = Split-Path -Parent $EnginePath
 if (Test-Path $fetch) {
@@ -70,7 +68,6 @@ Info "corpus: $Corpus  ($corpusCount files)"
 $eventLog = Join-Path $Temp "events.jsonl"
 "" | Set-Content $eventLog
 
-# --- spawn engine -----------------------------------------------------
 Step "Launching engine (isolated LOCALAPPDATA)"
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $EnginePath
@@ -82,9 +79,7 @@ $psi.CreateNoWindow = $true
 $psi.Environment["LOCALAPPDATA"]   = $Temp
 $psi.Environment["FILEID_LOG"]     = "info"
 $psi.Environment["FILEID_PERF_TRACE"] = "1"
-$psi.Environment["ORT_DYLIB_PATH"] = Join-Path $outDir "onnxruntime.dll"
-# Forward the RAM++ batch-size toggle so a measurement run can A/B single
-# (unset/0) vs batched (>1) without editing this script.
+# Forward the RAM++ batch-size toggle so a run can compare single (unset/0) and batched (>1).
 if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }
 
 $proc = New-Object System.Diagnostics.Process
@@ -123,7 +118,6 @@ try {
         if ($readyLine -match "`"$k`"\s*:\s*`"?([^,`"}]+)") { Info "$k = $($Matches[1])" }
     }
 
-    # --- scan ---------------------------------------------------------
     Step "Scanning ($corpusCount files; timeout ${ScanTimeoutMin}m)"
     $scanStart = Get-Date
     Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null; rescan = $true } } }
@@ -143,17 +137,14 @@ try {
     $tput = if ($scanSec -gt 0) { [math]::Round($processed / $scanSec, 1) } else { 0 }
     Info "throughput = $tput files/s"
 
-    # --- face clustering ---------------------------------------------
     Step "Face clustering"
     Send-Cmd @{ id = "cluster-1"; payload = @{ runFaceClustering = @{} } }
     if (Wait-For '"faceClusteringComplete"' 300) { OK "clustering complete" } else { Warn "clustering did not report complete in 5m" }
 
-    # --- restructure PLAN (non-destructive) --------------------------
     Step "Restructure plan (plan only — NOT applied)"
     Send-Cmd @{ id = "plan-1"; payload = @{ planRestructure = @{ libraryRoot = $Corpus } } }
     if (Wait-For '"restructurePlan"' 300) { OK "restructure plan produced" } else { Warn "no restructure plan in 5m" }
 
-    # --- merge suggestions -------------------------------------------
     Step "Merge suggestions"
     Send-Cmd @{ id = "merge-1"; payload = @{ findMergeSuggestions = @{} } }
     Wait-For '"mergeSuggestions"' 120 | Out-Null
@@ -169,7 +160,6 @@ finally {
     if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
 }
 
-# --- analysis ---------------------------------------------------------
 Step "Telemetry"
 $dbPath = Join-Path $State "fileid.sqlite"
 Info "DB: $dbPath  ($([math]::Round((Get-Item $dbPath -ErrorAction SilentlyContinue).Length/1MB,2)) MB)"
@@ -186,7 +176,6 @@ $py = $null; foreach ($c in @('python','py')) { if (Get-Command $c -ErrorAction 
 if ($py) { $env:ASSERT_MIN_FILES = "1"; & $py (Join-Path $BuildDir "scan_assertions.py") $dbPath }
 else { Warn "python not found; skipping DB assertions" }
 
-# --- cleanup ----------------------------------------------------------
 Step "Cleanup (removing junction + temp; user library untouched)"
 $j = Join-Path $State "Models"
 if (Test-Path $j) { cmd /c rmdir "$j" 2>$null }

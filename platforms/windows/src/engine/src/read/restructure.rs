@@ -5,15 +5,10 @@ use rusqlite::Connection;
 use crate::pipeline::discovery::FileKind;
 use crate::pipeline::restructure::{FileForClassify, PlannedIdentity};
 
-/// Files + per-file person names for restructure planning. Person names come
-/// from a deduped, ordered correlated subquery — NOT
-/// `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects at run with
-/// "DISTINCT aggregates must have exactly one argument". `names` (column 8) is a
-/// char(31)-separated list; only an unambiguous single-person result enables
-/// the People rule so group photos are not auto-filed under an arbitrary name.
-///
-/// Bind `(root, prefix, upper)` from [`plan_root_bounds`]; an empty root
-/// selects every active file.
+/// Person names come from a deduped, ordered correlated subquery, NOT `GROUP_CONCAT(DISTINCT p.name, char(31))` (SQLite
+/// rejects it: "DISTINCT aggregates must have exactly one argument"). `names` (column 8) is char(31)-separated; only an
+/// unambiguous single-person result enables the People rule so group photos are not filed under an arbitrary name. Bind
+/// `(root, prefix, upper)` from [`plan_root_bounds`]; an empty root selects every active file.
 pub const PLAN_FILES_SQL: &str = "SELECT
    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
    f.location_lat, f.location_lon, f.has_text,
@@ -41,7 +36,7 @@ pub const PLAN_FILES_SQL: &str = "SELECT
         OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))
  ORDER BY f.id";
 
-/// [`PLAN_FILES_SQL`] keyset-paged: also binds `?4` (last id) and `?5` (limit).
+/// Also binds `?4` (last id) and `?5` (limit).
 pub const PLAN_FILES_PAGE_SQL: &str = "SELECT
    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
    f.location_lat, f.location_lon, f.has_text,
@@ -71,14 +66,9 @@ pub const PLAN_FILES_PAGE_SQL: &str = "SELECT
  ORDER BY f.id
  LIMIT ?5";
 
-/// `(root, prefix, upper)` bind values scoping [`PLAN_FILES_SQL`] to `root`.
 pub fn plan_root_bounds(root: &str) -> (String, String, String) {
-    // Pick the separator from the ORIGINAL root, before trimming. A Windows
-    // drive-root like "C:\" trims to "C:" — which contains no backslash — so
-    // deriving the separator from the trimmed string chose '/', built the
-    // prefix "C:/", and produced a range that matched ZERO backslash-stored
-    // files (every real "C:\Users\..." path sorts past the '/'-based upper
-    // bound). Result: an empty/incorrect plan scope for a whole-drive library.
+    // Take the separator from the ORIGINAL root: a trimmed drive root like "C:" has no backslash left and would build a
+    // "/"-based prefix matching no stored path.
     let separator = if root.contains('\\') { '\\' } else { '/' };
     let root = root.trim_end_matches(['/', '\\']).to_string();
     let prefix = format!("{root}{separator}");
@@ -114,7 +104,6 @@ pub fn unambiguous_person_name(
         .flatten()
 }
 
-/// Row mapper for [`PLAN_FILES_SQL`] / [`PLAN_FILES_PAGE_SQL`].
 pub fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
     let kind: String = row.get(2)?;
     let names: Option<String> = row.get(8)?;
@@ -144,9 +133,9 @@ pub fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClas
     })
 }
 
-/// Deepest folder containing every active file, plus the active-file count.
-/// `None` when the library is empty. The component prefix of a sorted set's
-/// first and last members bounds every member, so only two rows are read.
+/// `None` when the library is empty. The component prefix of a sorted set's first and last members bounds every member,
+/// so only two rows are read. When that shared folder sits inside a scanned library root, the root is the answer, so a
+/// library already organized under its root plans no moves.
 pub fn library_root(conn: &Connection) -> rusqlite::Result<Option<(PathBuf, i64)>> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |row| row.get(0))?;
     if count == 0 {
@@ -162,11 +151,20 @@ pub fn library_root(conn: &Connection) -> rusqlite::Result<Option<(PathBuf, i64)
     let (first, last) = (edge("ASC")?, edge("DESC")?);
     let parents = [&first, &last].map(|path| path.parent().unwrap_or(path).components().collect::<Vec<_>>());
     let shared = parents[0].iter().zip(&parents[1]).take_while(|(a, b)| a == b).count();
-    let root: PathBuf = parents[0][..shared].iter().map(|part| part.as_os_str()).collect();
-    Ok(Some((root, count)))
+    let shared_folder: PathBuf = parents[0][..shared].iter().map(|part| part.as_os_str()).collect();
+    Ok(Some((enclosing_scan_root(conn, &shared_folder)?.unwrap_or(shared_folder), count)))
 }
 
-/// True when `root` is a filesystem root (`/`, `C:\`) — no parent folder.
+fn enclosing_scan_root(conn: &Connection, folder: &Path) -> rusqlite::Result<Option<PathBuf>> {
+    let mut stmt = conn.prepare("SELECT path FROM library_roots WHERE enabled = 1")?;
+    let roots = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(roots
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|root| folder.starts_with(root))
+        .max_by_key(|root| root.components().count()))
+}
+
 pub fn is_filesystem_root(root: &Path) -> bool {
     root.parent().is_none()
 }
@@ -198,6 +196,18 @@ mod tests {
         let (root, count) = library_root(&conn).unwrap().unwrap();
         assert_eq!((root.as_path(), count), (Path::new("/"), 4));
         assert!(is_filesystem_root(&root));
+    }
+
+    #[test]
+    fn library_root_is_the_scanned_folder_when_every_file_sits_deeper_inside_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert(&conn, "/lib/Photos/2026/November/a.jpg");
+        insert(&conn, "/lib/Photos/2026/November/b.jpg");
+        assert_eq!(library_root(&conn).unwrap().unwrap().0, PathBuf::from("/lib/Photos/2026/November"));
+        conn.execute("INSERT INTO library_roots(path,display,added_at) VALUES('/lib','/lib',1)", []).unwrap();
+        conn.execute("INSERT INTO library_roots(path,display,added_at) VALUES('/elsewhere','/elsewhere',1)", []).unwrap();
+        assert_eq!(library_root(&conn).unwrap().unwrap().0, PathBuf::from("/lib"));
     }
 
     #[test]

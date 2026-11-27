@@ -1,5 +1,4 @@
-// Spawns + supervises the engine child process. Auto-respawns with
-// backoff. State and events are observable on MainActor.
+// Spawns and supervises the engine child process, auto-respawning with backoff; state and events are observable on MainActor.
 import Foundation
 import Security
 import AppKit
@@ -16,13 +15,12 @@ public final class EngineClient {
 
     public private(set) var state: ConnectionState = .starting
     public private(set) var lastProgress: ScanProgress?
+    /// Files already read when the scan's post-scan work began. The engine counts that work on top of the files, so the work left is measured from here.
+    public private(set) var postScanBaseline: PostScanBaseline?
     public private(set) var lastError: EngineError? {
         didSet { lastErrorSignal &+= 1 }
     }
-    /// Bumps on every `lastError` write, including a repeat of an identical
-    /// message. EngineError isn't Equatable, so views key error-recovery
-    /// `.onChange` on this monotonic counter rather than `lastError?.message`
-    /// — two consecutive identical failures must still re-fire the handler.
+    /// Bumps on every `lastError` write, including an identical repeat. EngineError isn't Equatable, so views key error-recovery `.onChange` on this counter; two consecutive identical failures must still re-fire.
     public private(set) var lastErrorSignal: Int = 0
     public private(set) var latestChatResponse: ChatResponse?
     public private(set) var toolResponses: [String: ToolResponse] = [:]
@@ -30,7 +28,7 @@ public final class EngineClient {
     private var catalogResponseOrder: [String] = []
     public private(set) var catalogResponses: [String: CatalogResponse] = [:]
     public private(set) var catalogJobs: [CatalogJob] = []
-    public func searchCatalog(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil, limit: Int = 60) async -> CatalogResponse? {
+    func searchCatalog(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil, limit: Int = LibrarySearchOutcome.resultLimit) async -> CatalogResponse? {
         for _ in 0..<120 {
             guard !Task.isCancelled else { return nil }
             let id = UUID().uuidString
@@ -47,14 +45,18 @@ public final class EngineClient {
 
     private var catalogWaiters: [String: CheckedContinuation<CatalogResponse?, Never>] = [:]
 
-    /// Sends `request` and waits for its reply; nil when it can't be sent,
-    /// on timeout, on cancellation or when the engine stops.
     func catalogReply(to request: CatalogRequest, timeout: Duration) async -> CatalogResponse? {
         guard send(.catalogRequest(request: request)) else { return nil }
         return await catalogResponse(for: request.requestID, timeout: timeout)
     }
 
-    /// Resumes when the engine replies to `id`; nil on timeout, cancellation or engine exit.
+    func similarClusters(offset: Int, limit: Int, threshold: Int) async -> ReadStore.SimilarClusterPage? {
+        let request = CatalogRequest(requestID: UUID().uuidString, action: "similarGroups", limit: limit, offset: offset, similarThreshold: min(16, max(0, threshold)))
+        guard let reply = await catalogReply(to: request, timeout: .seconds(300)), reply.status == "ok",
+              let groups = reply.similarGroups, let total = reply.similarGroupTotal else { return nil }
+        return ReadStore.SimilarClusterPage(clusters: groups.map(\.fileIDs), total: total, sizes: groups.map(\.totalCount))
+    }
+
     func catalogResponse(for id: String, timeout: Duration) async -> CatalogResponse? {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: timeout)
@@ -83,9 +85,7 @@ public final class EngineClient {
 
     private var bulkResultWaiters: [UUID: (matcher: BulkResultMatcher, continuation: CheckedContinuation<BulkActionResult?, Never>)] = [:]
 
-    /// The first bulk result after `signal` whose action starts with `prefix`;
-    /// nil on timeout or engine exit. A cancelled caller still gets the result:
-    /// the files were already moved, and the undo needs the batch it names.
+    /// The first bulk result after `signal` whose action starts with `prefix`; nil on timeout or engine exit. A cancelled caller still gets it: the files were already moved and undo needs the batch it names.
     func bulkActionResult(after signal: Int, prefix: String, commandID: String? = nil, timeout: Duration) async -> BulkActionResult? {
         let matcher = BulkResultMatcher(actionPrefix: prefix, sentID: commandID)
         if bulkActionResultSignal != signal, let result = bulkActionResult, matcher.accepts(result) {
@@ -127,8 +127,7 @@ public final class EngineClient {
         await queryReplies.textEmbedding { send(.embedTextQuery(query: query, queryID: $0)) }
     }
 
-    /// JPEG bytes with a `maxPixelSize` long side (clamped to 64–2048, never
-    /// upscaled), or nil when the engine is down or can't decode the video.
+    /// JPEG bytes with a `maxPixelSize` long side (clamped to 64–2048, never upscaled), or nil when the engine is down or can't decode the video.
     public func generateVideoThumbnail(path: String, modifiedAt: Double?, maxPixelSize: Int = 192) async -> Data? {
         let size = min(max(maxPixelSize, 64), 2048)
         return await queryReplies.videoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: size) {
@@ -140,6 +139,11 @@ public final class EngineClient {
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?
     public private(set) var faceClusteringInFlight: Bool = false
+    /// "Finding faces… 120 of 848" while the engine reads the faces of a pass, which it reports as the running job's title.
+    public var faceStageProgress: String? {
+        guard let job = queueState.running, job.category == .faceCluster, job.title.hasPrefix("Finding faces") else { return nil }
+        return job.title
+    }
     /// Engine doesn't echo paused state, so the app mirrors it locally.
     public private(set) var isPaused: Bool = false
 
@@ -149,28 +153,24 @@ public final class EngineClient {
     public private(set) var modelDownloadProgress: ModelDownloadProgress?
     public private(set) var benchmarkProgress: BenchmarkProgress?
     public private(set) var libraryRoots: [LibraryRoot] = []
+    /// Which paths sit on read-only locations, from the engine's root list plus the Adlon name guard.
+    var readOnlyGate: ReadOnlyGate { ReadOnlyGate(libraryRoots) }
     public private(set) var benchmarkResults: [String: ModelBenchmark] = [:]
+    /// The engine's own verdict on each vision model for this Mac and the memory free now, from the last `listModels` for the vision role.
+    public private(set) var vlmAdvice: VLMAdvice?
     public private(set) var benchmarkMessage: (modelKind: String, text: String)?
     public private(set) var benchmarkModelKind: String?
     private var benchmarkRequestID: String?
     public private(set) var deepAnalyzeInFlight: Bool = false
-    /// Streamed by the engine between command-receipt and the first
-    /// per-file `deepAnalyzeProgress`, so the UI can show progressive
-    /// labelling during the ~10s VLM cold-load window. Cleared when the
-    /// first progress event arrives or the run completes.
+    /// Streamed between command receipt and the first `deepAnalyzeProgress` so the UI can show labelling during the ~10 s VLM cold load; cleared on the first progress event or run completion.
     public private(set) var deepAnalyzeStarting: DeepAnalyzeStarting?
-    /// False when engine reports mlx.metallib is missing — Deep Analyze
-    /// would crash on first VLM call. UI should disable + explain.
+    /// False when the engine reports mlx.metallib missing (Deep Analyze would crash on first VLM call); the UI disables and explains.
     public private(set) var deepAnalyzeAvailable: Bool = true
     public private(set) var deepAnalyzeUnavailableReason: String?
+    /// The scan fell back to the CPU for picture search and will take longer than usual; cleared when the next scan starts.
+    public private(set) var scanRunsOnCPU = false
 
-    /// Bumped on every engine exit (crash or clean). A dead engine can't
-    /// emit the terminal events that clear a view's *own* in-flight UI
-    /// (e.g. Deep Analyze's StreamCard + Cancel), so it would freeze until
-    /// a tab switch. Views observe this via `.onChange` to reset that
-    /// local state. EngineClient's own published flags are already reset
-    /// in `handleEngineExit`; this is the signal for state the client
-    /// doesn't own.
+    /// Bumped on every engine exit. A dead engine can't emit the terminal events that clear a view's own in-flight UI (e.g. Deep Analyze's StreamCard + Cancel), so views reset that state via `.onChange`. The client's own flags are reset in `handleEngineExit`.
     public private(set) var engineResetSignal: Int = 0
 
     public private(set) var queueState: QueueState = QueueState(
@@ -178,44 +178,27 @@ public final class EngineClient {
     )
 
     // MARK: - Restructure butler (engine-routed plan + apply)
-    //
-    // The macOS Restructure tab drives its plan + apply through
-    // the engine butler instead of the app-side classifier. These mirror the
-    // published-state pattern above; the `*Signal` counters bump on every fresh
-    // payload so views can react via `.onChange` even though the DTOs aren't
-    // Equatable (same idiom as `engineResetSignal`).
+    // The `*Signal` counters bump on every fresh payload so views can react via `.onChange` even though the DTOs aren't Equatable (same idiom as `engineResetSignal`).
     public private(set) var restructurePlan: RestructurePlan?
     public private(set) var restructureApplyResult: RestructureApplyResult?
     public private(set) var restructurePlanSignal: Int = 0
     public private(set) var restructureApplyResultSignal: Int = 0
     public private(set) var bulkActionResult: BulkActionResult?
     public private(set) var bulkActionResultSignal: Int = 0
-    /// The id of the command the last successful `send` queued.
     public private(set) var lastSentCommandID: String?
-    /// True once an applyRestructure has moved files and they haven't been undone
-    /// yet — drives the "Undo last run" affordance.
+    /// True once an applyRestructure has moved files and they haven't been undone; drives "Undo last run".
     public private(set) var canUndoRestructure = false
-    private var undoRestructureInFlight = false
+    /// The folder whose last Organize is waiting to be undone after a relaunch (from the engine's journal on disk); nil when the undo came from this session's own apply.
+    public private(set) var restructureUndoRoot: String?
+    var undoRestructureInFlight = false
 
     private var process: Process?
     private var stdinPipe: Pipe?
-    /// Serial queue for stdin command writes. The global CONCURRENT queue used
-    /// to let two rapid send() calls write to the engine's stdin fd at once,
-    /// which could reorder commands or interleave their bytes mid-line.
+    /// Serial queue for stdin writes: one writer at a time keeps commands in order and bytes from interleaving mid-line.
     private let stdinWriteQueue = DispatchQueue(label: "com.fileid.engine.stdin")
 
     // MARK: - App Nap protection
-    //
-    // The old app-lifetime beginActivity token (removed in AppDelegate) kept
-    // the UI process from being App-Napped — throttled timers / coalesced
-    // updates — during a long scan or Deep Analyze run. Replaced with
-    // operation-scoped tokens so the app isn't held un-nappable while idle.
-    // (System idle-sleep during scans is handled separately by the engine's
-    // SleepGuard; this is purely App Nap for the UI process.) Each token is
-    // begun when its operation starts and ended on EVERY terminal path —
-    // completion, cancel, failure, and engine crash/exit — through the guarded
-    // helpers below (begin no-ops if already held, end no-ops if already
-    // cleared), so the pair can never leak or double-release.
+    // Operation-scoped tokens (not an app-lifetime one) keep the UI process from being App-Napped during a long scan or Deep Analyze run without holding it un-nappable while idle. System idle-sleep is the engine's SleepGuard. Each token is begun when its operation starts and ended on EVERY terminal path (completion, cancel, failure, engine exit) through guarded helpers (begin no-ops if held, end no-ops if cleared), so the pair can't leak or double-release.
     private var scanActivityToken: NSObjectProtocol?
     private var deepAnalyzeActivityToken: NSObjectProtocol?
 
@@ -223,33 +206,26 @@ public final class EngineClient {
     private static let respawnDelays: [UInt64] = [1, 4, 16]
     private static let respawnWindow: TimeInterval = 60
     private var respawnAttempts: [Date] = []
-    // When the engine last reached Ready. The respawn budget is cleared
-    // only after it has been continuously Ready for `stabilitySettle` (a real
-    // recovery) — not on every Ready, which would let a Ready→crash flap reset
-    // the budget forever.
+    // When the engine last reached Ready. The respawn budget is cleared only after `stabilitySettle` of continuous Ready (a real recovery), not on every Ready, which would let a Ready→crash flap reset it forever.
     private var lastReadyAt: Date = .distantPast
     private static let stabilitySettle: TimeInterval = 30
     private var pendingRespawn: Task<Void, Never>?
 
-    /// Set on shutdown() or after a "work complete" signal. Suppresses
-    /// the phantom error pill after MLX's known SIGSEGV-at-exit bug.
+    /// Set on shutdown() or after a "work complete" signal; suppresses the phantom error pill after MLX's known SIGSEGV-at-exit bug.
     private var expectedExit: Bool = false
     public private(set) var lastTerminalEventAt: Date = .distantPast
 
-    /// When non-nil, the next engine exit deletes the SQLite library
-    /// before the respawn, and the next `.ready` event auto-starts a
-    /// scan against this URL. Drives `wipeAndRescan(rootURL:)`.
+    /// When non-nil, the next engine exit deletes the SQLite library before the respawn and the next `.ready` auto-starts a scan of this URL (`wipeAndRescan(rootURL:)`).
     private var pendingWipeAndRescanRoot: URL?
+    /// A folder to scan the moment the scan being stopped has ended; the engine refuses a start while the old scan is still draining.
+    private(set) var pendingScanRoot: URL?
+    private var scanBusyRetriesLeft = 0
 
     /// 2 Hz throttle on `deepAnalyzeLast`; otherwise SwiftUI's
     /// AttributeGraph overflows on a fast Deep Analyze run.
     private var lastDeepAnalyzeFileDoneAt: Date = .distantPast
 
-    // Every decoded event is funnelled through ONE serial AsyncStream
-    // consumed by a single long-lived @MainActor task, so handleEvent runs in
-    // strict receipt order. The previous per-event `Task { @MainActor }` dispatch
-    // had no ordering guarantee, so events could be applied out of order — e.g.
-    // wedging the Deep Analyze / face-clustering in-flight flag.
+    // Every decoded event goes through ONE serial AsyncStream consumed by a single @MainActor task, so handleEvent runs in strict receipt order, which keeps the Deep Analyze and face-clustering in-flight flags consistent.
     private let eventContinuation: AsyncStream<InboundEvent>.Continuation
     private var eventPump: Task<Void, Never>?
 
@@ -268,112 +244,74 @@ public final class EngineClient {
         }
     }
 
-    /// Where the engine binaries live and how each is vetted before it starts.
-    /// The app uses its own bundle; tests point it at a folder of stand-ins.
+    /// Where the engine binary lives and how it is vetted before it starts; tests point it at a folder holding a stand-in.
     struct LaunchContext {
         var directory: URL
         var environment: [String: String]
-        var defaults: UserDefaults
         var integrityFailure: (URL) -> String?
 
         static func appBundle() -> LaunchContext {
             let exec = Bundle.main.executablePath ?? CommandLine.arguments[0]
             return LaunchContext(directory: URL(fileURLWithPath: exec).deletingLastPathComponent(),
                                  environment: ProcessInfo.processInfo.environment,
-                                 defaults: .standard,
                                  integrityFailure: EngineClient.engineIntegrityFailure(binary:))
         }
 
-        func binary(for backend: EngineBackend) -> URL {
-            directory.appendingPathComponent(backend.binaryName)
-        }
+        var binary: URL { directory.appendingPathComponent(EngineBinary.name) }
 
-        func isBundled(_ backend: EngineBackend) -> Bool {
-            FileManager.default.isExecutableFile(atPath: binary(for: backend).path)
+        var isBundled: Bool {
+            FileManager.default.isExecutableFile(atPath: binary.path)
         }
     }
 
     private let launch: LaunchContext
 
-    /// The engine the live process runs; nil while none is running.
-    public private(set) var runningBackend: EngineBackend?
-    /// Engines that failed to start this session, and the note Settings shows.
-    public private(set) var fallback = EngineFallback()
+    public private(set) var startFailure: EngineStartFailure?
     private var runningReachedReady = false
+    private var startupExits = EngineStartupExits()
 
-    public var rustEngineBundled: Bool { launch.isBundled(.rust) }
-
-    /// The engine Settings ▸ Engine shows as chosen (before any fallback).
-    public var preferredBackend: EngineBackend {
-        EngineBackendPolicy.preferred(environment: launch.environment, defaults: launch.defaults,
-                                      rustBundled: rustEngineBundled)
-    }
-
-    /// Settings ▸ Engine: remember the choice and restart on it. A new choice
-    /// also forgets this session's fallback, so choosing Rust again retries it.
-    public func switchBackend(to backend: EngineBackend) {
-        launch.defaults.set(backend.rawValue, forKey: EngineBackendPolicy.defaultsKey)
-        fallback = EngineFallback()
+    public func restart() {
+        pendingRespawn?.cancel()
+        respawnAttempts.removeAll()
+        startupExits = EngineStartupExits()
         start()
     }
 
-    nonisolated static let damagedCopyReason = "This copy of FileID is damaged. Reinstall it."
-
     public func start() {
-        // A live engine here means this is a restart (Settings ▸ Restart
-        // Engine calls start() directly). Terminate + reap it FIRST —
-        // two live engines = two SQLite writers against one DB =
-        // corruption. Single-flight stop-then-start.
+        // A live engine here means this is a restart. Terminate + reap it FIRST: two live engines = two SQLite writers against one DB = corruption.
         terminateRunningEngine()
-        let candidates = EngineBackendPolicy.candidates(environment: launch.environment, defaults: launch.defaults,
-                                                        rustBundled: rustEngineBundled, demoted: fallback.demoted)
-        var failure = Self.damagedCopyReason
-        for backend in candidates {
-            let binURL = launch.binary(for: backend)
-            guard launch.isBundled(backend) else {
-                Self.debug("start: \(backend.rawValue) engine binary not found next to app executable")
-                fallback.launchFailed(backend, reason: "it isn't in this copy of FileID")
-                continue
-            }
-            // Refuse to spawn an engine binary that didn't ship with this
-            // app. Prevents a malicious process from dropping a payload at
-            // FileID.app/Contents/MacOS/FileIDEngine and getting full FS
-            // access via IPC. In dev (ad-hoc signing) and notarized
-            // builds (Developer ID), both binaries share a signing
-            // identity — we require it to match the app's.
-            if let reason = launch.integrityFailure(binURL) {
-                Self.debug("start: \(reason)")
-                failure = Self.damagedCopyReason
-                fallback.launchFailed(backend, reason: "its signature doesn't match the app")
-                continue
-            }
-            if let reason = spawn(binary: binURL, backend: backend) {
-                failure = reason
-                fallback.launchFailed(backend, reason: "it couldn't be launched")
-                continue
-            }
+        startFailure = nil
+        if case .crashed = state { state = .starting }
+        guard launch.isBundled else {
+            Self.debug("start: engine binary not found next to app executable")
+            fail(EngineStartFailure(.missing))
             return
         }
-        state = .crashed(reason: failure)
+        // Refuse to spawn an engine binary that didn't ship with this app, so a malicious process can't drop a payload at FileID.app/Contents/MacOS/fileidd and get full FS access via IPC. Dev (ad-hoc) and notarized (Developer ID) builds both share the app's signing identity, and we require it to match.
+        if let reason = launch.integrityFailure(launch.binary) {
+            Self.debug("start: \(reason)")
+            fail(EngineStartFailure(.signatureMismatch))
+            return
+        }
+        if let failure = spawn(binary: launch.binary) {
+            fail(failure)
+        }
     }
 
-    /// Stop half of a restart: cancel any pending respawn and
-    /// synchronously terminate + reap the running engine, so a restart
-    /// never overlaps two live engines against the single-writer SQLite
-    /// DB. The bounded reap releases the WAL lock before the next spawn;
-    /// the old process's pipe handlers are left armed (so it keeps
-    /// draining and can't deadlock on a full pipe during shutdown) — its
-    /// late EOF is harmless because `handleEngineExit(for:)` rejects any
-    /// process that is no longer `self.process`. Idempotent.
+    private func fail(_ failure: EngineStartFailure) {
+        Self.debug("engine unavailable: \(failure.cause)")
+        startFailure = failure
+        if lastError?.kind == "engine_exited" { lastError = nil }
+        state = .crashed(reason: failure.summary)
+    }
+
+    /// Stop half of a restart: cancel any pending respawn and synchronously terminate + reap the engine so two engines never overlap on the single-writer SQLite DB. The old process's pipe handlers stay armed (so it keeps draining and can't deadlock on a full pipe); its late EOF is harmless because `handleEngineExit(for:)` rejects any process that is no longer `self.process`. Idempotent.
     private func terminateRunningEngine() {
         pendingRespawn?.cancel()
         pendingRespawn = nil
         if let proc = process, proc.isRunning {
             proc.terminate()
-            // Bounded reap, not an unbounded waitUntilExit() on the
-            // @MainActor: SIGTERM drops the WAL lock in well under a second
-            // (the engine installs no handler), but a wedged/uninterruptible
-            // engine must never hang the UI. Poll, then escalate to SIGKILL.
+            // Bounded reap, not an unbounded waitUntilExit() on the @MainActor: SIGTERM drops the WAL lock in well under a second, but a wedged engine must never hang the UI. Poll, then escalate to SIGKILL.
             if !Self.waitForExit(proc, timeout: 3.0) {
                 kill(proc.processIdentifier, SIGKILL)
                 _ = Self.waitForExit(proc, timeout: 2.0)
@@ -381,27 +319,14 @@ public final class EngineClient {
         }
         process = nil
         stdinPipe = nil
-        runningBackend = nil
 
-        // `handleEngineExit(for:)` deliberately rejects this process the moment
-        // it stops being `self.process`, so a restart NEVER reaches the reset
-        // there — `start()` reassigns `self.process` in `spawn()` before the old
-        // pipe's EOF lands. Without this call, Settings ▸ Restart Engine during a
-        // job left `deepAnalyzeInFlight` (and the undo/queue/App-Nap state)
-        // latched against a jobless engine, disabling Analyze until relaunch.
+        // `handleEngineExit(for:)` rejects this process once it stops being `self.process`, so a restart never reaches the reset there (`start()` reassigns `self.process` before the old pipe's EOF lands). Without this call, Restart Engine during a job latched `deepAnalyzeInFlight` (and undo/queue/App-Nap state) against a jobless engine, disabling Analyze until relaunch.
         resetStateOnlyADeadEngineCouldClear()
-        // A restart is an explicit "start over", so drop the frozen scan
-        // progress too: the sidebar scan card keys off a non-idle phase and
-        // would otherwise keep rendering a dead Pause/Stop pair with no
-        // reachable Start. The crash leg deliberately keeps its last progress as
-        // forensic context — only this explicit path clears it.
+        // A restart is an explicit "start over", so drop the frozen scan progress too; otherwise the sidebar scan card keeps a dead Pause/Stop pair with no Start. The crash leg keeps its last progress as forensic context.
         lastProgress = nil
     }
 
-    /// Bounded wait for a child to exit; true if it exited within `timeout`.
-    /// Polls `isRunning` (flipped by Foundation's background reaper, so it
-    /// updates even while this runs on the main actor) instead of the
-    /// timeout-free `waitUntilExit()`, which can hang indefinitely.
+    /// Bounded wait for a child to exit; polls `isRunning` (flipped by Foundation's background reaper, even while this runs on the main actor) instead of the hang-prone `waitUntilExit()`.
     private static func waitForExit(_ proc: Process, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while proc.isRunning {
@@ -411,20 +336,9 @@ public final class EngineClient {
         return true
     }
 
-    /// Returns a non-nil failure reason when the engine binary
-    /// shouldn't be spawned. Two checks are mandatory:
-    ///
-    ///   1. The engine path resolves inside the running app bundle's
-    ///      `Contents/MacOS/`. This blocks the "drop a payload at
-    ///      FileID.app/Contents/MacOS/FileIDEngine" attack at the
-    ///      symlink level too — symlinks that escape the bundle fail.
-    ///   2. The engine's signing identity (Team ID for Developer ID
-    ///      builds, or both being unsigned/ad-hoc for dev builds)
-    ///      matches the app's. Each binary gets its own cdhash so a
-    ///      strict designated-requirement match against the app
-    ///      never works for dev — we compare team identifiers
-    ///      instead, which is what realistically catches a swapped
-    ///      binary signed by a different developer.
+    /// Returns a failure reason when the engine binary shouldn't be spawned. Two mandatory checks:
+    ///  1. The engine path resolves inside the app bundle's `Contents/MacOS/` (blocks the drop-a-payload attack, including symlinks that escape the bundle).
+    ///  2. The engine's signing identity matches the app's: Team ID for Developer ID builds, or both unsigned/ad-hoc for dev. Each binary has its own cdhash so a strict designated-requirement match never works for dev; comparing team identifiers is what catches a binary signed by a different developer.
     nonisolated private static func engineIntegrityFailure(binary: URL) -> String? {
         let resolved = binary.resolvingSymlinksInPath().standardizedFileURL
         let bundleMacOS = (Bundle.main.executableURL ?? URL(fileURLWithPath: ""))
@@ -438,21 +352,17 @@ public final class EngineClient {
         let appTeam = appTeamIdentifier()
         let engineTeam = teamIdentifier(forBinaryAt: resolved)
 
-        // Both signed by the same Team ID — Developer ID release path.
+        // Both signed by the same Team ID: Developer ID release path.
         if let a = appTeam, let e = engineTeam, a == e {
             return nil
         }
-        // Both ad-hoc / unsigned — dev path (`bash run.sh`). Path
-        // containment above is the only realistic guarantee here, and
-        // an attacker who can write inside Contents/MacOS/ already has
-        // enough access to swap the app itself.
+        // Both ad-hoc / unsigned: dev path (`bash run.sh`). Path containment above is the only realistic guarantee, and an attacker who can write inside Contents/MacOS/ can already swap the app.
         if appTeam == nil && engineTeam == nil {
             return nil
         }
         return "Engine signing identity does not match app (engine: \(engineTeam ?? "<unsigned>"), app: \(appTeam ?? "<unsigned>"))"
     }
 
-    /// Team Identifier of the running app, or nil if ad-hoc / unsigned.
     nonisolated private static func appTeamIdentifier() -> String? {
         var appCode: SecCode?
         guard SecCodeCopySelf([], &appCode) == errSecSuccess,
@@ -477,21 +387,14 @@ public final class EngineClient {
         return dict[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
-    /// Nil once the engine is running, else why it couldn't be launched.
-    private func spawn(binary: URL, backend: EngineBackend) -> String? {
-        Self.debug("spawn: starting \(backend.rawValue) engine at \(redactPathForLog(binary.path))")
+    private func spawn(binary: URL) -> EngineStartFailure? {
+        Self.debug("spawn: starting engine at \(redactPathForLog(binary.path))")
         let proc = Process()
         proc.executableURL = binary
-        // swift-transformers' NetworkMonitor reports offline until its
-        // first NWPathMonitor update arrives, racing welcome-sheet
-        // "Install all" clicks. Its escape hatch (HubApi.swift:822).
+        // swift-transformers' NetworkMonitor reports offline until its first NWPathMonitor update, racing welcome-sheet "Install all" clicks; this is its escape hatch (HubApi.swift:822).
         var env = ProcessInfo.processInfo.environment
         env["CI_DISABLE_NETWORK_MONITOR"] = "1"
-        env[ORTPrivacy.disableTelemetryVariable] = "1"
-        // Restructure folder-granularity (Settings ▸ Restructure). The engine reads
-        // FILEID_RESTRUCTURE_GRANULARITY at plan time; pass the user's saved choice
-        // through at spawn so it applies on the next engine start. "normal"/unset is the
-        // calibrated default, so only a validated non-default value is forwarded.
+        // Restructure folder-granularity: the engine reads FILEID_RESTRUCTURE_GRANULARITY at plan time, so the saved choice is passed at spawn. "normal"/unset is the calibrated default; only a validated non-default value is forwarded.
         if let g = UserDefaults.standard.string(forKey: AppSettings.restructureGranularityKey),
            g != AppSettings.restructureGranularityDefault,
            AppSettings.restructureGranularityValues.contains(g) {
@@ -509,32 +412,17 @@ public final class EngineClient {
         proc.standardOutput = outPipe
         proc.standardError = errPipe
 
-        // IPC flows over stderr (see IPCSink for the .app fd-1 rationale).
-        // stdout is unused; drain it, and disarm on EOF — otherwise the closed
-        // fd stays permanently readable and the handler busy-spins burning CPU
-        // after the engine exits.
+        // IPC flows over stderr (see IPCSink for the .app fd-1 rationale). stdout is unused: drain it and disarm on EOF, otherwise the closed fd stays readable and the handler busy-spins after the engine exits.
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             if handle.availableData.isEmpty {
                 handle.readabilityHandler = nil
             }
         }
-        // `scanned` = count of leading buffer bytes already known newline-free,
-        // so the drain resumes the newline search from where it left off instead
-        // of re-scanning the whole buffer every readability tick (the old O(n²)
-        // when a large frame accumulates across ticks).
+        // `scanned` = leading buffer bytes already known newline-free, so the drain resumes the newline search instead of re-scanning the buffer every tick (O(n²) for a large frame).
         let stderrBuffer = MutexBox((data: Data(), scanned: 0))
-        // 64 MiB inbound frame cap — matches the Windows app's inbound cap and the
-        // engine's command-read cap. The engine emits whole event lines (IPCSink
-        // caps OUTBOUND too and substitutes ipc_frame_too_large), and a butler
-        // restructurePlan (~3.5k+ moves) blows past the old 1 MiB guard, which
-        // silently dropped the frame and left the UI wedged with no plan and no
-        // error. Bumped 32→64 MiB for a whole-library plan. Still
-        // bounded so a wedged engine that never emits a newline can't grow this
-        // buffer without limit and OOM the app — an oversize frame surfaces a
-        // visible error instead of vanishing.
+        // 64 MiB inbound frame cap, matching the Windows app and the engine's command-read cap. A whole-library restructurePlan is far larger than 1 MiB. Still bounded so an engine that never emits a newline can't OOM the app; an oversize frame surfaces a visible error.
         let maxFrameBytes = 64 * 1024 * 1024
-        // Hand decoded events to the serial pump (Sendable continuation
-        // captured as a local) instead of spawning an unordered Task per event.
+        // Hand decoded events to the serial pump (Sendable continuation captured as a local) rather than an unordered Task per event.
         let continuation = self.eventContinuation
         errPipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
             let data = handle.availableData
@@ -545,14 +433,11 @@ public final class EngineClient {
                 }
                 return
             }
-            // Append + drain whole lines under the lock.
             var oversizeBytes: Int? = nil
             let lines: [Data] = stderrBuffer.withLock { state in
                 state.data.append(data)
                 var out: [Data] = []
-                // Lines are sliced by offset and the consumed prefix is dropped
-                // once per chunk; removing it per line shifted the whole buffer
-                // for every event in a burst.
+                // Lines are sliced by offset and the consumed prefix dropped once per chunk; removing it per line shifted the whole buffer for every event in a burst.
                 let base = state.data.startIndex
                 var consumed = 0
                 var searchFrom = state.scanned
@@ -572,10 +457,7 @@ public final class EngineClient {
                 }
                 if consumed > 0 { state.data.removeSubrange(base..<(base + consumed)) }
                 state.scanned = state.data.count
-                // A partial frame past the cap (no newline yet) means the engine
-                // is emitting garbage or a frame larger than the shared limit —
-                // drop it and resync to the next newline rather than buffering
-                // unbounded. Reported below instead of dropped silently.
+                // A partial frame past the cap (no newline yet) means garbage or an oversize frame: drop it and resync to the next newline rather than buffer unbounded; reported below, not silently.
                 if state.data.count > maxFrameBytes {
                     oversizeBytes = state.data.count
                     state.data.removeAll(keepingCapacity: false)
@@ -593,17 +475,13 @@ public final class EngineClient {
                 }
             }
             for line in lines {
-                // Only lines that can be JSON frames earn a decode
-                // attempt; anything else is library chatter from an engine
-                // predating the fd-2 split (or a torn frame) — log a
-                // truncated sample so spew can't bloat app.log.
+                // Only lines that can be JSON frames earn a decode attempt; anything else is a torn frame or stray output, logged as a truncated sample so it can't bloat app.log.
                 guard line.first == 0x7B else {
                     Self.debug("ENGINE: \(Self.redactFrameSample(line))")
                     continue
                 }
                 if let event = try? IPCCoder.decoder.decode(IPCEvent.self, from: line) {
-                    // Serial, ordered hand-off to the @MainActor pump. A video
-                    // frame's base64 is decoded here, off the main actor.
+                    // Serial, ordered hand-off to the @MainActor pump; a video frame's base64 is decoded here, off the main actor.
                     var videoFrame: DecodedVideoFrame?
                     if case .thumbnailGenerated(let reply) = event.payload {
                         videoFrame = EngineQueryReplies.decode(reply)
@@ -618,41 +496,43 @@ public final class EngineClient {
         do {
             try proc.run()
         } catch {
-            // NSError descriptions embed the binary path — persist
-            // domain+code only.
+            // NSError descriptions embed the binary path; persist domain+code only.
             let ns = error as NSError
             Self.debug("spawn: proc.run() FAILED: \(ns.domain) (\(ns.code))")
-            return "FileID's helper couldn't start. Quit and reopen FileID. If that doesn't help, reinstall FileID."
+            return EngineStartFailure(.couldNotLaunch)
         }
         Self.debug("spawn: engine pid=\(proc.processIdentifier), readabilityHandler armed")
         self.process = proc
         self.stdinPipe = inPipe
-        runningBackend = backend
         runningReachedReady = false
         return nil
     }
 
-    /// Error kinds that are a notice, not a failure: the user's own Cancel, a repeated Scan click (Swift sends
-    /// `scan_already_queued`, Rust `scan_already_running`), a rescan with nothing new, a declined license.
+    /// Error kinds that are a notice, not a failure: the user's own Cancel, a scan that fell back to the CPU, a repeated Scan click (`scan_already_queued` or `scan_already_running`), a rescan with nothing new, a declined license.
+    /// Errors that end an Organize move or undo with no result event, so the page has to release its in-flight state itself.
+    nonisolated static func endsRestructureWithoutResult(_ kind: String) -> Bool {
+        kind == "apply_restructure" || kind == "undo_restructure" || kind == "db_unavailable"
+    }
+
     nonisolated static func isQuietNotice(_ kind: String) -> Bool {
         switch kind {
         case "prewarm_cancelled", "scan_already_queued", "scan_already_running", "rescan_no_changes",
-             "model_license_not_accepted": return true
+             "model_license_not_accepted", "scan_slower_path": return true
         default: return false
         }
     }
 
-    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE
-    /// (an engine that exits at once is the Rust-to-Swift fallback case).
+    /// A deep-analyze error ends the run unless it is a per-file notice: the engine reports a file that changed since its scan and carries on with the rest.
+    nonisolated static func deepErrorEndsRun(_ kind: String) -> Bool {
+        kind.hasPrefix("deep") && kind != "deep_source_changed"
+    }
+
+    /// A write to an engine that has already exited must fail with EPIPE, not kill the app with SIGPIPE.
     nonisolated static func refuseSigpipe(on pipe: Pipe) {
         _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
 
-    /// Frame samples can carry full user paths in JSON values (e.g. a
-    /// torn deepAnalyzeProgress `currentPath`) — scrub home and volume
-    /// prefixes before they persist in app.log. External-volume paths
-    /// carry no username but the volume + share names identify the
-    /// user's NAS layout, so collapse them the same way.
+    /// Frame samples can carry full user paths in JSON values (e.g. a torn deepAnalyzeProgress `currentPath`): scrub home and volume prefixes before they persist in app.log. External-volume paths carry no username but volume + share names identify the user's NAS layout, so they collapse too.
     nonisolated private static func redactFrameSample(_ line: Data) -> String {
         let sample = String(data: line.prefix(512), encoding: .utf8) ?? "<binary>"
         return sample
@@ -664,7 +544,6 @@ public final class EngineClient {
             )
     }
 
-    /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
     nonisolated public static func debug(_ msg: String) {
         guard !runningTests else { return }
         debugLog.withLock { $0.write(msg) }
@@ -675,9 +554,7 @@ public final class EngineClient {
 
     nonisolated private static let debugLog = MutexBox(DebugLog())
 
-    /// One formatter and one open handle for app.log. The handle is dropped
-    /// whenever the file is gone (Start over, Factory Reset and Settings all
-    /// delete it), so a write never lands in an unlinked file.
+    /// One formatter and one open handle for app.log, dropped whenever the file is gone (Start over, Factory Reset and Settings delete it) so a write never lands in an unlinked file.
     private struct DebugLog {
         private let formatter = ISO8601DateFormatter()
         private var handle: FileHandle?
@@ -728,43 +605,48 @@ public final class EngineClient {
         case .ready(let info):
             state = .ready(info)
             runningReachedReady = true
-            if let runningBackend { fallback.reachedReady(runningBackend) }
+            startupExits.reachedReady()
             if lastError?.kind == "engine_exited" { lastError = nil }
             restoreSavedFolderAccess()
-            // Do NOT clear the respawn budget merely on reaching Ready — a
-            // Ready→immediate-crash flap would reset it every cycle and never trip
-            // the 3-in-60s cap (unbounded ~1s respawn loop). Just record when we
-            // became Ready; handleEngineExit clears the budget only if the engine
-            // stayed Ready for `stabilitySettle` (a genuine recovery).
+            if !canUndoRestructure, let root = RestructureUndoJournal.pendingRoot() {
+                canUndoRestructure = true
+                restructureUndoRoot = root
+            }
+            // Don't clear the respawn budget merely on reaching Ready: a Ready→immediate-crash flap would reset it each cycle and never trip the 3-in-60s cap. Record when we became Ready; handleEngineExit clears the budget only after `stabilitySettle`.
             lastReadyAt = Date()
-            // If we just came back from a wipe-and-rescan, auto-start
-            // the scan against the user's chosen root.
+            refreshVLMAdvice()
+            // Back from a wipe-and-rescan: auto-start the scan against the user's chosen root.
             if let root = pendingWipeAndRescanRoot {
                 pendingWipeAndRescanRoot = nil
                 startScan(rootURL: root)
             }
         case .progress(let p):
-            // Each IPC line is delivered to the main actor as its own
-            // unstructured Task, which the runtime may reorder — so a
-            // late "discovered: 100" must never overwrite the final
-            // "discovered: 4000". Drop any snapshot that would roll a
-            // counter (or the phase) backwards within the same session.
+            // Events reach the main actor as unstructured Tasks the runtime may reorder, so a late "discovered: 100" must never overwrite the final "discovered: 4000": drop any snapshot that rolls a counter (or the phase) backwards within the same session.
             guard p.supersedes(lastProgress) else { break }
             lastProgress = p
-            // Release the App-Nap token on any terminal scan phase. Cancel /
-            // fail arrive here as a phase change (not as .scanComplete), so
-            // this is the only place those two paths surface.
+            if p.phase == .postScan, let baseline = PostScanBaseline.observing(p, current: postScanBaseline), baseline != postScanBaseline {
+                postScanBaseline = baseline
+            }
+            // Release the App-Nap token on any terminal scan phase; cancel/fail arrive here as a phase change, not as .scanComplete.
             switch p.phase {
-            case .completed, .cancelled, .failed: endScanActivity()
-            case .idle, .discovering, .tagging, .postScan: break
+            case .completed, .cancelled, .failed:
+                endScanActivity()
+                startPendingScan()
+            case .discovering, .tagging, .postScan: pendingScanRetryRoot = nil
+            case .idle: break
             }
         case .phaseChanged(let phase):
-            // The Swift engine ends a scan with a terminal progress snapshot; the shared
-            // engine announces it with this event alone, so the snapshot keeps its
-            // post-scan phase (a scan that never finishes) unless the event settles it.
+            // The engine announces the end of a scan with this event alone, so the snapshot keeps its post-scan phase unless the event settles it.
             if let settled = lastProgress?.settled(by: phase) {
                 lastProgress = settled
+            }
+            // A scan the engine rejects or cancels before its first progress snapshot has nothing to settle, but its App-Nap token must still go.
+            switch phase {
+            case .completed, .cancelled, .failed:
                 endScanActivity()
+                startPendingScan()
+            case .discovering: pendingScanRetryRoot = nil
+            case .idle, .tagging, .postScan: break
             }
         case .discoveryComplete:
             break
@@ -775,40 +657,40 @@ public final class EngineClient {
         case .scanComplete:
             lastTerminalEventAt = Date()
             endScanActivity()
+            startPendingScan()
         case .error(let e):
             queryReplies.deliver(e)
-            // Engine startup capability warning: not a real error, just a
-            // signal that Deep Analyze can't run on this build.
+            // Startup capability warning, not a real error: Deep Analyze can't run on this build.
             if e.kind == "deep_analyze_unavailable" {
                 deepAnalyzeAvailable = false
                 deepAnalyzeUnavailableReason = e.message
                 return
             }
-            // PAR-111 mirror: a busy bounce means a pass IS running — the
-            // opposite of a failure. Falling through would match the
-            // hasPrefix("face_cluster")/hasPrefix("deep") arms below and
-            // wrongly clear the in-flight flags while the running pass is
-            // still going. Log-only; the running pass
-            // emits its own terminal event.
+            // A busy bounce means a pass IS running, the opposite of a failure. Falling through would match the hasPrefix("face_cluster")/hasPrefix("deep") arms below and wrongly clear the in-flight flags. Log-only; the running pass emits its own terminal event.
             if e.kind == "face_clustering_busy" || e.kind == "deep_analyze_already_running" {
                 Self.debug("engine bounce (benign): \(e.kind)")
                 return
             }
-            // The user's own Cancel, a repeated click and a declined license
-            // are not failures; the request they belong to already told them.
-            if Self.isQuietNotice(e.kind) {
-                Self.debug("engine notice (user-initiated): \(e.kind)")
+            // A grouping pass another scan took over runs again after that scan; the in-flight flag is the only thing to settle.
+            if e.kind == "face_clustering_cancelled" {
+                faceClusteringInFlight = false
                 return
             }
+            // The user's own Cancel, a repeated click and a declined license aren't failures; the request already told them.
+            if Self.isQuietNotice(e.kind) {
+                Self.debug("engine notice: \(e.kind)")
+                if e.kind == "scan_already_running" { retryScanStartWhileOldScanDrains() }
+                if e.kind == "scan_slower_path" { scanRunsOnCPU = true }
+                return
+            }
+            // A rejected undo (scan paused, another move running, handler panic) never gets a result, so its flag would otherwise make the next forward move read as an undo.
+            if e.kind == "undo_restructure" { undoRestructureInFlight = false }
             lastError = e
             if e.kind.hasPrefix("face_cluster") {
                 faceClusteringInFlight = false
             }
-            if e.kind.hasPrefix("deep") {
-                // A deep-analyze error (e.g. unknown model kind → "deep_invalid")
-                // means we'll never get .deepAnalyzeComplete, which is the only
-                // place that clears these flags — so clear them here or the UI
-                // stays stuck "analyzing…" forever.
+            if Self.deepErrorEndsRun(e.kind) {
+                // A deep-analyze error (e.g. unknown model kind → "deep_invalid") means .deepAnalyzeComplete, the only clearer of these flags, never arrives: clear them here or the UI stays stuck "analyzing…".
                 deepAnalyzeInFlight = false
                 deepAnalyzeProgress = nil
                 endDeepAnalyzeActivity()
@@ -826,16 +708,13 @@ public final class EngineClient {
         case .deepAnalyzeProgress(let p):
             deepAnalyzeProgress = p
             deepAnalyzeInFlight = true
-            // A describe run's model load reports progress below 1.0 and never a final 1.0,
-            // so the bar would stay as "Downloading 99%" for good once the model works.
+            // A describe run's model load reports progress below 1.0 and never a final 1.0, so the bar would stay "Downloading 99%" once the model works.
             clearModelDownloadProgress(forModelKind: p.modelKind)
             beginDeepAnalyzeActivity()
-            // First per-file progress arrived — clear the "Starting…"
-            // card so the progress card can take over without overlap.
+            // First per-file progress arrived: clear the "Starting…" card so the progress card takes over.
             deepAnalyzeStarting = nil
         case .deepAnalyzeFileDone(let d):
-            // 500 ms throttle — otherwise SwiftUI's AttributeGraph
-            // overflows over a fast Deep Analyze run.
+            // 500 ms throttle, else SwiftUI's AttributeGraph overflows over a fast Deep Analyze run.
             let now = Date()
             if now.timeIntervalSince(lastDeepAnalyzeFileDoneAt) >= 0.5 {
                 deepAnalyzeLast = d
@@ -850,52 +729,38 @@ public final class EngineClient {
             deepAnalyzeProgress = nil
             deepAnalyzeStarting = nil
         case .modelDownloadProgress(let p):
-            // Clear the bar once the download completes so the model picker
-            // doesn't show a stale "Downloading 100%" forever; otherwise track
-            // progress. It also clears on engine exit (handleEngineExit).
+            // Clear the bar when the download completes so the picker doesn't show a stale "Downloading 100%"; also cleared on engine exit (handleEngineExit).
             modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
-        // ── Restructure butler replies. handleEvent already
-        //    runs on the main actor (see spawn()'s dispatch), so these
-        //    assignments are isolation-safe. ──
+            if q.running?.category == .faceCluster { faceClusteringInFlight = true }
+        // Restructure butler replies (handleEvent runs on the main actor, so these assignments are isolation-safe).
         case .restructurePlan(let plan):
             restructurePlan = plan
             restructurePlanSignal &+= 1
         case .restructureApplyResult(let result):
             restructureApplyResult = result
             restructureApplyResultSignal &+= 1
-            // Toggle the "Undo last run" affordance: an apply that moved files
-            // makes the run undoable; the undo's own reply clears it.
+            // An apply that moved files makes the run undoable; the undo's own reply clears it.
             if undoRestructureInFlight {
                 undoRestructureInFlight = false
-                // A cancelled or partially-failed undo must KEEP the
-                // affordance: Restructure.undoLast only clears the on-disk
-                // journal when the undo both completed and had zero failures
-                // (Pipeline/Restructure.swift), so the remaining files are
-                // still relocated and still reversible. Clearing this
-                // unconditionally stranded a half-reverted library with no UI
-                // path back — permanently, since this flag is only ever set
-                // true by a forward apply and is never re-seeded from disk.
-                // Mirrors Windows NextCanUndoRestructure and Linux
-                // undo_fully_completed.
+                // A cancelled or partially-failed undo must KEEP the affordance: Restructure.undoLast clears the on-disk journal only when the undo completed with zero failures, so the remaining files are still reversible. This flag is only set by a forward apply and never re-seeded from disk, so clearing it would strand a half-reverted library. Mirrors Windows NextCanUndoRestructure and Linux undo_fully_completed.
                 canUndoRestructure = result.cancelled || result.failed > 0
             } else {
                 canUndoRestructure = result.applied > 0
             }
+            restructureUndoRoot = nil
         case .bulkActionResult(let result):
             bulkActionResult = result
             bulkActionResultSignal &+= 1
             resumeBulkResultWaiters(with: result)
-        // ── Remaining Windows-originated reply events. The mac app's
-        //    equivalent flows are synchronous (per-tab actions), so these
-        //    aren't consumed here yet; they're decoded so a shared/
-        //    cross-platform engine doesn't wedge the wire. ──
+        // Remaining Windows-originated reply events: the mac app's equivalent flows are synchronous, so they aren't consumed here, but they're decoded so a shared engine doesn't wedge the wire.
         case .rootsList(let list):
             guard list.requestID.hasPrefix("roots-") else { break }
             libraryRoots = list.roots
         case .modelCatalog(let catalog):
             for model in catalog.models { if let result = model.benchmark { benchmarkResults[model.id] = result } }
+            if catalog.requestID.hasPrefix(Self.vlmAdviceRequestPrefix) { vlmAdvice = VLMAdvice(catalog) }
         case .benchmarkProgress(let progress):
             guard progress.requestID == benchmarkRequestID else { break }
             benchmarkProgress = progress
@@ -908,7 +773,7 @@ public final class EngineClient {
                 benchmarkResults[result.modelKind] = benchmark
                 benchmarkMessage = nil
             } else {
-                benchmarkMessage = (result.modelKind, result.message ?? "The benchmark didn't finish.")
+                benchmarkMessage = (result.modelKind, result.message ?? "The benchmark didn’t finish.")
             }
         case .clipTextEmbedding(let reply):
             queryReplies.deliver(reply)
@@ -925,12 +790,7 @@ public final class EngineClient {
         }
     }
 
-    /// Clear the UI state whose only other clearer is an engine terminal event.
-    ///
-    /// A dead engine can never emit those events, so one mid-job crash would
-    /// wedge Deep Analyze / People across the respawn (the respawned engine
-    /// starts jobless, so nothing else un-sticks them). Both the crash leg and
-    /// a deliberate restart run this — see the call in `terminateRunningEngine`.
+    /// Clears UI state whose only other clearer is an engine terminal event. A dead engine can't emit those, so a mid-job crash would wedge Deep Analyze / People across the respawn. Both the crash leg and a deliberate restart run this (see `terminateRunningEngine`).
     private func resetStateOnlyADeadEngineCouldClear() {
         benchmarkRequestID = nil
         benchmarkModelKind = nil
@@ -942,37 +802,26 @@ public final class EngineClient {
         queryReplies.abandonAll()
         for id in Array(catalogWaiters.keys) { resumeCatalogWaiter(id, with: nil) }
         resumeBulkResultWaiters(with: nil)
-        // A dead engine emits no terminal event, so release both App-Nap
-        // tokens here — this is the crash/exit leg that keeps the begin/end
-        // pairs balanced. Both helpers no-op when their token isn't held.
+        // A dead engine emits no terminal event, so release both App-Nap tokens here (both helpers no-op when not held).
         endScanActivity()
+        pendingScanRoot = nil
+        pendingScanRetryRoot = nil
         endDeepAnalyzeActivity()
-        // Same for the undo affordance: a crash mid-undo never emits the terminal
-        // restructureApplyResult that clears this, so without the reset the NEXT
-        // apply's result is mis-attributed as the (dead) undo's. (app)
+        // Likewise the undo affordance: a crash mid-undo never emits the terminal restructureApplyResult, so without the reset the NEXT apply's result is mis-attributed as the dead undo's.
         undoRestructureInFlight = false
-        // A crash mid-download leaves a stale sub-1.0 progress that defeats the
-        // WelcomeSheet VLM "no response" watchdog and shows a phantom Deep-Analyze
-        // download bar.
+        // A crash mid-download leaves a stale sub-1.0 progress that defeats the WelcomeSheet VLM "no response" watchdog and shows a phantom Deep-Analyze download bar.
         modelDownloadProgress = nil
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
-        // Keep the counters as context, but a scan the dead engine was running
-        // can never report its terminal phase: left live, the sidebar offers
-        // only Pause/Stop against a jobless engine and hides Scan again.
+        // Keep the counters as context, but a scan the dead engine was running can never report its terminal phase: left live, the sidebar offers only Pause/Stop against a jobless engine and hides Scan.
         lastProgress = lastProgress?.settledAfterEngineExit()
-        // Signal views that own their in-flight UI (e.g. Deep Analyze's
-        // StreamCard + inert Cancel) to reset — the engine can no longer
-        // emit the terminal event that would clear them.
+        // Signal views that own in-flight UI (e.g. Deep Analyze's StreamCard + inert Cancel) to reset; the engine can no longer emit the terminal event.
         engineResetSignal &+= 1
     }
 
     @MainActor
     private func handleEngineExit(for proc: Process?) {
-        // Identity guard (mirrors the Windows sender != _process check):
-        // a late EOF from a process we already terminated/replaced — a
-        // Restart, or a respawn that raced — must NOT tear down the
-        // engine that's live now, or reset its in-flight UI.
+        // Identity guard (mirrors the Windows sender != _process check): a late EOF from a process we already terminated/replaced (a Restart, or a raced respawn) must NOT tear down the live engine or reset its in-flight UI.
         guard let proc, proc === self.process else { return }
 
         // Nil pipe handlers so any in-flight GCD callback short-circuits.
@@ -980,22 +829,16 @@ public final class EngineClient {
         (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         process = nil
         stdinPipe = nil
-        let exitedBackend = runningBackend
         let exitedBeforeReady = !runningReachedReady
-        runningBackend = nil
 
         resetStateOnlyADeadEngineCouldClear()
 
-        // Expected exit (shutdown called or work just completed): silent
-        // re-spawn, no error pill, no respawn budget burned. Covers
-        // MLX's known SIGSEGV-in-static-destructor on clean exit.
+        // Expected exit (shutdown called or work just completed): silent respawn, no error pill, no respawn budget burned. Covers MLX's known SIGSEGV-in-static-destructor on clean exit.
         let recentClean = Date().timeIntervalSince(lastTerminalEventAt) < 5.0
         if expectedExit || recentClean {
             Self.debug("exit: clean (expectedExit=\(expectedExit) recentClean=\(recentClean))")
             expectedExit = false
-            // Wipe the SQLite library before the respawn — this is
-            // the only safe window to delete it; the engine holds
-            // the WAL lock while it's running.
+            // Wipe the SQLite library before the respawn: the only safe window, since the running engine holds the WAL lock.
             if pendingWipeAndRescanRoot != nil {
                 Self.deleteLibraryFiles()
                 clearProgress()
@@ -1009,17 +852,15 @@ public final class EngineClient {
             return
         }
 
-        // A Rust engine that can't get going falls back to the Swift engine
-        // at once, with a fresh respawn budget.
-        if let exitedBackend, exitedBeforeReady, fallback.exitedBeforeReady(exitedBackend) {
-            fallBackAfterExit(of: exitedBackend)
+        // An engine that stops twice before it is ready is not coming up: say so now rather than after the whole respawn budget.
+        if exitedBeforeReady, startupExits.exitedBeforeReady() {
+            Self.debug("exit: stopped before ready \(EngineStartupExits.limit) times")
+            fail(EngineStartFailure(.exitsAtStart))
             return
         }
 
         let now = Date()
-        // A genuine recovery (engine stayed Ready for ≥ stabilitySettle)
-        // clears the budget; a Ready→immediate-crash flap does not, so it keeps
-        // ticking toward the 3-in-60s terminal cap instead of resetting forever.
+        // A genuine recovery (Ready for ≥ stabilitySettle) clears the budget; a Ready→immediate-crash flap does not, so it keeps ticking toward the 3-in-60s terminal cap.
         if lastReadyAt != .distantPast, now.timeIntervalSince(lastReadyAt) >= Self.stabilitySettle {
             respawnAttempts.removeAll()
         }
@@ -1030,12 +871,8 @@ public final class EngineClient {
 
         let attemptIdx = respawnAttempts.count
         guard attemptIdx < Self.respawnDelays.count else {
-            if let exitedBackend, fallback.respawnsExhausted(exitedBackend) {
-                fallBackAfterExit(of: exitedBackend)
-                return
-            }
-            state = .crashed(reason: "FileID's helper keeps stopping. Press Restart, or quit and reopen FileID.")
             Self.debug("respawn: budget exhausted, marking crashed")
+            fail(EngineStartFailure(.keepsStopping))
             return
         }
 
@@ -1044,7 +881,7 @@ public final class EngineClient {
         state = .starting
         lastError = EngineError(
             kind: "engine_exited",
-            message: "FileID's helper stopped and is restarting…"
+            message: "FileID’s helper stopped and is restarting…"
         )
         Self.debug("respawn: scheduling attempt \(attemptIdx + 1)/\(Self.respawnDelays.count) in \(delay)s")
 
@@ -1057,29 +894,18 @@ public final class EngineClient {
         }
     }
 
-    private func fallBackAfterExit(of backend: EngineBackend) {
-        Self.debug("fallback: \(backend.rawValue) engine demoted for this session")
-        respawnAttempts.removeAll()
-        lastReadyAt = .distantPast
-        state = .starting
-        if let note = fallback.note { lastError = EngineError(kind: "engine_fallback", message: note) }
-        pendingRespawn?.cancel()
-        pendingRespawn = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            guard let self else { return }
-            if case .crashed = self.state { return }
-            self.start()
-        }
-    }
-
     // MARK: - App Nap activity (begin/end must stay balanced)
 
-    private func beginScanActivity() {
+    func setPendingScanRootForTesting(_ url: URL?) { pendingScanRoot = url }
+
+    var scanActivityHeld: Bool { scanActivityToken != nil }
+
+    func beginScanActivity() {
         guard scanActivityToken == nil else { return }
         scanActivityToken = AppSleepActivity.begin(reason: "FileID is scanning files")
     }
 
-    private func endScanActivity() {
+    func endScanActivity() {
         guard let token = scanActivityToken else { return }
         AppSleepActivity.end(token)
         scanActivityToken = nil
@@ -1087,7 +913,7 @@ public final class EngineClient {
 
     private func beginDeepAnalyzeActivity() {
         guard deepAnalyzeActivityToken == nil else { return }
-        deepAnalyzeActivityToken = AppSleepActivity.begin(reason: "FileID is running Deep Analyze")
+        deepAnalyzeActivityToken = AppSleepActivity.begin(reason: "FileID is describing files")
     }
 
     private func endDeepAnalyzeActivity() {
@@ -1098,9 +924,7 @@ public final class EngineClient {
 
     // MARK: - Commands
 
-    /// Returns false when the command could not be queued (engine down or
-    /// encode failure). A later pipe-write failure terminates the captured
-    /// engine generation so its normal exit path clears caller state.
+    /// Returns false when the command could not be queued (engine down or encode failure). A later pipe-write failure terminates the captured engine generation so its normal exit path clears caller state.
     @discardableResult
     public func send(_ payload: IPCCommand.Payload) -> Bool {
         guard let pipe = stdinPipe else { return false }
@@ -1114,16 +938,11 @@ public final class EngineClient {
             return false
         }
 
-        // Off the main thread with a 10 s deadline. FileHandle.write
-        // blocks if the engine is dead with a full stdin buffer; on
-        // timeout we kill the engine to trigger handleEngineExit's
-        // respawn.
+        // Off the main thread with a 10 s deadline: FileHandle.write blocks if the engine is dead with a full stdin buffer, and on timeout we kill the engine to trigger handleEngineExit's respawn.
         let writeHandle = pipe.fileHandleForWriting
         let procBox = MutexBox<Process?>(self.process)
         let done = MutexBox(false)
-        // Serial queue → commands are written in submission order and never
-        // interleave. The timeout below stays on a concurrent queue so it fires
-        // as a real timer even while a blocked write holds the serial queue.
+        // Serial queue: commands are written in submission order and never interleave. The timeout below stays on a concurrent queue so it fires as a real timer even while a blocked write holds the serial queue.
         stdinWriteQueue.async {
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 10.0) {
                 guard !done.withLock({ $0 }) else { return }
@@ -1141,7 +960,61 @@ public final class EngineClient {
         return true
     }
 
-    /// Wipe progress + last batch + error (e.g. when the user picks a new folder).
+    /// Stops the scan that is running and starts `rootURL` once the engine reports the old one ended; with no scan running it starts at once.
+    public func replaceScan(with rootURL: URL) {
+        let running = lastProgress.map { [ScanPhase.discovering, .tagging, .postScan].contains($0.phase) } ?? false
+        guard running else {
+            startScan(rootURL: rootURL)
+            return
+        }
+        pendingScanRoot = rootURL
+        scanBusyRetriesLeft = 8
+        if !send(.cancelScan) {
+            pendingScanRoot = nil
+            startScan(rootURL: rootURL)
+            return
+        }
+        isPaused = false
+    }
+
+    private func startPendingScan() {
+        guard let root = pendingScanRoot else { return }
+        pendingScanRoot = nil
+        pendingScanRetryRoot = root
+        // The ended scan's remaining terminal events (phase change, scanComplete) follow its first one within moments; a start sent now would have its App-Nap token released by them.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self, self.pendingScanRetryRoot == root else { return }
+            self.clearProgress()
+            self.startScan(rootURL: root)
+        }
+    }
+
+    private var pendingScanRetryRoot: URL?
+
+    /// The engine can report the old scan ended a moment before it frees its slot, so a start sent right then bounces; try again a few times rather than dropping the user's folder.
+    private func retryScanStartWhileOldScanDrains() {
+        guard let root = pendingScanRetryRoot else { return }
+        if let phase = lastProgress?.phase, [.discovering, .tagging, .postScan].contains(phase) {
+            pendingScanRetryRoot = nil
+            return
+        }
+        guard scanBusyRetriesLeft > 0 else {
+            pendingScanRetryRoot = nil
+            endScanActivity()
+            lastError = EngineError(kind: "scan_not_started",
+                                    message: "The scan couldn’t start because the last one was still stopping. Press Scan again.")
+            return
+        }
+        scanBusyRetriesLeft -= 1
+        endScanActivity()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self, self.pendingScanRetryRoot == root else { return }
+            self.startScan(rootURL: root)
+        }
+    }
+
     public func clearProgress() {
         lastProgress = nil
         lastBatch = nil
@@ -1167,7 +1040,7 @@ public final class EngineClient {
     private func setSavedFolderBookmarkError() {
         lastError = EngineError(
             kind: "bookmark_unavailable",
-            message: "FileID can't open that folder any more. Choose the folder again."
+            message: "FileID can’t open that folder any more. Choose the folder again."
         )
     }
 
@@ -1175,11 +1048,17 @@ public final class EngineClient {
         _ = send(.grantFolderAccess(rootPath: path, rootBookmark: bookmark))
     }
 
+    /// A scan owns the engine from discovery to post-scan, paused or not; a second start would be refused and must not touch the pause state.
+    public var scanInProgress: Bool {
+        guard let phase = lastProgress?.phase else { return false }
+        return phase == .discovering || phase == .tagging || phase == .postScan
+    }
+
     public func startScan(rootURL: URL) {
-        isPaused = false
+        // A Describe result belongs to the library as it was; once a new scan starts it must not outrank the scan's own state in the sidebar.
+        deepAnalyzeComplete = nil
         let displayPath = rootURL.path
-        // The persisted app-scoped bookmark stays in the app; the engine gets
-        // a separate implicit-scope bookmark that can cross the process boundary.
+        // The persisted app-scoped bookmark stays in the app; the engine gets a separate implicit-scope bookmark that can cross the process boundary.
         let client = self
         Task.detached(priority: .userInitiated) {
             var resolvedPath = rootURL.standardizedFileURL.path
@@ -1191,9 +1070,8 @@ public final class EngineClient {
                 await MainActor.run {
                     client.lastError = EngineError(
                         kind: "bookmark_unavailable",
-                        message: "FileID couldn't retain access to that folder. Choose the folder again."
+                        message: "FileID couldn’t retain access to that folder. Choose the folder again."
                     )
-                    client.cancelAutoPilot()
                 }
                 return
                 #else
@@ -1201,27 +1079,22 @@ public final class EngineClient {
                 #endif
             }
             await MainActor.run {
-                // Begin the App-Nap token only if the command actually left the
-                // app; a dropped send (engine down) would otherwise leave the
-                // token held with no scan and no terminal event to release it.
+                // Begin the App-Nap token only if the command actually left the app; a dropped send would leave the token held with no scan and no terminal event to release it.
                 if client.send(.startScan(rootPath: resolvedPath, rootBookmark: rootBookmark,
                                           rootDisplay: displayPath,
                                           rescan: false, excludedPaths: nil)) {
+                    client.isPaused = false
+                    client.scanRunsOnCPU = false
                     client.beginScanActivity()
                 } else {
                     client.lastError = EngineError(
                         kind: "engine_exited",
-                        message: "The scan couldn't start because FileID's helper isn't running. Wait a moment and press Scan again."
+                        message: "The scan couldn’t start because FileID’s helper isn’t running. Restart it, then press Scan again."
                     )
-                    client.cancelAutoPilot()
                 }
             }
         }
     }
-
-    /// Nothing chains stages any more; kept so Chat's "stop" action still has
-    /// something to call.
-    public func cancelAutoPilot() {}
 
     public func pause()    { isPaused = true;  send(.pauseScan)  }
     public func resume()   { isPaused = false; send(.resumeScan) }
@@ -1229,7 +1102,6 @@ public final class EngineClient {
     public func cancelScan() {
         isPaused = false
         send(.cancelScan)
-        cancelAutoPilot()
     }
 
     /// Stops everything the engine is doing (Chat's "stop all").
@@ -1238,57 +1110,39 @@ public final class EngineClient {
         send(.cancelScan)
         send(.cancelRestructure)
         send(.deepAnalyzeCancel)
-        cancelAutoPilot()
     }
     public func shutdown() {
-        // Only latch the expected-exit suppression when the shutdown
-        // command actually left the app — otherwise a genuine crash that
-        // races the respawn window (stdinPipe nil → send() returns false)
-        // would be masked as a clean exit and skip the error pill.
+        // Latch the expected-exit suppression only when the shutdown command actually left the app; otherwise a genuine crash racing the respawn window would be masked as a clean exit and skip the error pill.
         if send(.shutdown) {
             expectedExit = true
         }
     }
 
-    /// Factory Reset: terminate the engine, wipe the Application Support folder,
-    /// purge all UserDefaults, and exit the macOS app immediately.
+    /// Factory Reset: terminate the engine, wipe the Application Support folder except the downloaded description models, purge all UserDefaults, and quit.
     public func factoryResetAndQuit() {
         terminateRunningEngine()
         SpotlightIndexer.wipe()
         let fm = FileManager.default
         if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
-            try? fm.removeItem(at: AppSupportPath.fileID)
+            FactoryReset.erase(root: AppSupportPath.fileID, keeping: [ModelCachePaths.huggingFaceRoot], fileManager: fm)
         }
         if let bundleID = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: bundleID)
-            UserDefaults.standard.synchronize()
+            FactoryReset.eraseDefaults(domain: bundleID)
         }
         #if os(macOS)
         NSApplication.shared.terminate(nil)
         #endif
     }
 
-    /// Wipes the SQLite library + scan logs and triggers a fresh
-    /// scan against `rootURL` once the engine has restarted. Cancels
-    /// any in-flight scan first. The engine has to exit before we
-    /// can delete the SQLite files (it holds the WAL lock), so the
-    /// flow is: shutdown → engine exit → handleEngineExit deletes
-    /// the files → engine respawn → on `.ready` event we trigger
-    /// the new scan.
+    /// Wipes the SQLite library + scan logs and triggers a fresh scan of `rootURL` once the engine has restarted. The engine must exit before the files can be deleted (it holds the WAL lock), so: shutdown → exit → handleEngineExit deletes the files → respawn → on `.ready` the new scan starts. Cancels any in-flight scan first.
     public func wipeAndRescan(rootURL: URL) {
         if let p = lastProgress, p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
             send(.cancelScan)
         }
-        // Snapshot the bookmark + display path NOW — by the time the
-        // restarted engine is ready, the security-scoped resource
-        // would have to be re-acquired. We rely on the same
-        // bookmark-resolve path as `startScan`.
+        // Snapshot the bookmark + display path NOW: by the time the restarted engine is ready the security-scoped resource would have to be re-acquired, via the same bookmark-resolve path as `startScan`.
         pendingWipeAndRescanRoot = rootURL
-        // Engine already down (respawn backoff or exhausted budget):
-        // the shutdown would be silently dropped and no exit would
-        // ever run the wipe — but no WAL lock is held either, so wipe
+        // Engine already down (respawn backoff or exhausted budget): the shutdown would be silently dropped and no exit would run the wipe, but no WAL lock is held either, so wipe directly and respawn.
 
-        // directly and respawn.
         guard stdinPipe != nil else {
             Self.deleteLibraryFiles()
             clearProgress()
@@ -1305,9 +1159,7 @@ public final class EngineClient {
         }
     }
 
-    /// Deletes the SQLite library + WAL/SHM siblings + the engine and app logs.
-    /// Safe to call only when the engine isn't running — SQLite
-    /// holds the lock otherwise.
+    /// Deletes the SQLite library + WAL/SHM siblings + the engine and app logs. Only safe when the engine isn't running (SQLite holds the lock).
     private static func deleteLibraryFiles() {
         let fm = FileManager.default
         let root = AppSupportPath.fileID
@@ -1322,15 +1174,11 @@ public final class EngineClient {
                 try? fm.removeItem(at: url)
             }
         }
-        // The Spotlight items mirror the rows just wiped — without
-        // this, captions/tags/paths of wiped files stay queryable in
-        // ⌘Space long after the library is gone.
+        // The Spotlight items mirror the rows just wiped; without this, captions/tags/paths of wiped files stay queryable in ⌘Space.
         SpotlightIndexer.wipe()
     }
 
-    // In-flight flags arm only when send() succeeded — a click during
-    // the respawn backoff (stdinPipe nil) used to set the flag, drop
-    // the command, and wedge the UI with no job running.
+    // In-flight flags arm only when send() succeeded: a click during respawn backoff (stdinPipe nil) would otherwise set the flag, drop the command, and wedge the UI with no job running.
     public func runFaceClustering() {
         guard !faceClusteringInFlight, send(.runFaceClustering) else { return }
         faceClusteringInFlight = true
@@ -1373,11 +1221,7 @@ public final class EngineClient {
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
         guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
-        // Every current call site is a whole-library run (no fileIDs), so the
-        // persisted Deep Analyze exclusion list is threaded through here —
-        // the one choke point every deepAnalyzeAll send passes through —
-        // rather than at each call site. Sent as nil (omitted on the wire)
-        // when empty; ignored engine-side whenever fileIDs is present.
+        // Every current call site is a whole-library run, so the persisted Deep Analyze exclusion list is threaded through this choke point, sent as nil (omitted) when empty and ignored engine-side whenever fileIDs is present.
         let excluded = DeepAnalyzeSettings.shared.excludedFolders
         guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true, fileIDs: nil, excludedFolders: excluded.isEmpty ? nil : excluded)) else { return }
         deepAnalyzeInFlight = true
@@ -1387,7 +1231,6 @@ public final class EngineClient {
         beginDeepAnalyzeActivity()
     }
 
-    /// Describe an explicit selection of at most 100 files (the schema bound).
     @discardableResult
     public func deepAnalyzeSelection(fileIDs: [Int64], modelKind: String) -> Bool {
         guard !fileIDs.isEmpty, fileIDs.count <= 100,
@@ -1407,22 +1250,13 @@ public final class EngineClient {
 
     // MARK: - Restructure butler commands
 
-    /// Ask the engine to compute a restructure plan for `libraryRoot`. The
-    /// reply lands on `restructurePlan` and bumps `restructurePlanSignal`.
-    /// Returns false when the command never left the app (engine starting /
-    /// down) so the caller can stop its "computing…" spinner.
+    /// Asks the engine to compute a restructure plan for `libraryRoot`; the reply lands on `restructurePlan` and bumps `restructurePlanSignal`. False when the command never left the app so the caller can stop its "computing…" spinner.
     @discardableResult
     public func planRestructure(libraryRoot: String) -> Bool {
         send(.planRestructure(libraryRoot: libraryRoot, supportsPagedPlans: true))
     }
 
-    /// Apply the selected `moves` through the engine butler. macOS performs
-    /// real on-disk moves only — there is no symlink-preview apply mode, so
-    /// the engine now rejects `useSymlinks: true` with an error instead of
-    /// silently performing a real move. Callers
-    /// should not pass `true`; the parameter exists for wire parity with the
-    /// Windows engine. The reply lands on `restructureApplyResult` and bumps
-    /// `restructureApplyResultSignal`.
+    /// Applies the selected `moves` through the engine butler. macOS does real on-disk moves only: the engine rejects `useSymlinks: true` with an error rather than silently moving; the parameter exists for wire parity with Windows. The reply lands on `restructureApplyResult` and bumps `restructureApplyResultSignal`.
     @discardableResult
     public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
                                  useSymlinks: Bool = false,
@@ -1432,45 +1266,27 @@ public final class EngineClient {
             useSymlinks: useSymlinks, planID: planID))
     }
 
-    /// Reverse the most recent applyRestructure — the engine replays its on-disk
-    /// undo journal, moving every relocated file back. The reply lands on
-    /// `restructureApplyResult` (applied = files moved back) and clears
-    /// `canUndoRestructure`. (RESTRUCTURE.md §6 reversibility)
+    /// Reverses the most recent applyRestructure by replaying the engine's on-disk undo journal. The reply lands on `restructureApplyResult` (applied = files moved back) and clears `canUndoRestructure`.
     @discardableResult
     public func undoRestructure(libraryRoot: String) -> Bool {
-        // Arm the in-flight flag ONLY on a successful send. A failed send (engine
-        // respawning) would otherwise latch the flag and mis-attribute the NEXT
-        // apply's result as the undo's — leaving canUndoRestructure false while the
-        // on-disk journal is still undoable. (app)
+        // Arm the in-flight flag ONLY on a successful send: a failed send (engine respawning) would latch it and mis-attribute the NEXT apply's result as the undo's, leaving canUndoRestructure false while the journal is still undoable.
         let sent = send(.undoRestructure(libraryRoot: libraryRoot))
         if sent { undoRestructureInFlight = true }
         return sent
     }
 
-    /// Cooperatively cancel the active restructure plan/apply/undo — never a
-    /// library scan (that's `cancel()` → `.cancelScan`; the schema requires
-    /// `.cancelRestructure` stay isolated from it). The engine finishes the
-    /// move currently in flight (each is already durable before the next
-    /// cancel-poll) and replies with a terminal `restructureApplyResult`
-    /// whose `cancelled` is true.
+    /// Cooperatively cancels the active restructure plan/apply/undo, never a library scan (`cancel()` → `.cancelScan`; the schema requires `.cancelRestructure` stay isolated). The engine finishes the move in flight (each durable before the next cancel-poll) and replies with a terminal `restructureApplyResult` with `cancelled` true.
     public func cancelRestructure() {
         send(.cancelRestructure)
     }
 
-    /// Pre-fetch a VLM's weights without running inference. Used by the
-    /// welcome-sheet onboarding flow so first-launch downloads happen
-    /// up front instead of stalling the first Deep Analyze run. The
-    /// engine emits `modelDownloadProgress` events identical to the
-    /// in-Deep-Analyze flow; bind to `engine.modelDownloadProgress`
-    /// for live progress.
+    /// Pre-fetches a VLM's weights without inference, so first-launch downloads happen up front (welcome sheet) instead of stalling the first Deep Analyze run. Progress arrives as `modelDownloadProgress` events.
     @discardableResult
     public func prewarmModel(_ modelKind: String) -> Bool {
         guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return false }
         return send(.prewarmModel(modelKind: modelKind))
     }
 
-    /// Measure an installed model on this Mac: cold load, prefill and decode
-    /// speed, seconds per image, peak memory, JSON reliability.
     @discardableResult
     public func benchmarkModel(_ kind: AIModelKind) -> Bool {
         guard benchmarkRequestID == nil else { return false }
@@ -1487,38 +1303,73 @@ public final class EngineClient {
         send(.cancelBenchmark)
     }
 
-    /// Asks the engine for the scanned locations; the answer lands in `libraryRoots`.
     public func refreshLibraryRoots() {
         send(.listRoots(requestID: "roots-" + UUID().uuidString.prefix(8).lowercased()))
     }
 
-    /// Pulls stored benchmark results for this Mac.
     public func refreshModelCatalog() {
         send(.listModels(requestID: "catalog-" + UUID().uuidString.prefix(8).lowercased(), role: nil))
     }
 
-    /// Cancel a running prewarm. Lands at the next Task.checkCancellation
-    /// inside swift-transformers' Hub fetcher (typically <1 s). `nil` cancels
-    /// every in-flight prewarm (the only mode the welcome sheet uses today).
+    static let vlmAdviceRequestPrefix = "advice-"
+
+    /// Asks the engine which vision models this Mac can run, and which loads with the memory free right now.
+    public func refreshVLMAdvice() {
+        send(.listModels(requestID: Self.vlmAdviceRequestPrefix + UUID().uuidString.prefix(8).lowercased(), role: "vision"))
+    }
+
+    /// Cancels a running prewarm at the next Task.checkCancellation inside swift-transformers' Hub fetcher (typically <1 s). `nil` cancels every in-flight prewarm.
     public func cancelPrewarm() {
         send(.cancelPrewarm(modelKind: nil))
     }
 
-    /// Drop a stale `modelDownloadProgress` left behind by a cancelled prewarm.
-    /// The engine only auto-clears the bar at fraction 1.0 (or on exit); a user
-    /// Cancel stops mid-download, so the last fraction lingers with the same
-    /// modelKind and would fool WelcomeSheet's retry watchdogs into believing a
-    /// fresh download is already progressing — arming neither the "no response"
-    /// nor the "stalled" timer. Pass a modelKind to clear only that model's
-    /// residue; nil clears whatever is showing.
+    #if DEBUG
+    func selfShotSetModelProgress(_ progress: ModelDownloadProgress) { modelDownloadProgress = progress }
+    #endif
+
+    /// Drops a stale `modelDownloadProgress` left by a cancelled prewarm. The engine auto-clears the bar only at 1.0 (or on exit), so a user Cancel leaves the last fraction behind, and WelcomeSheet's retry watchdogs would take it for a fresh download. A modelKind clears only that model's residue; nil clears whatever is showing.
     public func clearModelDownloadProgress(forModelKind modelKind: String? = nil) {
         if let modelKind, modelDownloadProgress?.modelKind != modelKind { return }
         modelDownloadProgress = nil
     }
 }
 
+public struct PostScanBaseline: Equatable, Sendable {
+    public let sessionID: String
+    public let filesRead: Int
+
+    /// The files read before post-scan began: the engine keeps the scan's own counts through post-scan, so any snapshot of the session gives them.
+    static func observing(_ progress: ScanProgress, current: PostScanBaseline?) -> PostScanBaseline? {
+        current?.sessionID == progress.sessionID ? current : PostScanBaseline(sessionID: progress.sessionID, filesRead: progress.processed)
+    }
+}
+
+/// What the post-scan phase has left, from the owed and done counts the engine sends with every post-scan snapshot.
+struct PostScanWork: Equatable {
+    let owed: Int
+    let done: Int
+    var left: Int { owed - done }
+    var fraction: Double { owed > 0 ? Double(done) / Double(owed) : 0 }
+}
+
 extension ScanProgress {
-    /// This snapshot with a terminal `phase`, when the phase event says the scan ended and the snapshot still shows it running.
+    static let captureDatesStep = "captureDates"
+
+    var postScanWork: PostScanWork? {
+        guard postScanStep != Self.captureDatesStep else { return nil }
+        return countedPostScanWork
+    }
+
+    /// The one-time check of capture dates a catalog from an older version needs; counted in photos and videos, not in tagged files.
+    var captureDateCheck: PostScanWork? {
+        postScanStep == Self.captureDatesStep ? countedPostScanWork : nil
+    }
+
+    private var countedPostScanWork: PostScanWork? {
+        guard let owed = postScanOwed, let done = postScanDone, owed > 0 else { return nil }
+        return PostScanWork(owed: owed, done: min(owed, done))
+    }
+
     func settled(by phase: ScanPhase) -> ScanProgress? {
         switch phase {
         case .completed, .cancelled, .failed: break
@@ -1543,13 +1394,7 @@ extension ScanProgress {
         }
     }
 
-    /// True when `self` is a fresher scan-progress snapshot than `prior`
-    /// and should replace it. Snapshots reach the main actor as
-    /// independent unstructured Tasks the runtime may reorder; a stale
-    /// one must never roll a counter backwards — e.g. a late
-    /// `discovered: 100` overwriting the final `discovered: 4000`.
-    /// Within one session the counters are monotonic and the phase only
-    /// advances; a different session always supersedes.
+    /// True when `self` is fresher than `prior` and should replace it. Snapshots arrive as unstructured Tasks the runtime may reorder, and a stale one must never roll a counter backwards. Within a session counters are monotonic and the phase only advances; a different session always supersedes.
     func supersedes(_ prior: ScanProgress?) -> Bool {
         guard let prior, prior.sessionID == sessionID else { return true }
         func isTerminal(_ phase: ScanPhase) -> Bool {
@@ -1569,8 +1414,6 @@ extension ScanProgress {
     }
 }
 
-/// Lock-protected box: concurrent closures capture a reference instead
-/// of a `var`, sidestepping Swift 6 SendableClosureCaptures errors.
 final class MutexBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: T

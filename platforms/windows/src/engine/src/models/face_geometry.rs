@@ -1,7 +1,3 @@
-// Face-detection geometry shared by the YuNet detector and the tagging
-// pipeline: detections, NMS, landmark-derived pose, and the geometry gate
-// that rejects non-face boxes before embedding.
-
 #[derive(Debug, Clone)]
 pub struct Detection {
     pub bbox: [f32; 4],
@@ -16,8 +12,7 @@ pub struct Pose {
     pub pitch: f32,
 }
 
-/// Greedy NMS by descending score. O(n²) is fine: detectors emit at most
-/// a few hundred candidates per image after the score filter.
+/// O(n²) is fine: detectors emit at most a few hundred candidates after the score filter.
 pub(crate) fn nms(mut candidates: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
     candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut kept: Vec<Detection> = Vec::with_capacity(candidates.len());
@@ -44,11 +39,7 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     if union <= 0.0 { 0.0 } else { inter / union }
 }
 
-/// Roll/yaw/pitch from the 5 landmarks. Roll comes from the angle of
-/// the eye-line; yaw and pitch from the relative landmark positions
-/// vs the bbox centroid. Approximate but matches the macOS Vision
-/// `roll/yaw/pitch` consumers (UI shows them only as the People-tab
-/// "best face" picker — sub-degree accuracy isn't required).
+/// Approximate; the UI shows these only for the People-tab "best face" picker.
 pub fn estimate_pose(landmarks: &[[f32; 2]; 5]) -> Pose {
     let left_eye = landmarks[0];
     let right_eye = landmarks[1];
@@ -56,18 +47,14 @@ pub fn estimate_pose(landmarks: &[[f32; 2]; 5]) -> Pose {
     let mouth_left = landmarks[3];
     let mouth_right = landmarks[4];
 
-    // Roll: angle of the eye line from horizontal.
     let dx = right_eye[0] - left_eye[0];
     let dy = right_eye[1] - left_eye[1];
     let roll = dy.atan2(dx);
 
-    // Yaw: signed displacement of the nose from the eye-midpoint,
-    // normalized by inter-ocular distance.
     let eye_mid_x = (left_eye[0] + right_eye[0]) / 2.0;
     let inter_ocular = ((dx * dx + dy * dy).sqrt()).max(1e-3);
     let yaw = ((nose[0] - eye_mid_x) / inter_ocular).clamp(-1.0, 1.0).asin();
 
-    // Pitch: nose y vs eye-mouth midline, normalized by face height.
     let mouth_mid_y = (mouth_left[1] + mouth_right[1]) / 2.0;
     let eye_mid_y = (left_eye[1] + right_eye[1]) / 2.0;
     let face_h = (mouth_mid_y - eye_mid_y).abs().max(1e-3);
@@ -77,10 +64,8 @@ pub fn estimate_pose(landmarks: &[[f32; 2]; 5]) -> Pose {
     Pose { roll, yaw, pitch }
 }
 
-/// Post-detection geometric validation using the 5 facial landmarks
-/// (left_eye, right_eye, nose, mouth_left, mouth_right) to reject
-/// false positives like signs, posters, and logos. Returns a composite
-/// quality score weighted by geometry confidence, or None if rejected.
+/// Landmark-based check rejecting false positives (signs, posters, logos). Returns a quality score, or None if
+/// rejected.
 pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option<f32> {
     let [x1, y1, x2, y2] = det.bbox;
     let bw = (x2 - x1).max(1e-3);
@@ -88,12 +73,10 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
     let bbox_area = bw * bh;
     let img_area = (img_w as f32) * (img_h as f32);
 
-    // Reject tiny detections (< 0.1% of image area).
     if bbox_area < img_area * 0.001 {
         return None;
     }
 
-    // Reject extreme aspect ratios — faces are roughly square.
     let aspect = bh / bw;
     if aspect < 0.6 || aspect > 2.0 {
         return None;
@@ -105,8 +88,7 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
     let mouth_left = det.landmarks[3];
     let mouth_right = det.landmarks[4];
 
-    // All landmarks should be inside the bbox (with 10% margin for
-    // floating-point drift from the letterbox remap).
+    // Landmarks must lie inside the bbox, with 10% margin for letterbox-remap drift.
     let margin_x = bw * 0.10;
     let margin_y = bh * 0.10;
     for lm in &det.landmarks {
@@ -117,7 +99,6 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
         }
     }
 
-    // Inter-eye distance must be ≥ 15% of bbox width.
     let eye_dx = right_eye[0] - left_eye[0];
     let eye_dy = right_eye[1] - left_eye[1];
     let inter_eye = (eye_dx * eye_dx + eye_dy * eye_dy).sqrt();
@@ -125,8 +106,7 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
         return None;
     }
 
-    // Vertical ordering: average eye Y < nose Y < average mouth Y.
-    // Allows some slack for tilted faces (±10% of bbox height).
+    // Eye Y < nose Y < mouth Y, with ±10% of bbox height slack for tilted faces.
     let eye_avg_y = (left_eye[1] + right_eye[1]) / 2.0;
     let mouth_avg_y = (mouth_left[1] + mouth_right[1]) / 2.0;
     let slack = bh * 0.10;
@@ -134,10 +114,7 @@ pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option
         return None;
     }
 
-    // Composite quality: raw score weighted by geometry confidence.
-    // Geometry confidence penalises detections where landmarks are
-    // bunched together (low inter-eye / bbox ratio) or the vertical
-    // span is unnaturally compressed.
+    // Geometry confidence penalises bunched landmarks (low inter-eye/bbox ratio) and a compressed vertical span.
     let eye_ratio = (inter_eye / bw).min(1.0);
     let vert_span = (mouth_avg_y - eye_avg_y).max(0.0);
     let vert_ratio = (vert_span / bh).min(1.0);
@@ -194,7 +171,6 @@ mod tests {
 
     #[test]
     fn iou_half_overlap_quarter() {
-        // 10×10 boxes overlapping in a 5×10 strip → inter = 50, union = 150
         let a = [0.0, 0.0, 10.0, 10.0];
         let b = [5.0, 0.0, 15.0, 10.0];
         let v = iou(&a, &b);
@@ -203,16 +179,14 @@ mod tests {
 
     #[test]
     fn nms_keeps_highest_score_per_cluster() {
-        // Three near-identical boxes; NMS @ 0.4 must keep the top one.
         let cands = vec![
             det(0.0, 0.0, 10.0, 10.0, 0.9),
             det(1.0, 1.0, 11.0, 11.0, 0.85),
             det(0.5, 0.5, 10.5, 10.5, 0.8),
-            det(100.0, 100.0, 110.0, 110.0, 0.7), // disjoint cluster
+            det(100.0, 100.0, 110.0, 110.0, 0.7),
         ];
         let kept = nms(cands, 0.4);
         assert_eq!(kept.len(), 2, "expected 2 clusters, got {}", kept.len());
-        // Highest score in cluster 1 wins.
         assert!((kept[0].score - 0.9).abs() < 1e-6);
         assert!((kept[1].score - 0.7).abs() < 1e-6);
     }
@@ -225,11 +199,11 @@ mod tests {
     #[test]
     fn pose_horizontal_eyes_zero_roll() {
         let pose = estimate_pose(&[
-            [10.0, 50.0],  // left eye
-            [90.0, 50.0],  // right eye  (same y)
-            [50.0, 60.0],  // nose
-            [30.0, 80.0],  // mouth left
-            [70.0, 80.0],  // mouth right
+            [10.0, 50.0],
+            [90.0, 50.0],
+            [50.0, 60.0],
+            [30.0, 80.0],
+            [70.0, 80.0],
         ]);
         assert!(pose.roll.abs() < 1e-3, "roll should be ~0 for level eyes, got {}", pose.roll);
     }
@@ -244,11 +218,11 @@ mod tests {
         let bw = x2 - x1;
         let bh = y2 - y1;
         [
-            [cx - bw * 0.15, cy - bh * 0.15],  // left eye
-            [cx + bw * 0.15, cy - bh * 0.15],  // right eye
-            [cx, cy],                            // nose
-            [cx - bw * 0.10, cy + bh * 0.20],  // mouth left
-            [cx + bw * 0.10, cy + bh * 0.20],  // mouth right
+            [cx - bw * 0.15, cy - bh * 0.15],
+            [cx + bw * 0.15, cy - bh * 0.15],
+            [cx, cy],
+            [cx - bw * 0.10, cy + bh * 0.20],
+            [cx + bw * 0.10, cy + bh * 0.20],
         ]
     }
 
@@ -270,13 +244,12 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_landmark_order() {
-        // Mouth above eyes — impossible for a real face.
         let lm = [
-            [150.0, 250.0],  // left eye (below mouth)
-            [250.0, 250.0],  // right eye
-            [200.0, 200.0],  // nose
-            [170.0, 150.0],  // mouth left (above eyes)
-            [230.0, 150.0],  // mouth right
+            [150.0, 250.0],
+            [250.0, 250.0],
+            [200.0, 200.0],
+            [170.0, 150.0],
+            [230.0, 150.0],
         ];
         let d = face_det(100.0, 100.0, 300.0, 300.0, 0.9, lm);
         assert!(validate_face_geometry(&d, 640, 480).is_none(),
@@ -294,13 +267,12 @@ mod tests {
 
     #[test]
     fn validate_accepts_side_profile() {
-        // Moderate yaw — nose shifted, but eyes still above mouth.
         let lm = [
-            [130.0, 140.0],  // left eye
-            [200.0, 145.0],  // right eye
-            [180.0, 180.0],  // nose (shifted right)
-            [140.0, 230.0],  // mouth left
-            [190.0, 235.0],  // mouth right
+            [130.0, 140.0],
+            [200.0, 145.0],
+            [180.0, 180.0],
+            [140.0, 230.0],
+            [190.0, 235.0],
         ];
         let d = face_det(100.0, 100.0, 250.0, 300.0, 0.80, lm);
         let q = validate_face_geometry(&d, 640, 480);
@@ -310,7 +282,7 @@ mod tests {
     #[test]
     fn validate_rejects_landmarks_outside_bbox() {
         let lm = [
-            [50.0, 50.0],    // left eye — way outside bbox
+            [50.0, 50.0],
             [250.0, 150.0],
             [200.0, 180.0],
             [170.0, 230.0],
@@ -323,10 +295,9 @@ mod tests {
 
     #[test]
     fn validate_rejects_clustered_landmarks() {
-        // All landmarks bunched in a tiny spot — typical of text/sign FP.
         let lm = [
             [200.0, 200.0],
-            [202.0, 200.0],  // inter-eye ~2px on a 200px bbox
+            [202.0, 200.0],
             [201.0, 201.0],
             [200.0, 202.0],
             [202.0, 202.0],

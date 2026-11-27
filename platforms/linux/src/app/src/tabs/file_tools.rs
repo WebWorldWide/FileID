@@ -1,6 +1,4 @@
-// File Tools (DESIGN_V3_PORT "File Tools"): 01 · Pick files (kind, file
-// checklist), 02 · Output (format, size, frame, folder) and a 380 px
-// 03 · Preview pane with the gold-framed preview, outputs and actions.
+// File Tools: pick files, set the output (format, size, frame, folder), and preview with outputs and actions.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -20,6 +18,19 @@ use crate::spring::{animate_with, Spring};
 use crate::v3;
 
 const KINDS: [&str; 3] = ["photo", "video", "chapters"];
+/// Returns true when `id` was refused because MAX_FILES are already chosen.
+fn select_within_limit(ids: &mut Vec<i64>, id: i64, active: bool) -> bool {
+    ids.retain(|other| *other != id);
+    if !active {
+        return false;
+    }
+    if ids.len() < MAX_FILES {
+        ids.push(id);
+        return false;
+    }
+    true
+}
+
 const PHOTO_FORMATS: [(&str, &str); 3] = [("PNG", "png"), ("JPEG", "jpeg"), ("TIFF", "tiff")];
 const CHAPTER_FORMATS: [(&str, &str); 2] = [("WebVTT", "vtt"), ("JSON", "json")];
 const FRAMES: [(&str, Option<&str>, f64); 5] = [
@@ -86,6 +97,7 @@ pub(super) fn turn_rgba(rgba: &[u8], width: usize, height: usize, quarter_turns:
 pub(super) struct RecipeChoice {
     pub kind: usize,
     pub format: usize,
+    pub chapter_format: usize,
     pub longest_side: u32,
     pub resolution: usize,
     pub frame: usize,
@@ -189,7 +201,7 @@ impl RecipeChoice {
         let (format, max_dimension) = match kind {
             "photo" => (PHOTO_FORMATS[self.format.min(2)].1, self.longest_side),
             "video" => ("mp4", RESOLUTIONS[self.resolution.min(1)].1),
-            _ => (CHAPTER_FORMATS[self.format.min(1)].1, 2048),
+            _ => (CHAPTER_FORMATS[self.chapter_format.min(1)].1, 2048),
         };
         ToolRecipe {
             kind: kind.into(),
@@ -238,7 +250,7 @@ impl RecipeChoice {
                 RESOLUTIONS[self.resolution.min(1)].0,
                 FRAMES[self.frame.min(4)].0
             ),
-            _ => format!("{files} · {}", CHAPTER_FORMATS[self.format.min(1)].0),
+            _ => format!("{files} · {}", CHAPTER_FORMATS[self.chapter_format.min(1)].0),
         }
     }
 
@@ -567,7 +579,6 @@ impl ToolsUi {
             .collect()
     }
 
-    /// Shows the rows for the chosen kind and video tool.
     fn sync_rows(&self) {
         let choice = self.choice.borrow().clone();
         let kind = KINDS[choice.kind.min(2)];
@@ -780,15 +791,14 @@ impl ToolsUi {
             let id = file.id;
             check.connect_toggled(move |check| {
                 let Some(ui) = weak.upgrade() else { return };
-                {
-                    let mut ids = ui.selected.borrow_mut();
-                    ids.retain(|other| *other != id);
-                    if check.is_active() && ids.len() < MAX_FILES {
-                        ids.push(id);
-                    } else if check.is_active() {
-                        check.set_active(false);
-                        ui.status.set_label("Up to 100 files per export.");
-                    }
+                let over_limit = select_within_limit(
+                    &mut ui.selected.borrow_mut(),
+                    id,
+                    check.is_active(),
+                );
+                if over_limit {
+                    check.set_active(false);
+                    ui.status.set_label("Up to 100 files per export.");
                 }
                 ui.load_preview_picture();
                 ui.changed();
@@ -912,7 +922,6 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let left = v3::vbox(16);
     left.add_css_class("v3-page-pad");
 
-    // ── 01 · Pick files ────────────────────────────────────────────────────────
     let recipe_panel = v3::panel("01 · Pick files");
     let kind = v3::Segmented::new(&["Photo", "Video", "Chapters"], 0);
     recipe_panel.trailing.append(&kind.root);
@@ -944,7 +953,6 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     recipe_footer.append(&select_none);
     left.append(&recipe_panel.root);
 
-    // ── 02 · Output ────────────────────────────────────────────────────────
     let output_panel = v3::panel("02 · Output");
     let output_body = v3::vbox(10);
     output_body.add_css_class("v3-panel-pad");
@@ -1053,7 +1061,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     output_body.append(&media_rows);
     output_panel.body.append(&output_body);
     let output_footer = output_panel.show_footer();
-    output_footer.append(&v3::section("Save to"));
+    output_footer.append(&v3::section_whole("Save to"));
     let destination_label = v3::mono("No folder chosen", "s12");
     destination_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
     destination_label.set_hexpand(true);
@@ -1072,7 +1080,6 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         .child(&left)
         .build();
 
-    // ── 03 · Preview ───────────────────────────────────────────────────────
     let pane = v3::vbox(0);
     pane.add_css_class("v3-pane");
     pane.set_size_request(380, -1);
@@ -1160,6 +1167,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         choice: RefCell::new(RecipeChoice {
             kind: 0,
             format: 0,
+            chapter_format: 0,
             longest_side: 2048,
             resolution: 1,
             frame: 0,
@@ -1262,7 +1270,8 @@ fn wire(
             {
                 let mut choice = ui.choice.borrow_mut();
                 match field {
-                    0 | 1 => choice.format = index,
+                    0 => choice.format = index,
+                    1 => choice.chapter_format = index,
                     _ => choice.resolution = index,
                 }
             }
@@ -1600,6 +1609,7 @@ mod tests {
         RecipeChoice {
             kind,
             format: 0,
+            chapter_format: 0,
             longest_side: 4096,
             resolution: 1,
             frame: 0,
@@ -1705,6 +1715,16 @@ mod tests {
     }
 
     #[test]
+    fn the_101st_file_is_refused_without_holding_the_selection() {
+        let mut ids: Vec<i64> = (0..MAX_FILES as i64).collect();
+        assert!(select_within_limit(&mut ids, 999, true));
+        assert_eq!(ids.len(), MAX_FILES);
+        assert!(!select_within_limit(&mut ids, 999, false));
+        assert!(!select_within_limit(&mut ids, 5, true));
+        assert_eq!(ids.len(), MAX_FILES);
+    }
+
+    #[test]
     fn recipes_only_carry_what_the_engine_accepts() {
         let photo = choice(0).recipe();
         assert_eq!(
@@ -1728,6 +1748,9 @@ mod tests {
         assert_eq!(video.allow_upscale, None);
         assert!(video.video_framing.is_none() && video.video_stabilization.is_none());
         assert_eq!(choice(1).recipe().video_aspect_ratio, None);
+        let json = RecipeChoice { chapter_format: 1, ..choice(2) };
+        assert_eq!(json.recipe().format, "json");
+        assert_eq!(RecipeChoice { kind: 0, ..json }.recipe().format, "png");
         let chapters = choice(2).recipe();
         assert_eq!(
             (chapters.kind.as_str(), chapters.format.as_str()),
@@ -1758,5 +1781,31 @@ mod tests {
             9.0 / 16.0
         );
         assert_eq!(output_state("completed"), ("Completed", Tone::Done));
+    }
+
+    fn descendants(widget: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            found.push(current.clone());
+            descendants(&current, found);
+            child = current.next_sibling();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_save_to_label_is_never_shortened() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let engine = Rc::new(std::cell::RefCell::new(crate::engine_client::EngineClient::new()));
+        let mut widgets = Vec::new();
+        descendants(&tools(engine), &mut widgets);
+        let label = widgets
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
+            .find(|label| label.text() == "SAVE TO")
+            .expect("save to label");
+        assert_eq!(label.ellipsize(), gtk::pango::EllipsizeMode::None);
     }
 }

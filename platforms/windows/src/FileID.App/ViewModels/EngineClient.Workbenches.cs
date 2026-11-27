@@ -14,7 +14,6 @@ internal sealed partial class EngineClient
     public ToolResponse? ToolResponse { get => _toolResponse; private set => Set(ref _toolResponse, value); }
     public ChatResponse? ChatResponse { get => _chatResponse; private set => Set(ref _chatResponse, value); }
     private BenchmarkProgress? _benchmarkProgress;
-    /// <summary>Latest progress of the running on-device benchmark.</summary>
     public BenchmarkProgress? BenchmarkProgress { get => _benchmarkProgress; private set => Set(ref _benchmarkProgress, value); }
 
     public Task<ModelCatalog> ListModelsAsync(string? role, CancellationToken ct = default)
@@ -29,7 +28,6 @@ internal sealed partial class EngineClient
         return SendWorkbenchAsync<RootsList>(id, new ListRootsCommand(id), TimeSpan.FromSeconds(30), ct);
     }
 
-    /// <summary>Benchmarks one installed model; tuning restarts the model several times, so allow an hour.</summary>
     public Task<BenchmarkResult> BenchmarkModelAsync(string modelKind, bool tune, CancellationToken ct = default)
     {
         var id = "bench-" + Guid.NewGuid().ToString("N");

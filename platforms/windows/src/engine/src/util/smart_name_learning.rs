@@ -1,7 +1,5 @@
-//! Local learning of smart-name style corrections. Each sample pairs the name
-//! the engine would propose without learning (`base`) with the name the user
-//! applied; preferences are what a clear majority of the newest samples show.
-//! Lockstep with macOS `SmartNameLearning.swift`; both run
+//! Local learning of smart-name style corrections: each sample pairs the proposal without learning (`base`) with the
+//! name the user applied; preferences are what a clear majority of the newest samples show. Cases live in
 //! `shared/test-corpus/naming/learning-cases.json`.
 
 use std::collections::{BTreeMap, HashSet};
@@ -261,7 +259,6 @@ fn majority<T: PartialEq + Copy>(votes: &[T]) -> Option<T> {
     votes.iter().copied().find(|vote| 2 * votes.iter().filter(|other| *other == vote).count() > votes.len())
 }
 
-/// Preferences from up to `WINDOW` samples, newest first; the order does not change the result.
 pub fn derive(samples: &[Sample]) -> Learned {
     let observations: Vec<Observation> = samples.iter().take(WINDOW).map(observe).collect();
     let mut learned = Learned::default();

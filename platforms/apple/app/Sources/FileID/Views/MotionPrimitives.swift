@@ -1,14 +1,9 @@
-// Shared motion primitives:
-//   ShimmerView         — gold/lavender sweep over a loading placeholder.
-// All respect reduceMotion.
+// Shared motion primitives. All respect reduceMotion.
 import SwiftUI
 
 // MARK: - Shimmer
 
-/// A loading-state placeholder. Renders a soft rounded rectangle with a
-/// gold/lavender highlight sweeping diagonally across it. Use as a
-/// stand-in for content that's about to arrive (a thumbnail, a caption,
-/// a face crop). Subtle; not a literal "loading" word.
+/// A loading placeholder: a soft rounded rectangle with a gold/lavender highlight sweeping across it.
 struct ShimmerView: View {
     var cornerRadius: CGFloat = 8
 
@@ -33,7 +28,7 @@ struct ShimmerView: View {
                         .offset(x: w * phase)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

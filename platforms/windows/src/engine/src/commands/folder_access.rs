@@ -1,9 +1,7 @@
-//! Folder access the Mac app hands over as security-scoped bookmarks
-//! (`grantFolderAccess` and `startScan.rootBookmark`), held the way the Swift
-//! engine's `SecurityScopedAccessRegistry` holds it: the granted root until the
-//! next grant, a scan's root for the scan. A bookmark that doesn't resolve to
-//! the path it names is refused with Swift's `folder_access_denied`. Builds
-//! the Mac app doesn't host have no bookmarks and accept every path, as before.
+//! Folder access the Mac app hands over as security-scoped bookmarks (`grantFolderAccess`, `startScan.rootBookmark`):
+//! the granted root lasts until the next grant, a scan's root for the scan. A bookmark that doesn't resolve to the
+//! path it names is refused with `folder_access_denied`. Builds the Mac app doesn't host have no bookmarks and accept
+//! every path.
 
 use crate::ipc::{self, sink::Sink};
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -35,7 +33,6 @@ mod mac {
         drop(previous);
     }
 
-    /// `URL.standardizedFileURL.path`: `.` and `..` resolved lexically, no trailing slash.
     pub(super) fn standardized(path: &Path) -> PathBuf {
         let mut out = PathBuf::new();
         for part in path.components() {
@@ -51,7 +48,6 @@ mod mac {
     }
 }
 
-/// `grantFolderAccess`: keep access to the app's chosen folder until the next grant.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) async fn grant(sink: &Sink, payload: ipc::GrantFolderAccessPayload) {
     match mac::open(&payload.root_path, &payload.root_bookmark) {
@@ -65,14 +61,12 @@ pub(crate) async fn grant(sink: &Sink, payload: ipc::GrantFolderAccessPayload) {
 #[allow(clippy::unused_async)]
 pub(crate) async fn grant(_sink: &Sink, _payload: ipc::GrantFolderAccessPayload) {}
 
-/// Access to a scan root, held until dropped.
 pub(crate) struct ScanAccess {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     _lease: Option<crate::apple::BookmarkLease>,
 }
 
-/// The scan root's access; `None` when its bookmark doesn't grant `root_path`.
-/// No bookmark is fine outside the sandbox, as in the Swift engine's Developer ID build.
+/// `None` when its bookmark doesn't grant `root_path`; no bookmark is fine outside the sandbox (Developer ID build).
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) fn scan_access(root_path: &str, bookmark: Option<&str>) -> Option<ScanAccess> {
     match bookmark {
@@ -81,9 +75,8 @@ pub(crate) fn scan_access(root_path: &str, bookmark: Option<&str>) -> Option<Sca
     }
 }
 
-/// A root the process may not list (a sandboxed engine has no right to a folder
-/// without a bookmark that carries access, and TCC can refuse a protected one)
-/// is refused here; discovery would call it an empty folder.
+/// A sandboxed engine has no right to a folder without a bookmark carrying access, and TCC can refuse a protected one;
+/// discovery would call it an empty folder.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn root_is_listable(root_path: &str) -> bool {
     !matches!(std::fs::read_dir(root_path), Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied)

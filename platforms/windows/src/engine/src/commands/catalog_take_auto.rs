@@ -1,7 +1,5 @@
-//! Zero-setup Best Takes for the shared engine: suggested groups of tries from
-//! capture time + CLIP + pHash (near_duplicate_grouping with TAKES/CLIPS
-//! thresholds), cached model-free scores and Keep all / Skip choices. Mirror
-//! of the macOS `CatalogTakeAuto.swift`; keep thresholds and reasons in step.
+//! Zero-setup Best Takes: groups of tries from capture time + CLIP + pHash (near_duplicate_grouping with TAKES/CLIPS
+//! thresholds), cached model-free scores and Keep all / Skip choices.
 
 use crate::models::face_geometry::Detection;
 use crate::ipc::{
@@ -28,9 +26,8 @@ struct Row1 {
     content: Option<(Vec<u8>, i64)>,
 }
 
-/// The one rule for "the same file" in every take path: stored hash and size,
-/// only for files small enough to be hashed in full (larger files store a
-/// sampled hash that two different files can share).
+/// The one rule for "the same file" in every take path: stored hash and size, only for files small enough to be hashed
+/// in full (larger files store a sampled hash two different files can share).
 pub(super) fn content_identity(hash: Option<Vec<u8>>, size: Option<i64>) -> Option<(Vec<u8>, i64)> {
     match (hash, size) {
         (Some(hash), Some(size)) if (0..=FULL_HASH_MAX_BYTES as i64).contains(&size) => Some((hash, size)),
@@ -38,10 +35,7 @@ pub(super) fn content_identity(hash: Option<Vec<u8>>, size: Option<i64>) -> Opti
     }
 }
 
-/// Copies of one file are one try: keep the lowest file id of each content
-/// (stored hash and size, only for files small enough to be hashed in full, the
-/// same identity Duplicates verifies). Swift `CatalogTakeAuto.distinctContents`
-/// applies the same rule.
+/// Copies of one file are one try: keep the lowest file id per content identity (as Duplicates verifies).
 fn distinct_contents<'a>(members: Vec<&'a Item>, contents: &HashMap<i64, (Vec<u8>, i64)>) -> Vec<&'a Item> {
     let mut by_id: Vec<&Item> = members.clone();
     by_id.sort_by_key(|m| m.id);
@@ -58,8 +52,17 @@ fn distinct_contents<'a>(members: Vec<&'a Item>, contents: &HashMap<i64, (Vec<u8
     members.into_iter().filter(|m| keep.contains(&m.id)).collect()
 }
 
-pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGroup>> {
-    ensure!((1..=100).contains(&limit), "Invalid take group limit");
+pub const MAX_PAGE: usize = 100;
+
+/// Validates a request's `offset` and `limit` (default one page of 100) for the take-group lists.
+pub fn page_bounds(offset: Option<i64>, limit: Option<usize>) -> Result<(usize, usize)> {
+    let limit = limit.unwrap_or(MAX_PAGE);
+    ensure!((1..=MAX_PAGE).contains(&limit), "Invalid take group limit");
+    let offset = usize::try_from(offset.unwrap_or(0)).map_err(|_| anyhow::anyhow!("Invalid take group offset"))?;
+    Ok((offset, limit))
+}
+
+pub fn discover(conn: &Connection, offset: usize, limit: usize) -> Result<Vec<CatalogTakeAutoGroup>> {
     let mut statement = conn.prepare(
         "SELECT f.id, f.path_text, f.created_at, f.phash, f.kind, f.content_hash, f.size_bytes FROM files f
          WHERE f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
@@ -125,12 +128,9 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
     }
     let visible = apply_decisions(conn, groups)?;
     let newest = visible.iter().map(|g| g.captured_at).fold(0.0, f64::max);
-    let mut ranked = rank(visible, newest);
-    ranked.truncate(limit);
-    Ok(ranked)
+    Ok(rank(visible, newest).into_iter().skip(offset).take(limit).collect())
 }
 
-/// Drops groups inside a Keep all choice and marks those inside a Skip choice.
 pub fn apply_decisions(conn: &Connection, groups: Vec<CatalogTakeAutoGroup>) -> Result<Vec<CatalogTakeAutoGroup>> {
     let mut decisions: Vec<(String, HashSet<i64>)> = Vec::new();
     let mut statement = conn.prepare("SELECT decision,file_ids_json FROM take_group_decisions")?;
@@ -154,8 +154,7 @@ pub fn apply_decisions(conn: &Connection, groups: Vec<CatalogTakeAutoGroup>) -> 
     Ok(visible)
 }
 
-/// Bigger and more recent groups first: 0.6 × size (saturating at 12 tries)
-/// + 0.4 × recency (half-life 14 days before the newest group). Skipped last.
+/// 0.6 × size (saturating at 12 tries) + 0.4 × recency (half-life 14 days before the newest group); skipped last.
 pub fn rank(mut groups: Vec<CatalogTakeAutoGroup>, newest: f64) -> Vec<CatalogTakeAutoGroup> {
     let value = |g: &CatalogTakeAutoGroup| {
         let size = g.shots.len().min(12) as f64 / 12.0;
@@ -204,8 +203,7 @@ fn load_embeddings(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<f3
     Ok(out)
 }
 
-/// One shot per file name: a RAW and its JPEG are one try. The viewable
-/// (non-RAW) file is primary. Shots in capture order.
+/// A RAW and its JPEG are one try; the viewable (non-RAW) file is primary.
 pub fn shots(items: &[&Item]) -> Vec<CatalogTakeShot> {
     let mut order: Vec<String> = Vec::new();
     let mut by_stem: HashMap<String, Vec<&Item>> = HashMap::new();
@@ -291,8 +289,6 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
-// MARK: scoring
-
 pub struct ScoreJob {
     shots: Vec<CatalogTakeShot>,
     rows: HashMap<i64, FileRow>,
@@ -306,15 +302,11 @@ struct FileRow {
     revision: String,
 }
 
-/// Faces for take scoring. Kept behind a trait so the shared face-quality gate
-/// can replace this judgement without touching the scorer. `None` means the
-/// detector could not run, so the result is used once but not cached.
+/// Behind a trait so the shared face-quality gate can replace this judgement without touching the scorer. `None` means
+/// the detector could not run: used once, not cached.
 pub trait TakeFaceAnalyzer {
     fn id(&self) -> &str;
-    /// `detail` is a larger decode of the same photo for per-face models.
     fn faces(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<Vec<Face>>;
-    /// The first pass over the analysis image: its faces and, where the
-    /// platform has a person detector, the people in it.
     fn analyze(&mut self, rgb: &[u8], width: u32, height: u32, detail: Option<&mut Detail>) -> Option<(Vec<Face>, Option<Vec<Box2>>)> {
         self.faces(rgb, width, height, detail).map(|faces| (faces, None))
     }
@@ -322,23 +314,20 @@ pub trait TakeFaceAnalyzer {
     fn detects(&self) -> bool {
         true
     }
-    /// Faces in `tile` of the Mac's tile source, cropped as decoded (Swift hands
-    /// Vision those crops). `None` when the analyzer could not run.
+    /// Cropped as decoded. `None` when the analyzer could not run.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     fn tile_faces(&mut self, _tiles: &crate::apple::faces::TakeTiles, _tile: &take_scoring::Tile) -> Option<Vec<Face>> {
         None
     }
 }
 
-/// The full decode of a photo whose faces were found on a smaller copy. Face Mesh
-/// reads each face from it at the tile size (at 1024 px its closed-eye precision falls
-/// from about 0.7 to 0.5); only a square around the face is resized, which costs a few
-/// milliseconds where resizing a 33 MP frame to 2048 px measured 226–275 ms.
+/// Face Mesh reads each face from the full decode at the tile size (at 1024 px its closed-eye precision falls from ~0.7
+/// to 0.5); only a square around the face is resized, costing a few ms where resizing a 33 MP frame to 2048 px took
+/// 226–275 ms.
 pub struct Detail<'a> {
     source: &'a [u8],
     width: u32,
     height: u32,
-    /// A decode made only when first read (the Mac, as Swift's `TakeDetailImage`).
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     deferred: Option<Deferred<'a>>,
 }
@@ -355,13 +344,11 @@ impl<'a> Detail<'a> {
         Self { source, width, height, deferred: None }
     }
 
-    /// A detail image decoded by `load` the first time it is read.
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     pub fn deferred(load: impl FnMut() -> Option<Decoded> + 'a) -> Self {
         Self { source: &[], width: 0, height: 0, deferred: Some(Deferred { load: Box::new(load), loaded: std::cell::OnceCell::new() }) }
     }
 
-    /// The whole decode as packed RGB8 and its size, decoding a deferred one now.
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     pub fn load(&mut self) -> Option<(&[u8], u32, u32)> {
         match self.deferred.as_mut() {
@@ -370,14 +357,11 @@ impl<'a> Detail<'a> {
         }
     }
 
-    /// A deferred decode, if it was made.
     #[cfg(test)]
     pub fn into_loaded(self) -> Option<Decoded> {
         self.deferred.and_then(|deferred| deferred.loaded.into_inner().flatten())
     }
 
-    /// The pixels around `face` (found on a `width` × `height` copy) as they appear in
-    /// the photo resized to `TILE_LONG_SIDE`, and the face in those pixels' coordinates.
     pub fn face(&self, face: &Detection, width: u32, height: u32) -> Option<(Vec<u8>, u32, u32, Detection)> {
         let (sx, sy) = (self.width as f32 / width as f32, self.height as f32 / height as f32);
         let to_source = scaled(face, sx, sy);
@@ -406,8 +390,6 @@ impl<'a> Detail<'a> {
     }
 }
 
-/// YuNet when its weights are installed: boxes and detector score as quality.
-/// Eye openness comes from the face mesh when that model is installed too.
 pub struct YuNetFaces {
     model: Option<crate::models::yunet::YuNet>,
     mesh: Option<crate::models::face_mesh::FaceMesh>,
@@ -434,9 +416,8 @@ static TAKE_FACES: crate::models::idle::IdleSlot<YuNetFaces> =
 
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 impl YuNetFaces {
-    /// Runs `work` with the face models, kept loaded between requests and
-    /// parked when idle. Nothing is kept while the detector is not installed,
-    /// so installing it takes effect on the next request.
+    /// Models stay loaded between requests and park when idle; nothing is kept while the detector is not installed, so
+    /// installing it takes effect on the next request.
     pub fn with_loaded<R>(work: impl FnOnce(&mut Self) -> R) -> R {
         let mut work = Some(work);
         if !crate::coordinator::process_gpu_device_removed() {
@@ -519,8 +500,7 @@ fn scaled(d: &Detection, sx: f32, sy: f32) -> Detection {
     }
 }
 
-/// Reads what scoring needs under the database lock; the caller then scores
-/// without holding it.
+/// The caller scores without holding the database lock.
 pub fn prepare(conn: &Connection, file_ids: &[i64], faces_id: &str) -> Result<ScoreJob> {
     ensure!(
         (1..=MAX_SCORED_FILES).contains(&file_ids.len()) && file_ids.iter().all(|id| *id > 0),
@@ -571,14 +551,12 @@ pub struct Scored {
     version: String,
 }
 
-/// Decodes and measures every shot without a current cache entry.
 pub fn compute(job: ScoreJob, faces: &mut dyn TakeFaceAnalyzer) -> Scored {
     let measured = missing(&job).into_iter().map(|(id, row)| (id, measure(row, faces))).collect();
     finish(job, measured)
 }
 
-/// [`compute`] with one analyzer per worker, a photo each at a time, as the
-/// Swift engine's `CatalogTakeAuto` measures up to four at once.
+/// One analyzer per worker, a photo each at a time.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [A]) -> Scored {
     let queue = parking_lot::Mutex::new(missing(&job));
@@ -586,12 +564,11 @@ pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [
     std::thread::scope(|scope| {
         for faces in analyzers.iter_mut() {
             let (queue, measured) = (&queue, &measured);
-            // User-initiated QoS, as the Swift engine's request tasks: Vision
-            // schedules by the caller's QoS.
+            // User-initiated QoS: Vision schedules by the caller's QoS.
             scope.spawn(move || {
                 crate::util::qos::interactive(|| loop {
-                    // Bound first: a guard in the `while let` scrutinee would be
-                    // held through the body and serialise the workers.
+                    // Bound first: a guard in the `while let` scrutinee would be held through the body and serialise
+                    // the workers.
                     let next = queue.lock().pop();
                     let Some((id, row)) = next else { break };
                     let value = measure(row, faces);
@@ -603,7 +580,6 @@ pub fn compute_with<A: TakeFaceAnalyzer + Send>(job: ScoreJob, analyzers: &mut [
     finish(job, measured.into_inner())
 }
 
-/// Primary photos without cached signals, in shot order.
 fn missing(job: &ScoreJob) -> Vec<(i64, &FileRow)> {
     let mut rows: Vec<(i64, &FileRow)> = job
         .shots
@@ -664,8 +640,6 @@ pub fn store(conn: &Connection, scored: &Scored) -> Result<()> {
     Ok(())
 }
 
-/// A photo's take signals: on the Mac the Swift engine's decodes and Vision
-/// (`apple::faces::take_image_signals`), elsewhere the shared decoder.
 fn photo_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signals, bool)> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -677,8 +651,7 @@ fn photo_signals(path: &Path, faces: &mut dyn TakeFaceAnalyzer) -> Option<(Signa
     }
 }
 
-/// The first pass's faces and people; `None` when the analyzer could not run
-/// (the result is then used once, not cached).
+/// `None` when the analyzer could not run (used once, not cached).
 pub(crate) fn first_pass(
     faces: &mut dyn TakeFaceAnalyzer,
     rgb: &[u8],
@@ -689,8 +662,6 @@ pub(crate) fn first_pass(
     faces.analyze(rgb, width, height, detail)
 }
 
-/// The tiles of a wide frame (`take_scoring::tiles` of the `ww` × `wh` decode),
-/// placed back on the frame; `None` when the analyzer could not run on one.
 pub(crate) fn tiled_faces(faces: &mut dyn TakeFaceAnalyzer, wide: &[u8], ww: u32, wh: u32) -> Option<Vec<Face>> {
     let mut tiled = Vec::new();
     for tile in take_scoring::tiles(ww as usize, wh as usize) {
@@ -756,7 +727,7 @@ fn video_signals(path: &Path) -> Option<Signals> {
     take_scoring::video_signals(&pairs, probe.duration)
 }
 
-/// The Mac app's engine has no FFmpeg runtime; it takes frames from AVFoundation, as the Swift engine does.
+/// The Mac app's engine has no FFmpeg runtime; it takes frames from AVFoundation.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn take_frame(path: &Path, seconds: f64, size: (u32, u32), cancelled: &std::sync::atomic::AtomicBool) -> Option<Vec<u8>> {
     let output = std::env::temp_dir().join(format!("fileid-take-frame-{}.jpg", uuid::Uuid::new_v4()));
@@ -810,6 +781,10 @@ mod tests {
     fn a_video_is_scored_from_avfoundation_frames() {
         let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../../shared/test-corpus/conformance-media/clip-rotated.mov");
+        if !crate::models::native_process::self_worker::test_worker_present() {
+            eprintln!("skipped: frames come from a worker process and no engine binary is built (set FILEID_TEST_ENGINE_PATH)");
+            return;
+        }
         assert!(super::video_signals(&clip).is_some(), "the Mac engine has no FFmpeg runtime; frames come from AVFoundation");
     }
 
@@ -918,7 +893,7 @@ mod tests {
         conn.execute("INSERT INTO catalog_events(id,title) VALUES('e','Event')", []).unwrap();
         conn.execute("INSERT INTO catalog_event_files(event_id,file_id) VALUES('e',11)", []).unwrap();
         conn.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(1,22,'export','{}')", []).unwrap();
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_ids(), vec![1, 2]);
         let plan: Vec<String> = conn
@@ -949,7 +924,7 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         insert_content(&conn, 1, "/c/dup b.jpg", 100.0, 0.0, 7, 5000);
         insert_content(&conn, 2, "/c/dup b again.jpg", 101.0, 0.0, 7, 5000);
-        assert!(discover(&conn, 100).unwrap().is_empty());
+        assert!(discover(&conn, 0, 100).unwrap().is_empty());
     }
 
     #[test]
@@ -958,7 +933,7 @@ mod tests {
         insert_content(&conn, 5, "/c/one.jpg", 100.0, 0.0, 7, 5000);
         insert_content(&conn, 2, "/c/one copy.jpg", 99.0, 0.0, 7, 5000);
         insert_content(&conn, 3, "/c/other.jpg", 101.0, 0.05, 8, 5000);
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_ids(), vec![2, 3]);
         assert_eq!(groups[0].shots.len(), 2);
@@ -969,10 +944,35 @@ mod tests {
         let conn = crate::db::test_support::memory_db();
         insert_content(&conn, 1, "/c/a.jpg", 100.0, 0.0, 7, 17 * 1024 * 1024);
         insert_content(&conn, 2, "/c/b.jpg", 101.0, 0.0, 7, 17 * 1024 * 1024);
-        assert_eq!(discover(&conn, 100).unwrap().len(), 1);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 1);
         insert(&conn, 3, "/c/c.jpg", 5000.0, 0.0);
         insert(&conn, 4, "/c/d.jpg", 5001.0, 0.0);
-        assert_eq!(discover(&conn, 100).unwrap().len(), 2);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pages_continue_the_ranked_list_where_the_last_one_stopped() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, time) in [(1, 100.0), (2, 101.0), (3, 5000.0), (4, 5001.0), (5, 9000.0), (6, 9001.0)] {
+            insert(&conn, id, &format!("/c/{id}.JPG"), time, 0.0);
+        }
+        let keys = |offset, limit| -> Vec<String> {
+            discover(&conn, offset, limit).unwrap().into_iter().map(|g| g.group_key).collect()
+        };
+        let all = keys(0, 100);
+        assert_eq!(all.len(), 3);
+        assert_eq!(keys(0, 2), all[..2]);
+        assert_eq!(keys(2, 2), all[2..]);
+        assert!(keys(3, 2).is_empty());
+    }
+
+    #[test]
+    fn page_bounds_default_to_one_full_page_and_refuse_nonsense() {
+        assert_eq!(page_bounds(None, None).unwrap(), (0, MAX_PAGE));
+        assert_eq!(page_bounds(Some(300), Some(50)).unwrap(), (300, 50));
+        assert!(page_bounds(Some(-1), None).is_err());
+        assert!(page_bounds(None, Some(0)).is_err());
+        assert!(page_bounds(None, Some(MAX_PAGE + 1)).is_err());
     }
 
     #[test]
@@ -985,7 +985,7 @@ mod tests {
         insert(&conn, 5, "/c/JPEGs/DSC3.JPG", 103.0, 1.2);
         insert(&conn, 6, "/c/JPEGs/DSC9.JPG", 5000.0, 0.0);
         insert(&conn, 7, "/c/JPEGs/DSC10.JPG", 5001.0, 0.02);
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.len(), 2);
         let burst = groups.iter().find(|g| g.shots.len() == 2 && g.shots[0].primary_file_id == 1).unwrap();
         assert_eq!(burst.shots[0].file_ids, vec![1, 2]);
@@ -996,12 +996,12 @@ mod tests {
 
         let decision = |d: &str, ids: Vec<i64>| CatalogTakeDecision { group_key: burst.group_key.clone(), decision: d.into(), file_ids: ids };
         decide(&conn, &decision("skip", burst.file_ids())).unwrap();
-        let groups = discover(&conn, 100).unwrap();
+        let groups = discover(&conn, 0, 100).unwrap();
         assert_eq!(groups.last().unwrap().status, "skipped");
         decide(&conn, &decision("keepAll", burst.file_ids())).unwrap();
-        assert_eq!(discover(&conn, 100).unwrap().len(), 1);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 1);
         decide(&conn, &decision("reopen", burst.file_ids())).unwrap();
-        assert_eq!(discover(&conn, 100).unwrap().len(), 2);
+        assert_eq!(discover(&conn, 0, 100).unwrap().len(), 2);
         assert!(decide(&conn, &decision("delete", burst.file_ids())).is_err());
     }
 

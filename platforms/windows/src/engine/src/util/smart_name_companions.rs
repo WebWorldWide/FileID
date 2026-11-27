@@ -1,13 +1,11 @@
-//! Files that keep one name stem when smart names rename them: a RAW and its
-//! JPEG/HEIC, a Live Photo's HEIC/JPEG and MOV, and `.xmp`/`.aae` sidecars
-//! (`IMG_1.xmp` or darktable's `IMG_1.ARW.xmp`). Lockstep with macOS
-//! `SmartNameCompanions.swift`.
+//! Files that keep one name stem when smart names rename them: a RAW and its JPEG/HEIC, a Live Photo's HEIC/JPEG and
+//! MOV, and `.xmp`/`.aae` sidecars (`IMG_1.xmp` or darktable's `IMG_1.ARW.xmp`).
 
 use std::collections::HashSet;
 
 use super::smart_name_style::{lower, split_name, Style};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
     Image,
     Raw,
@@ -56,8 +54,6 @@ pub struct Member {
     pub role: Role,
 }
 
-/// `name` and every companion of it in `listing`, in role then name order;
-/// empty when it has none.
 pub fn members(name: &str, listing: &[String]) -> Vec<Member> {
     let Some((stem, suffix, role)) = base(name) else { return Vec::new() };
     let key = lower(&stem);
@@ -80,33 +76,28 @@ pub fn is_group(members: &[Member]) -> bool {
     members.len() >= 2 && members.iter().any(|member| member.role != Role::Sidecar)
 }
 
-/// The first `_N` bump (1 = none, up to 99) at which every member's new name,
-/// `stem` plus its own suffix, is free in the folder and the batch, or its own
-/// name in another case. `members` holds each member's suffix and lowercased
-/// current name.
+/// The first `_N` bump (1 = none, up to 99) at which every member's new name is free in its own folder, or is its own
+/// name in another case. `free(index, lowercase name)` says whether member `index`'s folder has the name free.
 pub fn shared_names(
     stem: &str,
     members: &[(String, String)],
-    taken: &HashSet<String>,
-    claimed: &HashSet<String>,
+    free: impl Fn(usize, &str) -> bool,
 ) -> Option<Vec<String>> {
     (1..=99).find_map(|bump| {
         let base = if bump == 1 { stem.to_string() } else { format!("{stem}_{bump}") };
         let names: Vec<String> = members.iter().map(|(suffix, _)| format!("{base}{suffix}")).collect();
         let mut keys = HashSet::new();
-        let free = names.iter().zip(members).all(|(name, (_, own))| {
+        let ok = names.iter().zip(members).enumerate().all(|(index, (name, (_, own)))| {
             let key = lower(name);
-            keys.insert(key.clone()) && (key == *own || (!taken.contains(&key) && !claimed.contains(&key)))
+            keys.insert(key.clone()) && (key == *own || free(index, &key))
         });
-        free.then_some(names)
+        ok.then_some(names)
     })
 }
 
-/// Sidecars in `listing` that follow a rename of a `planned` RAW, JPEG/HEIC or
-/// MOV: `<stem>.xmp`/`.aae` or `<name>.xmp` (extension in any case), not hidden
-/// and not planned themselves. One is kept only when every same-stem RAW,
-/// JPEG/HEIC or MOV in the folder is planned, and goes to the first planned
-/// member with that stem as `(planned index, sidecar name, suffix after the stem)`.
+/// Sidecars that follow a rename of a `planned` RAW/JPEG/HEIC/MOV: `<stem>.xmp`/`.aae` or `<name>.xmp`, not hidden, not
+/// planned. Kept only when every same-stem RAW/JPEG/HEIC/MOV is planned; goes to the first planned member as `(planned
+/// index, sidecar name, suffix after the stem)`.
 pub fn following_sidecars(planned: &[String], listing: &[String]) -> Vec<(usize, String, String)> {
     let planned_names: HashSet<&str> = planned.iter().map(String::as_str).collect();
     let primary = |name: &str| base(name).filter(|(_, _, role)| *role != Role::Sidecar).map(|(stem, _, _)| stem);
@@ -141,7 +132,6 @@ pub fn following_sidecars(planned: &[String], listing: &[String]) -> Vec<(usize,
     found
 }
 
-/// Lower is better evidence, in the order `propose` reads its sources.
 pub fn source_rank(source: &str, style: Style) -> u8 {
     match source {
         "chapter" => 0,
@@ -191,6 +181,9 @@ mod tests {
 
     #[test]
     fn shared_names_bump_together_or_not_at_all() {
+        fn shared_names(stem: &str, members: &[(String, String)], taken: &HashSet<String>, claimed: &HashSet<String>) -> Option<Vec<String>> {
+            super::shared_names(stem, members, |_, key| !taken.contains(key) && !claimed.contains(key))
+        }
         let members = vec![(".JPG".to_string(), "dsc_1.jpg".to_string()), (".ARW".to_string(), "dsc_1.arw".to_string())];
         let none = HashSet::new();
         assert_eq!(shared_names("beach", &members, &none, &none), Some(vec!["beach.JPG".into(), "beach.ARW".into()]));

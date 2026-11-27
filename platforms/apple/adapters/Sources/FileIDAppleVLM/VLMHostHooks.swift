@@ -1,9 +1,6 @@
-// What FileIDVLMCore needs from the Rust host. Model facts (repository,
-// display name, memory budget, architecture) come from the shared catalog in
-// FileIDModelInfo, as in the Swift engine; the host's spec for each load must
-// agree with it, or the load is refused. Models are verified offline, never
-// downloaded. Nothing here opens a URL, socket or HTTP client or launches a
-// process.
+// What FileIDVLMCore needs from the Rust host. Model facts (repository, display name, memory budget, architecture) come from the shared catalog in
+// FileIDModelInfo, and the host's spec for each load must agree with it or the load is refused. Models are verified offline, never downloaded:
+// nothing here opens a URL, socket or HTTP client or launches a process.
 import CryptoKit
 import Darwin
 import FileIDModelInfo
@@ -14,7 +11,7 @@ import Foundation
 struct VLMModelSpec: Codable, Sendable, Equatable {
     let kind: String
     let repo: String
-    /// Folder that holds `models/<repo>`, like the Swift engine's Hugging Face root.
+    /// Folder that holds `models/<repo>`, the Hugging Face cache root.
     let huggingFaceRoot: String
     let revision: String?
     let displayName: String
@@ -80,11 +77,8 @@ enum VLMDownloaderError: LocalizedError {
     }
 }
 
-/// Offline only: the Rust engine installs models. A load succeeds when the
-/// folder holds the pinned revision's `.fileid-verified-<revision>` manifest
-/// and every listed file still matches it (same rules as the Swift engine's
-/// `VLMDownloader.verifiedSentinelIsValid`), or, for a model the host marks
-/// unpinned, when the folder has a config and weights.
+/// Offline only: the Rust engine installs models. A load succeeds when the folder holds the pinned revision's `.fileid-verified-<revision>` manifest
+/// and every listed file still matches it, or, for a model the host marks unpinned, when the folder has a config and weights.
 final class VLMDownloader: Sendable {
     static let shared = VLMDownloader()
 

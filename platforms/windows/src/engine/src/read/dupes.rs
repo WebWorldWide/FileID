@@ -1,7 +1,5 @@
-//! Exact and perceptual duplicate detection over the indexed library.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -12,15 +10,14 @@ pub const DEFAULT_SIMILAR_THRESHOLD: u32 = 8;
 pub const MAX_SIMILAR_THRESHOLD: u32 = 16;
 const MAX_GENERIC_INDEX_ENTRIES: usize = 2_000_000;
 const MAX_SIMILAR_COMPARISONS: u64 = 5_000_000;
+const SIMILAR_COMPARISONS_PER_ROW: u64 = 500;
 
-/// Verification caps for one exact pass: candidate files and bytes to re-hash.
 #[derive(Clone, Copy, Debug)]
 pub struct ExactCaps {
     pub max_candidates: u64,
     pub max_bytes: u64,
 }
 
-/// Same-size candidates admitted under [`ExactCaps`], plus what was left out.
 #[derive(Debug, Default)]
 pub struct ExactCandidates {
     pub candidates: Vec<ExactDuplicateCandidate>,
@@ -34,13 +31,10 @@ impl ExactCandidates {
     }
 }
 
-/// Byte-verified exact groups (hash-identical, size-identical).
 #[derive(Debug, Default)]
 pub struct ExactListing {
     pub groups: Vec<ExactDuplicateGroup>,
-    /// Candidates admitted under the caps and re-hashed.
     pub admitted: u64,
-    /// Admitted candidates that were missing, unreadable, changed or cancelled.
     pub unreadable: usize,
     pub skipped_candidates: u64,
     pub skipped_bytes: u64,
@@ -52,13 +46,10 @@ impl ExactListing {
     }
 }
 
-/// Every active file sharing its size with another — the macOS Cleanup rule:
-/// membership is the whole same-size class, because stored content hashes are
-/// never byte-proof (legacy and current recipes, stale or missing hashes).
-/// The stored hash only ranks: classes sharing a stored (hash, size) —
-/// near-certain duplicates — are admitted first, then the remaining same-size
-/// classes by potential reclaim. Classes are taken whole or not at all, so a
-/// split class can never pair; [`exact_groups`] re-hashes every admitted file.
+/// The Cleanup rule: membership is the whole same-size class, because stored hashes are never byte-proof
+/// (legacy/current recipes, stale or missing hashes). The stored hash only ranks: classes sharing a stored (hash, size)
+/// go first, then the rest by potential reclaim. Classes are taken whole or not at all so a split class can never pair;
+/// [`exact_groups`] re-hashes every admitted file.
 pub fn exact_candidates(conn: &Connection, caps: ExactCaps) -> Result<ExactCandidates> {
     let mut stmt = conn.prepare(
         "WITH active AS ( \
@@ -112,8 +103,7 @@ pub fn exact_candidates(conn: &Connection, caps: ExactCaps) -> Result<ExactCandi
     Ok(out)
 }
 
-/// [`exact_candidates`] re-hashed and grouped. `cancel` stops hashing early;
-/// files not reached count as unreadable.
+/// `cancel` stops hashing early; files not reached count as unreadable.
 pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> bool) -> Result<ExactListing> {
     let selected = exact_candidates(conn, caps)?;
     let admitted = selected.candidates.len() as u64;
@@ -127,20 +117,147 @@ pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> boo
     })
 }
 
-/// Perceptual near-duplicates: connected components of active files whose
-/// dHashes differ by at most `threshold` bits (transitively chained). Each
-/// component's ids are sorted; components come in ascending order of their
-/// smallest id. `None` when no file has a perceptual hash. `phash = 0` is the
-/// "no hash" sentinel and is ignored.
+/// Whether a path reads as a copy of something else: a Takeout export, a folder or file named "copy", or a numbered "name (2)" duplicate.
+fn looks_like_a_copy(path: &Path) -> bool {
+    let named_copy = |text: &str| {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| matches!(word, "copy" | "copies" | "takeout"))
+    };
+    let numbered = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_suffix(')'))
+        .and_then(|stem| stem.rsplit_once(" ("))
+        .is_some_and(|(_, number)| {
+            !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        });
+    numbered
+        || path
+            .components()
+            .any(|part| named_copy(&part.as_os_str().to_string_lossy()))
+}
+
+/// Puts the original first: not a copy by name, then the oldest modification time, the shortest path, the lowest id.
+fn put_original_first(files: &mut [ExactDuplicateCandidate], modified_at: &HashMap<i64, f64>) {
+    let modified = |file: &ExactDuplicateCandidate| {
+        modified_at.get(&file.id).copied().unwrap_or(f64::INFINITY)
+    };
+    files.sort_by(|a, b| {
+        looks_like_a_copy(&a.path)
+            .cmp(&looks_like_a_copy(&b.path))
+            .then_with(|| modified(a).total_cmp(&modified(b)))
+            .then_with(|| a.path.as_os_str().len().cmp(&b.path.as_os_str().len()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn modified_times(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, f64>> {
+    let mut times = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT id, modified_at FROM files WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<f64>>(1)?))
+        })?;
+        for row in rows {
+            if let (id, Some(modified)) = row? {
+                times.insert(id, modified);
+            }
+        }
+    }
+    Ok(times)
+}
+
+/// Orders each group so its first file is the original to keep and the rest are the copies.
+pub fn put_originals_first(conn: &Connection, groups: &mut [ExactDuplicateGroup]) -> Result<()> {
+    let ids: Vec<i64> = groups.iter().flat_map(|group| group.files.iter().map(|file| file.id)).collect();
+    let modified_at = modified_times(conn, &ids)?;
+    for group in groups {
+        put_original_first(&mut group.files, &modified_at);
+    }
+    Ok(())
+}
+
+/// Groups of files whose dHashes are all within `threshold` bits of one anchor hash; ids sorted, groups by smallest id.
+/// Files linked only through a chain of near neighbours land in different groups, so a long run of loosely similar
+/// images never becomes one group. `None` when no file has a perceptual hash; `phash = 0` means "no hash". A RAW file
+/// whose same-named rendered twin (any folder, within `threshold` bits) is in its group is the same shot, so it never
+/// counts as a look-alike of that twin.
 pub fn similar_groups(conn: &Connection, threshold: u32, cancel: impl Fn() -> bool) -> Result<Option<Vec<Vec<i64>>>> {
-    let mut stmt = conn.prepare("SELECT id, phash FROM files WHERE failed = 0 AND phash IS NOT NULL AND phash != 0 ORDER BY id")?;
+    let mut stmt = conn.prepare("SELECT id, phash, path_text FROM files WHERE failed = 0 AND phash IS NOT NULL AND phash != 0 ORDER BY id")?;
+    let mut paths: HashMap<i64, String> = HashMap::new();
     let rows: Vec<(i64, i64)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, String>(2)?)))?
+        .map(|row| {
+            row.map(|(id, phash, path)| {
+                paths.insert(id, path);
+                (id, phash)
+            })
+        })
         .collect::<rusqlite::Result<_>>()?;
     if rows.is_empty() {
         return Ok(None);
     }
-    Ok(Some(similar_components(&rows, threshold, &cancel)?.0))
+    let components = similar_components(&rows, threshold, &cancel)?.0;
+    let hashes: HashMap<i64, i64> = rows.into_iter().collect();
+    let mut groups: Vec<Vec<i64>> = components.into_iter().flat_map(|ids| anchored_groups(ids, &hashes, threshold)).collect();
+    groups.sort_unstable_by_key(|ids| ids[0]);
+    Ok(Some(without_raw_twins(groups, &paths, &hashes, threshold)))
+}
+
+/// Splits one connected component into groups around anchors, most-repeated hash first: each group takes every
+/// still-unassigned file within `threshold` bits of its anchor. Groups of one file are dropped.
+fn anchored_groups(component: Vec<i64>, hashes: &HashMap<i64, i64>, threshold: u32) -> Vec<Vec<i64>> {
+    let mut by_hash: BTreeMap<u64, Vec<i64>> = BTreeMap::new();
+    for id in component {
+        by_hash.entry(hashes[&id] as u64).or_default().push(id);
+    }
+    let mut anchors: Vec<(u64, Vec<i64>)> = by_hash.into_iter().collect();
+    anchors.sort_by_key(|(_, ids)| (std::cmp::Reverse(ids.len()), ids.iter().min().copied()));
+    let mut waiting: std::collections::VecDeque<(u64, Vec<i64>)> = anchors.into();
+    let mut groups = Vec::new();
+    while let Some((anchor, mut ids)) = waiting.pop_front() {
+        waiting.retain(|(hash, members)| {
+            let near = (hash ^ anchor).count_ones() <= threshold;
+            if near {
+                ids.extend_from_slice(members);
+            }
+            !near
+        });
+        if ids.len() > 1 {
+            ids.sort_unstable();
+            groups.push(ids);
+        }
+    }
+    groups
+}
+
+fn without_raw_twins(groups: Vec<Vec<i64>>, paths: &HashMap<i64, String>, hashes: &HashMap<i64, i64>, threshold: u32) -> Vec<Vec<i64>> {
+    use crate::pipeline::near_duplicate_grouping::{is_raw, stem};
+    groups
+        .into_iter()
+        .filter_map(|ids| {
+            let rendered: Vec<(String, i64)> = ids
+                .iter()
+                .filter_map(|id| Some((paths.get(id)?, hashes.get(id)?)))
+                .filter(|(path, _)| !is_raw(path))
+                .map(|(path, hash)| (stem(path), *hash))
+                .collect();
+            let kept: Vec<i64> = ids
+                .into_iter()
+                .filter(|id| {
+                    let (Some(path), Some(hash)) = (paths.get(id), hashes.get(id)) else { return true };
+                    !is_raw(path)
+                        || !rendered.iter().any(|(twin, twin_hash)| *twin == stem(path) && ((*hash ^ twin_hash) as u64).count_ones() <= threshold)
+                })
+                .collect();
+            (kept.len() > 1).then_some(kept)
+        })
+        .collect()
 }
 
 fn similar_components(rows: &[(i64, i64)], threshold: u32, cancel: &dyn Fn() -> bool) -> Result<(Vec<Vec<i64>>, u64)> {
@@ -148,14 +265,15 @@ fn similar_components(rows: &[(i64, i64)], threshold: u32, cancel: &dyn Fn() -> 
         bail!("similar threshold {threshold} exceeds the supported maximum of {MAX_SIMILAR_THRESHOLD} bits");
     }
     let mut parent: Vec<usize> = (0..rows.len()).collect();
+    let budget = MAX_SIMILAR_COMPARISONS.max((rows.len() as u64).saturating_mul(SIMILAR_COMPARISONS_PER_ROW));
     let comparisons = if threshold == DEFAULT_SIMILAR_THRESHOLD {
-        radius_eight(rows, &mut parent, cancel)?
+        radius_eight(rows, &mut parent, budget, cancel)?
     } else {
         let entries = rows.len().saturating_mul((threshold + 1) as usize);
         if entries > MAX_GENERIC_INDEX_ENTRIES {
             bail!("similar candidate index would require {entries} entries; limit is {MAX_GENERIC_INDEX_ENTRIES}");
         }
-        generic(rows, threshold, &mut parent, cancel)?
+        generic(rows, threshold, &mut parent, budget, cancel)?
     };
     let mut components: BTreeMap<usize, Vec<i64>> = BTreeMap::new();
     for (index, row) in rows.iter().enumerate() {
@@ -174,10 +292,9 @@ fn similar_components(rows: &[(i64, i64)], threshold: u32, cancel: &dyn Fn() -> 
     Ok((groups, comparisons))
 }
 
-/// Pigeonhole multi-index search: split 64 bits into 3 blocks (21/21/22); two
-/// hashes within 8 bits agree within 2 bits on at least one block, so probing
+/// Pigeonhole: 64 bits in 3 blocks (21/21/22); two hashes within 8 bits agree within 2 bits on one block, so probing
 /// each block's ≤2-bit neighbourhood finds every candidate.
-fn radius_eight(rows: &[(i64, i64)], parent: &mut [usize], cancel: &dyn Fn() -> bool) -> Result<u64> {
+fn radius_eight(rows: &[(i64, i64)], parent: &mut [usize], budget: u64, cancel: &dyn Fn() -> bool) -> Result<u64> {
     const BLOCKS: [(usize, usize); 3] = [(0, 21), (21, 21), (42, 22)];
     let masks = [masks_within_two(21), masks_within_two(21), masks_within_two(22)];
     let mut indexes: Vec<HashMap<u64, Vec<usize>>> = (0..BLOCKS.len()).map(|_| HashMap::new()).collect();
@@ -203,8 +320,8 @@ fn radius_eight(rows: &[(i64, i64)], parent: &mut [usize], cancel: &dyn Fn() -> 
         }
         for other in candidates {
             comparisons += 1;
-            if comparisons > MAX_SIMILAR_COMPARISONS {
-                bail!("similar candidate comparisons exceeded the {MAX_SIMILAR_COMPARISONS} safety limit");
+            if comparisons > budget {
+                bail!("similar candidate comparisons exceeded the {budget} safety limit");
             }
             if (hash ^ rows[other].1 as u64).count_ones() <= DEFAULT_SIMILAR_THRESHOLD {
                 union(parent, index, other);
@@ -230,9 +347,8 @@ fn masks_within_two(width: usize) -> Vec<u64> {
     masks
 }
 
-/// Pigeonhole with `threshold + 1` blocks: within-threshold hashes match
-/// exactly on at least one block.
-fn generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize], cancel: &dyn Fn() -> bool) -> Result<u64> {
+/// Pigeonhole with `threshold + 1` blocks: within-threshold hashes match exactly on one.
+fn generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize], budget: u64, cancel: &dyn Fn() -> bool) -> Result<u64> {
     let blocks = (threshold + 1) as usize;
     let block_key = |hash: u64, block: usize| {
         let lo = (block * 64) / blocks;
@@ -260,8 +376,8 @@ fn generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize], cancel: &d
         }
         for other in candidates {
             comparisons += 1;
-            if comparisons > MAX_SIMILAR_COMPARISONS {
-                bail!("similar candidate comparisons exceeded the {MAX_SIMILAR_COMPARISONS} safety limit");
+            if comparisons > budget {
+                bail!("similar candidate comparisons exceeded the {budget} safety limit");
             }
             if (hash ^ rows[other].1 as u64).count_ones() <= threshold {
                 union(parent, index, other);
@@ -294,6 +410,55 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    fn candidate(id: i64, path: &str) -> ExactDuplicateCandidate {
+        ExactDuplicateCandidate { id, path: PathBuf::from(path), indexed_size: 1 }
+    }
+
+    #[test]
+    fn copies_are_recognised_by_folder_or_file_name() {
+        for copy in [
+            "/photos/Takeout/Google Photos/a.jpg",
+            "/photos/dupe-copy-2.jpg",
+            "/photos/Copy of a.jpg",
+            "/photos/Copies/a.jpg",
+            "/photos/a (2).jpg",
+        ] {
+            assert!(looks_like_a_copy(Path::new(copy)), "{copy}");
+        }
+        for original in [
+            "/photos/DSC01691.JPG",
+            "/photos/Copyright/a.jpg",
+            "/photos/photocopy.jpg",
+            "/photos/Trip (Italy).jpg",
+        ] {
+            assert!(!looks_like_a_copy(Path::new(original)), "{original}");
+        }
+    }
+
+    #[test]
+    fn the_original_outranks_a_copy_even_with_the_lower_id() {
+        let mut files = vec![
+            candidate(1, "/photos/dupe-copy-2.jpg"),
+            candidate(2, "/photos/Camera/DSC01691.JPG"),
+        ];
+        put_original_first(&mut files, &HashMap::from([(1, 100.0), (2, 200.0)]));
+        assert_eq!(files[0].id, 2);
+    }
+
+    #[test]
+    fn among_plain_names_the_oldest_then_the_shortest_path_then_the_lowest_id_wins() {
+        let times = HashMap::from([(1, 300.0), (2, 100.0), (3, 100.0), (4, 100.0)]);
+        let mut files = vec![
+            candidate(1, "/a/one.jpg"),
+            candidate(3, "/a/b/three.jpg"),
+            candidate(2, "/a/two.jpg"),
+            candidate(4, "/a/fou.jpg"),
+        ];
+        put_original_first(&mut files, &times);
+        let order: Vec<i64> = files.iter().map(|file| file.id).collect();
+        assert_eq!(order, [2, 4, 3, 1]);
+    }
 
     fn components(rows: &[(i64, i64)], threshold: u32) -> Result<Vec<Vec<i64>>> {
         Ok(similar_components(rows, threshold, &|| false)?.0)
@@ -354,6 +519,19 @@ mod tests {
     fn generic_search_stops_at_comparison_budget() {
         let rows = (0..3_200).map(|id| (id, id)).collect::<Vec<(i64, i64)>>();
         assert!(components(&rows, 1).unwrap_err().to_string().contains("comparisons exceeded"));
+    }
+
+    #[test]
+    fn a_library_of_dense_clusters_is_searched_not_refused() {
+        let rows: Vec<(i64, i64)> = (0..20_000u64)
+            .map(|i| {
+                let cluster = (i / 600).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 21 << 21;
+                (i as i64, (cluster | (i * 2_654_435_761 % (1 << 21))) as i64)
+            })
+            .collect();
+        let (groups, comparisons) = similar_components(&rows, 8, &|| false).unwrap();
+        assert!(comparisons > MAX_SIMILAR_COMPARISONS, "{comparisons}");
+        assert!(!groups.is_empty());
     }
 
     #[test]
@@ -440,6 +618,36 @@ mod tests {
         assert!(similar_groups(&conn, 8, || false).unwrap().unwrap().is_empty());
         conn.execute("UPDATE files SET failed = 0", []).unwrap();
         assert_eq!(similar_groups(&conn, 8, || false).unwrap().unwrap(), vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn a_chain_of_look_alikes_does_not_become_one_group() {
+        let conn = library();
+        let chain = [0u64, 0x3f, 0xfff, 0x3_ffff, 0xff_ffff, 0x3fff_ffff];
+        for (index, phash) in chain.iter().enumerate() {
+            insert(&conn, std::path::Path::new(&format!("/lib/{index}.jpg")), 1, None, Some((*phash | 1 << 63) as i64));
+        }
+        let groups = similar_groups(&conn, 8, || false).unwrap().unwrap();
+        assert_eq!(groups, vec![vec![1, 2], vec![3, 4], vec![5, 6]]);
+    }
+
+    #[test]
+    fn similar_groups_treat_a_raw_and_its_rendered_twin_as_one_shot() {
+        let conn = library();
+        for (path, phash) in [
+            ("/ev/Photos/RAWs/DSC1.ARW", 0b1),
+            ("/ev/Photos/JPEGs/DSC1.JPG", 0b1),
+            ("/lib/DSC2.ARW", 0b1),
+            ("/lib/DSC2.JPG", 0b11),
+            ("/lib/other.jpg", 0b111),
+            ("/lib/solo.ARW", 0b11),
+            ("/lib/lonely.ARW", 0xFFFF_0000_0000_0000u64 as i64),
+            ("/lib/lonely.JPG", 0xFFFF_0000_0000_0000u64 as i64),
+        ] {
+            insert(&conn, std::path::Path::new(path), 1, None, Some(phash));
+        }
+        let groups = similar_groups(&conn, 8, || false).unwrap().unwrap();
+        assert_eq!(groups, vec![vec![2, 4, 5, 6]]);
     }
 
     #[test]

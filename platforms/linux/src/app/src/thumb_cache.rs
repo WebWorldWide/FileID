@@ -1,8 +1,5 @@
-// On-disk thumbnail cache, so a grid that was decoded once opens from small
-// files instead of re-reading every photo. Lives in the helper's own
-// `thumbs.cache` folder (cleared by Start over), keyed by the file's path,
-// size, modified time and the requested size; capped, oldest files first.
-// Everything here runs on the thumbnail worker threads, never the GTK thread.
+// On-disk thumbnail cache keyed by path, size, mtime and requested size; capped, oldest first.
+// Lives in the helper's `thumbs.cache` folder (cleared by Start over). Runs on thumbnail workers only.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

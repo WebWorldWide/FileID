@@ -1,7 +1,3 @@
-// Settings cards that sit around the model rows: Appearance, Organize Folders,
-// Folders not to describe, and the Advanced troubleshooting section. Ports of
-// the macOS `AppearanceCard`, `DeepAnalyzeExclusionsCard` and Advanced group.
-
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -254,6 +250,12 @@ fn add_excluded_folder(path: &Path) -> (&'static str, bool) {
     }
     let mut folders = app_settings::deep_analyze_excluded_folders();
     let normalized = text.trim_end_matches('/').to_owned();
+    if normalized.is_empty() {
+        return (
+            "Couldn't skip that folder. Choose a folder inside your library, not the whole computer.",
+            true,
+        );
+    }
     if folders.iter().any(|known| known == &normalized) {
         return ("That folder is already skipped.", false);
     }
@@ -397,13 +399,15 @@ fn engine_label(state: &EngineState) -> Option<String> {
 
 pub fn advanced(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let expander = gtk::Expander::builder()
-        .label("Advanced (troubleshooting: background helper, storage, scan history, logs)")
+        .label_widget(&v3::wrapped(
+            "Advanced (troubleshooting: background helper, storage, scan history, logs)",
+            &[],
+        ))
         .build();
     let body = v3::vbox(14);
     body.set_margin_top(10);
     expander.set_child(Some(&body));
 
-    // Engine
     body.append(&heading("Engine"));
     let status_row = kv_row(
         "Status",
@@ -450,13 +454,11 @@ pub fn advanced(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    // Storage
     body.append(&heading("Storage"));
     let storage = v3::vbox(6);
     storage.append(&v3::label("Reading sizes…", &["dim-label"]));
     body.append(&storage);
 
-    // Recent scans
     body.append(&heading("Recent scans"));
     let scans = v3::vbox(6);
     scans.append(&v3::label("No scans recorded yet.", &["dim-label"]));
@@ -516,7 +518,6 @@ pub fn advanced(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    // Logs
     body.append(&heading("Logs"));
     body.append(&note("Detailed scan and app logs for troubleshooting."));
     let open_logs = v3::secondary("Open logs folder", false);
@@ -529,7 +530,6 @@ pub fn advanced(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
     });
     body.append(&open_logs);
 
-    // Danger zone
     let danger = gtk::Label::builder()
         .label("Danger Zone")
         .xalign(0.0)

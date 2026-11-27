@@ -31,9 +31,8 @@ pub(crate) trait MoveFileIo {
     }
 }
 
-/// The volume has no hard links (FAT, exFAT, many network shares), or the
-/// source is at its link limit. A no-replace rename gives the same no-clobber
-/// guarantee there, without the moment where both names exist.
+/// FAT, exFAT, many network shares, or the source is at its link limit; a no-replace rename gives the same no-clobber
+/// guarantee without a moment where both names exist.
 fn links_unavailable(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::Unsupported {
         return true;
@@ -53,6 +52,24 @@ fn links_unavailable(error: &io::Error) -> bool {
         false
     }
 }
+
+/// Publishes a staged file under a name that must not exist yet. A hard link keeps both names valid until the stage
+/// is removed; on filesystems without links the no-replace rename gives the same no-clobber guarantee.
+pub(crate) fn publish_staged(stage: &Path, output: &Path) -> io::Result<()> {
+    publish_staged_with(stage, output, |stage, output| fs::hard_link(stage, output))
+}
+
+fn publish_staged_with(
+    stage: &Path,
+    output: &Path,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match link(stage, output) {
+        Err(error) if links_unavailable(&error) => super::path_safety::rename_no_replace(stage, output),
+        other => other,
+    }
+}
+
 struct FileSystem;
 impl MoveFileIo for FileSystem {}
 
@@ -179,6 +196,31 @@ mod tests {
         fn publish_stage(&self, _: &Path, _: &Path) -> io::Result<()> {
             Err(io::ErrorKind::Unsupported.into())
         }
+    }
+    fn unlinkable(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    #[test]
+    fn publishing_a_stage_falls_back_to_rename_where_links_are_unavailable() {
+        let dir = Directory(std::env::temp_dir().join(format!("fileid-publish-fallback-{}", std::process::id())));
+        fs::create_dir_all(&dir.0).unwrap();
+        let (stage, output) = (dir.0.join(".stage.part"), dir.0.join("out.jpg"));
+        fs::write(&stage, b"export").unwrap();
+        publish_staged_with(&stage, &output, unlinkable).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"export");
+        assert!(!stage.exists());
+    }
+    #[test]
+    fn publishing_a_stage_never_replaces_an_existing_output() {
+        let dir = Directory(std::env::temp_dir().join(format!("fileid-publish-occupied-{}", std::process::id())));
+        fs::create_dir_all(&dir.0).unwrap();
+        let (stage, output) = (dir.0.join(".stage.part"), dir.0.join("out.jpg"));
+        fs::write(&stage, b"export").unwrap();
+        fs::write(&output, b"mine").unwrap();
+        assert!(publish_staged_with(&stage, &output, unlinkable).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"mine");
+        assert!(publish_staged(&stage, &output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"mine");
     }
     #[test]
     fn volumes_without_hard_links_still_move_without_clobbering() {

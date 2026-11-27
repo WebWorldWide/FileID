@@ -22,6 +22,7 @@ $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $stage = Join-Path $OutputDirectory ("stage-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
+try {
 
 function Invoke-Checked {
     param([string]$Executable, [string[]]$Arguments)
@@ -73,17 +74,17 @@ Invoke-Checked 'pwsh' @(
     '-CacheDir', (Join-Path $platformRoot 'dist/runtime-cache')
 )
 foreach ($required in @(
-    'FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'onnxruntime.dll', 'DirectML.dll', 'pdfium.dll',
+    'FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'pdfium.dll',
     'RuntimeBundles/llama.cpp/llama-server.exe',
     'RuntimeBundles/llama.cpp/llama-mtmd-cli.exe',
     'RuntimeBundles/whisper.cpp/Release/whisper-cli.exe',
-    'RuntimeBundles/packs/openvino/onnxruntime.dll',
     'RuntimeBundles/THIRD-PARTY-NOTICES.txt'
 )) {
     if (-not (Test-Path (Join-Path $stage $required))) { throw "Missing package payload: $required" }
 }
 Copy-Item -Path (Join-Path $platformRoot 'store/Assets/*.png') -Destination (Join-Path $stage 'Assets')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES.txt')
 $docsStage = Join-Path $stage 'Docs'
 New-Item -ItemType Directory -Force -Path $docsStage | Out-Null
 Copy-Item -LiteralPath (Join-Path $repoRoot 'shared/docs/PRIVACY.md') -Destination (Join-Path $docsStage 'PRIVACY.md')
@@ -101,3 +102,6 @@ $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvar
 Write-Host "Store package: $package"
 Write-Host 'Unsigned upload artifact; Microsoft signs the distributed Store package.'
 Write-Host 'Complete the release blockers in shared/docs/WINDOWS_STORE.md before submission.'
+} finally {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+}

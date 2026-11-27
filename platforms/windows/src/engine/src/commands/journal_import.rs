@@ -1,8 +1,6 @@
-//! One-shot import of the macOS Swift engine's Trash journal when the Mac app
-//! switches to this engine: `trash-journal.json` batches become signed
-//! `trash_log.json` entries. It lives in the shared state folder
-//! (`paths::root()`), so only the app-hosted build calls this. The Swift file
-//! is left in place for a switch back.
+//! One-shot import of the Swift engine's Trash journal when the Mac app switches to this engine: `trash-journal.json`
+//! batches become signed `trash_log.json` entries in the shared state folder (`paths::root()`), so only the app-hosted
+//! build calls this. The Swift file is left for a switch back.
 
 use std::path::Path;
 
@@ -33,9 +31,8 @@ struct SwiftItem {
 pub(crate) const SWIFT_TRASH_JOURNAL: &str = "trash-journal.json";
 const IMPORT_MARKER: &str = "trash-journal.json.imported";
 
-/// Imports the Swift Trash journal from the state folder. Failures are
-/// logged: the Swift file stays, so the next start retries. (`path-moves.ndjson`
-/// is shared by both engines: see `path_moves`.)
+/// Failures are logged and the Swift file stays, so the next start retries (`path-moves.ndjson` is shared by both
+/// engines: see `path_moves`).
 pub(crate) fn import_swift_journals() {
     let Ok(root) = paths::root() else {
         return;
@@ -56,9 +53,8 @@ fn file_stamp(path: &Path) -> Option<String> {
     Some(format!("{}:{}", metadata.len(), modified.as_nanos()))
 }
 
-/// Appends every Swift batch the log does not have yet (by batch id), then
+/// Appends every Swift batch not yet in the log (by batch id; batches the Swift engine dual-wrote are skipped), then
 /// records the journal's size and mtime so an unchanged file is not read again.
-/// Batches the Swift engine dual-wrote are already in the log and are skipped.
 pub(crate) fn import_swift_trash_journal(root: &Path, log: &Path, key: &[u8]) -> anyhow::Result<usize> {
     let swift = root.join(SWIFT_TRASH_JOURNAL);
     let marker = root.join(IMPORT_MARKER);
@@ -93,14 +89,15 @@ fn convert_item(item: SwiftItem) -> TrashLogItem {
     let mut converted = TrashLogItem {
         file_id: item.file_id,
         original_path: item.original_path,
+        library_root: None,
         recycle_bin_id: None,
         recycle_physical_path: None,
         source_identity: None,
         trashed_path: (!item.trashed_path.is_empty()).then_some(item.trashed_path),
         rows: item.rows,
+        settled: false,
     };
-    // The Swift journal keeps only the inode; bind the volume too while the
-    // item is where the journal says (in the Trash, or never moved).
+    // The Swift journal keeps only the inode; bind the volume too while the item is where the journal says.
     if let Some(inode) = converted.expected_inode() {
         converted.source_identity = [converted.trashed_path.as_deref(), Some(converted.original_path.as_str())]
             .into_iter()
@@ -114,6 +111,10 @@ fn convert_item(item: SwiftItem) -> TrashLogItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::test_support::{rebase_paths, swift_written};
+
+    const FIXTURE_FOLDER: &str = "/private/tmp/fileid-conformance-fixture/journal-trash";
+    const BATCH: &str = "258da9fe-545c-4d96-90f4-f9427b7f6a83";
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("fileid-import-{tag}-{}", uuid::Uuid::new_v4()));
@@ -121,45 +122,30 @@ mod tests {
         dir
     }
 
-    // A Swift `trash-journal.json` exactly as `JSONEncoder` writes `[TrashJournal.Batch]`.
-    fn swift_journal(batch: &str, original: &Path, trashed: &Path, inode: u64) -> String {
-        serde_json::json!([{
-            "id": batch,
-            "createdAt": 1_700_000_000.5,
-            "items": [{
-                "fileID": 7,
-                "originalPath": original.to_string_lossy(),
-                "trashedPath": trashed.to_string_lossy(),
-                "rows": [
-                    {"table": "files", "columns": {
-                        "id": {"int": 7}, "path_text": {"text": original.to_string_lossy()},
-                        "path_hash": {"int": 1}, "size_bytes": {"int": 5}, "scanned_at": {"real": 2.0},
-                        "kind": {"text": "photo"}, "extension": {"text": "jpg"}, "modified_at": {"real": 1.0}, "file_ref": {"int": inode as i64}, "vlm_description": {}
-                    }},
-                    {"table": "tags", "columns": {"file_id": {"int": 7}, "tag": {"text": "beach"},
-                        "source": {"text": "user"}, "score": {}}},
-                    {"table": "clip_embeddings", "columns": {"file_id": {"int": 7},
-                        "embedding": {"blob": "AAECAw=="}, "model": {"text": "clip"}}}
-                ]
-            }]
-        }])
-        .to_string()
+    // The `trash-journal.json` the Swift engine wrote when it trashed
+    // `docs/trash me.txt` (test Trash root), moved into `root`; the item's
+    // recorded inode becomes `inode`, the one the file has here.
+    fn swift_journal(journal: &str, root: &Path, inode: u64) -> String {
+        let mut batches: serde_json::Value = serde_json::from_slice(&std::fs::read(swift_written(journal)).unwrap()).unwrap();
+        rebase_paths(&mut batches, FIXTURE_FOLDER, &root.to_string_lossy());
+        for row in batches[0]["items"][0]["rows"].as_array_mut().unwrap() {
+            if row["table"] == "files" {
+                row["columns"]["file_ref"]["int"] = serde_json::json!(inode);
+            }
+        }
+        batches.to_string()
     }
 
-    // The app's last Trash batch, made by the Swift engine, restores after the
-    // switch: it imports once, identity-bound, with its catalog snapshot intact.
+    // The app's last Trash batch made by the Swift engine restores after the switch: imported once, identity-bound,
+    // catalog snapshot intact.
     #[test]
     fn swift_trash_batch_imports_once_with_identity_and_snapshot() {
         let root = scratch("trash");
-        let library = root.join("lib");
-        let trash = root.join("Trash");
-        std::fs::create_dir_all(&library).unwrap();
-        std::fs::create_dir_all(&trash).unwrap();
-        let original = library.join("photo.jpg");
-        let trashed = trash.join("photo.jpg");
-        std::fs::write(&trashed, b"bytes").unwrap();
+        let trashed = root.join("state/Trash/trash me.txt");
+        std::fs::create_dir_all(trashed.parent().unwrap()).unwrap();
+        std::fs::write(&trashed, b"trash me\n").unwrap();
         let identity = crate::platform::file_identity(&trashed).unwrap();
-        let journal = swift_journal("SWIFT-BATCH", &original, &trashed, identity.file);
+        let journal = swift_journal("journals/trash-journal.json", &root, identity.file);
         std::fs::write(root.join(SWIFT_TRASH_JOURNAL), &journal).unwrap();
         let log = root.join("trash_log.json");
         let key = b"import-test-key";
@@ -172,37 +158,61 @@ mod tests {
         let entries = trash_log::latest_entries(&std::fs::read(&log).unwrap(), key);
         assert_eq!(entries.len(), 1);
         let item = &entries[0].items[0];
-        assert_eq!(entries[0].batch_id, "SWIFT-BATCH");
-        assert_eq!(item.file_id, 7);
-        assert_eq!(item.original_path, original.to_string_lossy());
-        assert_eq!(item.trashed_path.as_deref(), Some(trashed.to_string_lossy().as_ref()));
+        assert_eq!(entries[0].batch_id, BATCH);
+        assert_eq!(item.file_id, 1);
+        assert_eq!(item.original_path, format!("{}/tree/docs/trash me.txt", root.to_string_lossy()));
+        let journal_trashed = format!("{}/state/Trash/trash me.txt", root.to_string_lossy());
+        assert_eq!(item.trashed_path.as_deref(), Some(journal_trashed.as_str()));
         assert_eq!(item.source_identity, Some(identity));
         assert_eq!(item.recycle_bin_id, None, "no claim: startup must never move it out of the Trash");
-        assert_eq!(item.rows.len(), 3);
+        assert_eq!(item.rows.len(), 2);
 
         let conn = crate::db::test_support::memory_db();
-        assert!(trash_log::restore_snapshot(&conn, 7, &item.original_path, &item.rows).unwrap());
-        let tag: String = conn.query_row("SELECT tag FROM tags WHERE file_id = 7", [], |row| row.get(0)).unwrap();
-        let blob: Vec<u8> = conn
-            .query_row("SELECT embedding FROM clip_embeddings WHERE file_id = 7", [], |row| row.get(0))
+        assert!(trash_log::restore_snapshot(&conn, 1, &item.original_path, &item.rows).unwrap());
+        let tag: String = conn.query_row("SELECT tag FROM tags WHERE file_id = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(tag, "keep me");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    // A batch that carries faces: the face rows (blob vectors included) restore.
+    #[test]
+    fn swift_trash_batch_with_faces_restores_them() {
+        let root = scratch("faces");
+        let folder = FIXTURE_FOLDER.replace("journal-trash", "journal-trash-faces");
+        let mut batches: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(swift_written("journals/trash-journal-faces.json")).unwrap()).unwrap();
+        rebase_paths(&mut batches, &folder, &root.to_string_lossy());
+        std::fs::write(root.join(SWIFT_TRASH_JOURNAL), batches.to_string()).unwrap();
+        let log = root.join("trash_log.json");
+        let key = b"import-test-key";
+        assert_eq!(import_swift_trash_journal(&root, &log, key).unwrap(), 1);
+
+        let entries = trash_log::latest_entries(&std::fs::read(&log).unwrap(), key);
+        let item = &entries[0].items[0];
+        let conn = crate::db::test_support::memory_db();
+        conn.execute("INSERT INTO persons(id, name, created_at) VALUES (1, 'A', 0), (2, 'B', 0)", []).unwrap();
+        assert!(trash_log::restore_snapshot(&conn, item.file_id, &item.original_path, &item.rows).unwrap());
+        let faces: Vec<(i64, Option<i64>, Vec<u8>)> = conn
+            .prepare("SELECT id, person_id, arcface_embedding FROM face_prints WHERE file_id = 1 ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(tag, "beach");
-        assert_eq!(blob, vec![0, 1, 2, 3]);
+        assert_eq!(faces, vec![(1, Some(1), vec![0, 0, 128, 63]), (3, Some(2), vec![0, 0, 128, 63])]);
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
     fn dual_written_batch_is_not_imported_twice() {
         let root = scratch("dual");
-        let original = root.join("a.jpg");
-        let trashed = root.join("gone.jpg");
-        std::fs::write(root.join(SWIFT_TRASH_JOURNAL), swift_journal("DUAL", &original, &trashed, 1)).unwrap();
+        std::fs::write(root.join(SWIFT_TRASH_JOURNAL), swift_journal("journals/trash-journal.json", &root, 1)).unwrap();
         let log = root.join("trash_log.json");
         let key = b"k";
         let dual = TrashLogEntry {
-            batch_id: "DUAL".into(),
+            batch_id: BATCH.into(),
             timestamp: 1.0,
-            items: vec![TrashLogItem { file_id: 7, original_path: "x".into(), ..Default::default() }],
+            items: vec![TrashLogItem { file_id: 1, original_path: "x".into(), ..Default::default() }],
         };
         trash_log::append_at(&log, key, &dual).unwrap();
         assert_eq!(import_swift_trash_journal(&root, &log, key).unwrap(), 0);
@@ -213,7 +223,8 @@ mod tests {
     #[test]
     fn unreadable_swift_journal_is_retried_later() {
         let root = scratch("torn");
-        std::fs::write(root.join(SWIFT_TRASH_JOURNAL), b"[{\"id\":").unwrap();
+        let torn = std::fs::read(swift_written("journals/trash-journal.json")).unwrap();
+        std::fs::write(root.join(SWIFT_TRASH_JOURNAL), &torn[..torn.len() / 2]).unwrap();
         assert!(import_swift_trash_journal(&root, &root.join("trash_log.json"), b"k").is_err());
         assert!(!root.join(IMPORT_MARKER).exists());
         std::fs::remove_dir_all(root).ok();

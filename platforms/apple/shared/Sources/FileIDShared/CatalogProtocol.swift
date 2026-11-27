@@ -179,6 +179,12 @@ public struct CatalogTakeAutoGroup: Codable, Sendable, Equatable, Identifiable {
     private enum CodingKeys: String, CodingKey { case groupKey, kind, status, capturedAt, similarity, shots, relation, evidence }
 }
 
+public struct CatalogSimilarGroup: Codable, Sendable, Equatable {
+    public var fileIDs: [Int64]
+    public var totalCount: Int
+    public init(fileIDs: [Int64], totalCount: Int) { self.fileIDs = fileIDs; self.totalCount = totalCount }
+}
+
 public struct CatalogTakeQuality: Codable, Sendable, Equatable {
     public var primaryFileID: Int64
     public var fileIDs: [Int64]
@@ -285,7 +291,9 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
     public var takeDecision: CatalogTakeDecision?
     public var naming: CatalogNaming?
     public var nameEdits: [CatalogNameEdit]?
-    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, rootID: Int64? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil, nameEdits: [CatalogNameEdit]? = nil) {
+    public var offset: Int?
+    public var similarThreshold: Int?
+    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, rootID: Int64? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil, nameEdits: [CatalogNameEdit]? = nil, offset: Int? = nil, similarThreshold: Int? = nil) {
         self.requestID = requestID
         self.action = action
         self.query = query
@@ -309,6 +317,8 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
         self.takeDecision = takeDecision
         self.naming = naming
         self.nameEdits = nameEdits
+        self.offset = offset
+        self.similarThreshold = similarThreshold
     }
 }
 
@@ -324,9 +334,11 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
     public var recommendation: CatalogTakeRecommendation?
     public var suggestedTakeGroups: [CatalogTakeGroupSuggestion]?
     public var takeGroups: [CatalogTakeAutoGroup]?
+    public var similarGroups: [CatalogSimilarGroup]?
+    public var similarGroupTotal: Int?
     public var takeQualities: [CatalogTakeQuality]?
     public var takeGoalRanking: CatalogTakeGoalRanking?
-    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil, suggestedTakeGroups: [CatalogTakeGroupSuggestion]? = nil, takeGroups: [CatalogTakeAutoGroup]? = nil, takeQualities: [CatalogTakeQuality]? = nil, takeGoalRanking: CatalogTakeGoalRanking? = nil) {
+    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil, suggestedTakeGroups: [CatalogTakeGroupSuggestion]? = nil, takeGroups: [CatalogTakeAutoGroup]? = nil, similarGroups: [CatalogSimilarGroup]? = nil, similarGroupTotal: Int? = nil, takeQualities: [CatalogTakeQuality]? = nil, takeGoalRanking: CatalogTakeGoalRanking? = nil) {
         self.requestID = requestID
         self.status = status
         self.message = message
@@ -338,6 +350,8 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
         self.recommendation = recommendation
         self.suggestedTakeGroups = suggestedTakeGroups
         self.takeGroups = takeGroups
+        self.similarGroups = similarGroups
+        self.similarGroupTotal = similarGroupTotal
         self.takeQualities = takeQualities
         self.takeGoalRanking = takeGoalRanking
     }

@@ -1,14 +1,4 @@
-//! AI-model download driver for the global `D` shortcut.
-//!
-//! Installs the models the TUI uses in-process with the engine's SHA-256
-//! verified Hugging Face downloader (`downloader::install_model_blocking`) on a
-//! worker thread, streaming an install gauge + status line. The default models
-//! come from `huggingface.co` — the only network egress the project ever makes
-//! (see the no-telemetry principle).
-//!
-//! Non-blocking, mirroring [`crate::scan`]: the UI keeps drawing, `q` keeps
-//! quitting (and cancels the download). On success it reloads the library and
-//! sends [`LoadMsg::Done`]; any failure becomes a single [`LoadMsg::Error`].
+//! `D` shortcut: installs the TUI's models in-process with the engine's SHA-256-verified downloader on a worker thread, streaming an install gauge. The only network egress is user-initiated huggingface.co. `q` cancels the download.
 
 use std::path::PathBuf;
 use std::sync::Arc;

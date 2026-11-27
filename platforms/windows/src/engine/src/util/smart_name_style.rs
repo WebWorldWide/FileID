@@ -1,8 +1,6 @@
-//! Saved smart-name styles built only from stored catalog evidence.
-//! Lockstep with macOS `SmartNameStyle.swift`; both run
-//! `shared/test-corpus/naming/style-cases.json`. Text is handled per Unicode
-//! scalar (lowercase mapping, Alphabetic, numeric categories) so both engines
-//! produce byte-identical names.
+//! Saved smart-name styles from stored catalog evidence. Lockstep with macOS `SmartNameStyle.swift` (both run
+//! `shared/test-corpus/naming/style-cases.json`); text is handled per Unicode scalar so both engines produce
+//! byte-identical names.
 
 use std::collections::HashSet;
 
@@ -236,8 +234,6 @@ fn formatted_date(date: &str, format: Option<&str>) -> String {
     }
 }
 
-/// The name in `options`' style with its learned preferences applied, and the
-/// preferences that changed it: each one whose removal alone gives another outcome.
 pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
     let mut outcome = build(evidence, options);
     for key in options.learned.active_keys() {

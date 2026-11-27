@@ -1,10 +1,4 @@
-// Scan pipeline modules.
-//
-//   discovery → bounded mpsc → tagging workers → bounded mpsc → dbwriter
-//
-// All channels backpressured; workers paced by the slowest stage downstream.
-// ScanCoordinator's AtomicBool sync mirrors checked between batches for
-// cancellation that lands within milliseconds without an actor hop per file.
+// Scan pipeline: discovery → bounded mpsc → tagging workers → bounded mpsc → dbwriter. All channels are backpressured, and ScanCoordinator's AtomicBool mirrors are checked between batches so cancellation lands within milliseconds without an actor hop per file.
 
 pub mod archive_names;
 pub(crate) mod capture_date_backfill;
@@ -25,6 +19,10 @@ pub mod take_scoring;
 pub mod video_scene_selection;
 pub mod restructure;
 pub mod restructure_apply;
+#[cfg(test)]
+mod restructure_case_tests;
+#[cfg(test)]
+mod restructure_folder_tests;
 pub mod restructure_feedback;
 pub mod restructure_respect;
 pub mod raw_preview;

@@ -20,7 +20,7 @@ struct BulkTagSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Apply tags to \(files.count) file\(files.count == 1 ? "" : "s")")
-                        .font(Theme.Font.body(20, .semibold))
+                        .font(Theme.Font.display(28))
                     Text("Comma-separated. Existing tags on each file are preserved — only new tags get added.")
                         .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
@@ -30,7 +30,7 @@ struct BulkTagSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
             TextField("e.g. Vacation, Family, Important", text: $rawTags)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .font(Theme.Font.body(13.5))
             if let s = status {
                 Text(s).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
@@ -45,13 +45,14 @@ struct BulkTagSheet: View {
                         .foregroundStyle(.black)
                         .font(Theme.Font.body(13.5, .semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .keyboardShortcut(.defaultAction)
                 .disabled(inFlight || parsedTags.isEmpty || files.isEmpty)
             }
         }
         .padding(20)
         .frame(width: 520)
+        .sheetSurface()
     }
 
     private var parsedTags: [String] {
@@ -66,14 +67,9 @@ struct BulkTagSheet: View {
         inFlight = true
         status = nil
         let urls = files.map(\.url)
-        // Work off-MainActor via `Task.detached().value`, then resume on
-        // MainActor for the UI updates. Avoids Swift 6 Sendable-capture
-        // issues with the view's onComplete closure.
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                // journal: nil — the sheet owns the journal write so a
-                // total-failure batch can't clear a still-valid prior one
-                // (TagWriter clears on any empty batch).
+                // journal: nil because TagWriter clears the journal on any empty batch; the sheet writes it so a failed batch can't clear a still-valid prior one.
                 let detailed = TagWriter.addTagsBulkDetailed(tags, to: urls, journal: nil)
                 BulkTagSheet.recordOrPreserveJournal(outcomes: detailed.outcomes,
                                                      failed: detailed.failed)
@@ -81,11 +77,11 @@ struct BulkTagSheet: View {
             }.value
             inFlight = false
             if result.failed == 0 && result.unchanged == 0 {
-                status = "Tagged \(result.added) file\(result.added == 1 ? "" : "s")"
+                status = "Tagged \(Plural.noun(result.added, "file", "files"))"
             } else if result.failed == 0 {
-                status = "Tagged \(result.added) · \(result.unchanged) already had these tags"
+                status = "Tagged \(result.added.formatted()) · \(result.unchanged.formatted()) already had these tags"
             } else {
-                status = "Tagged \(result.added) · \(result.unchanged) unchanged · \(result.failed) failed"
+                status = "Tagged \(result.added.formatted()) · \(result.unchanged.formatted()) unchanged · \(result.failed.formatted()) couldn’t be tagged"
                     + (result.firstError.map { " — \($0)" } ?? "")
             }
             store.notifyChanged()
@@ -98,13 +94,7 @@ struct BulkTagSheet: View {
 
     nonisolated static let lastBatchKey = "bulkTag.lastBatch.v1"
 
-    /// Update the undo journal for a finished bulk-tag batch:
-    /// • successful additions → record them so "Undo last tags" strips ONLY
-    ///   what FileID just added.
-    /// • a clean all-unchanged batch (no failures, nothing new added) → clear
-    ///   it, so a stale earlier batch can't be undone by mistake.
-    /// • a batch with failures and no successes → leave the prior journal
-    ///   intact; a failed batch must not destroy "Undo last tags".
+    /// Records added tags so "Undo last tags" strips only what FileID added. A clean all-unchanged batch clears the journal; a batch with failures and no successes leaves it intact.
     nonisolated static func recordOrPreserveJournal(outcomes: [TagWriter.TagOutcome],
                                                     failed: Int,
                                                     in defaults: UserDefaults = .standard) {
@@ -117,8 +107,7 @@ struct BulkTagSheet: View {
         }
     }
 
-    /// Decode the most recent tag batch from UserDefaults. Nil when no
-    /// batch has been recorded yet.
+    /// The most recent tag batch, or nil when none is recorded.
     nonisolated static func loadLastBatch() -> [TagWriter.TagOutcome]? {
         guard let data = UserDefaults.standard.data(forKey: lastBatchKey) else { return nil }
         return try? JSONDecoder().decode([TagWriter.TagOutcome].self, from: data)

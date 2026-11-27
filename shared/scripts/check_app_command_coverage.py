@@ -8,7 +8,7 @@ build) by default. Every command it can send must therefore be
    `server.rs` that does more than `{}`, and, for catalog, tool and chat
    requests, the action named in the matching handler; and
 2. exercised on that engine by a conformance case CI runs against the
-   app-hosted build (pinned to the Swift engine's replies), or listed in
+   app-hosted build (its expected replies were captured from the retired Swift engine), or listed in
    OUTSIDE_CONFORMANCE with the reason and where it was measured instead.
 
 "App-reachable" is read from the app's sources: a command case of
@@ -40,12 +40,12 @@ HANDLERS = {
 }
 
 # Reachable commands that no conformance case can run on CI's runner, with the
-# reason and where the Rust engine was checked against the Swift engine instead.
+# reason and where the Rust engine was checked instead.
 # Empty: every app-reachable command has a case. An entry looks like
-# ("command", "benchmarkModel"): "needs an installed model; STATE 2026-11-11 Stage 7".
+# ("command", "benchmarkModel"): "needs an installed model; <reason>".
 OUTSIDE_CONFORMANCE: dict[tuple[str, str], str] = {}
 
-# App-reachable commands that both engines answer as unsupported. Empty: the
+# App-reachable commands the engine answers as unsupported. Empty: the
 # hosted Rust engine serves everything the app sends.
 UNSUPPORTED_BY_BOTH: dict[tuple[str, str], str] = {}
 
@@ -147,27 +147,14 @@ def step_commands(step: dict):
 
 
 def exercised_on_hosted_rust(cases: list[dict]) -> dict[tuple[str, str], list[str]]:
-    """Commands each case sends to the Rust engine when CI runs it: as the lead
-    engine (the case's `engines` include rust) or as the peer a Swift-led
-    cross-engine case restarts into."""
+    """Commands each case sends to the engine when CI runs the hosted build."""
     seen: dict[tuple[str, str], list[str]] = {}
     for case in cases:
         if blocked_on_hosted_rust(case):
             continue
-        for lead in case.get("engines", ["swift", "rust"]):
-            if lead != "rust" and "rust" not in case.get("requires", []):
-                continue
-            current = case.get("start", lead)
-            for step in case.get("steps", []):
-                if "restart" in step:
-                    if current == "rust":
-                        seen.setdefault(("command", "shutdown"), []).append(case["name"])
-                    current = step["restart"] if isinstance(step["restart"], str) else lead
-                    continue
-                if current != "rust":
-                    continue
-                for key in step_commands(step):
-                    seen.setdefault(key, []).append(case["name"])
+        for step in case.get("steps", []):
+            for key in step_commands(step):
+                seen.setdefault(key, []).append(case["name"])
     return seen
 
 

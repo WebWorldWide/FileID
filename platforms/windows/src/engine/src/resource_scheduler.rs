@@ -6,14 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How `reserve_internal` treats a request it can't admit right now.
 #[derive(Clone, Copy)]
 enum Wait {
-    /// Fail at once while an interactive lease is active or memory is tight.
     Immediate,
-    /// Wait behind interactive leases; still fail when nothing can release.
     Queued,
-    /// Wait through every transient condition until the deadline.
     Until(Instant),
 }
 
@@ -91,9 +87,8 @@ impl ResourceScheduler {
         static SHARED: OnceLock<Arc<ResourceScheduler>> = OnceLock::new();
         SHARED
             .get_or_init(|| {
-                // Installed memory never changes and free memory is probed at most
-                // every 100 ms: a scan asks twice per file, and each probe is a
-                // system call (or two) that used to run for every one.
+                // Installed memory never changes and free memory is probed at most every 100 ms: a scan asks twice per
+                // file and each probe is a system call.
                 static TOTAL_MB: OnceLock<u64> = OnceLock::new();
                 static AVAILABLE_MB: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
                 Self::new(
@@ -168,7 +163,7 @@ impl ResourceScheduler {
     }
     pub fn under_pressure(&self) -> bool {
         let (total, available) = (self.memory)();
-        total == 0 || available < (total / 4).clamp(2048, 8192)
+        total == 0 || available < crate::util::model_memory::reserve_mb(total)
     }
     pub fn reserve_with_accelerators(
         self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
@@ -176,10 +171,9 @@ impl ResourceScheduler {
     ) -> Result<Lease> {
         self.reserve_internal(demand, accelerators, priority, cancelled, Wait::Immediate)
     }
-    /// Admission for work that must not fail just because the machine is busy
-    /// (a scan file): waits, cancellably and for at most `patience`, for
-    /// interactive leases, residents and low free memory to clear. Fails at
-    /// once only when the demand could never fit on this machine.
+    /// For work that must not fail just because the machine is busy (a scan file): waits cancellably, up to `patience`,
+    /// for interactive leases, residents and low free memory to clear; fails at once only when the demand could never
+    /// fit.
     pub fn reserve_patient(
         self: &Arc<Self>, demand: Demand, priority: Priority,
         cancelled: impl Fn() -> bool, patience: Duration,
@@ -213,12 +207,10 @@ impl ResourceScheduler {
             && let Some(reason) =
                 crate::util::model_memory::rejection(total, available, demand.memory_mb)
             {
-                // Free memory comes and goes; only a demand larger than the
-                // whole budget is permanent for a patient caller.
-                let reserve = (total / 4).clamp(2048, 8192);
-                let never_fits = total == 0 || total <= reserve || demand.memory_mb > total - reserve;
+                // Only a demand larger than the whole budget is permanent for a patient caller.
+                let never_fits = !crate::util::model_memory::fits_budget(total, demand.memory_mb);
                 if !matches!(wait, Wait::Until(_)) || never_fits {
-                    bail!("{reason}")
+                    return Err(crate::util::model_memory::MemoryShortfall(reason).into());
                 }
             }
         let mut state = self.state.lock();
@@ -249,7 +241,7 @@ impl ResourceScheduler {
                 || (crate::util::model_memory::rejection(total, available, demand.memory_mb)
                     .is_none()
                     && demand.memory_mb.saturating_add(used.memory_mb)
-                        <= total.saturating_sub((total / 4).clamp(2048, 8192)));
+                        <= total.saturating_sub(crate::util::model_memory::reserve_mb(total)));
             let used_gpu = state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.gpu_mb));
             let used_npu = state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.npu_mb));
             let accelerator_ok = (accelerators.gpu_mb == 0 || self.accelerator_capacity.gpu_mb.is_some_and(|cap| used_gpu.saturating_add(accelerators.gpu_mb) <= cap))
@@ -275,19 +267,19 @@ impl ResourceScheduler {
                 .fold(0u64, |sum, (d, _)| sum.saturating_add(d.memory_mb));
             let resident_blocks_budget = demand.memory_mb > 0
                 && demand.memory_mb.saturating_add(resident_memory)
-                    > total.saturating_sub((total / 4).clamp(2048, 8192));
+                    > total.saturating_sub(crate::util::model_memory::reserve_mb(total));
             let stuck_on_residents = (!accelerator_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
                 || resident_blocks_budget
                 || (!memory_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0));
-            let busy = state.active.is_empty()
+            let busy = (first == Some(id) && state.active.is_empty())
                 || (!wait_background && priority == Priority::Background
                     && state
                         .active
                         .values()
                         .any(|(_, p)| *p == Priority::Interactive));
             if stuck_on_residents || busy {
-                // Residents retire when idle and free memory recovers, so a
-                // patient caller keeps polling until its deadline.
+                // Residents retire when idle and free memory recovers, so a patient caller keeps polling until its
+                // deadline.
                 let reason = match wait {
                     Wait::Until(deadline) if Instant::now() < deadline => None,
                     Wait::Until(_) => Some("Resource admission timed out: the machine stayed too busy or low on memory"),
@@ -426,6 +418,26 @@ mod tests {
             .is_err());
     }
     #[test]
+    fn a_queued_waiter_behind_another_keeps_waiting_when_nothing_is_running() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let scheduler = ResourceScheduler::new(|| (16384, 12000), 1, 1);
+        let demand = Demand { memory_mb: 0, cpu: 1, io: 1 };
+        scheduler.state.lock().waiting.insert(0, (demand, Priority::Interactive));
+        let cancel = AtomicBool::new(false);
+        let outcome = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                scheduler.reserve_queued(demand, AcceleratorDemand::default(), Priority::Interactive, || cancel.load(Ordering::SeqCst))
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!worker.is_finished(), "the waiter gave up while another waiter was ahead of it");
+            cancel.store(true, Ordering::SeqCst);
+            worker.join().unwrap()
+        });
+        let message = outcome.err().expect("cancelled").to_string();
+        assert!(message.contains("cancelled") && !message.contains("deferred"), "{message}");
+    }
+
+    #[test]
     fn interactive_waiters_precede_background_and_cancel_cleanly() {
         let scheduler = ResourceScheduler::new(|| (16384, 12000), 1, 1);
         let demand = Demand {
@@ -454,6 +466,17 @@ mod tests {
         });
         assert_eq!(order.lock().first(), Some(&2));
         assert!(scheduler.state.lock().waiting.is_empty());
+    }
+    #[test]
+    fn a_load_refused_for_memory_says_so_in_a_way_a_caller_can_act_on() {
+        use crate::util::model_memory::MemoryShortfall;
+        let scheduler = ResourceScheduler::new(|| (16384, 6000), 2, 2);
+        let busy = scheduler.reserve(Demand { memory_mb: 8704, cpu: 0, io: 0 }, Priority::Interactive, || false).err().expect("9.5 GB free is needed");
+        assert!(busy.downcast_ref::<MemoryShortfall>().is_some_and(|short| short.0.contains("is available")), "{busy}");
+        let smaller = scheduler.reserve(Demand { memory_mb: 3072, cpu: 0, io: 0 }, Priority::Interactive, || false);
+        assert!(smaller.is_ok(), "a smaller model loads in the same memory");
+        let cancelled = scheduler.reserve(Demand { memory_mb: 3072, cpu: 0, io: 0 }, Priority::Interactive, || true).err();
+        assert!(cancelled.is_none_or(|error| error.downcast_ref::<MemoryShortfall>().is_none()));
     }
     #[test]
     fn patient_admission_waits_out_interactive_leases_and_low_memory() {

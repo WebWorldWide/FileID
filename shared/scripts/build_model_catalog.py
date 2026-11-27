@@ -33,7 +33,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_model_license_policy import (  # noqa: E402
     CONVERSION_SUFFIX,
-    VARIANT_WORDS,
     catalog_errors,
     gemma_terms_error,
     identity_mismatch,
@@ -122,6 +121,22 @@ SPEECH_NAME = re.compile(r"voxtral|whisper|asr|audio|speech", re.I)
 REASONING_NAME = re.compile(r"thinking|reasoning|r1-distill", re.I)
 GGUF_QUANT_PREFERENCE = ["Q4_K_M", "Q4_K_S", "Q4_0", "IQ4_XS", "Q5_K_M", "Q8_0", "BF16", "F16"]
 MMPROJ_PREFERENCE = ["f16", "F16", "bf16", "BF16", "Q8_0", "q8_0", "f32"]
+# Builds a person chose that discovery alone would not: a model above
+# --max-resident-gb, or a second quantization of a model whose first build is
+# already listed. `--reviewed-builds` adds only these to the existing catalog
+# (replacing an entry with the same id); each still goes through every
+# license, lineage and identity check above. Single-file GGUFs only: the
+# engine's catalog layout is one `model.gguf` plus one `mmproj.gguf`.
+# - GLM-4.6V: 106B (12B active) MIT; its 70 GB single-file Q4_K_M is the only
+#   permissive ~100B vision GGUF that is not split into shards, so it sits above
+#   the size ceiling. The parameter counts come from its card, which the repo
+#   name does not carry.
+# - Qwen3-VL-2B Q4_K_M: the Q8_0 build on the ladder needs 4.25 GB free on an
+#   8 GB PC; Q4_K_M with the Q8_0 projector needs 3.3 GB.
+REVIEWED_BUILDS = [
+    {"repo": "ggml-org/GLM-4.6V-GGUF", "quantization": "Q4_K_M", "parametersBillion": 106.0, "activeParametersBillion": 12.0},
+    {"repo": "Qwen/Qwen3-VL-2B-Instruct-GGUF", "quantization": "Q4_K_M", "projector": "Q8_0"},
+]
 
 ROLE_BY_PIPELINE = {
     "image-text-to-text": "vision",
@@ -378,7 +393,10 @@ def tier_for(resident_gb: float) -> str:
     return "workstation"
 
 
-def build_gguf_entry(info: dict, base_repo: str, base_info: dict, license_key: str) -> dict | None:
+def build_gguf_entry(
+    info: dict, base_repo: str, base_info: dict, license_key: str,
+    quantization: str | None = None, projector_quantization: str | None = None,
+) -> dict | None:
     repo, sha = info["id"], info["sha"]
     files = gguf_files(repo, sha)
     if not files:
@@ -388,10 +406,10 @@ def build_gguf_entry(info: dict, base_repo: str, base_info: dict, license_key: s
         if "mmproj" not in f["path"].lower() and not is_split(f["path"])
         and not AUXILIARY_FILE.search(Path(f["path"]).name) and not LOW_BIT.search(Path(f["path"]).name)
     ]
-    model = pick(weights, GGUF_QUANT_PREFERENCE, lambda p: True)
+    model = pick(weights, [quantization] if quantization else GGUF_QUANT_PREFERENCE, lambda p: True)
     if not model:
         return None
-    projector = pick(files, MMPROJ_PREFERENCE, lambda p: "mmproj" in p.lower())
+    projector = pick(files, [projector_quantization] if projector_quantization else MMPROJ_PREFERENCE, lambda p: "mmproj" in p.lower())
     pipeline = base_info.get("pipeline_tag") or info.get("pipeline_tag")
     role = ROLE_BY_PIPELINE.get(pipeline or "", "text")
     if SPEECH_NAME.search(base_repo) or (pipeline or "").startswith("audio") or pipeline == "automatic-speech-recognition":
@@ -404,7 +422,7 @@ def build_gguf_entry(info: dict, base_repo: str, base_info: dict, license_key: s
     if projector:
         artifacts.append({"role": "projector", **projector})
     total = sum(a["bytes"] for a in artifacts)
-    quant = next(q for q in GGUF_QUANT_PREFERENCE if q.lower() in Path(model["path"]).name.lower())
+    quant = next(q for q in [quantization, *GGUF_QUANT_PREFERENCE] if q and q.lower() in Path(model["path"]).name.lower())
     resident_gb = total / 1e9 * 1.15 + (0.6 if role in ("vision", "text") else 0.1)
     return finish_entry(info, base_repo, base_info, license_key, "gguf", role, quant, artifacts, total, resident_gb, sha)
 
@@ -485,6 +503,98 @@ def discover(authors: list[str], formats: set[str], limit: int) -> list[dict]:
     return seen
 
 
+def vet(info: dict, upstream_cache: dict, reject) -> tuple[list, str, dict, str] | None:
+    """The repository's lineage, upstream release and license key when every
+    license, denylist, identity and language-model check passes; otherwise
+    `reject` is told why and the result is None."""
+    chain = lineage(info["id"], upstream_cache, info=info)
+    # The model is the original release this conversion was made from;
+    # deeper ancestors are its backbone. Every declared upstream license
+    # must be allowed, and the conversion may not claim a different one.
+    base_repo, base_info = upstream_of(chain)
+    if base_repo == info["id"] and model_name(base_repo) != base_repo.split("/", 1)[1]:
+        original = f"{base_repo.split('/', 1)[0]}/{model_name(base_repo)}"
+        original_info = upstream_cache.setdefault(original, get(f"models/{original}") or {})
+        if original_info:
+            base_repo, base_info = original, original_info
+    org = chain[-1][0].split("/", 1)[0]
+    upstream_licenses = {license_of(item) for _, item in chain[1:]} - {None}
+    license_key = license_of(base_info) or license_of(chain[-1][1]) or license_of(info)
+    if org not in UPSTREAM_ORGS or base_repo.split("/", 1)[0] not in UPSTREAM_ORGS | set(PUBLISHERS):
+        reject("untrusted upstream", info["id"])
+        return None
+    restricted = restricted_reason(info["id"], base_repo, *(repo for repo, _ in chain))
+    if restricted:
+        reject("denylisted", info["id"], restricted)
+        return None
+    if (license_key not in ALLOWED_LICENSES or not upstream_licenses <= set(ALLOWED_LICENSES)
+            or license_of(info) not in (None, license_key, "other")
+            or any(restricted_license_reference(item) for _, item in license_chain(chain))
+            or (base_info and restricted_license_reference(base_info))):
+        reject("license", info["id"])
+        return None
+    gemma = gemma_terms_error(model_name(base_repo), info["id"], ALLOWED_LICENSES[license_key], license_key == "gemma")
+    if gemma:
+        reject("license", info["id"], gemma)
+        return None
+    problem = identity_problem(chain, base_repo, base_info)
+    if problem:
+        reject("identity mismatch", info["id"], problem)
+        return None
+    if EXCLUDE.search(base_repo):
+        reject("excluded variant", info["id"])
+        return None
+    if not_language_model(info, base_repo, base_info):
+        reject("not a language model", info["id"])
+        return None
+    return chain, base_repo, base_info, license_key
+
+
+def sort_key(entry: dict) -> tuple:
+    return (entry["role"], entry["format"], entry["estimatedResidentGB"], entry["id"])
+
+
+def write_checked(catalog: dict, output: Path) -> int:
+    """Run the release gate's checks on `catalog`, and replace `output` only when they pass."""
+    with tempfile.TemporaryDirectory() as temporary:
+        candidate = Path(temporary) / "catalog.json"
+        candidate.write_text(json.dumps(catalog, indent=1, sort_keys=False) + "\n")
+        errors = catalog_errors(candidate)
+        if errors:
+            for error in errors:
+                print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(candidate.read_text())
+    return 0
+
+
+def add_reviewed_builds(output: Path, upstream_cache: dict) -> int:
+    """Add REVIEWED_BUILDS to the catalog already at `output`, leaving every other entry as it is."""
+    catalog = json.loads(output.read_text())
+    problems: list[str] = []
+    entries = {entry["id"]: entry for entry in catalog["entries"]}
+    for spec in REVIEWED_BUILDS:
+        info = get(f"models/{spec['repo']}")
+        vetted = vet(info, upstream_cache, lambda reason, repo, detail="": problems.append(f"{repo}: {reason} {detail}".rstrip())) if info else None
+        entry = build_gguf_entry(info, *vetted[1:], spec["quantization"], spec.get("projector")) if vetted else None
+        if not entry or entry["role"] != "vision":
+            problems.append(f"{spec['repo']}: no single-file {spec['quantization']} vision build")
+            continue
+        for key in ("parametersBillion", "activeParametersBillion"):
+            entry[key] = spec.get(key, entry[key])
+        entries[entry["id"]] = entry
+    if problems:
+        print("\n".join(f"ERROR: {problem}" for problem in problems), file=sys.stderr)
+        return 1
+    catalog["entries"] = sorted(entries.values(), key=sort_key)
+    catalog["generatedAt"] = time.strftime("%Y-%m-%d")
+    status = write_checked(catalog, output)
+    if status == 0:
+        print(f"{output}: {len(catalog['entries'])} entries; reviewed builds: {', '.join(spec['repo'] for spec in REVIEWED_BUILDS)}", file=sys.stderr)
+    return status
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output", type=Path, default=Path("shared/models/catalog.json"))
@@ -493,6 +603,7 @@ def main() -> int:
     parser.add_argument("--max-resident-gb", type=float, default=80.0)
     parser.add_argument("--cache", type=Path, help="directory caching Hugging Face API responses")
     parser.add_argument("--verbose", action="store_true", help="print every rejected repository and why")
+    parser.add_argument("--reviewed-builds", action="store_true", help="only add REVIEWED_BUILDS to the catalog at --output and leave every other entry as it is")
     args = parser.parse_args()
     global CACHE
     if args.cache:
@@ -501,6 +612,8 @@ def main() -> int:
 
     formats = set(args.formats.split(","))
     upstream_cache: dict = {}
+    if args.reviewed_builds:
+        return add_reviewed_builds(args.output, upstream_cache)
     chosen: dict[tuple[str, str, str], tuple[int, dict]] = {}
     rejected: dict[str, int] = {}
     def reject(reason: str, repo: str, detail: str = "") -> None:
@@ -509,46 +622,10 @@ def main() -> int:
             print(f"reject {repo}: {reason} {detail}".rstrip(), file=sys.stderr)
 
     for info in discover(PUBLISHERS, formats, args.limit):
-        chain = lineage(info["id"], upstream_cache, info=info)
-        # The model is the original release this conversion was made from;
-        # deeper ancestors are its backbone. Every declared upstream license
-        # must be allowed, and the conversion may not claim a different one.
-        base_repo, base_info = upstream_of(chain)
-        if base_repo == info["id"] and model_name(base_repo) != base_repo.split("/", 1)[1]:
-            original = f"{base_repo.split('/', 1)[0]}/{model_name(base_repo)}"
-            original_info = upstream_cache.setdefault(original, get(f"models/{original}") or {})
-            if original_info:
-                base_repo, base_info = original, original_info
-        org = chain[-1][0].split("/", 1)[0]
-        upstream_licenses = {license_of(item) for _, item in chain[1:]} - {None}
-        license_key = license_of(base_info) or license_of(chain[-1][1]) or license_of(info)
-        if org not in UPSTREAM_ORGS or base_repo.split("/", 1)[0] not in UPSTREAM_ORGS | set(PUBLISHERS):
-            reject("untrusted upstream", info["id"])
+        vetted = vet(info, upstream_cache, reject)
+        if not vetted:
             continue
-        restricted = restricted_reason(info["id"], base_repo, *(repo for repo, _ in chain))
-        if restricted:
-            reject("denylisted", info["id"], restricted)
-            continue
-        if (license_key not in ALLOWED_LICENSES or not upstream_licenses <= set(ALLOWED_LICENSES)
-                or license_of(info) not in (None, license_key, "other")
-                or any(restricted_license_reference(item) for _, item in license_chain(chain))
-                or (base_info and restricted_license_reference(base_info))):
-            reject("license", info["id"])
-            continue
-        gemma = gemma_terms_error(model_name(base_repo), info["id"], ALLOWED_LICENSES[license_key], license_key == "gemma")
-        if gemma:
-            reject("license", info["id"], gemma)
-            continue
-        problem = identity_problem(chain, base_repo, base_info)
-        if problem:
-            reject("identity mismatch", info["id"], problem)
-            continue
-        if EXCLUDE.search(base_repo):
-            reject("excluded variant", info["id"])
-            continue
-        if not_language_model(info, base_repo, base_info):
-            reject("not a language model", info["id"])
-            continue
+        chain, base_repo, base_info, license_key = vetted
         rank = (PUBLISHERS.index(info["id"].split("/", 1)[0]), mlx_quant_rank(info["id"]) if info["_format"] == "mlx" else 0)
         key = (base_repo, info["_format"])
         if key in chosen and chosen[key][0] <= rank:
@@ -561,7 +638,7 @@ def main() -> int:
         entry["role"] = ROLE_OVERRIDES.get(info["id"]) or ROLE_OVERRIDES.get(base_repo, entry["role"])
         chosen[key] = (rank, entry)
 
-    entries = sorted((entry for _, entry in chosen.values()), key=lambda e: (e["role"], e["format"], e["estimatedResidentGB"], e["id"]))
+    entries = sorted((entry for _, entry in chosen.values()), key=sort_key)
     ids = set()
     for entry in entries:
         while entry["id"] in ids:
@@ -576,16 +653,9 @@ def main() -> int:
     }
     # The release gate's checks run on the output before it replaces the
     # catalog, so a bad entry fails the build instead of shipping.
-    with tempfile.TemporaryDirectory() as temporary:
-        candidate = Path(temporary) / "catalog.json"
-        candidate.write_text(json.dumps(catalog, indent=1, sort_keys=False) + "\n")
-        errors = catalog_errors(candidate)
-        if errors:
-            for error in errors:
-                print(f"ERROR: {error}", file=sys.stderr)
-            return 1
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(candidate.read_text())
+    status = write_checked(catalog, args.output)
+    if status:
+        return status
     by_role: dict[str, int] = {}
     for entry in entries:
         by_role[f"{entry['format']}/{entry['role']}"] = by_role.get(f"{entry['format']}/{entry['role']}", 0) + 1

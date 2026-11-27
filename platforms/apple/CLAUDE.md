@@ -1,36 +1,36 @@
 # FileID — Apple platform (macOS)
 
-macOS 15+ SwiftUI app + Swift engine that tag, dedupe, restructure, and rename local file libraries on-device (Apple Neural Engine, ONNX Runtime via the CoreML EP, and MLX VLMs). The visual + behavioral reference the Windows port mirrors.
+macOS 15+ SwiftUI app that tags, dedupes, restructures, and renames local file libraries on-device (Apple Neural Engine, the shared Rust engine's tract inference runtime, and MLX VLMs). The app links no ONNX Runtime and the Swift engine is gone: the app runs only the shared Rust engine (`fileidd`). The visual + behavioral reference the Windows port mirrors.
 
 Covers `platforms/apple/`. For the Windows build see `platforms/windows/CLAUDE.md`; for cross-platform contracts + principles see the root `CLAUDE.md` and `shared/`.
 
 ## Architecture
 
-Two binaries, newline-delimited JSON over stdin/stdout:
+Newline-delimited JSON over stdin/stdout between the app and its engine (the engine's events arrive on its stderr):
 - `app/Sources/FileID/` — SwiftUI app. UI state in `EngineClient` (`@MainActor @Observable`); spawns the engine, auto-respawns with backoff on crash.
-- `engine/Sources/FileIDEngine/` — Swift CLI child. Owns the DB, scan pipeline, ANE/GPU model loading.
+- `fileidd` — the shared Rust engine (`../windows/src/engine`, `--features apple-adapters`), the only engine; it owns the DB, scan pipeline and model loading. When `fileidd` is missing, refused by the signing check, or stops twice before `ready`, `EngineClient` sets `startFailure` and `EngineUnavailableCard` offers Show log / Try again. `scripts/assemble_app.sh` builds and bundles it.
 - `shared/Sources/FileIDShared/` — `IPCProtocol.swift` (`IPCCommand`/`IPCEvent`), DB row types, the AI model registry (`AIModels.swift`), mirrored against `../../shared/ipc-schema/ipc.schema.json`.
-- `shared/Sources/FileIDImaging/` — decode (ImageIO, HEIF, JPEG previews), Vision primary pass and text reads, and the MLX CLIP/RAM++ image graphs. The Swift engine and `FileIDAppleKit` both depend on it, so the two engines run the same code; declarations are `package`-visible.
-- `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (C interface in `adapters/include/fileid_apple.h`). Since Stage 10 a Developer ID build bundles `fileidd` and starts it first; the Swift engine stays bundled as the fallback and is selectable in Settings ▸ Advanced ▸ Engine, with `defaults write com.fileid.app engine.backend swift|rust` or `FILEID_ENGINE_BACKEND` (`EngineBackend.swift` holds the policy). App Store builds (`-DFILEID_APP_STORE`) run the Swift engine only and do not bundle `fileidd`. `scripts/assemble_app.sh` bundles it by default for release builds (`FILEID_WITH_RUST_ENGINE=0` leaves it out).
-- `Tests/` — Swift Testing (Shared + Engine suites). `scripts/iterate.sh` — corpus regression harness.
+- `shared/Sources/FileIDImaging/` — decode (ImageIO, HEIF, JPEG previews), Vision primary pass and text reads, and the MLX CLIP/RAM++ image graphs, exposed to the Rust engine through `FileIDAppleKit`; declarations are `package`-visible.
+- `adapters/` — `FileIDAppleKit`, the Swift dynamic library the shared Rust engine links when the app hosts it as `Contents/MacOS/fileidd` (C interface in `adapters/include/fileid_apple.h`), in Developer ID and App Store (`-DFILEID_APP_STORE`, child of the sandboxed app via `FileIDEngineAppStore.entitlements`) builds alike.
+- `Tests/` — Swift Testing (Shared, AppleKit and App suites); engine behaviour is covered by Rust tests and `shared/scripts/conformance.py`. `scripts/iterate.sh` — corpus regression harness against `fileidd`.
 
-Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v36**, with append-only migrations in `Database.swift` mirrored against the Windows engine so a library round-trips across platforms. Not SwiftData.
+Storage: SQLite WAL written only by the Rust engine (migrations in `../windows/src/engine/src/db/migrations.rs` and `shared/catalog/*.sql`, schema v41, one chain for every platform); the app reads it through GRDB.swift (`ReadStore`). Not SwiftData.
 
 ## Tabs
 
 | Tab | Purpose | Key file |
 |---|---|---|
 | Library | FTS5 + semantic CLIP search, thumbnail grid, preview | `LibraryView.swift` |
-| People | Face clusters → name them | `PeopleView.swift`, `engine/.../FaceClustering.swift` |
+| People | Face clusters → name them | `PeopleView.swift`, the engine |
 | Cleanup | Duplicate groups via phash | `CleanupView.swift` |
-| Deep Analyze | On-device VLM captions / smart renames (MLX) | `DeepAnalyzeViews.swift`, `engine/.../DeepAnalyze.swift` |
+| Deep Analyze | On-device VLM captions / smart renames (MLX) | `DeepAnalyzeViews.swift` |
 | Restructure | Folder reorg — Sankey + recommendation rows + drill-down | `RestructureView.swift`, `Restructure/` |
 | Settings | AI models, engine info, logs, privacy | `SettingsView.swift` |
 
 ## AI models (commercial-clean target)
 
-Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/huggingface` (an existing `~/Documents/huggingface/models` from older Developer ID installs stays in use). The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
-- **Faces** — SFace embedder (Apache, 128-d ONNX via the CoreML EP) + 5-point alignment; detection stays Apple Vision.
+Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/huggingface`; the engine (`models/mlx.rs` `cache_root`) and `ModelCachePaths.swift` apply one rule: an existing non-empty `~/Documents/huggingface/models` from older Developer ID installs stays in use, every new install lands in Application Support. Factory reset keeps that folder. The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
+- **Faces** — SFace embedder (Apache, 128-d ONNX run by the shared Rust engine on tract, CPU) + 5-point alignment; detection stays Apple Vision.
 - **CLIP** — OpenAI/OpenCLIP ViT-B/32 (MIT) image + text, 512-d.
 - **Tagging** — RAM++ primary, CLIP zero-shot scene tags as fallback.
 - **Deep Analyze** — Qwen3-VL 4B is the measured recommendation for 8 GB Macs and Qwen3-VL 8B for 16 GB Macs; Qwen2.5-VL 7B, Gemma 3, and Mistral-Small-3.2 remain curated alternatives.
@@ -41,10 +41,10 @@ Under `~/Library/Application Support/FileID/Models/`; VLMs go under `Models/hugg
 # From platforms/apple/
 bash run.sh                                                  # wipe DB + build + launch (fresh-state)
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build   # quick type-check
-swift test                                                   # Shared + Engine suites
+swift test                                                   # Shared + AppleKit + App suites
 ```
 
-`run.sh` needs cmake + the Xcode Metal Toolchain (for `mlx.metallib`). Release bundling: `swift build -c release --product {FileID,FileIDEngine}`, copy both into `FileID.app/Contents/MacOS/`, `open`.
+`run.sh` needs cmake + the Xcode Metal Toolchain (for `mlx.metallib`). Release bundling: `bash scripts/assemble_app.sh <bundle>` after `swift build -c release --product FileID` (it builds `fileidd` and `FileIDAppleKit`).
 
 `ensure_mlx_metallib.sh` keys the cached Metal library to the checked-out MLX revision and builds from a temporary source copy. It must never patch SwiftPM's checkout in place. For an isolated scratch build, set `FILEID_MLX_SOURCE` and `FILEID_METALLIB_CACHE` for that script, then `FILEID_BUILD_DIR` and the same `FILEID_METALLIB_CACHE` for `scripts/assemble_app.sh`.
 
@@ -53,7 +53,7 @@ swift test                                                   # Shared + Engine s
 - **Swift 6 strict concurrency.** `@MainActor` for UI, `actor` for shared mutable services, `@unchecked Sendable` only with explicit lock coverage.
 - Engine surfaces failures as `IPCEvent.error(EngineError(kind:message:))`; app-side non-critical paths `try?`-swallow.
 - Wrap user paths in `redactPathForLog(_:)` before logging — paths leak PII.
-- **No new third-party packages without asking.** In already: GRDB, swift-transformers, MLX, swift-async-algorithms, onnxruntime.
+- **No new third-party packages without asking.** In already: GRDB, swift-transformers, MLX.
 - **Default to no comments** — only a non-obvious *why*.
 - **No telemetry.** Local-only logs. See `../../shared/docs/PRIVACY.md`.
 

@@ -1,6 +1,4 @@
-//! Groups burst frames and RAW+JPEG pairs so Deep Analyze runs the VLM once per
-//! group. Mirror of the macOS `NearDuplicateGrouping.swift` with the same
-//! thresholds; change both together.
+//! Groups burst frames and RAW+JPEG pairs so Deep Analyze runs the VLM once per group.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -50,11 +48,6 @@ pub const CLIPS: Thresholds = Thresholds {
 };
 
 pub const MAX_GAP_SECONDS: f64 = NEAR_DUPLICATE.max_gap_seconds;
-pub const MAX_SPAN_SECONDS: f64 = NEAR_DUPLICATE.max_span_seconds;
-pub const MIN_COSINE: f32 = NEAR_DUPLICATE.min_cosine;
-pub const MIN_SEED_COSINE: f32 = NEAR_DUPLICATE.min_seed_cosine;
-pub const MAX_HAMMING: u32 = NEAR_DUPLICATE.max_hamming;
-pub const MAX_GROUP_SIZE: usize = NEAR_DUPLICATE.max_group_size;
 /// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this
 /// similar counts as the same shot even when its file dates differ.
 pub const SIDECAR_COSINE: f32 = 0.90;
@@ -75,7 +68,6 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     pub representative: i64,
-    /// Every file in the group, representative included, in capture order.
     pub members: Vec<i64>,
 }
 
@@ -109,8 +101,6 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-/// Same-stem twins that look alike share the earlier capture time, so a JPEG
-/// exported hours after the RAW still sorts beside it.
 pub fn align_sidecar_times(items: &[Item]) -> Vec<Item> {
     let mut by_stem: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, item) in items.iter().enumerate() {
@@ -168,6 +158,14 @@ pub fn groups_with(items: &[Item], limits: &Thresholds) -> Vec<Group> {
     result
 }
 
+/// Two files with one stem are one shot only when the pictures agree. Without embeddings, only a RAW and a non-RAW file in the same folder (a camera's RAW+JPEG pair) count; `IMG_0001` from two folders or two cameras does not.
+fn is_same_shot_sidecar(a: &Item, b: &Item) -> bool {
+    match (a.embedding.as_deref(), b.embedding.as_deref()) {
+        (Some(x), Some(y)) => cosine(x, y) >= SIDECAR_COSINE,
+        _ => is_raw(&a.path) != is_raw(&b.path) && Path::new(&a.path).parent() == Path::new(&b.path).parent(),
+    }
+}
+
 fn joins(item: &Item, current: &[&Item], limits: &Thresholds) -> bool {
     let last = current[current.len() - 1];
     let (Some(time), Some(last_time), Some(first_time)) = (item.time, last.time, current[0].time) else {
@@ -180,7 +178,7 @@ fn joins(item: &Item, current: &[&Item], limits: &Thresholds) -> bool {
         return false;
     }
     let item_stem = stem(&item.path);
-    if current.iter().any(|c| stem(&c.path) == item_stem && c.path != item.path) {
+    if current.iter().any(|c| stem(&c.path) == item_stem && c.path != item.path && is_same_shot_sidecar(item, c)) {
         return true;
     }
     let (Some(embedding), Some(last_embedding), Some(seed)) =
@@ -258,8 +256,6 @@ pub fn decode_embedding(blob: &[u8]) -> Option<Vec<f32>> {
     Some(blob.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
-/// Image metadata for `ids`; CLIP vectors only for files within `MAX_GAP_SECONDS`
-/// of another, so a large library never loads every embedding.
 pub fn load_items(conn: &rusqlite::Connection, ids: &[i64]) -> rusqlite::Result<Vec<Item>> {
     let mut meta: Vec<(i64, String, Option<f64>, Option<u64>)> = Vec::new();
     let mut stmt = conn.prepare_cached(
@@ -317,7 +313,6 @@ pub fn grouping_enabled() -> bool {
     std::env::var("FILEID_DEEP_GROUPING").map(|v| v != "0").unwrap_or(true)
 }
 
-/// Orders `ids` so each group's representative runs first and its members follow.
 pub fn plan(conn: &rusqlite::Connection, ids: &[i64]) -> Plan {
     let mut plan = Plan { ordered: ids.to_vec(), ..Plan::default() };
     if ids.len() < 2 || !grouping_enabled() {
@@ -405,6 +400,22 @@ mod tests {
     }
 
     #[test]
+    fn same_stem_files_with_different_pictures_or_folders_stay_separate() {
+        let unrelated = groups(&[
+            item(1, "/camera/IMG_0001.jpg", Some(100.0), Some(0.0)),
+            item(2, "/cabinet/IMG_0001.png", Some(101.0), Some(1.5)),
+        ]);
+        assert_eq!(unrelated.iter().map(|g| g.members.clone()).collect::<Vec<_>>(), vec![vec![1], vec![2]]);
+        let no_embeddings = groups(&[
+            item(1, "/a/x.jpg", Some(100.0), None),
+            item(2, "/b/x.jpg", Some(100.0), None),
+            item(3, "/a/y.jpg", Some(200.0), None),
+            item(4, "/b/y.dng", Some(200.0), None),
+        ]);
+        assert!(no_embeddings.iter().all(|g| g.members.len() == 1), "two JPEGs, or a pair split across folders, are not one shot");
+    }
+
+    #[test]
     fn a_later_export_of_the_raw_joins_its_shot() {
         let found = groups(&[
             item(1, "/c/RAWs/DSC9.ARW", Some(100.0), Some(0.0)),
@@ -444,7 +455,7 @@ mod tests {
         for g in found {
             let angles: Vec<f32> = g.members.iter().map(|m| *m as f32 * 0.2).collect();
             let spread = angles.iter().copied().fold(f32::MIN, f32::max) - angles.iter().copied().fold(f32::MAX, f32::min);
-            assert!(spread.cos() >= MIN_SEED_COSINE);
+            assert!(spread.cos() >= NEAR_DUPLICATE.min_seed_cosine);
         }
     }
 

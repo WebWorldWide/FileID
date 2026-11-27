@@ -83,5 +83,23 @@
       {"label": "states", "db": "SELECT id,kind,state FROM catalog_jobs ORDER BY id",
        "expect": [["done", "takeGrouping", "completed"], ["odd", "mystery", "queued"], ["take-grouping", "takeGrouping", "cancelled"]]}
     ]
+  },
+  {
+    "name": "catalog-similar-groups-page-look-alikes-largest-first",
+    "description": "similarGroups pages the Cleanup look-alike groups: perceptual hashes within the threshold chain, a group of byte-identical files is left to the Exact view, groups come largest first, and a page past the end is empty. An out-of-range page size is refused.",
+    "sql": ["INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,phash,content_hash) VALUES(1,'/internal/a1.jpg',1,100,10,0,'image','jpg',1,X'01'),(2,'/internal/a2.jpg',2,100,10,0,'image','jpg',3,X'02'),(3,'/internal/b1.jpg',3,100,10,0,'image','jpg',-4294967296,X'03'),(4,'/internal/b2.jpg',4,100,10,0,'image','jpg',-4294967295,X'04'),(5,'/internal/b3.jpg',5,100,10,0,'image','jpg',-4294967294,X'05'),(6,'/internal/c1.jpg',6,100,10,0,'image','jpg',281474976645120,X'06'),(7,'/internal/c2.jpg',7,100,10,0,'image','jpg',281474976645120,X'06')"],
+    "steps": [
+      {"label": "first page", "catalog": {"action": "similarGroups", "limit": 1},
+       "expect": {"status": "ok", "similarGroupTotal": 2, "similarGroups": [{"fileIDs": [3, 4, 5], "totalCount": 3}]}},
+
+      {"label": "second page", "catalog": {"action": "similarGroups", "limit": 1, "offset": 1},
+       "expect": {"status": "ok", "similarGroupTotal": 2, "similarGroups": [{"fileIDs": [1, 2], "totalCount": 2}]}},
+
+      {"label": "past the end", "catalog": {"action": "similarGroups", "limit": 1, "offset": 2},
+       "expect": {"status": "ok", "similarGroupTotal": 2, "similarGroups": []}},
+
+      {"label": "page size out of range refused", "catalog": {"action": "similarGroups", "limit": 201},
+       "expect": {"status": "error"}}
+    ]
   }
 ]

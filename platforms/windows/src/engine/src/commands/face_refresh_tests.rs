@@ -1,5 +1,8 @@
 use super::*;
 use crate::db::test_support::memory_db;
+use crate::util::face_crop_stamp;
+
+const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
 
 struct TempDir(PathBuf);
 
@@ -74,11 +77,9 @@ fn face(conn: &Connection, id: i64, file: i64, bbox: &str, model: Option<&str>) 
 
 struct Library {
     conn: Connection,
-    _dir: TempDir,
+    dir: TempDir,
 }
 
-/// Faces 1–2 in a present photo (2 fails), 3 in a photo deleted from a present
-/// location, 4 on an unplugged location, 5 already current.
 fn library() -> Library {
     let dir = tempdir();
     let root = dir.path().join("library");
@@ -98,7 +99,7 @@ fn library() -> Library {
     face(&conn, 3, 2, "ok-3", Some("old"));
     face(&conn, 4, 3, "ok-4", Some("old"));
     face(&conn, 5, 1, "ok-5", Some("m"));
-    Library { conn, _dir: dir }
+    Library { conn, dir }
 }
 
 fn states(conn: &Connection) -> Vec<(i64, String)> {
@@ -124,6 +125,86 @@ fn seeding_queues_outdated_faces_of_one_namespace() {
     assert_eq!((status.total, status.pending, status.outdated, status.state.as_deref()), (4, 4, 4, Some("queued")));
     let other = super::status(conn, Some("n"), "p").unwrap();
     assert_eq!(other.total, 0, "another model has its own backlog");
+}
+
+#[test]
+fn faces_whose_crop_lacks_the_upright_stamp_are_outdated_until_their_crop_is_rewritten() {
+    let library = library();
+    let conn = &library.conn;
+    conn.execute("UPDATE face_prints SET processing_version='macos-test' WHERE id=5", []).unwrap();
+    let crops = library.dir.path().join("face_crops");
+    std::fs::create_dir_all(&crops).unwrap();
+    let crop = crops.join("5.jpg");
+    std::fs::write(&crop, JPEG).unwrap();
+
+    assert_eq!(outdated_in(conn, "m", "macos-test", None).unwrap(), 4);
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
+    seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
+    assert!(states(conn).contains(&(5, "pending".to_string())));
+
+    std::fs::write(&crop, face_crop_stamp::stamp(JPEG)).unwrap();
+    conn.execute("UPDATE face_refresh_backlog SET state='done', updated_at=?1 WHERE face_id=5", [now()]).unwrap();
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 4);
+}
+
+fn library_with_a_stale_crop() -> (Library, PathBuf) {
+    let library = library();
+    library.conn.execute("UPDATE face_prints SET processing_version='macos-test' WHERE id=5", []).unwrap();
+    let crops = library.dir.path().join("face_crops");
+    std::fs::create_dir_all(&crops).unwrap();
+    let crop = crops.join("5.jpg");
+    std::fs::write(&crop, JPEG).unwrap();
+    (library, crops)
+}
+
+fn fail_as_source_changed(conn: &Connection, faces: &str) {
+    conn.execute(&format!("UPDATE face_refresh_backlog SET state='failed', reason='source_changed' WHERE face_id IN ({faces})"), []).unwrap();
+}
+
+#[test]
+fn refreshing_a_face_writes_a_stamped_crop_that_ends_its_outdated_count() {
+    let (library, crops) = library_with_a_stale_crop();
+    let conn = &library.conn;
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
+    seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
+
+    save_crops_in(&crops, &[(5, JPEG.to_vec()), (3, JPEG.to_vec())], &[5]);
+    assert!(face_crop_stamp::is_stamped(&crops.join("5.jpg")));
+    assert!(!crops.join("3.jpg").exists(), "a face whose vector was not saved keeps its crop");
+    conn.execute("UPDATE face_refresh_backlog SET state='done', updated_at=?1 WHERE face_id=5", [now()]).unwrap();
+    OLD_CROPS.lock().remove(&crop_space(&crops, "m", "macos-test"));
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 4);
+}
+
+#[test]
+fn faces_whose_photo_changed_after_the_scan_stop_counting_as_outdated_until_the_photo_matches_again() {
+    let (library, crops) = library_with_a_stale_crop();
+    let conn = &library.conn;
+    seed_in(conn, "m", "macos-test", 1.0, Some(&crops)).unwrap();
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5);
+
+    conn.execute("UPDATE files SET size_bytes=size_bytes+1 WHERE id=1", []).unwrap();
+    fail_as_source_changed(conn, "1,2,5");
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 2, "faces 3 and 4 wait for their library; the changed photo's faces wait for a rescan");
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), Vec::<i64>::new());
+
+    conn.execute("UPDATE files SET size_bytes=size_bytes-1 WHERE id=1", []).unwrap();
+    assert_eq!(outdated_in(conn, "m", "macos-test", Some(&crops)).unwrap(), 5, "a photo that matches the catalog again can be refreshed");
+}
+
+#[test]
+fn the_crop_folder_is_scanned_once_and_a_clean_scan_is_remembered() {
+    let (library, crops) = library_with_a_stale_crop();
+    let conn = &library.conn;
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5]);
+    std::fs::write(crops.join("5.jpg"), face_crop_stamp::stamp(JPEG)).unwrap();
+    assert_eq!(stale_crops(conn, "m", "macos-test", &crops).unwrap(), vec![5], "the second look does not open the crops again");
+
+    OLD_CROPS.lock().remove(&crop_space(&crops, "m", "macos-test"));
+    assert!(stale_crops(conn, "m", "macos-test", &crops).unwrap().is_empty());
+    assert!(crops.join(CROPS_VERIFIED).exists());
+    std::fs::write(crops.join("5.jpg"), JPEG).unwrap();
+    assert!(stale_crops(conn, "m", "macos-test", &crops).unwrap().is_empty(), "a folder verified clean is not scanned again");
 }
 
 #[test]
@@ -197,7 +278,7 @@ fn an_interrupted_job_comes_back_paused() {
     recover(conn).unwrap();
     let job: (String, String) = conn.query_row("SELECT state, error FROM catalog_jobs WHERE id=?1", [JOB_ID], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(job, ("paused".into(), INTERRUPTED.into()));
-    assert!(is_job(conn, JOB_ID).unwrap());
+    assert!(crate::commands::catalog::is_job_of_kind(conn, JOB_ID, JOB_KIND).unwrap());
 }
 
 #[test]
@@ -248,6 +329,20 @@ fn pixel_boxes_follow_both_engines_box_formats() {
     let mac = pixel_box("0.1,0.5,0.2,0.25", 100, 200).unwrap();
     assert!((mac[0] - 10.0).abs() < 1e-4 && (mac[1] - 50.0).abs() < 1e-4 && (mac[2] - 20.0).abs() < 1e-4 && (mac[3] - 50.0).abs() < 1e-4);
     assert_eq!(pixel_box("nonsense", 1, 1), Err("bad_box"));
+}
+
+#[test]
+fn faces_a_scan_has_not_embedded_yet_are_not_called_outdated() {
+    let library = library();
+    let before = outdated(&library.conn, "m", "p").unwrap();
+    library
+        .conn
+        .execute("INSERT INTO face_prints(id,file_id,print_data,bbox) VALUES(90,1,X'','0,0,1,1'),(91,1,X'','0,0,.5,.5')", [])
+        .unwrap();
+    assert_eq!(outdated(&library.conn, "m", "p").unwrap(), before);
+    seed(&library.conn, "m", "p", 1.0).unwrap();
+    let seeded: i64 = library.conn.query_row("SELECT COUNT(*) FROM face_refresh_backlog WHERE face_id IN (90,91)", [], |row| row.get(0)).unwrap();
+    assert_eq!(seeded, 0);
 }
 
 #[test]

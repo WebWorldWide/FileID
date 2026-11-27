@@ -10,7 +10,6 @@ struct PerceptualGroupingTests {
 
     private func i(_ u: UInt64) -> Int64 { Int64(bitPattern: u) }
 
-    // MARK: - Hamming distance
 
     @Test("Hamming distance is popcount of XOR over the raw 64 bits")
     func hamming() {
@@ -22,7 +21,6 @@ struct PerceptualGroupingTests {
         #expect(PerceptualGrouping.hammingDistance(i(UInt64.max), i(UInt64.max)) == 0)
     }
 
-    // MARK: - Grouping
 
     @Test("Exact match (Ham 0) groups; threshold 0 is honored")
     func exactMatch() {
@@ -91,5 +89,47 @@ struct PerceptualGroupingTests {
     func degenerate() {
         #expect(PerceptualGrouping.groupByHamming([], maxHamming: 8).isEmpty)
         #expect(PerceptualGrouping.groupByHamming([(1, i(0x0))], maxHamming: 8).isEmpty)
+    }
+
+    @Test("A RAW and its rendered twin are one shot, never look-alikes of each other")
+    func rawTwinsLeaveTheGroup() {
+        let paths: [Int64: String] = [
+            1: "/ev/Photos/RAWs/DSC1.ARW", 2: "/ev/Photos/JPEGs/DSC1.JPG", 3: "/lib/DSC2.ARW", 4: "/lib/DSC2.JPG",
+            5: "/lib/other.jpg", 6: "/lib/solo.ARW", 7: "/lib/lonely.ARW", 8: "/lib/lonely.JPG",
+        ]
+        let far = i(0xFFFF_0000_0000_0000)
+        let hashes: [Int64: Int64] = [1: i(0b1), 2: i(0b1), 3: i(0b1), 4: i(0b11), 5: i(0b111), 6: i(0b11), 7: far, 8: far]
+        let groups = PerceptualGrouping.droppingRawTwins([[1, 2, 3, 4, 5, 6], [7, 8]], paths: paths, hashes: hashes, maxHamming: 8)
+        #expect(groups == [[2, 4, 5, 6]])
+    }
+
+    @Test("The indexed grouping finds exactly the groups the pairwise scan finds")
+    func indexedGroupingMatchesPairwise() {
+        var rng = SystemRandomNumberGenerator()
+        var items: [(id: Int64, phash: Int64)] = []
+        for n in 0..<900 {
+            let base = UInt64.random(in: 0...UInt64.max, using: &rng)
+            items.append((Int64(items.count + 1), i(base)))
+            for _ in 0..<Int.random(in: 0...3, using: &rng) {
+                var h = base
+                for _ in 0..<Int.random(in: 0...9, using: &rng) { h ^= 1 << UInt64.random(in: 0..<64, using: &rng) }
+                items.append((Int64(items.count + 1), i(h)))
+            }
+            _ = n
+        }
+        for k in [0, 4, 8] {
+            var parent = Array(0..<items.count)
+            func find(_ x: Int) -> Int { var r = x; while parent[r] != r { r = parent[r] }; return r }
+            for a in 0..<items.count {
+                for b in (a + 1)..<items.count where PerceptualGrouping.hammingDistance(items[a].phash, items[b].phash) <= k {
+                    parent[max(find(a), find(b))] = min(find(a), find(b))
+                }
+            }
+            var expected: [Int: [Int64]] = [:]
+            for a in 0..<items.count { expected[find(a), default: []].append(items[a].id) }
+            let want = Set(expected.values.filter { $0.count > 1 }.map { Set($0) })
+            let got = Set(PerceptualGrouping.groupByHamming(items, maxHamming: k).map { Set($0) })
+            #expect(got == want)
+        }
     }
 }

@@ -1,11 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    OnboardingSplash — the "How it works" first-run page on the empty Detail
-    when no folder is chosen (macOS Detail.swift EmptyState).
-
-    All FontIcon glyphs use numeric XML escapes so the bytes survive
-    encoding pipelines.
--->
+<!-- OnboardingSplash: the "How it works" first-run page shown when no folder is chosen. Glyphs use numeric XML escapes so they survive encoding pipelines. -->
 <UserControl
     x:Class="FileID.Views.OnboardingSplash"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -23,9 +17,7 @@
             <StackPanel Spacing="8">
                 <TextBlock Text="FILEID / GET STARTED"
                            Style="{StaticResource ShellSectionLabelStyle}" />
-                <!-- Rainbow-shimmering title — 1:1 with macOS Detail.swift.
-                     The LinearGradientBrush's EndPoint is animated by code-behind
-                     over 12 s; ReducedMotion freezes it on solid gold. -->
+                <!-- The gradient's EndPoint is animated by code-behind; reduced motion freezes it on solid gold. -->
                 <TextBlock x:Name="TitleText"
                            Text="FileID"
                            FontFamily="{StaticResource DisplayFontFamily}"

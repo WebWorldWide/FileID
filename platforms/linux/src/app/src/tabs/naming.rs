@@ -1,7 +1,5 @@
-// Describe Files ▸ Name style (macOS smartNamesCard "Name style" + Preview
-// names): the saved style, a proposeNames preview of the Library selection or
-// the files with suggestions, editable names, and Rename through renameFiles
-// with an Undo toast.
+// Describe Files > Name style: the saved style, the proposeNames preview, editable names, and
+// Rename through renameFiles with an Undo toast.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -223,7 +221,6 @@ pub(super) fn parse_reason(evidence: Option<&str>) -> (String, Option<i64>) {
     }
 }
 
-/// The name before its last dot, like the engines' split.
 pub(super) fn stem(name: &str) -> &str {
     match name.rfind('.') {
         Some(dot) if dot > 0 && dot + 1 < name.len() => &name[..dot],
@@ -1203,7 +1200,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn card_lists_rows_and_greys_out_rows_without_names() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let engine = Rc::new(RefCell::new(EngineClient::new()));
         let (card, ui) = new_ui(engine, adw::ToastOverlay::new(), Vec::new);
         let window = gtk::Window::builder().child(&card).default_width(720).default_height(600).build();

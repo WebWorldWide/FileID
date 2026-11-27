@@ -14,7 +14,7 @@ struct QueueListView: View {
                 Spacer()
                 if let eta = state.totalEtaSeconds, eta > 0 {
                     Text("about \(DurationText.short(eta)) left")
-                        .font(Theme.ChromeFont.body(11).monospacedDigit())
+                        .font(Theme.ChromeFont.body(11.5).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                 }
             }
@@ -31,7 +31,7 @@ struct QueueListView: View {
                             .truncationMode(.middle)
                         if let eta = job.etaSeconds, eta > 0 {
                             Text("about \(DurationText.short(eta)) left")
-                                .font(Theme.ChromeFont.body(11).monospacedDigit())
+                                .font(Theme.ChromeFont.body(11.5).monospacedDigit())
                                 .foregroundStyle(Theme.text3)
                         }
                     }

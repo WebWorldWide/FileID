@@ -16,12 +16,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private bool _unloaded;
     private bool _initializingToggles;
 
-    /// <summary> expose the singleton ModelInstallerService so
-    /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
-    /// way WelcomeSheet does. Without this binding path the cards stayed
-    /// stale after Welcome installed a model — the imperative TextBlock
-    /// mutation only fired when the user clicked the in-card Install button.
-    /// </summary>
+    /// <summary>The shared installer singleton, so the model cards x:Bind to its slots and stay current when another sheet installs a model.</summary>
     internal Services.ModelInstallerService Svc => Services.ModelInstallerService.Instance;
 
     public SettingsView()
@@ -48,37 +43,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Loaded += (_, _) =>
         {
             HydrateToggles();
-            // Re-seed from on-disk sentinels in case Welcome / DeepAnalyze
-            // installed a model while a different tab was active. The call
-            // happens on the UI thread (Loaded handler), so any
-            // PropertyChanged events from slot.Status flips land on the
-            // dispatcher the bindings live on. Belt-and-suspenders: a
-            // direct Bindings.Update() below forces re-evaluation even
-            // if a PropertyChanged event was dropped (singleton first-
-            // touched off the UI thread, etc.).
+            // A model may have been installed from another sheet while this tab was inactive.
             try { Svc.Refresh(); } catch { }
-            // sync the CUDA llama.cpp + cuDNN install buttons to
-            // reflect already-installed state at page load. Before this
-            // the buttons always showed "Install" and the user had to
-            // click them just to see the state flip (matching engine's
-            // immediate sentinel-check short-circuit).
             try { SyncInstallButtonStates(); } catch { }
-            // Force a bindings refresh after sentinel re-seed. Without
-            // this, the ArcFace / MobileCLIP install buttons can stay on
-            // "Install" at page load even when the sentinels exist on
-            // disk — Set()'s equality short-circuit suppresses the
-            // PropertyChanged event when Refresh()'s SeedSlot writes a
-            // status equal to the cached field. NEXT.md tracked this
-            // as the "install-state detection at page load" bug.
+            // Set()'s equality short-circuit can swallow PropertyChanged when Refresh() writes an unchanged status, so force the bindings.
             try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
-            // Populate the Recent Scans card. Query is cheap (≤5 rows)
-            // so we do it inline on the dispatcher.
             try { _ = PopulateRecentScansAsync(); } catch { }
         };
     }
 
-    // Reads up to the 5 most-recent scan_sessions rows and renders one
-    // line per row in the Recent Scans card.
     private async System.Threading.Tasks.Task PopulateRecentScansAsync()
     {
         var rows = await System.Threading.Tasks.Task.Run(() =>
@@ -87,11 +60,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             try
             {
                 if (!System.IO.File.Exists(AppPaths.DbPath)) return list;
-                var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                     new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                     {
                         DataSource = AppPaths.DbPath,
                         Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        Pooling = false,
                     }.ToString());
                 conn.Open();
                 using var cmd = conn.CreateCommand();
@@ -117,9 +91,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }).ConfigureAwait(true);
 
         if (_unloaded) return;
-        // Defensive: view may have unloaded during the async DB read; the
-        // XAML element references could be disposed. Wrap in try/catch
-        // to keep an in-flight continuation from fast-failing the dispatcher.
+        // The view may have unloaded during the DB read; a throw here would fast-fail the dispatcher.
         try
         {
             if (rows.Count == 0)
@@ -137,9 +109,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 var dur = completed.HasValue && completed.Value > started
                     ? FormatDuration(completed.Value - started)
                     : (status == "running" ? "running…" : "—");
-                // The engine stamps failed (DbWriter error / GPU TDR) and
-                // cancelled rows too — surface those instead of letting them
-                // read like clean completions.
+                // Failed and cancelled sessions must not read like clean completions.
                 var statusNote = status switch
                 {
                     "failed" => "  ·  failed",
@@ -168,20 +138,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         return $"{ts.Minutes}m{ts.Seconds:00}s";
     }
 
-    /// <summary>probe the engine's install sentinels and flip the
-    /// NVIDIA-acceleration card buttons to "Installed" + disabled if the
-    /// runtime is already present on disk. Same sentinel path the engine
-    /// writes after a successful prewarm (atomic temp+rename) — file
-    /// existence is sufficient. Matches <see cref="Services.ModelInstallerService"/>'s
-    /// SentinelInstalled probe.
-    ///
-    /// Also covers the ArcFace + MobileCLIP slots that the model-card x:Binds
-    /// observe via Svc.Arcface.Status / Svc.Clip.Status. SeedFromSentinels
-    /// already keeps those slots in sync, but if the singleton was first
-    /// touched off the UI thread or PropertyChanged was suppressed by Set()'s
-    /// equality short-circuit, the bindings stay stale. Directly forcing
-    /// the slot Status here (on the UI dispatcher) wakes those bindings up.
-    /// </summary>
+    /// <summary>Probes the engine's install sentinels (written atomically after a successful prewarm) and marks the CUDA llama.cpp button and the ArcFace, CLIP and VLM slots installed when present.</summary>
     private void SyncInstallButtonStates()
     {
         if (SentinelExists("llama_runtime_cuda_x64"))
@@ -190,19 +147,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp is installed. Describe Files uses it on the next run.";
         }
-        // Gate on the ORT CUDA provider (the pack that actually enables the
-        // CUDA EP); cuDNN alone never flipped scanning off DirectML.
-        if (SentinelExists("ort_cuda_x64"))
-        {
-            InstallCudnnButton.Content = "Installed";
-            InstallCudnnButton.IsEnabled = false;
-            // Leave CudnnStatusText alone — SyncNvidiaSection owns it and
-            // already reflects whether the CUDA EP is actually active in
-            // the current engine session (which depends on engine restart,
-            // not just sentinel presence).
-        }
-        // ArcFace requires the "arcface" sentinel (the engine bundles
-        // SCRFD + ArcFace as one install in registry.rs).
+        // The engine installs SCRFD and ArcFace together under the "arcface" sentinel.
         if (SentinelExists("arcface") && Svc.Arcface.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
@@ -211,7 +156,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Svc.Arcface.Fraction = 1.0;
             });
         }
-        // CLIP requires BOTH halves on disk (image encoder + text encoder).
+        // CLIP needs both the image and the text encoder on disk.
         if (SentinelExists("mobileclip_s2") && SentinelExists("clip_text")
             && Svc.Clip.Status != Services.ModelInstallStatus.Installed)
         {
@@ -272,20 +217,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 OnPropertyChanged(nameof(GpuDiagnosticsText));
                 OnPropertyChanged(nameof(PowerDiagnosticsText));
                 OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
-                // SyncReprobeUi reads the live session's bound EP from Info, so
-                // refresh the cuDNN pill here too — after a restart re-binds CUDA
-                // the pill flips from "restart to switch" to "active".
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) { SyncNvidiaSection(); SyncReprobeUi(); } });
-            }
-            else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
-            {
-                Services.DebugLog.Info($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncReprobeUi(); });
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncNvidiaSection(); });
             }
         });
 
-    /// <summary>Toggle the NVIDIA acceleration card based on the detected
-    /// GPU vendor. The card configures the optional CUDA ORT execution provider.</summary>
     private void SyncNvidiaSection()
     {
         var hw = EngineClient.Instance.Info?.Hardware;
@@ -295,12 +230,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         if (isNvidia)
         {
             NvidiaAccelerationSection.Visibility = Visibility.Visible;
-            var ep = (hw?.ExecutionProvider ?? "").ToLowerInvariant();
-            CudnnStatusText.Text = ep == "cuda"
-                ? "✓ The current scan engine is using the CUDA execution provider."
-                : SentinelExists("ort_cuda_x64")
-                    ? "CUDA files are installed. Restart the engine to select the CUDA execution provider."
-                    : "Install a compatible CUDA provider and cuDNN locally, then verify the files below.";
         }
     }
 
@@ -314,7 +243,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             SelectRadio(LavaModeRadios, s.LavaMode);
             SelectRadio(TextSizeRadios, s.TextSize);
             SelectRadio(GranularityRadios, s.RestructureGranularity);
-            // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
             {
@@ -387,30 +315,19 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnProviderOverrideChanged), () =>
         {
-            // The ComboBox's SelectedIndex="0" raises SelectionChanged during
-            // InitializeComponent — before HydrateToggles seeds the saved value
-            // and before _initializingToggles is set. Persisting here would
-            // clobber the user's GPU EP override to "auto" on every Settings
-            // open. Bail until the view is live; HydrateToggles re-selects then.
+            // SelectedIndex="0" raises SelectionChanged during InitializeComponent, before the saved value is seeded; persisting then would reset the override to "auto" on every open.
             if (!IsLoaded || _initializingToggles) return;
             if (ProviderCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
             var s = AppViewModel.Instance.Settings;
             s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
             s.Save();
-            // The engine reads this value at startup via runtime.rs's
-            // read_user_ep_override(); to apply a change live, the user
-            // must restart the engine (the Restart button in this view, or
-            // the prompt shown after installing a Performance Pack).
         });
 
     public string EngineVersionText
     {
         get
         {
-            // Info can be null even when State==Ready in the brief
-            // window between spawn + first ready event. Surface State so
-            // the Settings card stops claiming "Engine starting..." for
-            // a Ready engine.
+            // Info is null briefly after spawn even when State is Ready.
             var ec = EngineClient.Instance;
             var info = ec.Info;
             if (info is not null) return $"Engine v{info.Version} - PID {info.Pid}";
@@ -465,12 +382,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (hw is null) return string.Empty;
             return hw.ExecutionProvider switch
             {
-                "cuda" => "CUDA — NVIDIA-tuned (highest perf on RTX class)",
-                "tensorrt" => "TensorRT — NVIDIA optimized graph compilation",
-                "directml" => "DirectML — works on every Windows GPU vendor",
-                "openvino" => "OpenVINO — Intel-tuned",
-                "qnn" => "QNN — Snapdragon Hexagon NPU (most power-efficient on WoA)",
-                "cpu" => "CPU — AVX2 / NEON SIMD",
+                "tract-cpu" => "CPU — tract, the same on Windows, macOS and Linux",
                 _ => hw.ExecutionProvider,
             };
         }
@@ -482,10 +394,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     public Visibility RecommendationVisibility =>
         string.IsNullOrEmpty(RecommendationText) ? Visibility.Collapsed : Visibility.Visible;
 
-    /// <summary>P/E core split when hybrid, plus logical thread count
-    /// and the worker cap currently in effect. Falls back to physical
-    /// cores when running against an older engine that didn't populate
-    /// the new fields.</summary>
+    /// <summary>P/E core split when hybrid, plus logical thread count and the worker cap in effect.</summary>
     public string CpuTopologyText
     {
         get
@@ -560,7 +469,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Scan-time scene tagging uses CLIP (source='auto') and is enabled by default.
     public string SceneTaggingDiagnosticsText =>
         "Tags: CLIP zero-shot (source='auto', scan-time, fast) + manual VLM refinement.";
 
@@ -575,11 +483,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
         });
 
-    // Force re-tag: re-scan the current library root with rescan=true so the
-    // engine recomputes tags for files it already has (incremental rescan
-    // skips up-to-date files). Without this, a tagging change isn't visible
-    // unless the user deletes fileid.sqlite. Root comes from the same place
-    // the normal scan path uses (AppViewModel.FolderPath).
+    // An incremental rescan skips up-to-date files, so re-tagging needs rescan=true on the current root.
     private async void OnForceRetagClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnForceRetagClicked), async () =>
         {
@@ -605,7 +509,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── Storage card paths ───────────────────────────────────────────
     public string DbPathText => AppPaths.DbPath;
     public string ThumbCachePathText => AppPaths.ThumbsDir;
     public string ModelsPathText => AppPaths.ModelsDir;
@@ -657,22 +560,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
         catch
         {
-            // Settings is low-stakes — silently ignore. The path is already
-            // shown next to the button so the user can copy it manually.
+            // The path is shown next to the button, so a failed reveal is harmless.
         }
     }
 
-    /// <summary> route the Settings install button through the
-    /// shared ModelInstallerService slot, same as WelcomeSheet. Single source
-    /// of truth for status; the x:Bind paths on the card update automatically
-    /// via the slot's PropertyChanged. No more local OnProgress subscription
-    /// (which couldn't pick up state changes that originated in Welcome).</summary>
-    // Per-card install re-entry guard. Mirrors WelcomeSheet: PrewarmAsync
-    // only flips Status to Downloading after awaiting WaitForReadyAsync, so a
-    // rapid double-click on Install/Retry could otherwise fire two
-    // slot.InstallAsync() (→ duplicate prewarm IPC) while Status is still
-    // NotInstalled/Failed. UI-thread-confined (click handler + ConfigureAwait
-    // (true) continuation).
+    // PrewarmAsync flips Status to Downloading only after WaitForReadyAsync, so a rapid double-click would otherwise send a duplicate prewarm. UI-thread-confined.
     private readonly System.Collections.Generic.HashSet<Services.ModelSlot> _installInFlight = new();
 
     private void OnInstallModelClicked(object sender, RoutedEventArgs e)
@@ -691,9 +583,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         // Cancel this row's in-flight model (the engine now supports per-model cancel).
         if (slot.Status == Services.ModelInstallStatus.Downloading)
         {
-            // Pre-flip caption to "Cancelling…" so the user gets instant
-            // feedback — engine confirmation takes 1-5 s. Mirrors macOS
-            // WelcomeSheet.swift:74-82's pre-emptive reset.
+            // Engine confirmation takes 1-5 s, so show "Cancelling…" immediately.
             slot.Message = "Cancelling…";
             slot.BytesPerSecond = 0;
             slot.EtaSeconds = 0;
@@ -712,10 +602,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }, "Install " + slot.DisplayLabel);
     }
 
-    // Drive the cancel and surface failure. If CancelAllAsync throws (engine
-    // crashed / IPC dead), the slot would otherwise sit at "Cancelling…"
-    // forever with the button still reading "Cancel". Reset it back to the
-    // Downloading caption and tell the user the cancel couldn't be delivered.
+    // If the engine is dead the cancel never lands, so the optimistic "Cancelling…" caption must be reverted and the user told.
     private async Task CancelSlotAsync(Services.ModelSlot slot)
     {
         try
@@ -726,9 +613,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             DebugLog.Warn($"[SETTINGS] Cancel {slot.DisplayLabel} threw: {ex}");
             if (_unloaded) return;
-            // Clear the optimistic "Cancelling…" caption so the row no longer
-            // claims a cancel is in progress; the slot stays Downloading and
-            // the button reverts to "Cancel" for another attempt.
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (slot.Status == Services.ModelInstallStatus.Downloading
@@ -760,10 +644,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        // ContentDialog.ShowAsync can throw on a broken XamlRoot
-        // (mid-shutdown, tab re-host). Catch + log so a failed alert never
-        // escalates to App.UnhandledException. Mirrors
-        // SidebarProcessingControl.ShowAlertAsync.
+        // ShowAsync throws on a broken XamlRoot (mid-shutdown, tab re-host); a failed alert must not reach App.UnhandledException.
         try
         {
             if (XamlRoot is null)
@@ -787,8 +668,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── x:Bind helper functions (copied verbatim from WelcomeSheet) ───
-
     internal Visibility VisibleIfDownloading(Services.ModelInstallStatus s) =>
         s == Services.ModelInstallStatus.Downloading ? Visibility.Visible : Visibility.Collapsed;
 
@@ -798,13 +677,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     internal Visibility VisibleIfFailed(Services.ModelInstallStatus s) =>
         s == Services.ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
 
-    // Single ProgressBar per model card: indeterminate until the first byte,
-    // then determinate. Replaces the old ProgressBar↔ProgressRing Visibility
-    // swap that flickered each time Fraction crossed 0.
-    //
-    // Gate indeterminate on NOT-yet-started (HasStarted is sticky for the
-    // session), not on an instantaneous frac<=0 — so a multi-pack fraction
-    // rewind can't re-flap the bar to its marquee. Mirrors WelcomeSheet.
+    // Indeterminate until the first byte. Gated on the sticky HasStarted rather than fraction<=0 so a multi-pack fraction rewind doesn't flap the bar back to its marquee.
     internal bool IsStarting(Services.ModelInstallStatus s, bool hasStarted) =>
         s == Services.ModelInstallStatus.Downloading && !hasStarted;
 
@@ -818,18 +691,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         _ => "Download",
     };
 
-    // Sticky once started — see WelcomeSheet.ShowRateEta. Avoids flapping the
-    // row in/out on a single transient sub-100 B/s stall sample; RateEtaLabel
-    // renders empty text while stalled so the row holds a blank line.
+    // Sticky once started so one transient stall sample doesn't flap the row; RateEtaLabel renders empty while stalled.
     internal Visibility ShowRateEta(Services.ModelInstallStatus status, bool hasStarted) =>
         status == Services.ModelInstallStatus.Downloading && hasStarted
             ? Visibility.Visible : Visibility.Collapsed;
 
     internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
     {
-        // Prefer the engine's caption (e.g. "Queued — starting download…") while
-        // we're still at 0%, so the row doesn't read "Starting…" forever after
-        // the engine has acknowledged the prewarm.
+        // At 0% prefer the engine's caption (e.g. "Queued — starting download…") over "Starting…".
         string pct;
         if (fraction > 0) pct = $"{fraction * 100:0}%";
         else if (!string.IsNullOrEmpty(message)) pct = message;
@@ -865,138 +734,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         if (seconds < 3600) return $"{seconds / 60:0}m {seconds % 60:00}s";
         return $"{seconds / 3600:0}h {(seconds % 3600) / 60:00}m";
     }
-    private void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
-    {
-        var pack = Path.Combine(AppPaths.ModelsDir, "packs", "cuda");
-        var cudnn = Path.Combine(AppPaths.ModelsDir, "cudnn");
-        CudnnStatusText.Text = $"Place compatible ONNX Runtime CUDA and CUDA 12.4 files in {pack}, and cuDNN 9 files in {cudnn}. Then select Verify install. FileID does not download vendor runtimes.";
-    }
-
     private void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
     {
         var pack = Path.Combine(AppPaths.ModelsDir, "llama.cpp-cuda");
         CudaLlamaStatusText.Text = $"Place a compatible CUDA llama.cpp runtime in {pack}, then restart the engine. FileID does not download vendor runtimes.";
     }
 
-    /// <summary>F3c "Get cuDNN" link: opens NVIDIA's official cuDNN download
-    /// page in the user's default browser. No FileID-owned redistribution.
-    /// After install, the engine's system-CUDA probe (runtime.rs) picks up
-    /// cuDNN on next launch and the CUDA EP becomes available.</summary>
-
-    /// <summary>ask the engine to re-probe cuDNN availability after
-    /// the user manually installs it. The engine replies with a
-    /// HardwareReprobed event that lands on
-    /// <see cref="EngineClient.LastHardwareReprobe"/>; <see cref="SyncReprobeUi"/>
-    /// then renders the success pill or the diagnostics caption.</summary>
-    private async void OnVerifyCudnnClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            VerifyCudnnButton.IsEnabled = false;
-            VerifyCudnnButton.Content = "Verifying…";
-            await EngineClient.Instance.VerifyCudaPackAsync();
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Verify cuDNN failed: " + ex.Message);
-            CudnnDiagnosticsText.Text = "Couldn't check: " + ex.Message;
-            CudnnDiagnosticsText.Visibility = Visibility.Visible;
-        }
-        finally
-        {
-            // Restore label even before the event arrives; the SyncReprobeUi
-            // hook will update the rest of the row when the engine replies.
-            VerifyCudnnButton.IsEnabled = true;
-            VerifyCudnnButton.Content = "Verify install";
-        }
-    }
-
-    /// <summary>render the success pill / diagnostics caption after
-    /// the engine emits a HardwareReprobed event. Called from the engine
-    /// PropertyChanged hook on LastHardwareReprobe.</summary>
-    private void SyncReprobeUi()
-    {
-        var reprobe = EngineClient.Instance.LastHardwareReprobe;
-        if (reprobe is null) return;
-        var present = reprobe.Hardware.CudaPackPresent;
-        // The reprobe's ExecutionProvider is a FRESH probe (what the EP picker
-        // WOULD bind now), not the EP the running engine actually bound at
-        // startup — trusting it claims "CUDA active, no restart needed" while
-        // scans still run on DirectML. The authoritative active EP is the live
-        // session's bound EP that the engine reported on its ready event
-        // (Info.Hardware.ExecutionProvider). The full fix is engine-side: carry
-        // the bound EP on the reprobe event; until then, read it from Info.
-        var boundEp = (EngineClient.Instance.Info?.Hardware?.ExecutionProvider ?? "").ToLowerInvariant();
-
-        if (present)
-        {
-            CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
-            CudnnSuccessPill.Visibility = Visibility.Visible;
-            if (boundEp == "cuda")
-            {
-                // Running engine actually bound CUDA — no restart needed.
-                CudnnSuccessTitle.Text = "✓ cuDNN active — scanning uses CUDA EP.";
-                CudnnSuccessDetail.Text = $"Adapter: {reprobe.Hardware.AdapterName ?? "unknown"}. Execution provider: CUDA.";
-                RestartEngineButton.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                // CUDA pack is present but the running session bound a different
-                // EP at startup — a restart is required to re-pick CUDA. If the
-                // bound EP is unknown (Info not yet populated) say so, rather
-                // than implying CUDA is already live.
-                CudnnSuccessTitle.Text = "✓ cuDNN detected — restart engine to switch to CUDA";
-                var current = string.IsNullOrEmpty(boundEp) ? "detected (not necessarily active)" : boundEp;
-                CudnnSuccessDetail.Text = $"Current session: {current}. Restart so the engine re-picks the execution provider.";
-                RestartEngineButton.Visibility = Visibility.Visible;
-            }
-        }
-        else
-        {
-            CudnnSuccessPill.Visibility = Visibility.Collapsed;
-            var diag = reprobe.Diagnostics;
-            if (!string.IsNullOrWhiteSpace(diag))
-            {
-                CudnnDiagnosticsText.Text = diag!;
-                CudnnDiagnosticsText.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
-            }
-        }
-    }
-
-    /// <summary>shutdown + auto-respawn cycle so the engine re-runs
-    /// the EP picker. EngineClient's existing crash-respawn path picks the
-    /// new EP on the next spawn.</summary>
-    private async void OnRestartEngineClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            RestartEngineButton.IsEnabled = false;
-            RestartEngineButton.Content = "Restarting…";
-            await EngineClient.Instance.RestartAsync();
-            // After RestartAsync returns, Ready has been emitted; SyncReprobeUi
-            // will refresh on the next PropertyChanged via Info update.
-            DebugLog.Info("Engine restart requested by user after cuDNN install.");
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Engine restart failed: " + ex.Message);
-        }
-        finally
-        {
-            RestartEngineButton.IsEnabled = true;
-            RestartEngineButton.Content = "Restart engine";
-        }
-    }
-
-    /// <summary>PAR-148: always-available "Restart engine" in the Engine
-    /// card (the only other restart is buried in the conditional cuDNN
-    /// pill). Shutdown + auto-respawn so the engine re-runs the EP picker;
-    /// cancels any in-flight scan. Mirrors macOS SettingsView's "Restart
-    /// Engine" button.</summary>
     private async void OnRestartEngineCardClicked(object sender, RoutedEventArgs e)
     {
         try
@@ -1019,9 +762,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>PAR-148: always-available "Stop engine" in the Engine card.
-    /// Cleanly shuts the engine down (user-initiated, so no auto-respawn).
-    /// Mirrors macOS SettingsView's "Stop Engine" button.</summary>
     private async void OnStopEngineCardClicked(object sender, RoutedEventArgs e)
     {
         try

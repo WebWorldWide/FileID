@@ -27,7 +27,8 @@ public sealed record LibraryRoot(
     long FileCount,
     long TotalBytes,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? LastScanAt = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LastStatus = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LastStatus = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? ReadOnly = null);
 
 /// <summary>Reply to <c>listRoots</c>.</summary>
 public sealed record RootsList(
@@ -39,7 +40,9 @@ public sealed record RootsList(
 public sealed record ModelCatalog(
     [property: JsonPropertyName("requestID")] string RequestId,
     double PhysicalMemoryGB,
+    long AvailableMemoryMB,
     long VramMB,
+    [property: JsonPropertyName("recommendedID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RecommendedId,
     IReadOnlyList<ModelCatalogItem> Models);
 
 public sealed record ModelCatalogItem(
@@ -60,6 +63,7 @@ public sealed record ModelCatalogItem(
     bool Runnable,
     bool Installed,
     bool Fits,
+    bool FitsNow,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
 
 public sealed record BenchmarkProgress(
@@ -204,7 +208,10 @@ public sealed record ScanProgress(
     double FilesPerSecond,
     double? EtaSeconds,
     [property: JsonPropertyName("residentMB")] ulong ResidentMb,
-    [property: JsonPropertyName("availableMB")] ulong AvailableMb);
+    [property: JsonPropertyName("availableMB")] ulong AvailableMb,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? PostScanOwed = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? PostScanDone = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PostScanStep = null);
 
 public sealed record FileDoneEvent(
     string Path,

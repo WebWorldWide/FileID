@@ -1,7 +1,4 @@
-﻿// SidebarFolderHeader code-behind. The title-bar folder popover: wires the
-// picker / rescan / clear / wipe actions to the AppViewModel and
-// EngineClient. Hosted in a Flyout, so it subscribes on Loaded (each open)
-// and asks the host to close before any picker or dialog appears.
+﻿// SidebarFolderHeader code-behind: the title-bar folder popover. Hosted in a Flyout, it subscribes on Loaded (each open) and asks the host to close before any picker or dialog appears.
 
 using System.ComponentModel;
 using FileID.IpcSchema;
@@ -35,7 +32,6 @@ public sealed partial class SidebarFolderHeader : UserControl
         Unloaded += OnUnloaded;
     }
 
-    /// <summary>Raised before an action runs so the hosting flyout can close.</summary>
     public event EventHandler? DismissRequested;
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -71,8 +67,6 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    /// <summary>"All locations" and one row per scanned location, rebuilt into the stable
-    /// ScopeList container when the flyout opens or the list changes.</summary>
     private void SyncScope()
     {
         var vm = AppViewModel.Instance;
@@ -199,9 +193,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    // disable the button while a picker dialog is open so a
-    // double-click can't spawn two concurrent pickers and race their
-    // FolderPath setters.
+    // The button is disabled while a picker is open so a double-click can't spawn two pickers racing on FolderPath.
     private int _pickInFlight; // 0 = idle, 1 = picker open
 
     private async void OnPickClicked(object sender, RoutedEventArgs e)
@@ -227,7 +219,6 @@ public sealed partial class SidebarFolderHeader : UserControl
             }
             if (result.Path is null)
             {
-                // User cancelled — no-op.
                 return;
             }
 
@@ -246,10 +237,17 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    private void OnClearClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnClearClicked), () =>
+    private async void OnClearClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnClearClicked), async () =>
         {
             RequestDismiss();
+            var engine = EngineClient.Instance;
+            var phase = engine.Phase ?? engine.LastProgress?.Phase;
+            if (phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan)
+            {
+                try { await engine.CancelScanAsync(); }
+                catch (Exception ex) { DebugLog.Warn("Close folder: cancelling the scan failed: " + ex.Message); }
+            }
             AppViewModel.Instance.FolderPath = null;
         });
 
@@ -268,22 +266,11 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    // re-entrancy guard. The wipe flow is multi-second (shutdown +
-    // wait + file delete + respawn). A second click that lands while the
-    // first is in flight would race the deletes against the new engine's
-    // open + likely corrupt the fresh DB. Set true at the top of the
-    // confirmed wipe, cleared in finally.
+    // A second click during a wipe would race the deletes against the new engine's open and could corrupt the fresh DB.
     private int _wipeInFlight; // 0 = idle, 1 = wipe running
 
     private async void OnWipeClicked(object sender, RoutedEventArgs e)
     {
-        // gate BEFORE the confirmation dialog. The dialog itself
-        // is modal but WinUI 3 still dispatches click events even while a
-        // ContentDialog is open; a fast double-click could open two
-        // sequential dialogs and run two wipes back-to-back if the gate
-        // were placed after confirmation. Moving the gate here also means
-        // the button doesn't appear to respond to a rapid second click,
-        // matching the "first wipe wins" expectation.
         if (System.Threading.Interlocked.CompareExchange(ref _wipeInFlight, 1, 0) != 0)
         {
             DebugLog.Info("[WIPE] already in flight; ignoring second click.");
@@ -321,26 +308,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    /// <summary>extracted from OnWipeClicked so the engine ALWAYS
-    /// comes back up — even when file delete fails. Previously every
-    /// failure path early-returned without calling StartAsync, leaving
-    /// the engine permanently Crashed and the entire app unusable. The
-    /// finally block now restarts the engine unconditionally; the user
-    /// sees "Wipe partially failed" alert but still has a working app.
-    ///
-    /// Stages (each logged so a wipe hang or silent failure is
-    /// localizable from app.log alone — the original wipe code logged
-    /// only the IPC OUT line and went silent for 27 s on the user's
-    /// first repro):
-    ///   1. ClearPhaseAndError + reset LastProgress/LastBatch — sidebar
-    ///      stops showing the prior scan's "Completed" panel during the
-    ///      shutdown window.
-    ///   2. StopAndWaitForExitAsync — releases the SQLite handle.
-    ///   3. Delete fileid.sqlite + WAL/SHM with retry (kernel FILE_OBJECT
-    ///      can stay live ~200 ms past process exit).
-    ///   4. StartAsync — fresh engine respawns, migrations re-apply on the
-    ///      empty DB. ALWAYS attempted in the finally so a delete failure
-    ///      doesn't strand the user.</summary>
+    /// <summary>Runs from a finally block so a delete failure doesn't strand the user.</summary>
     private async Task RunWipeAsync()
     {
         DebugLog.Info("[WIPE] stage 1: clear stale UI state");
@@ -353,10 +321,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] ResetForWipe threw (non-fatal): " + ex.Message);
         }
 
-        // Preferred path: ask the running engine to wipe in-process. It owns
-        // the only SQLite handle, so truncating tables there can't hit the
-        // "file in use by another process" race the app-side delete did — no
-        // shutdown/restart. On success we go straight to a fresh rescan.
+        // The engine owns the only SQLite handle, so truncating there avoids the "file in use by another process" race of an app-side delete and needs no shutdown or restart.
         if (EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
         {
             try
@@ -410,14 +375,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] stage 3 (delete) threw: " + ex);
         }
 
-        // stage 3b: face_crops/ and thumbs.cache/. Earlier wipes
-        // only deleted the SQLite trio, leaving stale face crops and
-        // thumbnails on disk that the fresh DB would re-reference (face
-        // crops live alongside face_print rows; thumbnails are content-
-        // hashed but a wipe shouldn't accumulate orphaned files). Best-
-        // effort + non-fatal — a partial dir delete is degraded but
-        // recoverable, and gating the engine restart on it would strand
-        // the user the same way pre-3b DB-only failures did.
+        // The SQLite files are not the only state: face crops and thumbnails would otherwise be left as orphans that the fresh DB could re-reference.
         try
         {
             foreach (var dir in new[] { AppPaths.FacesDir, AppPaths.ThumbsDir })
@@ -432,16 +390,10 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
         catch (Exception ex)
         {
-            // Don't promote to deleteError — face crops and thumbnails
-            // surviving a wipe is degraded but not user-visible until
-            // they re-appear in People / Library, by which point the
-            // new scan will have regenerated them anyway.
             DebugLog.Warn("[WIPE] stage 3b (face_crops/thumbs) threw (non-fatal): " + ex.Message);
         }
 
-        // ALWAYS attempt restart, even when the delete failed.
-        // Without this, a single locked WAL leaves the user with a dead
-        // engine and no recovery path short of relaunching the app.
+        // A single locked WAL would otherwise leave a dead engine with no recovery short of relaunching.
         DebugLog.Info("[WIPE] stage 4: restart engine");
         try
         {
@@ -456,14 +408,6 @@ public sealed partial class SidebarFolderHeader : UserControl
         await FinishWipeAsync(success: deleteError is null, failureDetail: deleteError);
     }
 
-    /// <summary>Final step of a wipe: reset the app to its first-run clean
-    /// state and tell the user. We deliberately do NOT rescan — "Wipe" leaves
-    /// the library empty until the user picks a folder again. Clearing
-    /// FolderPath nulls LastFolderPath/LastFolderDisplay in settings and raises
-    /// HasFolder, which drives the sidebar back to the empty picker (the same
-    /// path "Clear folder" takes). Downloaded models under %LOCALAPPDATA%\FileID\
-    /// Models are intentionally kept — they're not library state and are
-    /// expensive to re-download.</summary>
     private async Task FinishWipeAsync(bool success, string? failureDetail = null)
     {
         try { AppViewModel.Instance.FolderPath = null; }
@@ -487,16 +431,10 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    // Windows can hold a FILE_OBJECT live for a few hundred ms after the
-    // owning process exits — handle-close cleanup is asynchronous. Retry
-    // a couple of times before letting the final IOException propagate to
-    // the caller's try/catch (which surfaces the user-visible error dialog).
+    // Windows can hold a FILE_OBJECT live for a few hundred ms after the owning process exits — handle-close cleanup is asynchronous.
     private static async Task TryDeleteWithRetryAsync(string path)
     {
-        // The engine-side wipeLibrary path avoids the post-exit FILE_OBJECT
-        // race entirely; this retry only backstops the fallback delete.
-        // Exponential backoff (~3 s total) gives the kernel ample time to
-        // release the handle before the IOException propagates to the caller.
+        // The engine-side wipeLibrary path avoids the post-exit FILE_OBJECT race entirely; this retry only backstops the fallback delete.
         const int maxAttempts = 6;
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
@@ -519,11 +457,6 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    /// <summary>Recursive directory delete with the same FILE_OBJECT
-    /// retry profile as the per-file delete above. The thumbs cache
-    /// can hold thousands of small files — recreating the empty
-    /// directory after delete keeps the next scan's first thumbnail
-    /// write from racing against EnsureDirectories on engine startup.</summary>
     private static async Task TryDeleteDirWithRetryAsync(string dir)
     {
         for (int attempt = 0; attempt < 3; attempt++)
@@ -566,7 +499,6 @@ public sealed partial class SidebarFolderHeader : UserControl
 
     private IntPtr GetParentHwnd()
     {
-        // Walk up the visual tree to the host Window's HWND.
         if (App.HostWindow is { } window)
         {
             return WinRT.Interop.WindowNative.GetWindowHandle(window);

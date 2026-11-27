@@ -15,12 +15,24 @@ New-Item -ItemType Directory -Force -Path $OutputRoot, $CacheDir | Out-Null
 
 function Get-VerifiedFile([string]$Name, [string]$Uri, [string]$Sha256) {
     $path = Join-Path $CacheDir $Name
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        Invoke-WebRequest -Uri $Uri -OutFile $path -UseBasicParsing
+    $expected = $Sha256.ToLowerInvariant()
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $cached = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($cached -eq $expected) { return $path }
+        Write-Host "  discarding invalid cached file: $path" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $path -Force
     }
-    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $Sha256) {
-        throw "SHA-256 mismatch for $Name; expected $Sha256, got $actual."
+    $temporary = "$path.tmp-$PID"
+    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    try {
+        Invoke-WebRequest -Uri $Uri -OutFile $temporary -UseBasicParsing
+        $actual = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "SHA-256 mismatch for $Name; expected $expected, got $actual."
+        }
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
     return $path
 }
@@ -33,8 +45,6 @@ function Expand-VerifiedZip([string]$Name, [string]$Uri, [string]$Sha256, [strin
 
 $llamaRoot = Join-Path $OutputRoot 'llama.cpp'
 $whisperRoot = Join-Path $OutputRoot 'whisper.cpp'
-$openvinoRoot = Join-Path $OutputRoot 'packs/openvino'
-$openvinoStage = Join-Path $CacheDir ("openvino-extract-" + [Guid]::NewGuid().ToString('N'))
 
 Expand-VerifiedZip `
     'llama-b9254-bin-win-vulkan-x64.zip' `
@@ -58,19 +68,6 @@ Copy-Item -LiteralPath (Get-VerifiedFile `
     '94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d') `
     -Destination (Join-Path $whisperRoot 'LICENSE')
 
-Expand-VerifiedZip `
-    'ort-openvino-win-x64-1.22.0.zip' `
-    'https://huggingface.co/Web-World-Wide/OpenVINO/resolve/main/ort-openvino-win-x64-1.22.0.zip' `
-    'de3d73e9fd9bc33931343ec4e11c21bc8fe5d1ae0921e24ffc574de171118154' `
-    $openvinoStage
-
-$openvinoPayload = Join-Path $openvinoStage 'ort-openvino-win-x64-1.22.0'
-if (-not (Test-Path -LiteralPath (Join-Path $openvinoPayload 'onnxruntime.dll') -PathType Leaf)) {
-    throw 'The verified OpenVINO archive did not contain its expected ONNX Runtime payload.'
-}
-New-Item -ItemType Directory -Force -Path $openvinoRoot | Out-Null
-Copy-Item -Path (Join-Path $openvinoPayload '*') -Destination $openvinoRoot -Recurse -Force
-
 $notices = @(
     'FileID includes the following third-party runtime components:',
     '',
@@ -80,15 +77,11 @@ $notices = @(
     '',
     'whisper.cpp v1.9.0 Windows runtime',
     'Source: https://github.com/ggml-org/whisper.cpp/tree/v1.9.0',
-    'License: MIT; see RuntimeBundles/whisper.cpp/LICENSE.',
-    '',
-    'ONNX Runtime 1.22.0 with OpenVINO',
-    'Source: https://huggingface.co/Web-World-Wide/OpenVINO',
-    'License and third-party notices: RuntimeBundles/packs/openvino/licenses/.'
+    'License: MIT; see RuntimeBundles/whisper.cpp/LICENSE.'
 )
 [IO.File]::WriteAllLines(
     (Join-Path $OutputRoot 'THIRD-PARTY-NOTICES.txt'),
     $notices,
     [Text.UTF8Encoding]::new($false))
 
-Write-Host 'Verified and staged llama.cpp Vulkan, whisper.cpp, and OpenVINO runtimes.'
+Write-Host 'Verified and staged llama.cpp Vulkan and whisper.cpp runtimes.'

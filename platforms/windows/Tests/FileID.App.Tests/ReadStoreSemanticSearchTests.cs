@@ -1,13 +1,6 @@
 ﻿// Equivalence test for ReadStore.SemanticSearchAsync's bounded top-K scan.
-//
-// The perf change made the loop materialize a FileRow only for rows the heap
-// retains (instead of for every embedding row). This guards that the change is
-// byte-identical in OUTPUT: the same set of file ids in the same best→worst
-// order as a naive full scan + sort, including the dimension-mismatch skip and
-// the failed=0 filter.
-//
-// Builds a throwaway SQLite DB with just the columns SemanticSearchAsync
-// projects, then opens it through the real ReadStore (read-only).
+// The perf change made the loop materialize a FileRow only for rows the heap retains (instead of for every embedding row). This guards that the change is byte-identical in OUTPUT: the same set of file ids in the same best→worst order as a naive full scan + sort, including the dimension-mismatch skip and the failed=0 filter.
+// Builds a throwaway SQLite DB with just the columns SemanticSearchAsync projects, then opens it through the real ReadStore (read-only).
 
 using System;
 using System.Collections.Generic;
@@ -104,8 +97,6 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         return acc;
     }
 
-    // Naive reference: dot-product every non-failed embedding of matching dim,
-    // sort best→worst, take `limit`. Mirrors the heap result's ordering.
     private static long[] NaiveTopK(IReadOnlyList<Row> rows, float[] query, int limit, string? kind)
     {
         return rows
@@ -127,8 +118,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
     [Fact]
     public async Task SemanticSearch_TopK_MatchesNaiveScan()
     {
-        // Scores are the first component; descending: 5 (0.9), 2 (0.8), 4 (0.5),
-        // 1 (0.1), 3 (-0.2). failed row (6) must be excluded entirely.
+        // Scores are the first component; descending: 5 (0.9), 2 (0.8), 4 (0.5), 1 (0.1), 3 (-0.2). failed row (6) must be excluded entirely.
         var rows = new List<Row>
         {
             new(1, "image", false, Emb(0.1f, 0.3f, 0.2f)),
@@ -150,7 +140,6 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         var expected = NaiveTopK(rows, Query, limit, null);
         Assert.Equal(expected, actualIds);
 
-        // Scores carried through must be descending (best→worst).
         for (int i = 1; i < actual.Count; i++)
         {
             Assert.True(actual[i - 1].Score >= actual[i].Score);
@@ -218,8 +207,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         Assert.DoesNotContain(2L, actualIds);
     }
 
-    // Dispose / DisposeAsync must close the connection exactly once
-    // and tolerate being called repeatedly across both teardown paths.
+    // Dispose / DisposeAsync must close the connection exactly once and tolerate being called repeatedly across both teardown paths.
     [Fact]
     public async Task Dispose_ClosesConnection_AndIsIdempotent()
     {
@@ -237,8 +225,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         await store.DisposeAsync();
     }
 
-    // Reads issued after disposal bail at the pre-gate null check and
-    // return empty without throwing (they never touch the disposed gate).
+    // Reads issued after disposal bail at the pre-gate null check and return empty without throwing (they never touch the disposed gate).
     [Fact]
     public async Task ReadsAfterDispose_ReturnEmpty_DoNotThrow()
     {
@@ -255,11 +242,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         Assert.Empty(await store.SimilarFilesAsync(1, 10, CancellationToken.None));
     }
 
-    // Dispose must drain an in-flight thread-pool read via
-    // the gate before freeing the native connection. With the pre-fix teardown
-    // (free without acquiring the gate) the concurrent reader uses the connection
-    // after sqlite3_close — an access violation that crashes the test host. The
-    // gate-drain serializes the two, so no use-after-dispose surfaces.
+    // Dispose must drain an in-flight thread-pool read via the gate before freeing the native connection. Without draining, the concurrent reader uses the connection after sqlite3_close: an access violation that crashes the test host.
     [Fact(Timeout = 30000)]
     public async Task Dispose_DrainsInFlightRead_NoUseAfterDispose()
     {
@@ -285,8 +268,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
                     _ = await store.SemanticSearchAsync(Query, 25, CancellationToken.None);
                 }
             }
-            // Narrow start-after-dispose race on the gate is tolerated; the bug
-            // under test is the native use-after-free, which is NOT one of these.
+            // Narrow start-after-dispose race on the gate is tolerated; the bug under test is the native use-after-free, which is NOT one of these.
             catch (ObjectDisposedException) { }
             catch (OperationCanceledException) { }
             catch (Exception ex) { unexpected = ex; }

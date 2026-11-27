@@ -1,16 +1,5 @@
-// Library tab — read-only DB-backed thumbnail grid, filename/tag/text
-// search, and file preview.
-//
-//   * `gtk::SearchEntry` (debounced) → engine query → grid reload,
-//   * gold segmented kind pills (All / Images / Videos / Docs / PDFs / Audio),
-//   * a virtualized `gtk::GridView` backed by a `gio::ListStore` of
-//     `BoxedAnyObject(FileRow)`, with a `SignalListItemFactory` that lazily
-//     loads each visible tile's thumbnail off the main loop, and
-//   * an `adw::Dialog` preview (large image + metadata) on activation.
-//
-// Live-scan behaviour mirrors macOS: the tab subscribes to engine events and
-// throttle-reloads the grid as batches land so the room "fills in" during a
-// scan, then does a final reload on completion.
+// Library tab: DB-backed thumbnail grid with filename/tag/text search and preview.
+// Live scans throttle grid reloads so new files fill in; the final reload runs on completion.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -94,7 +83,6 @@ const TILE_THUMB_PX: i32 = 256;
 const PREVIEW_PX: i32 = 2400;
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
-    // ── Shared state ─────────────────────────────────────────────────────────
     let search_text = Rc::new(RefCell::new(String::new()));
     let kind_filter = Rc::new(RefCell::new(None::<String>));
     let query_gen = Rc::new(Cell::new(0u64));
@@ -105,7 +93,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let selection = gtk::MultiSelection::new(Some(model.clone()));
     let offline = Rc::new(RefCell::new(OfflineRoots::default()));
 
-    // ── Grid factory ─────────────────────────────────────────────────────────
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, list_item| {
         if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
@@ -154,9 +141,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
-    // Click selects one file and fills the Selected pane, Ctrl+click toggles,
-    // Shift+click and Shift+arrows extend; double-click/Enter opens the
-    // preview; Esc clears the selection.
     let restoring = Rc::new(Cell::new(false));
     let similar_hook: Rc<RefCell<Box<dyn Fn()>>> = Rc::new(RefCell::new(Box::new(|| {})));
     let pane = {
@@ -239,9 +223,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
     scroller.add_css_class("fileid-tab");
 
-    // Empty state (no scan yet / no matches) ↔ the grid. Without this a fresh
-    // install shows a silent black void where the Library should invite the
-    // first scan (macOS/Windows both present an empty-state hint here).
+// Without this a fresh install shows a silent empty grid where the Library should invite the first scan.
     let empty_page = adw::StatusPage::builder()
         .icon_name("view-grid-symbolic")
         .title("No files yet")
@@ -253,7 +235,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content_stack.add_named(&scroller, Some("grid"));
     content_stack.add_named(&empty_page, Some("empty"));
 
-    // ── Header (count + search + pills); the shell draws the page title ─────
     let count_label = gtk::Label::builder()
         .label("0 files")
         .xalign(0.0)
@@ -310,7 +291,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["fileid-search"])
         .build();
 
-    // Reusable reload closure shared by search + pills + scan events.
     let gate = Rc::new(super::reload_gate::ReloadGate::default());
     let live_ctx: Rc<RefCell<Option<Rc<ReloadCtx>>>> = Rc::new(RefCell::new(None));
     let reload: Rc<dyn Fn()> = {
@@ -448,7 +428,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
-    // Debounced search → reload.
     search.connect_search_changed(clone!(
         #[strong]
         search_text,
@@ -545,7 +524,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    // Live-scan reloads: throttle on batches, final reload on completion.
     let ev_rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -647,8 +625,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.upcast()
 }
 
-// ── Reload ───────────────────────────────────────────────────────────────────
-/// Appends the next page when the grid nears its end.
 fn load_more(ctx: &Rc<ReloadCtx>) {
     if !ctx.has_more.get() || ctx.loading_more.get() {
         return;
@@ -698,9 +674,7 @@ struct ReloadCtx {
     count_label: gtk::Label,
     content_stack: gtk::Stack,
     empty_page: adw::StatusPage,
-    /// Header action shown when weaker look-alikes are kept back behind keyword matches.
     weaker_button: gtk::Button,
-    /// The user asked to see the weaker look-alikes of `weaker_query`.
     show_weaker: Cell<bool>,
     weaker_query: RefCell<String>,
     weaker_handler: RefCell<Option<glib::SignalHandlerId>>,
@@ -798,7 +772,7 @@ fn visual_wanted(query: &str) -> bool {
     query.trim().chars().count() >= 3
 }
 
-/// The engine's result summary ("3 good matches, 1 weaker."), shown in place
+/// The engine's result summary ("3 matches (2 strong visual), 1 weaker."), shown in place
 /// of the file count; nothing when the engine sent none.
 fn strength_label(message: Option<&str>) -> Option<String> {
     message.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned)
@@ -824,7 +798,9 @@ fn parse_strength(message: Option<&str>) -> Option<(u64, u64)> {
         Some((head, tail)) => (head, Some(tail.strip_suffix(" weaker")?)),
         None => (body, None),
     };
-    let good = head.strip_suffix(" good matches").or_else(|| head.strip_suffix(" good match"))?;
+    let (counted, strong) = head.split_once(" (")?;
+    count(strong.strip_suffix(" strong visual)")?)?;
+    let good = counted.strip_suffix(" matches").or_else(|| counted.strip_suffix(" match"))?;
     let weaker = match weak {
         Some(digits) => count(digits)?,
         None => 0,
@@ -851,7 +827,6 @@ struct SearchDecision {
     add_keyword_rows: bool,
 }
 
-/// How a search with the engine's summary is shown (Mac `LibrarySearchOutcome.decide`).
 fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool) -> SearchDecision {
     let Some((good, weaker)) = parse_strength(message) else {
         return SearchDecision { source: SearchSource::Engine, label: strength_label(message), hidden_weaker: 0, add_keyword_rows: true };
@@ -869,7 +844,6 @@ fn decide_search(message: Option<&str>, keyword_count: usize, show_weaker: bool)
     SearchDecision { source: SearchSource::Keyword, label: Some(label), hidden_weaker: weaker, add_keyword_rows: false }
 }
 
-/// The engine's rows in its order, then the keyword rows it lacks in theirs.
 fn append_keyword_rows<T>(engine: Vec<T>, keyword: Vec<T>, id: impl Fn(&T) -> i64) -> Vec<T> {
     let known: HashSet<i64> = engine.iter().map(&id).collect();
     let extra = keyword.into_iter().filter(|row| !known.contains(&id(row))).collect::<Vec<_>>();
@@ -996,7 +970,6 @@ async fn run_visual(ctx: &Rc<ReloadCtx>, generation: u64, searched: String) {
 fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str, filtered: bool) {
     // One items-changed signal for the whole page instead of one per row.
     let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
-    // Keep the same files selected (and the pane on them) across a refresh.
     let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
     ctx.weaker_button.set_visible(false);
     ctx.empty_page.set_child(None::<&gtk::Box>);
@@ -1046,7 +1019,6 @@ fn show_rows(ctx: &Rc<ReloadCtx>, rows: Vec<FileRow>, total: i64, searched: &str
     }
 }
 
-// ── Find Similar ─────────────────────────────────────────────────────────────
 
 /// Tries a visual-index request this many times a second apart while the
 /// engine is still building its index (macOS retries for two minutes).
@@ -1193,7 +1165,6 @@ fn read_rows_in_order(ids: Vec<i64>, kind: Option<String>) -> async_channel::Rec
     })
 }
 
-// ── Kind pills ───────────────────────────────────────────────────────────────
 
 fn build_pills(kind_filter: Rc<RefCell<Option<String>>>, reload: Rc<dyn Fn()>) -> gtk::Box {
     let kinds: [(&str, Option<&str>); 6] = [
@@ -1241,7 +1212,6 @@ fn build_pills(kind_filter: Rc<RefCell<Option<String>>>, reload: Rc<dyn Fn()>) -
     pillbox
 }
 
-// ── Tile widget ──────────────────────────────────────────────────────────────
 
 fn build_tile() -> gtk::Box {
     let vbox = gtk::Box::builder()
@@ -1300,7 +1270,6 @@ struct TileParts {
     caption: gtk::Label,
 }
 
-/// Resolve the fixed tile-widget structure built by `build_tile`.
 fn tile_parts(vbox: &gtk::Box) -> Option<TileParts> {
     let overlay = vbox.first_child()?.downcast::<gtk::Overlay>().ok()?;
     let pic = overlay.child()?.downcast::<gtk::Picture>().ok()?;
@@ -1403,7 +1372,6 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem, offl
     BOUND_TILES.with_borrow_mut(|tiles| tiles.insert(tile_token_key(list_item), list_item.downgrade()));
     offline_badge.set_visible(offline.is_offline(&row.path));
 
-    // Filename — the suggested name in gold when present (macOS parity).
     name.remove_css_class("gold-accent");
     match row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
         Some(p) => {
@@ -1423,23 +1391,47 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem, offl
     if row.kind == "image" || is_video {
         let key = ThumbCacheKey::for_row(&row);
         if let Some(tex) = thumb_cache_get(&key) {
-            pic.set_paintable(Some(&tex));
+            show_thumbnail(&pic, &tex);
             play.set_visible(is_video);
             return;
         }
-        pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
+        show_kind_icon(&pic, &row.kind);
         let parts = TileRequest {
             engine: engine.clone(),
             list_item: list_item.downgrade(),
             pic: pic.downgrade(),
             play: play.downgrade(),
+            caption: caption.downgrade(),
+            kind: row.kind.clone(),
             key,
             is_video,
         };
         request_tile_thumbnail(list_item, parts, true);
     } else {
-        pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
+        show_kind_icon(&pic, &row.kind);
     }
+}
+
+fn show_thumbnail(pic: &gtk::Picture, texture: &gtk::gdk::Texture) {
+    pic.set_content_fit(gtk::ContentFit::Cover);
+    pic.set_tooltip_text(None);
+    pic.set_paintable(Some(texture));
+}
+
+/// The kind icon at its own size, centred in the tile: stretched to fill like a photo it would blur.
+fn show_kind_icon(pic: &gtk::Picture, kind: &str) {
+    pic.set_content_fit(gtk::ContentFit::ScaleDown);
+    pic.set_tooltip_text(None);
+    pic.set_paintable(icon_paintable(icon_for_kind(kind), 96).as_ref());
+}
+
+const NO_PREVIEW_CAPTION: &str = "No preview";
+
+fn no_preview_reason(kind: &str) -> String {
+    format!(
+        "No preview: FileID could not read a picture from this {kind}, so it shows the {kind} icon. \
+         Its name, date and folder still work in search."
+    )
 }
 
 struct TileRequest {
@@ -1447,6 +1439,8 @@ struct TileRequest {
     list_item: glib::WeakRef<gtk::ListItem>,
     pic: glib::WeakRef<gtk::Picture>,
     play: glib::WeakRef<gtk::Image>,
+    caption: glib::WeakRef<gtk::Label>,
+    kind: String,
     key: ThumbCacheKey,
     is_video: bool,
 }
@@ -1515,7 +1509,13 @@ fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry
                 }
                 return;
             }
-            ThumbReply::Dropped | ThumbReply::Failed => return,
+            ThumbReply::Dropped => return,
+            ThumbReply::Failed => {
+                if still_wanted {
+                    explain_missing_preview(&request);
+                }
+                return;
+            }
         };
         let tex = texture_from_decoded(decoded);
         thumb_cache_put(request.key.clone(), tex.clone());
@@ -1523,12 +1523,21 @@ fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry
             return;
         }
         if let Some(pic) = request.pic.upgrade() {
-            pic.set_paintable(Some(&tex));
+            show_thumbnail(&pic, &tex);
         }
         if let Some(play) = request.play.upgrade() {
             play.set_visible(request.is_video);
         }
     });
+}
+
+fn explain_missing_preview(request: &TileRequest) {
+    if let Some(pic) = request.pic.upgrade() {
+        pic.set_tooltip_text(Some(&no_preview_reason(&request.kind)));
+    }
+    if let Some(caption) = request.caption.upgrade() {
+        caption.set_text(&format!("{} · {NO_PREVIEW_CAPTION}", caption.text()));
+    }
 }
 
 fn clear_tile(tile: &gtk::Widget) {
@@ -1537,6 +1546,7 @@ fn clear_tile(tile: &gtk::Widget) {
     };
     if let Some(parts) = tile_parts(vbox) {
         parts.pic.set_paintable(None::<&gtk::gdk::Texture>);
+        parts.pic.set_tooltip_text(None);
         parts.play.set_visible(false);
         parts.offline.set_visible(false);
     }
@@ -1555,7 +1565,6 @@ fn refresh_pane_details(pane: &Rc<SelectedPane>) {
     });
 }
 
-// ── Preview dialog ───────────────────────────────────────────────────────────
 
 /// The file preview dialog. Shows a large image + metadata and pages with the
 /// ‹ / › buttons or the arrow keys. It navigates a frozen snapshot by file id,
@@ -1867,7 +1876,6 @@ fn open_preview(
     ));
     dialog.present(Some(parent));
 
-    // Springy fade-in of the body, on the shared brand spring.
     let body_weak = body.downgrade();
     let _ = crate::spring::animate(&body, 0.0, 1.0, move |v| {
         if let Some(b) = body_weak.upgrade() {
@@ -1876,7 +1884,6 @@ fn open_preview(
     });
 }
 
-/// Every selected tile with its row, in grid order.
 fn selected_rows(selection: &gtk::MultiSelection) -> Vec<(u32, FileRow)> {
     let set = selection.selection();
     (0..set.size())
@@ -1907,7 +1914,6 @@ fn show_selection(selection: &gtk::MultiSelection, pane: &SelectedPane, reloaded
     }
 }
 
-/// Resolve the `FileRow` at `pos` in the (selection) model.
 fn row_at(model: &impl IsA<gio::ListModel>, pos: u32) -> Option<FileRow> {
     let boxed = model.item(pos)?.downcast::<BoxedAnyObject>().ok()?;
     let r = boxed.borrow::<FileRow>();
@@ -1918,7 +1924,6 @@ fn snapshot_rows(model: &impl IsA<gio::ListModel>) -> Vec<FileRow> {
     (0..model.n_items()).filter_map(|pos| row_at(model, pos)).collect()
 }
 
-/// Build the metadata glass-card for one row (rebuilt on each navigation).
 fn build_meta(row: &FileRow) -> gtk::Box {
     let meta = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1967,7 +1972,6 @@ pub(super) fn inherited_caption_note() -> gtk::Label {
         .build()
 }
 
-/// Load one row's image (or a kind icon) into the preview `Picture`, off-thread.
 fn load_preview_image(
     engine: &Rc<RefCell<EngineClient>>,
     pic: &gtk::Picture,
@@ -2024,7 +2028,6 @@ fn meta_row(key: &str, value: &str) -> gtk::Box {
     r
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// True if `list_item` still represents the file at `want` — i.e. the recycled
 /// `GridView` tile has not been rebound to another row while a thumbnail was in
@@ -2041,6 +2044,15 @@ fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &ThumbCacheKey
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tile_with_no_picture_says_why_and_that_search_still_works() {
+        let reason = no_preview_reason("video");
+        assert!(reason.starts_with("No preview"), "{reason}");
+        assert!(reason.contains("this video"), "{reason}");
+        assert!(reason.contains("name, date and folder still work in search"), "{reason}");
+        assert!(no_preview_reason("image").contains("this image"));
+    }
 
     #[test]
     fn new_files_are_inserted_only_at_the_top_of_the_grid() {
@@ -2102,13 +2114,13 @@ mod tests {
     #[test]
     fn summary_text_matches_the_mac_wording() {
         use fileid_engine::models::search_strength::summary;
-        let shown = |good, weak| strength_label(Some(&summary(good, weak)));
-        assert_eq!(shown(1, 0).as_deref(), Some("1 good match."));
-        assert_eq!(shown(3, 0).as_deref(), Some("3 good matches."));
-        assert_eq!(shown(1, 2).as_deref(), Some("1 good match, 2 weaker."));
-        assert_eq!(shown(4, 1).as_deref(), Some("4 good matches, 1 weaker."));
-        assert_eq!(shown(0, 5).as_deref(), Some("No good matches, 5 weaker."));
-        assert_eq!(shown(0, 0).as_deref(), Some("No matches."));
+        let shown = |good, strong, weak| strength_label(Some(&summary(good, strong, weak)));
+        assert_eq!(shown(1, 1, 0).as_deref(), Some("1 match (1 strong visual)."));
+        assert_eq!(shown(3, 0, 0).as_deref(), Some("3 matches (0 strong visual)."));
+        assert_eq!(shown(1, 1, 2).as_deref(), Some("1 match (1 strong visual), 2 weaker."));
+        assert_eq!(shown(4, 2, 1).as_deref(), Some("4 matches (2 strong visual), 1 weaker."));
+        assert_eq!(shown(0, 0, 5).as_deref(), Some("No good matches, 5 weaker."));
+        assert_eq!(shown(0, 0, 0).as_deref(), Some("No matches."));
     }
 
     #[test]
@@ -2123,8 +2135,8 @@ mod tests {
 
     #[test]
     fn parses_the_engines_sentences() {
-        assert_eq!(parse_strength(Some("3 good matches, 1 weaker.")), Some((3, 1)));
-        assert_eq!(parse_strength(Some("1 good match.")), Some((1, 0)));
+        assert_eq!(parse_strength(Some("3 matches (2 strong visual), 1 weaker.")), Some((3, 1)));
+        assert_eq!(parse_strength(Some("1 match (1 strong visual).")), Some((1, 0)));
         assert_eq!(parse_strength(Some("No good matches, 60 weaker.")), Some((0, 60)));
         assert_eq!(parse_strength(Some("No matches.")), Some((0, 0)));
         assert_eq!(parse_strength(Some("Matches by name, text and what's in the picture.")), None);
@@ -2134,10 +2146,10 @@ mod tests {
 
     #[test]
     fn good_matches_show_the_engines_list_and_summary() {
-        let d = decided(Some("4 good matches, 20 weaker."), 2, false);
+        let d = decided(Some("4 matches (3 strong visual), 20 weaker."), 2, false);
         assert_eq!(d.source, SearchSource::Engine);
         assert_eq!(d.hidden_weaker, 0);
-        assert_eq!(d.label.as_deref(), Some("4 good matches, 20 weaker."));
+        assert_eq!(d.label.as_deref(), Some("4 matches (3 strong visual), 20 weaker."));
     }
 
     #[test]
@@ -2182,7 +2194,7 @@ mod tests {
 
     #[test]
     fn only_the_engines_list_decisions_add_keyword_rows() {
-        assert!(decided(Some("4 good matches, 20 weaker."), 2, false).add_keyword_rows);
+        assert!(decided(Some("4 matches (3 strong visual), 20 weaker."), 2, false).add_keyword_rows);
         assert!(decided(Some("No good matches, 60 weaker."), 0, true).add_keyword_rows);
         assert!(decided(Some("Matches by name, text and what's in the picture."), 0, false).add_keyword_rows);
         assert!(decided(None, 0, false).add_keyword_rows);

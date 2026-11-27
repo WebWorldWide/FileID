@@ -1,11 +1,7 @@
-//! Randomized IPC fuzzer. Mutates valid command frames (the schema exemplars
-//! and every command in the shared conformance cases) and feeds them through
-//! `handle_line` against a temporary state directory and catalog. Asserts no
-//! panic anywhere on the engine's threads, no hung command, and a structured
-//! error for every frame that fails to decode or validate.
-//!
-//! The normal run does a few thousand lines. Set `FILEID_FUZZ_IPC_ITERATIONS`
-//! for a long run and `FILEID_FUZZ_SEED` to replay one.
+//! Randomized IPC fuzzer: mutates valid command frames (schema exemplars and the shared conformance cases) through
+//! `handle_line` against a temporary state directory and catalog. Asserts no panic on the engine's threads, no hung
+//! command, and a structured error for every frame that fails to decode or validate. `FILEID_FUZZ_IPC_ITERATIONS` for a
+//! long run, `FILEID_FUZZ_SEED` to replay one.
 
 use super::*;
 use serde_json::{json, Value};
@@ -34,8 +30,8 @@ impl Rng {
     }
 }
 
-/// Commands whose handlers walk an arbitrary path, launch a process or open a
-/// network connection. Their frames are decoded and validated, not dispatched.
+/// Decoded and validated, not dispatched: their handlers walk arbitrary paths, launch processes or open network
+/// connections.
 const DECODE_ONLY: &[&str] = &[
     "startScan",
     "prewarmModel",
@@ -94,7 +90,7 @@ fn seeds(root: &str) -> Vec<Value> {
         .map(|payload| serde_json::to_value(payload).expect("exemplar serializes"))
         .collect();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../shared/test-corpus/conformance");
-    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("conformance cases").flatten().map(|e| e.path()).collect();
+    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("conformance cases").flatten().map(|e| e.path()).filter(|path| path.extension().is_some_and(|extension| extension == "json")).collect();
     files.sort();
     for file in files {
         let cases: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -202,17 +198,14 @@ fn mutate(value: &mut Value, rng: &mut Rng, tags: &[String], depth: usize) {
     }
 }
 
-/// Repeating an already large element (a 200 KB string 120,000 times) would
-/// build a multi-gigabyte frame that exhausts a CI runner's memory long before
-/// the engine's 64 MiB frame limit could reject it; keep each array growth near 8 MiB.
+/// Repeating a large element (200 KB string × 120,000) would build a multi-gigabyte frame that exhausts a CI runner's
+/// memory long before the 64 MiB frame limit rejects it; keep each growth near 8 MiB.
 fn bounded_copies(copy: &Value, wanted: usize) -> usize {
     const BUDGET: usize = 8 << 20;
     let size = serde_json::to_string(copy).map(|text| text.len()).unwrap_or(1).max(1);
     wanted.min(BUDGET / size).max(usize::from(wanted > 0))
 }
 
-/// Keeps every value's JSON type so the frame still decodes and reaches the
-/// handler with hostile contents.
 fn mutate_typed(value: &mut Value, rng: &mut Rng) {
     match value {
         Value::Object(map) if !map.is_empty() => {
@@ -291,7 +284,6 @@ fn mutate_text(text: String, rng: &mut Rng) -> String {
             }
         }
     }
-    // The stdio reader decodes frames lossily, so handle_line only sees UTF-8.
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -359,9 +351,6 @@ impl Drop for EnvGuard {
 
 type PanicLog = Arc<parking_lot::Mutex<BTreeMap<String, usize>>>;
 
-/// Records panics raised on threads whose name starts with `prefix`, including
-/// ones a handler catches and turns into an error, and forwards every other
-/// panic to the previous hook.
 pub(crate) fn record_panics(prefix: &'static str) -> (PanicLog, impl FnOnce()) {
     let log: PanicLog = Arc::default();
     let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> = Arc::from(std::panic::take_hook());
@@ -392,8 +381,6 @@ pub(crate) fn iterations(var: &str, default: usize) -> usize {
 }
 
 fn seed_catalog(db: &rusqlite::Connection, root: &str) {
-    // Rows point at files that do not exist, so trash and rename can never
-    // reach a real file even when the fuzzer hits a valid command.
     let _ = db.execute_batch(&format!(
         "INSERT OR IGNORE INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES \
            (1,'{root}/missing/a.jpg',1,100,10,0,'image','jpg'),(2,'{root}/missing/b.txt',2,100,10,0,'doc','txt'),\
@@ -445,6 +432,7 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             deep_analyze_cancel: Arc::default(),
             deep_analyze_active: Arc::default(),
             face_cluster_active: Arc::default(),
+            face_cluster_cancel: Arc::default(),
             restructure_cancellations: RestructureCancelRegistry::default(),
             restructure_active: Arc::default(),
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -463,8 +451,6 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
                 continue;
             }
             *stats.entry("lines").or_default() += 1;
-            // Parsing a multi-megabyte random frame in a debug build on a starved CI runner can take
-            // seconds by itself; that is input size, not a hang, so the budgets below grow by it.
             let parse_started = std::time::Instant::now();
             let mut decoded: Option<IpcCommand> = serde_json::from_str(trimmed).ok();
             let parse_cost = parse_started.elapsed() * 3;
@@ -479,9 +465,8 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
                 *stats.entry("decode_only").or_default() += 1;
                 continue;
             }
-            // Worker responsiveness: a handler blocking every runtime thread
-            // would stall all other commands. This also yields once per frame,
-            // as the real stdin loop does on each read.
+            // A handler blocking every runtime thread would stall other commands; this also yields once per frame, as
+            // the real stdin loop does.
             let probe = std::time::Instant::now();
             let _ = tokio::spawn(async {}).await;
             if probe.elapsed() > std::time::Duration::from_secs(5) {
@@ -516,8 +501,10 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             if recent.len() > 12 {
                 recent.pop_front();
             }
-            let kinds = error_kinds(&drain(&mut events, &mut failures, &line));
-            if tag.is_none() && !kinds.iter().any(|k| k == "command_decode_failed") {
+            let drained = drain(&mut events, &mut failures, &line);
+            let kinds = error_kinds(&drained);
+            let refused_as_tool_response = drained.iter().any(|event| matches!(&event.payload, EventPayload::ToolResponse(response) if response.inner.status == "error"));
+            if tag.is_none() && !refused_as_tool_response && !kinds.iter().any(|k| k == "command_decode_failed") {
                 failures.entry("decode failure without command_decode_failed".into()).or_insert(sample.clone());
             }
             if valid == Some(false) && !kinds.iter().any(|k| k == "command_limit_exceeded") {
@@ -531,7 +518,6 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             }
         }
 
-        // Every queued mutation must finish: the gate frees within the deadline.
         d.restructure_cancellations.request_cancel();
         d.deep_analyze_cancel.store(true, Ordering::Release);
         match tokio::time::timeout(std::time::Duration::from_secs(60), d.mutation_gate.lock()).await {
@@ -553,3 +539,99 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
     assert!(failures.is_empty(), "ipc fuzzer found {} failure signatures:\n{failures:#?}", failures.len());
 }
 
+
+async fn next_within(events: &mut tokio::sync::mpsc::Receiver<IpcEvent>) -> IpcEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await.expect("an event arrives").expect("sink open")
+}
+
+fn gap_dispatcher(db: Option<Writer>, sink: Sink) -> Dispatcher {
+    Dispatcher {
+        sink,
+        shutdown: Arc::new(Notify::new()),
+        command_shutdown_requested: Arc::default(),
+        db,
+        catalog_index: None,
+        db_path: std::path::PathBuf::new(),
+        scan_state: Arc::default(),
+        scan_active: Arc::default(),
+        scan_cancel_requested: Arc::default(),
+        deep_analyze_cancel: Arc::default(),
+        deep_analyze_active: Arc::default(),
+        face_cluster_active: Arc::default(),
+        face_cluster_cancel: Arc::default(),
+        restructure_cancellations: RestructureCancelRegistry::default(),
+        restructure_active: Arc::default(),
+        mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+        jobs: job_queue::JobQueue::new(),
+        http_client: crate::downloader::fail_closed_client(),
+    }
+}
+
+// With no catalog the app must still leave its scanning state: the error is
+// followed by the scan's terminal phase.
+#[tokio::test]
+async fn start_scan_with_no_database_answers_db_unavailable_then_a_terminal_phase() {
+    let (sink, mut events) = Sink::channel_for_test(8);
+    let d = gap_dispatcher(None, sink);
+    let line = serde_json::json!({
+        "id": "scan-1",
+        "payload": { "startScan": { "rootPath": "/tmp/does-not-matter", "rescan": false } }
+    })
+    .to_string();
+    handle_line(&d, &line).await;
+    let first = next_within(&mut events).await.payload;
+    assert!(
+        matches!(&first, EventPayload::Error(e) if e.inner.kind == "db_unavailable"),
+        "first event: {first:?}"
+    );
+    let second = next_within(&mut events).await.payload;
+    assert!(matches!(second, EventPayload::PhaseChanged(ref p) if p.inner == ScanPhase::Failed), "second event: {second:?}");
+    assert!(!d.scan_active.load(Ordering::Acquire), "no scan slot is left reserved");
+}
+
+// Two Organize Folders moves never run together: the second is refused loudly
+// and the first still finishes with its own result.
+#[tokio::test]
+async fn a_second_organize_folders_move_is_refused_while_the_first_runs_and_the_first_completes() {
+    let dir = std::env::temp_dir().join(format!("fileid-restructure-excl-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let writer = db::open_writer(&dir.join("fileid.sqlite")).expect("temp catalog");
+    let (sink, mut events) = Sink::channel_for_test(64);
+    let d = gap_dispatcher(Some(Arc::new(parking_lot::Mutex::new(writer))), sink);
+    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+    let result = || {
+        IpcEvent::now(EventPayload::RestructureApplyResult(ipc::Wrap::new(ipc::RestructureApplyResult {
+            applied: 0,
+            failed: 0,
+            privilege_error: None,
+            cancelled: false,
+            planned: None,
+            remaining: None,
+            shortcut_undo_token: None,
+        })))
+    };
+    d.restructure_mutation("applyRestructure", "apply_restructure", "first", (), move |sink: Sink, _db, _payload: (), _cancel| async move {
+        let _ = finished.await;
+        sink.send(result()).await;
+    })
+    .await;
+    let ran_second = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = ran_second.clone();
+    d.restructure_mutation("undoRestructure", "undo_restructure", "second", (), move |_sink: Sink, _db, _payload: (), _cancel| async move {
+        flag.store(true, Ordering::Release);
+    })
+    .await;
+    let mut kinds = Vec::new();
+    for _ in 0..2 {
+        match next_within(&mut events).await.payload {
+            EventPayload::Error(e) => kinds.push(e.inner.kind.clone()),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(kinds, vec!["restructure_already_running".to_string(), "undo_restructure".to_string()]);
+    assert!(!ran_second.load(Ordering::Acquire), "the second move never started");
+    finish.send(()).unwrap();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(20), events.recv()).await.expect("the first move finishes").unwrap();
+    assert!(matches!(done.payload, EventPayload::RestructureApplyResult(_)));
+    let _ = std::fs::remove_dir_all(&dir);
+}

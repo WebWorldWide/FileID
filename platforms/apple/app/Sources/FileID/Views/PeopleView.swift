@@ -3,6 +3,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 struct PeopleView: View {
     let engine: EngineClient
@@ -11,6 +12,7 @@ struct PeopleView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var persons: [ReadStore.PersonRow] = []
+    @State private var namesAtOpen: Set<String>?
     @State private var personByID: [Int64: ReadStore.PersonRow] = [:]
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
@@ -44,6 +46,13 @@ struct PeopleView: View {
 
     /// Single sheet driver. Three stacked .sheet modifiers wedged the
     /// view graph on macOS 26 (blanked the sidebar on tab transition).
+    #if DEBUG
+    @State private var selfShotReviewQueue: FaceQueueKind?
+    private var reviewStart: FaceQueueKind? { selfShotReviewQueue }
+    #else
+    private var reviewStart: FaceQueueKind? { nil }
+    #endif
+
     enum ActiveSheet: Identifiable, Equatable {
         case personDetail(Int64)        // person id; we look up the row
         case suggestedMerges
@@ -59,6 +68,9 @@ struct PeopleView: View {
         }
     }
     @State private var activeSheet: ActiveSheet?
+    #if DEBUG
+    @Environment(\.pageActive) private var pageActive
+    #endif
     @State private var review: FaceReviewModel?
     @State private var mergeQueue: FaceQueueModel?
     @State private var splitQueue: FaceQueueModel?
@@ -68,7 +80,7 @@ struct PeopleView: View {
         VStack(spacing: 0) {
             if showsHeader {
                 headerBlock
-                Divider().opacity(0.15)
+                Hairline(color: Theme.hairlineSoft)
             }
             if mergeProgress != nil || mergeStatus != nil { statusRow }
             content
@@ -85,9 +97,30 @@ struct PeopleView: View {
             if sheet == nil { refreshReview(); refreshMergeUndo() }
         }
         .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+            guard pageActive, let action = note.object as? String else { return }
+            let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
+            switch parts.first {
+            case "person":
+                let index = (Int(parts.last ?? "") ?? 1) - 1
+                if persons.indices.contains(index) { activeSheet = .personDetail(persons[index].id) }
+            case "review":
+                selfShotReviewQueue = parts.count == 2 ? FaceQueueKind(rawValue: parts[1]) : nil
+                activeSheet = .faceReview
+            case "suggested":
+                Task {
+                    suggestions = await engine.findMergeSuggestions() ?? []
+                    activeSheet = .suggestedMerges
+                }
+            case "close": activeSheet = nil
+            default: break
+            }
+        }
+        #endif
         .modifier(FaceQueueObservers(jobs: engine.catalogJobs, changes: queueChanges, refresh: faceRefresh, onChange: { reload() }))
         .confirmationDialog(
-            "Merge \"\(pendingDragMerge?.targetName ?? "")\" with the dropped person?",
+            "Merge “\(pendingDragMerge?.targetName ?? "")” with the dropped person?",
             isPresented: Binding(get: { pendingDragMerge != nil }, set: { if !$0 { pendingDragMerge = nil } }),
             titleVisibility: .visible
         ) {
@@ -96,7 +129,7 @@ struct PeopleView: View {
                 pendingDragMerge = nil
                 Task {
                     if let n = await CatalogWrites.merge(engine, store: store, target: merge.target, sources: [merge.source]) {
-                        setStatus("Merged into \(merge.targetName) (\(n) photos).")
+                        setStatus("Merged into \(merge.targetName) (\(Plural.noun(n, "photo", "photos"))).")
                     } else {
                         setStatus(Self.mergeFailed)
                     }
@@ -139,8 +172,11 @@ struct PeopleView: View {
                             Task {
                                 let n = await CatalogWrites.merge(engine, store: store, target: t.id, sources: [s.id])
                                 if let n {
-                                    setStatus("Merged into \"\(displayName)\" (\(n) photos).")
-                                    suggestions.removeAll { $0.id == candidateID }
+                                    setStatus("Merged into “\(displayName)” (\(Plural.noun(n, "photo", "photos"))).")
+                                    let alive = await Task.detached(priority: .userInitiated) { [store] in
+                                        Set(store.persons(includeUnknown: true).map(\.id))
+                                    }.value
+                                    suggestions = MergeSuggestionPair.stillMergeable(suggestions.filter { $0.id != candidateID }, alive: alive)
                                 } else {
                                     setStatus(Self.mergeFailed)
                                 }
@@ -186,16 +222,13 @@ struct PeopleView: View {
                             let alive = await Task.detached(priority: .userInitiated) { [store] in
                                 Set(store.persons(includeUnknown: true).map(\.id))
                             }.value
-                            suggestions.removeAll {
-                                batchToRemove.contains($0.id)
-                                    && !(alive.contains($0.sourcePersonID) && alive.contains($0.destinationPersonID))
-                            }
+                            suggestions.removeAll { batchToRemove.contains($0.id) && !$0.involvesOnly(alive) }
                             if merged == 0 {
                                 setStatus(mergeStopRequested ? "Stopped. Nothing was merged." : Self.mergeFailed)
                             } else if merged < total {
                                 setStatus(mergeStopRequested
-                                    ? "Stopped after \(merged) of \(total) merges. The rest are still in the list."
-                                    : "Merged \(merged) of \(total). The rest didn't go through and are still in the list.")
+                                    ? "Stopped after \(merged.formatted()) of \(Plural.noun(total, "merge", "merges")). The rest are still in the list."
+                                    : "Merged \(merged.formatted()) of \(total.formatted()). The rest didn’t go through and are still in the list.")
                             } else {
                                 setStatus("Merged \(merged) \(merged == 1 ? "pair" : "pairs") of cards.")
                             }
@@ -209,7 +242,7 @@ struct PeopleView: View {
             case .faceReview:
                 if let review, let mergeQueue, let splitQueue {
                     FaceReviewSheet(model: review, merges: mergeQueue, splits: splitQueue, personByID: personByID,
-                                    store: store) { activeSheet = nil }
+                                    store: store, startOn: reviewStart) { activeSheet = nil }
                 }
             case .mergeTargetPicker:
                 MergeTargetPickerSheet(
@@ -239,11 +272,11 @@ struct PeopleView: View {
                             }.value
                             let merged = sources.filter { before.contains($0) && !after.contains($0) }.count
                             if let newCount, merged == sourceCount {
-                                setStatus("Combined \(sourceCount + 1) cards into \"\(displayName)\" (\(newCount) photos).")
+                                setStatus("Combined \(Plural.noun(sourceCount + 1, "card", "cards")) into “\(displayName)” (\(Plural.noun(newCount, "photo", "photos"))).")
                             } else if newCount != nil {
                                 setStatus(mergeStopRequested
-                                    ? "Stopped after \(merged) of \(sourceCount) merges into \"\(displayName)\". The other cards were left as they were."
-                                    : "Merged \(merged) of \(sourceCount) cards into \"\(displayName)\". The rest didn't go through.")
+                                    ? "Stopped after \(merged.formatted()) of \(Plural.noun(sourceCount, "merge", "merges")) into “\(displayName)”. The other cards were left as they were."
+                                    : "Merged \(merged.formatted()) of \(Plural.noun(sourceCount, "card", "cards")) into “\(displayName)”. The rest didn’t go through.")
                             } else {
                                 setStatus(mergeStopRequested ? "Stopped. Nothing was merged." : Self.mergeFailed)
                             }
@@ -258,7 +291,7 @@ struct PeopleView: View {
         }
     }
 
-    static let mergeFailed = "The merge didn't go through. Try again in a moment."
+    static let mergeFailed = "The merge didn’t go through. Try again in a moment."
     static let mergeWarning = "Their photos become one person. You can undo this right after."
 
     private func setStatus(_ text: String?, offersShowUnknowns: Bool = false) {
@@ -279,7 +312,7 @@ struct PeopleView: View {
                     .font(Theme.Font.body(12))
                     .foregroundStyle(Theme.text2)
                 Button(mergeStopRequested ? "Stopping…" : "Stop") { mergeStopRequested = true }
-                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .disabled(mergeStopRequested)
                     .help("Finish the merge that is running, then stop. Merges already done stay.")
             } else if let status = mergeStatus {
@@ -292,7 +325,7 @@ struct PeopleView: View {
                         reload()
                     }
                     .buttonStyle(DSSecondaryButtonStyle(height: 22))
-                    .help("Show the people you marked as unknown. To bring one back, open the card and untick \"I don't know who this is\".")
+                    .help("Show the people you marked as unknown. To bring one back, open the card and untick “I don’t know who this is”.")
                 }
             }
             Spacer(minLength: 0)
@@ -355,14 +388,29 @@ struct PeopleView: View {
         }
     }
 
+    private var headerCount: some View {
+        MetaText(headerCountLine, color: Theme.text2).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private var headerButtons: some View {
+        reviewButton.fixedSize(horizontal: true, vertical: false)
+        undoMergeButton.fixedSize(horizontal: true, vertical: false)
+        headerActions.fixedSize(horizontal: true, vertical: false)
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                MetaText(headerCountLine, color: Theme.text2)
-                Spacer()
-                reviewButton
-                undoMergeButton
-                headerActions
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    headerCount
+                    Spacer()
+                    headerButtons
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    headerCount
+                    FlowLayout(spacing: 8) { headerButtons }
+                }
             }
             if let faceRefresh { FaceRefreshRow(model: faceRefresh) }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
@@ -371,7 +419,7 @@ struct PeopleView: View {
                         .font(Theme.Font.body(13.5))
                         .foregroundStyle(Theme.text3)
                     Button("Group faces") { engine.runFaceClustering() }
-                        .buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        .buttonStyle(DSSecondaryButtonStyle())
                         .disabled(engine.faceClusteringInFlight)
                         .help("Sort the waiting faces into people. Names you gave are kept.")
                 }
@@ -382,24 +430,18 @@ struct PeopleView: View {
         }
     }
 
-    /// True when there are person clusters but none of them have been
-    /// given a name yet AND nothing's already running. Drives the
-    /// visibility of the "Skip naming" row — once at least one person
-    /// is named OR Deep Analyze is already in flight, the skip option
-    /// is irrelevant noise and goes away.
+    /// True when clusters exist but none are named and nothing is running. Drives the "Skip naming" row.
     private var canSkipNaming: Bool {
         guard !persons.isEmpty else { return false }
         guard !engine.deepAnalyzeInFlight else { return false }
         return !persons.contains { $0.hasAnyName }
     }
 
-    /// Item 2: true once at least one cluster is named (and nothing's running).
-    /// Gates the positive "Continue to Deep Analyze" forward affordance — the
-    /// counterpart to canSkipNaming. Mutually exclusive with it in the header.
+    /// True once at least one cluster is named and nothing is running: the forward "Continue to Deep Analyze" affordance, exclusive with canSkipNaming.
     private var canContinueToDeepAnalyze: Bool {
         guard !persons.isEmpty else { return false }
         guard !engine.deepAnalyzeInFlight else { return false }
-        return persons.contains { $0.hasAnyName }
+        return NamingSession.namedSinceOpen(baseline: namesAtOpen, persons: persons)
     }
 
     @ViewBuilder
@@ -417,13 +459,11 @@ struct PeopleView: View {
                     let reply = await engine.findMergeSuggestions()
                     suggestionsLoading = false
                     guard let result = reply else {
-                        setStatus("Couldn't look for likely merges right now. Try again in a moment.")
+                        setStatus("Couldn’t look for likely merges right now. Try again in a moment.")
                         return
                     }
-                    // The scan is multi-second; don't preempt whatever the
-                    // user navigated to while it ran. Only surface the sheet
-                    // if they're still on a neutral People view — no sheet
-                    // already up, not mid merge/unknown selection.
+                    // The scan takes seconds; only surface the sheet if the user is still on a
+                    // neutral People view (no sheet up, no merge or unknown selection).
                     guard activeSheet == nil, !mergeMode, !unknownMode else { return }
                     suggestions = result
                     setStatus(nil)
@@ -433,8 +473,7 @@ struct PeopleView: View {
                 Label(suggestionsLoading ? "Looking for the same person twice…" : "Suggest merges",
                       systemImage: suggestionsLoading ? "hourglass" : "sparkle.magnifyingglass")
             }
-            .buttonStyle(.dsPrimary)
-            .tint(Theme.gold)
+            .buttonStyle(.dsSecondary)
             .disabled(suggestionsLoading || mergeInFlight)
             .help("Find cards that might show the same person, so you can combine them.")
 
@@ -452,7 +491,7 @@ struct PeopleView: View {
                 Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
             }
             .buttonStyle(.dsSecondary)
-            .help("Hide people you don't need to name, like strangers in a crowd. Their photos stay in the library.")
+            .help("Hide people you don’t need to name, like strangers in a crowd. Their photos stay in the library.")
         }
     }
 
@@ -491,12 +530,7 @@ struct PeopleView: View {
     }
 
     private var headerCountLine: String {
-        let p = persons.count
-        let unnamed = persons.filter { !$0.hasAnyName }.count
-        if p == 0 && totalFacePrints == 0 { return "" }
-        if p == 0 { return engine.faceClusteringInFlight ? "\(totalFacePrints.formatted()) faces · grouping…" : "\(totalFacePrints.formatted()) faces detected · not grouped yet" }
-        if unnamed > 0 { return "\(p) people · \(unnamed) still unnamed" }
-        return "\(p) people · all named"
+        PeopleHeaderText.countLine(people: persons.count, unnamed: persons.filter { !$0.hasAnyName }.count, faces: totalFacePrints, grouping: engine.faceClusteringInFlight)
     }
 
     private func bulkMarkUnknown() {
@@ -507,10 +541,10 @@ struct PeopleView: View {
         Task {
             let n = await CatalogWrites.markUnknown(engine, store: store, ids: ids)
             if n > 0 {
-                setStatus("Marked \(n) \(n == 1 ? "person" : "people") as unknown and hid \(n == 1 ? "that card" : "those cards"). To bring one back, show them, open the card and untick \"I don't know who this is\".",
+                setStatus("Marked \(n) \(n == 1 ? "person" : "people") as unknown and hid \(n == 1 ? "that card" : "those cards"). To bring one back, show them, open the card and untick “I don’t know who this is”.",
                           offersShowUnknowns: true)
             } else {
-                setStatus("Marking as unknown didn't go through. Try again in a moment.")
+                setStatus("Marking as unknown didn’t go through. Try again in a moment.")
             }
             reload()
         }
@@ -520,11 +554,7 @@ struct PeopleView: View {
     private var headerBlock: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            // Surface the "skip naming" escape hatch right at the top
-            // of the People tab — that's where the user is when they
-            // realize they don't want to name anyone. Quiet styling so
-            // it doesn't compete with the recommended naming flow, but
-            // visible enough that it's discoverable.
+                // Quiet "skip naming" escape hatch, discoverable at the top of the tab.
             if canSkipNaming {
                 skipNamingRow
             } else if canContinueToDeepAnalyze {
@@ -535,16 +565,14 @@ struct PeopleView: View {
         .padding(.vertical, 14)
     }
 
-    /// Inline notice + button that lets the user bypass naming and
-    /// run Deep Analyze immediately. Only shown when at least one
-    /// person cluster exists but none have been named yet.
+    /// Inline notice and button to skip naming and run Deep Analyze now.
     @ViewBuilder
     private var skipNamingRow: some View {
         HStack(spacing: 10) {
             Image(systemName: "forward.circle")
                 .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(13.5))
-            Text("Don't want to name anyone? Descriptions will say \"a person\" instead of a name.")
+            Text("Don’t want to name anyone? Descriptions will say “a person” instead of a name.")
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
@@ -555,25 +583,17 @@ struct PeopleView: View {
             } label: {
                 Label("Describe files without names",
                       systemImage: "forward.fill")
-                    .font(Theme.Font.body(12, .semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.6), lineWidth: 1))
-                    .foregroundStyle(Theme.text3)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlSmall))
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
             .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start describing every file now. You can name people later and describe again.")
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Color.secondary.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
+        .dsBannerSurface(fill: Color.white.opacity(0.04), stroke: Theme.hairline)
     }
 
-    /// Item 2: positive "keep moving" affordance — once at least one person is
-    /// named, advance straight to Deep Analyze (which uses those names in its
-    /// captions + smart filenames). The forward counterpart to skipNamingRow:
-    /// "if they have named someone, switch it to continue."
+    /// Forward affordance once someone is named: continues to Deep Analyze, which uses those names in captions and smart filenames.
     @ViewBuilder
     private var continueToDeepAnalyzeRow: some View {
         HStack(spacing: 10) {
@@ -590,60 +610,58 @@ struct PeopleView: View {
                 onSwitchTab(.deep)
             } label: {
                 Label("Describe files", systemImage: "arrow.forward.circle.fill")
-                    .font(Theme.Font.body(12, .semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
-                    .foregroundStyle(.black)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlSmall))
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
             .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start writing a description and a suggested name for every file. Progress shows on the Describe Files page.")
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.10)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
+        .dsBannerSurface(fill: Theme.gold.opacity(0.10), stroke: Theme.gold.opacity(0.30))
     }
 
     // MARK: - Content
 
     @ViewBuilder
     private var content: some View {
-        if !(faceModelInstalled ?? !FaceEmbedderKind.installedKinds().isEmpty) {
+        let modelInstalled = faceModelInstalled ?? !FaceEmbedderKind.installedKinds().isEmpty
+        switch PeopleContent.resolve(modelInstalled: modelInstalled, people: persons.count, faces: totalFacePrints) {
+        case .modelMissing:
             modelMissingBanner
-        } else if persons.isEmpty && totalFacePrints == 0 {
+        case .empty:
             emptyState
-        } else if persons.isEmpty {
+        case .ungrouped:
             noClustersYet
-        } else {
-            ScrollView {
+        case .people(let modelMissing):
+            ScrollView(.vertical) {
+                if modelMissing {
+                    modelMissingBanner
+                        .padding(.horizontal, Theme.Metrics.pageInsetX)
+                        .padding(.top, 16)
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 14)], spacing: 14) {
                     ForEach(persons) { person in
                         let inMode = mergeMode || unknownMode
                         let checked = mergeMode ? mergeChecked.contains(person.id)
                                                 : unknownChecked.contains(person.id)
-                        PersonCard(person: person, store: store,
-                                   selectionMode: inMode,
-                                   isChecked: checked,
-                                   selectionTint: unknownMode ? Color.gray : Theme.gold)
-                            .onTapGesture {
-                                if mergeMode {
-                                    if mergeChecked.contains(person.id) { mergeChecked.remove(person.id) }
-                                    else { mergeChecked.insert(person.id) }
-                                } else if unknownMode {
-                                    if unknownChecked.contains(person.id) { unknownChecked.remove(person.id) }
-                                    else { unknownChecked.insert(person.id) }
-                                } else {
-                                    activeSheet = .personDetail(person.id)
-                                }
+                        Button {
+                            if mergeMode {
+                                if mergeChecked.contains(person.id) { mergeChecked.remove(person.id) }
+                                else { mergeChecked.insert(person.id) }
+                            } else if unknownMode {
+                                if unknownChecked.contains(person.id) { unknownChecked.remove(person.id) }
+                                else { unknownChecked.insert(person.id) }
+                            } else {
+                                activeSheet = .personDetail(person.id)
                             }
-                            // Drag a person card onto another to merge
-                            // them. Source person's photos move into
-                            // target; source row is deleted. Disabled
-                            // while in merge / mark-unknown checkbox
-                            // mode — otherwise an accidental drag
-                            // mid-selection would merge instead of
-                            // toggling a checkbox.
+                        } label: {
+                            PersonCard(person: person, store: store,
+                                       selectionMode: inMode,
+                                       isChecked: checked,
+                                       selectionTint: unknownMode ? Color.gray : Theme.gold)
+                        }
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+                            // Drag a card onto another to merge; disabled in checkbox modes so a drag mid-selection doesn't merge.
                             .modifier(PersonCardDragMergeModifier(
                                 enabled: !mergeMode && !unknownMode,
                                 personID: person.id,
@@ -651,13 +669,11 @@ struct PeopleView: View {
                                 engine: engine,
                                 store: store,
                                 onDropped: { sourceID in
+                                    guard persons.contains(where: { $0.id == sourceID }) else { return }
                                     pendingDragMerge = PendingDragMerge(source: sourceID, target: person.id, targetName: person.displayName)
                                 }
                             ))
-                            // Spring entrance: cards scale + fade in when
-                            // they appear. Disabled when the user has
-                            // "Reduce Motion" turned on — instant fade
-                            // only, no scale.
+                            // Spring entrance; under Reduce Motion, a plain fade.
                             .transition(reduceMotion
                                 ? .opacity
                                 : .asymmetric(
@@ -670,18 +686,13 @@ struct PeopleView: View {
                 .padding(.vertical, 16)
                 // Animate on count to avoid the per-render array
                 // allocation that mapping IDs would cause.
-                .animation(reduceMotion
-                    ? .easeOut(duration: 0.15)
-                    : .spring(response: 0.35, dampingFraction: 0.78),
-                            value: persons.count)
+                .animation(Theme.springStandard, value: persons.count)
                 hiddenUnknownsFooter
             }
         }
     }
 
-    /// Subtle footer revealing the count of unknown-marked people,
-    /// with a toggle to show / hide them. Hidden by default so the
-    /// grid stays clean (the user's whole point of marking them).
+    /// Footer toggle that reveals people marked unknown; hidden by default.
     @ViewBuilder
     private var hiddenUnknownsFooter: some View {
         if hiddenUnknownCount > 0 {
@@ -719,32 +730,26 @@ struct PeopleView: View {
             icon: "person.2.crop.square.stack",
             title: images > 0 ? "No faces found" : "No people yet",
             message: images > 0
-                ? "FileID looked at \(images.formatted()) photo\(images == 1 ? "" : "s") in this library and didn't find any faces. People appear here when a scanned photo has one."
+                ? "FileID looked at \(images.formatted()) photo\(images == 1 ? "" : "s") in this library and didn’t find any faces. People appear here when a scanned photo has one."
                 : "Scan a folder with photos. Faces are detected as the scan runs and grouped into people you can name."
         )
     }
 
-    @ViewBuilder
     private var noClustersYet: some View {
-        VStack(spacing: 14) {
-            EmptyStateView(
-                icon: "person.crop.circle.badge.questionmark",
-                title: "\(totalFacePrints) faces found",
-                message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
-                primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
-                secondaryMessage: "Then click a card to type that person's name."
-            )
-            if engine.faceClusteringInFlight {
-                ProgressView("Grouping faces…")
-                    .padding(.top, 4)
-            }
-        }
+        EmptyStateView(
+            icon: "person.crop.circle.badge.questionmark",
+            title: "\(Plural.noun(totalFacePrints, "face", "faces")) found",
+            message: PeopleHeaderText.ungroupedMessage(grouping: engine.faceClusteringInFlight),
+            primaryAction: engine.faceClusteringInFlight ? nil : ("Group faces", { engine.runFaceClustering() }),
+            secondaryMessage: "Then click a card to type that person’s name.",
+            progressLabel: engine.faceClusteringInFlight ? (engine.faceStageProgress ?? "Grouping faces…") : nil
+        )
     }
 
     private var modelMissingBanner: some View {
-        FaceModelInstallPanel(engine: engine, detectedFaces: totalFacePrints)
+        FaceModelInstallPanel(engine: engine, detectedFaces: totalFacePrints, hasPeople: !persons.isEmpty)
             .frame(maxWidth: 560)
-            .padding(.top, 40)
+            .padding(.top, persons.isEmpty ? 40 : 0)
             .frame(maxWidth: .infinity)
     }
 
@@ -785,6 +790,7 @@ struct PeopleView: View {
             }.value
             guard !Task.isCancelled else { return }
             totalFacePrints = loaded.faces
+            if namesAtOpen == nil { namesAtOpen = NamingSession.snapshot(loaded.rows) }
             persons = loaded.rows
             hiddenUnknownCount = loaded.hidden
             // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
@@ -811,9 +817,31 @@ struct PeopleView: View {
 
 // MARK: - Card
 
-/// Draggable + drop-target modifier on a PersonCard. Splits the
-/// drag-merge logic out of PeopleView's body so we can conditionally
-/// apply it (disabled in merge / mark-unknown selection modes).
+/// What a dragged person card carries, so a number typed or dragged in from elsewhere is never taken for a person.
+enum PersonDragPayload {
+    private static let prefix = "fileid-person:"
+
+    static func encode(_ personID: Int64) -> String { prefix + String(personID) }
+
+    static func decode(_ text: String) -> Int64? {
+        guard text.hasPrefix(prefix) else { return nil }
+        return Int64(text.dropFirst(prefix.count))
+    }
+}
+
+/// Drag-merge drop target for a PersonCard, applied conditionally: off in merge and mark-unknown modes.
+enum NamingSession {
+    static func snapshot(_ persons: [ReadStore.PersonRow]) -> Set<String> {
+        Set(persons.filter { !$0.tagName.isEmpty }.map { "\($0.id)|\($0.tagName)" })
+    }
+
+    /// True only when a name was saved after the page opened, so a catalog that already had names does not greet every launch with "Names saved".
+    static func namedSinceOpen(baseline: Set<String>?, persons: [ReadStore.PersonRow]) -> Bool {
+        guard let baseline else { return false }
+        return !snapshot(persons).isSubset(of: baseline)
+    }
+}
+
 private struct PersonCardDragMergeModifier: ViewModifier {
     let enabled: Bool
     let personID: Int64
@@ -825,10 +853,10 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content
-                .draggable("\(personID)")
+                .draggable(PersonDragPayload.encode(personID))
                 .dropDestination(for: String.self) { items, _ in
                     guard let s = items.first,
-                          let sourceID = Int64(s),
+                          let sourceID = PersonDragPayload.decode(s),
                           sourceID != personID else { return false }
                     onDropped(sourceID)
                     return true
@@ -848,6 +876,7 @@ private struct PersonCard: View {
     var selectionTint: Color = Theme.gold
 
     @State private var thumbnail: NSImage?
+    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -857,13 +886,10 @@ private struct PersonCard: View {
                 .overlay(LinearGradient(colors: [.white.opacity(0.06), .black.opacity(0.3)], startPoint: .top, endPoint: .bottom))
                 .overlay(selectionOverlay)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
-                .overlay {
-                    if person.hasAnyName {
-                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairline, lineWidth: 1)
-                    } else {
-                        RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
-                    }
-                }
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                    .strokeBorder(person.hasAnyName ? Theme.hairlineStrong : Theme.ai.opacity(0.4), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                    .strokeBorder(Theme.gold.opacity(hovering && !selectionMode ? 0.7 : 0), lineWidth: 1.5))
             Text(displayName)
                 .font(Theme.Font.body(14, .semibold))
                 .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
@@ -872,6 +898,9 @@ private struct PersonCard: View {
             MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")", size: 11)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(Theme.quick, value: hovering)
         .task(id: thumbnailIdentity) {
             await loadThumb()
         }
@@ -912,11 +941,11 @@ private struct PersonCard: View {
     private var selectionOverlay: some View {
         if selectionMode {
             ZStack {
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .stroke(isChecked ? selectionTint : Color.white.opacity(0.25),
-                            lineWidth: isChecked ? 3 : 1.5)
+                RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                    .strokeBorder(isChecked ? selectionTint : Color.white.opacity(0.25),
+                                  lineWidth: isChecked ? 3 : 1.5)
                 if isChecked {
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .fill(selectionTint.opacity(0.18))
                 }
                 VStack {
@@ -942,6 +971,11 @@ private struct PersonCard: View {
         }
         thumbnail = nil
         guard let path = person.representativePath else { return }
+        if person.representativeBBox != nil, let stored = await ThumbnailService.storedFaceCrop(identity: key), !Task.isCancelled {
+            FaceCropCache.store(stored, for: key)
+            thumbnail = stored
+            return
+        }
         let url = URL(fileURLWithPath: path)
         guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360,
                   revision: person.representativeCacheRevision), !Task.isCancelled else { return }
@@ -963,7 +997,9 @@ private struct PersonCard: View {
         guard !Task.isCancelled else { return }
         let box = UncheckedImage(full)
         let cropped = await Task.detached(priority: .userInitiated) {
-            ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation).map(UncheckedImage.init)
+            let face = ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation)
+            if let face { ThumbnailService.storeFaceCrop(face, identity: key) }
+            return face.map(UncheckedImage.init)
         }.value
         guard !Task.isCancelled else { return }
         let face = cropped?.image ?? full
@@ -1016,9 +1052,7 @@ private struct PersonDetailSheet: View {
     @State private var isUnknown: Bool = false
     @State private var tagBatchStatus: String?
     @State private var tagBatchInFlight: Bool = false
-    // Multi-select for moving photos to another person's cluster.
-    // Common case: clusterer put a photo of Adam in Jack's cluster;
-    // the user opens Jack, selects the wrong photos, picks Adam.
+    // Multi-select for moving mis-clustered photos to another person.
     @State private var selectMode: Bool = false
     @State private var checked: Set<Int64> = []
     @State private var showMoveTargetPicker: Bool = false
@@ -1078,7 +1112,7 @@ private struct PersonDetailSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(headerTitle)
-                        .font(Theme.Font.body(20, .semibold))
+                        .font(Theme.Font.display(28))
                     Spacer()
                     MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
                     Button("Done") { dismiss() }
@@ -1087,10 +1121,10 @@ private struct PersonDetailSheet: View {
                 }
                 Toggle(isOn: $isUnknown) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("I don't know who this is")
+                        Text("I don’t know who this is")
                             .font(Theme.Font.body(13.5))
                         Text("Hides this person and leaves them out of descriptions. Their photos stay in the library.")
-                            .font(Theme.Font.body(11))
+                            .font(Theme.Font.body(11.5))
                             .foregroundStyle(Theme.text3)
                     }
                 }
@@ -1099,13 +1133,13 @@ private struct PersonDetailSheet: View {
                     Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                         GridRow {
                             namedField("Title", placeholder: "Uncle, Grandma…", text: $title)
-                            namedField("First name", placeholder: "optional", text: $firstName)
-                            namedField("Middle", placeholder: "optional", text: $middleName)
+                            namedField("First name", placeholder: "Optional", text: $firstName)
+                            namedField("Middle", placeholder: "Optional", text: $middleName)
                         }
                         GridRow {
-                            namedField("Last name", placeholder: "optional", text: $lastName)
+                            namedField("Last name", placeholder: "Optional", text: $lastName)
                             namedField("Suffix", placeholder: "Jr, III…", text: $suffix)
-                            Color.clear   // grid alignment only
+                            Color.clear.gridCellUnsizedAxes(.vertical)   // grid alignment only
                         }
                     }
                     Text("Descriptions will call this person **“\(deepAnalyzeRef)”**.")
@@ -1119,7 +1153,7 @@ private struct PersonDetailSheet: View {
             }
             .padding(16)
             FaceReviewSection(engine: engine, person: person, onChange: loadFiles)
-            Divider()
+            Hairline()
             // Photo grid + multi-select toolbar. Toolbar only shows when
             // we have ≥ 2 photos and ≥ 2 named persons in total — moving
             // makes no sense otherwise.
@@ -1129,22 +1163,24 @@ private struct PersonDetailSheet: View {
                     .foregroundStyle(Theme.text3)
                     .padding(.horizontal, 16).padding(.vertical, 4)
             }
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 8)], spacing: 8) {
                     ForEach(files) { f in
-                        PersonFileTile(
-                            file: f,
-                            selectMode: selectMode,
-                            isChecked: checked.contains(f.id)
-                        )
-                            .onTapGesture {
-                                if selectMode {
-                                    if checked.contains(f.id) { checked.remove(f.id) }
-                                    else { checked.insert(f.id) }
-                                } else {
-                                    NSWorkspace.shared.open(f.url)
-                                }
+                        Button {
+                            if selectMode {
+                                if checked.contains(f.id) { checked.remove(f.id) }
+                                else { checked.insert(f.id) }
+                            } else {
+                                NSWorkspace.shared.open(f.url)
                             }
+                        } label: {
+                            PersonFileTile(
+                                file: f,
+                                selectMode: selectMode,
+                                isChecked: checked.contains(f.id)
+                            )
+                        }
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
                     }
                 }
                 .padding(16)
@@ -1156,10 +1192,12 @@ private struct PersonDetailSheet: View {
                 engine: engine,
                 store: store,
                 fileIDs: Array(checked),
-                onMoved: { count, targetName in
-                    moveStatus = "Moved \(count) photo\(count == 1 ? "" : "s") to \(targetName)."
-                    selectMode = false
-                    checked.removeAll()
+                onMoved: { outcome, targetName in
+                    moveStatus = outcome.status(target: targetName)
+                    if outcome.photosMoved > 0 {
+                        selectMode = false
+                        checked.removeAll()
+                    }
                     loadFiles()
                 }
             )
@@ -1180,6 +1218,8 @@ private struct PersonDetailSheet: View {
             Text(pendingTagMessage)
         }
         .frame(minWidth: 720, minHeight: 520)
+        .sheetSurface()
+        .dsEscapeCancels { dismiss() }
         .onAppear {
             loadFiles()
             title = person.title ?? ""
@@ -1201,14 +1241,14 @@ private struct PersonDetailSheet: View {
         Task { [engine, store] in
             if unknown {
                 if await CatalogWrites.markUnknown(engine, store: store, ids: [id]) == 0 {
-                    ToastCenter.shared.show("Couldn't mark \(shownName) as unknown. Open the card and try again.", duration: 8)
+                    ToastCenter.shared.show("Couldn’t mark \(shownName) as unknown. Open the card and try again.", duration: 8)
                 }
             } else {
                 let value: (Int) -> String? = { fields[$0].isEmpty ? nil : fields[$0] }
                 let saved = await CatalogWrites.renamePerson(engine, store: store, id: id, title: value(0), firstName: value(1),
                                                              middleName: value(2), lastName: value(3), suffix: value(4))
                 if !saved {
-                    ToastCenter.shared.show("The name for \(shownName) wasn't saved. Open the card and type it again.", duration: 8)
+                    ToastCenter.shared.show("The name for \(shownName) wasn’t saved. Open the card and type it again.", duration: 8)
                 }
             }
         }
@@ -1218,19 +1258,21 @@ private struct PersonDetailSheet: View {
         guard let tag = pendingTag else { return "" }
         let count = files.count
         let noun = "\(count.formatted()) file\(count == 1 ? "" : "s")"
-        if let old = tag.removing { return "Replace the tag \"\(old)\" with \"\(tag.adding)\" on \(noun)?" }
-        return "Add the tag \"\(tag.adding)\" to \(noun)?"
+        if let old = tag.removing { return "Replace the tag “\(old)” with “\(tag.adding)” on \(noun)?" }
+        return "Add the tag “\(tag.adding)” to \(noun)?"
     }
 
     private var pendingTagMessage: String {
         guard let tag = pendingTag else { return "" }
         let count = files.count
-        let these = count == 1 ? "this photo" : "all \(count.formatted()) photos of this person"
+        let these = count == 1 ? "this photo" : "all \(Plural.noun(count, "photo", "photos")) of this person"
         if let old = tag.removing {
-            return "FileID removes the Finder tag \"\(old)\" from \(these) and adds \"\(tag.adding)\". Other tags are kept. You can change tags later in Finder."
+            return "FileID removes the Finder tag “\(old)” from \(these) and adds “\(tag.adding)”. Other tags are kept. You can change tags later in Finder."
         }
-        return "FileID writes the Finder tag \"\(tag.adding)\" onto \(these). It shows in Finder and Spotlight. Other tags are kept, and you can remove it later in Finder."
+        return "FileID writes the Finder tag “\(tag.adding)” onto \(these). It shows in Finder and Spotlight. Other tags are kept, and you can remove it later in Finder."
     }
+
+    private var allPhotosReadOnlyReason: String? { engine.readOnlyGate.reasonIfAll(files.map(\.url)) }
 
     @ViewBuilder
     private var tagAllPhotosButton: some View {
@@ -1242,12 +1284,13 @@ private struct PersonDetailSheet: View {
                 } label: {
                     Label(tagBatchInFlight
                           ? "Tagging…"
-                          : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with \"\(tagName)\"",
+                          : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with “\(tagName)”",
                           systemImage: "tag.fill")
                 }
                 .buttonStyle(.dsSecondary)
                 .disabled(tagBatchInFlight || tagName.isEmpty || files.isEmpty)
-                .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
+                .help("Adds the Finder tag “\(tagName)” to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
+                .readOnlyGated(allPhotosReadOnlyReason)
 
                 // re-tag affordance. Shows only when this person
                 // was previously tagged with a DIFFERENT name (e.g. user
@@ -1256,16 +1299,17 @@ private struct PersonDetailSheet: View {
                     Button {
                         pendingTag = PendingTag(adding: tagName, removing: oldTag)
                     } label: {
-                        Label("Replace \"\(oldTag)\" with \"\(tagName)\"",
+                        Label("Replace “\(oldTag)” with “\(tagName)”",
                               systemImage: "arrow.triangle.2.circlepath")
                     }
                     .buttonStyle(.dsSecondary)
                     .disabled(tagBatchInFlight || files.isEmpty)
-                    .help("Photos were tagged \"\(oldTag)\" earlier. Removes the old tag and adds the new one.")
+                    .help("Photos were tagged “\(oldTag)” earlier. Removes the old tag and adds the new one.")
+                    .readOnlyGated(allPhotosReadOnlyReason)
                 }
             }
             if let s = tagBatchStatus {
-                Text(s).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(s).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
         }
     }
@@ -1300,8 +1344,8 @@ private struct PersonDetailSheet: View {
             let failCount = failed
             await MainActor.run {
                 tagBatchInFlight = false
-                tagBatchStatus = "Replaced \"\(oldTag)\" → \"\(newTag)\" on \(doneCount) file\(doneCount == 1 ? "" : "s")"
-                    + (failCount > 0 ? ", \(failCount) failed" : "")
+                tagBatchStatus = "Replaced “\(oldTag)” → “\(newTag)” on \(doneCount) file\(doneCount == 1 ? "" : "s")"
+                    + (failCount > 0 ? ", \(failCount.formatted()) couldn’t be tagged" : "")
                 storeRef.notifyChanged()
                 BulkRenameSheet.recordPersonTag(personID: person.id, tag: newTag)
             }
@@ -1322,6 +1366,10 @@ private struct PersonDetailSheet: View {
 
     private func applyTagToAllPhotos(_ tag: String) {
         guard !tag.isEmpty else { return }
+        if let refusal = ReadOnlyLocations.batchRefusal(files.map(\.url)) {
+            tagBatchStatus = refusal.errorDescription
+            return
+        }
         tagBatchInFlight = true
         tagBatchStatus = nil
         let urls = files.map(\.url)
@@ -1334,14 +1382,14 @@ private struct PersonDetailSheet: View {
                     let added = result.added
                     let unchanged = result.unchanged
                     if unchanged == 0 {
-                        tagBatchStatus = "Tagged \(added) file\(added == 1 ? "" : "s") with \"\(tag)\""
+                        tagBatchStatus = "Tagged \(Plural.noun(added, "file", "files")) with “\(tag)”"
                     } else if added == 0 {
-                        tagBatchStatus = "All \(unchanged) file\(unchanged == 1 ? "" : "s") already had \"\(tag)\""
+                        tagBatchStatus = "All \(Plural.noun(unchanged, "file", "files")) already had “\(tag)”"
                     } else {
-                        tagBatchStatus = "Tagged \(added) · \(unchanged) already had \"\(tag)\""
+                        tagBatchStatus = "Tagged \(added.formatted()) · \(unchanged.formatted()) already had “\(tag)”"
                     }
                 } else {
-                    tagBatchStatus = "Tagged \(result.added), \(result.failed) failed"
+                    tagBatchStatus = "Tagged \(result.added.formatted()) · \(result.failed.formatted()) couldn’t be tagged"
                         + (result.firstError.map { " — \($0)" } ?? "")
                 }
                 storeRef.notifyChanged()
@@ -1357,18 +1405,13 @@ private struct PersonDetailSheet: View {
                 .font(Theme.Font.body(12, .semibold))
                 .foregroundStyle(Theme.text3)
             TextField(placeholder, text: text)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .frame(minWidth: 140)
         }
     }
 
     private var headerTitle: String {
-        if isUnknown { return "Unknown person" }
-        let preview = [title, firstName, middleName, lastName, suffix]
-            .compactMap { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        return preview.isEmpty ? "Unnamed person" : preview
+        PersonCardText.sheetTitle(isUnknown: isUnknown, nameParts: [title, firstName, middleName, lastName, suffix], personID: person.id)
     }
 
     /// `[Title] [First]`, else first, else title, else "a person".
@@ -1389,7 +1432,7 @@ private struct PersonFileTile: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Color.black.opacity(0.3)
+            Theme.well
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(tile)
                 .overlay(selectionOverlay)
@@ -1400,7 +1443,7 @@ private struct PersonFileTile: View {
                                 lineWidth: isChecked ? 2 : 0)
                 )
             Text(file.url.lastPathComponent)
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1433,7 +1476,7 @@ private struct PersonFileTile: View {
                 Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 18))
                     .foregroundStyle(isChecked ? Theme.gold : Color.white.opacity(0.85))
-                    .background(Circle().fill(.black.opacity(0.4)))
+                    .background(Circle().fill(.black.opacity(0.5)))
                     .padding(6)
             }
         }
@@ -1442,16 +1485,13 @@ private struct PersonFileTile: View {
 
 // MARK: - Move-photos target picker
 
-/// Picker shown when the user wants to reassign photos from one
-/// person's cluster to another. Lists every other person, named or not
-/// (skips self and people marked unknown), with their representative
-/// thumbnail and photo count. Picking one asks before moving.
+/// Picker for moving photos to another person's cluster. Skips self and people marked unknown; picking one asks before moving.
 private struct MovePhotosTargetPicker: View {
     let sourcePerson: ReadStore.PersonRow
     let engine: EngineClient
     let store: ReadStore
     let fileIDs: [Int64]
-    let onMoved: @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
+    let onMoved: @Sendable @MainActor (_ outcome: CatalogWrites.FaceMoveOutcome, _ targetName: String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var candidates: [ReadStore.PersonRow] = []
     @State private var pendingTarget: ReadStore.PersonRow?
@@ -1464,8 +1504,8 @@ private struct MovePhotosTargetPicker: View {
         let completion = onMoved
         dismiss()
         Task { [engine, store] in
-            let moved = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
-            completion(moved, targetName)
+            let outcome = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
+            completion(outcome, targetName)
         }
     }
 
@@ -1484,21 +1524,22 @@ private struct MovePhotosTargetPicker: View {
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
-            Divider()
-            ScrollView {
+            Hairline()
+            ScrollView(.vertical) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)],
                           spacing: 12) {
                     ForEach(candidates) { p in
                         Button { pendingTarget = p } label: {
                             PersonCard(person: p, store: store)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
                     }
                 }
                 .padding(16)
             }
         }
         .frame(minWidth: 640, minHeight: 480)
+        .sheetSurface()
         .confirmationDialog(
             "Move \(fileIDs.count) photo\(fileIDs.count == 1 ? "" : "s") from \(sourcePerson.displayName) to \(pendingTarget?.displayName ?? "")?",
             isPresented: Binding(get: { pendingTarget != nil }, set: { if !$0 { pendingTarget = nil } }),
@@ -1511,7 +1552,7 @@ private struct MovePhotosTargetPicker: View {
             }
             Button("Cancel", role: .cancel) { pendingTarget = nil }
         } message: {
-            Text("\(sourcePerson.displayName)'s face in \(fileIDs.count == 1 ? "this photo" : "these photos") will count as \(pendingTarget?.displayName ?? "the other person") instead. The files themselves aren't changed. To put them back, move them the same way from the other card.")
+            Text("\(sourcePerson.displayName)'s face in \(fileIDs.count == 1 ? "this photo" : "these photos") will count as \(pendingTarget?.displayName ?? "the other person") instead. The files themselves aren’t changed. To put them back, move them the same way from the other card.")
         }
         .onAppear {
             let sourceID = sourcePerson.id
@@ -1557,7 +1598,7 @@ private struct SuggestedMergesSheet: View {
                 ProgressView().controlSize(.small)
                 Text(progress).font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
                 Button(stopRequested ? "Stopping…" : "Stop", action: onStop)
-                    .buttonStyle(DSSecondaryButtonStyle(height: 22))
+                    .buttonStyle(DSSecondaryButtonStyle())
                     .disabled(stopRequested)
                     .help("Finish the merge that is running, then stop. Merges already done stay.")
                 Spacer(minLength: 0)
@@ -1575,8 +1616,8 @@ private struct SuggestedMergesSheet: View {
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Suggested merges")
-                        .font(Theme.Font.body(14, .semibold))
-                    Text("\(candidates.count) pairs of cards might be the same person.")
+                        .font(Theme.Font.display(28))
+                    Text("\(Plural.noun(candidates.count, "pair", "pairs")) of cards might be the same person.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.text3)
                 }
@@ -1589,9 +1630,7 @@ private struct SuggestedMergesSheet: View {
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             HStack(spacing: 8) {
-                // Bulk-accept the highest-confidence ("Very likely same",
-                // cosine ≥ 0.55) pairs in one click. Lets the user clear
-                // the easy cases without 100 individual Merge clicks.
+                // Accepts every "Very likely same" pair (cosine ≥ 0.55) in one click.
                 let veryLikely = candidates.filter { $0.similarity >= 0.55 }
                 Button {
                     pending = PendingMerge(pairs: veryLikely, single: false,
@@ -1599,12 +1638,8 @@ private struct SuggestedMergesSheet: View {
                 } label: {
                     Label("Merge \(veryLikely.count) very likely matches",
                           systemImage: "checkmark.circle.fill")
-                        .font(Theme.Font.body(13.5, .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.delight.opacity(0.18)))
-                        .foregroundStyle(Theme.delight)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.delight))
                 .disabled(veryLikely.isEmpty || inFlight)
                 .help("Combine only the pairs FileID is most sure about. The rest stay here for you to check.")
                 Button {
@@ -1613,22 +1648,18 @@ private struct SuggestedMergesSheet: View {
                 } label: {
                     Label("Merge all \(candidates.count)",
                           systemImage: "rectangle.stack.fill")
-                        .font(Theme.Font.body(13.5, .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary, lineWidth: 1))
-                        .foregroundStyle(Theme.text3)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsSecondary)
                 .disabled(candidates.isEmpty || inFlight)
-                .help("Merge every pair in the list. Be careful: the pairs marked \"Possibly same\" may be two different people.")
+                .help("Merge every pair in the list. Be careful: the pairs marked “Possibly same” may be two different people.")
                 Spacer()
             }
             outcomeRow
-            Divider().opacity(0.3)
+            Hairline(color: Theme.hairlineSoft)
             if candidates.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 48))
+                        .font(.system(size: 56, weight: .light))
                         .foregroundStyle(Theme.delight)
                     Text("No likely matches found.")
                         .font(Theme.Font.body(13.5, .semibold))
@@ -1641,7 +1672,7 @@ private struct SuggestedMergesSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(40)
             } else {
-                ScrollView {
+                ScrollView(.vertical) {
                     // LazyVStack: a few hundred candidates in a plain
                     // VStack overflows SwiftUI's AttributeGraph.
                     LazyVStack(spacing: 10) {
@@ -1654,8 +1685,8 @@ private struct SuggestedMergesSheet: View {
         }
         .padding(20)
         .frame(minWidth: 560, minHeight: 420)
-        .background(LavaLampBackground())
-        .preferredColorScheme(.dark)
+        .sheetSurface()
+        .dsEscapeCancels(onDismiss)
         .confirmationDialog(
             pending?.title ?? "",
             isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
@@ -1699,6 +1730,7 @@ private struct SuggestedMergesSheet: View {
                         .tint(Theme.gold)
                         .disabled(inFlight)
                 }
+                .fixedSize()
             }
             .padding(10)
             .background(
@@ -1719,11 +1751,11 @@ private struct SuggestedMergesSheet: View {
                     .font(Theme.Font.body(13.5, .semibold))
                     .lineLimit(1)
                 Text("\(p.fileCount) photo\(p.fileCount == 1 ? "" : "s")")
-                    .font(Theme.Font.body(11))
+                    .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
         }
-        .frame(width: 170, alignment: .leading)
+        .frame(minWidth: 120, maxWidth: 170, alignment: .leading)
     }
 
     private func similarityColor(_ s: Double) -> Color {
@@ -1764,7 +1796,7 @@ private struct MergeTargetPickerSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Combine \(checked.count) cards into one person")
+                Text("Combine \(Plural.noun(checked.count, "card", "cards")) into one person")
                     .font(Theme.Font.body(14, .semibold))
                 Spacer()
                 Button("Cancel", action: onCancel)
@@ -1775,8 +1807,8 @@ private struct MergeTargetPickerSheet: View {
                 .font(Theme.Font.body(13.5))
                 .foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
-            Divider().opacity(0.3)
-            ScrollView {
+            Hairline(color: Theme.hairlineSoft)
+            ScrollView(.vertical) {
                 LazyVStack(spacing: 8) {
                     ForEach(sortedCandidates) { person in
                         Button { pendingTarget = person } label: {
@@ -1808,17 +1840,17 @@ private struct MergeTargetPickerSheet: View {
                                             lineWidth: 1)
                             )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                     }
                 }
             }
         }
         .padding(20)
         .frame(minWidth: 460, minHeight: 320)
-        .background(LavaLampBackground())
+        .sheetSurface()
         .preferredColorScheme(.dark)
         .confirmationDialog(
-            "Combine \(checked.count) cards into \"\(pendingTarget?.displayName ?? "")\"?",
+            "Combine \(Plural.noun(checked.count, "card", "cards")) into “\(pendingTarget?.displayName ?? "")”?",
             isPresented: Binding(get: { pendingTarget != nil }, set: { if !$0 { pendingTarget = nil } }),
             titleVisibility: .visible
         ) {
@@ -1829,7 +1861,7 @@ private struct MergeTargetPickerSheet: View {
             }
             Button("Cancel", role: .cancel) { pendingTarget = nil }
         } message: {
-            Text("The other \(checked.count - 1 == 1 ? "card goes" : "\(checked.count - 1) cards go") away and \(checked.count - 1 == 1 ? "its" : "their") photos move to this one. You can undo this right after.")
+            Text("The other \(checked.count - 1 == 1 ? "card goes" : "\(Plural.noun(checked.count - 1, "card", "cards")) go") away and \(checked.count - 1 == 1 ? "its" : "their") photos move to this one. You can undo this right after.")
         }
     }
 }
@@ -1840,16 +1872,17 @@ private struct MergeTargetPickerSheet: View {
 private struct FaceModelInstallPanel: View {
     let engine: EngineClient
     let detectedFaces: Int
+    let hasPeople: Bool
     @State private var installer = ModelInstaller.face
     private let kind = FaceEmbedderKind.defaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
 
     var body: some View {
         Panel {
             PanelHeader("Face recognition") {
-                MetaText(detectedFaces > 0 ? "\(detectedFaces.formatted()) faces detected" : "No faces yet", size: 11)
+                MetaText(detectedFaces > 0 ? "\(Plural.noun(detectedFaces, "face", "faces")) detected" : "No faces yet", size: 11)
             }
             VStack(alignment: .leading, spacing: 10) {
-                Text("Download the Faces model to sort photos by person").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
+                Text(PeopleHeaderText.modelPanelTitle(hasPeople: hasPeople)).font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
                 Text("It finds the same person across your photos. Then you can name people, combine duplicates and tag every photo they appear in.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
                 statusRow
@@ -1883,7 +1916,7 @@ private struct FaceModelInstallPanel: View {
     }
 
     private var downloadSize: String {
-        "about \(Int((Double(kind.approxBytes) / 1_048_576).rounded())) MB"
+        "about \(ModelSize.label(Int64(kind.approxBytes)))"
     }
 
     @ViewBuilder
@@ -1922,5 +1955,60 @@ private struct FaceQueueObservers: ViewModifier {
                 if jobs.contains(where: { $0.kind == "faceRefresh" }) { Task { await refresh?.reload() } }
             }
             .onChange(of: changes) { _, _ in onChange() }
+    }
+}
+
+enum PersonCardText {
+    /// The person card's title as the name fields are edited; an unnamed person keeps the "Person N" the grid tile shows.
+    static func sheetTitle(isUnknown: Bool, nameParts: [String], personID: Int64) -> String {
+        if isUnknown { return "Unknown person" }
+        let preview = nameParts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
+        return preview.isEmpty ? "Person \(personID)" : preview
+    }
+}
+
+
+extension MergeSuggestionPair {
+    func involvesOnly(_ alive: Set<Int64>) -> Bool {
+        alive.contains(sourcePersonID) && alive.contains(destinationPersonID)
+    }
+
+    /// A merge folds one card into another, so any other pair naming the folded card has no row left to draw and must not be counted.
+    static func stillMergeable(_ pairs: [MergeSuggestionPair], alive: Set<Int64>) -> [MergeSuggestionPair] {
+        pairs.filter { $0.involvesOnly(alive) }
+    }
+}
+
+enum PeopleContent: Equatable {
+    case modelMissing
+    case empty
+    case ungrouped
+    case people(modelMissing: Bool)
+
+    static func resolve(modelInstalled: Bool, people: Int, faces: Int) -> PeopleContent {
+        if people > 0 { return .people(modelMissing: !modelInstalled) }
+        if !modelInstalled { return .modelMissing }
+        return faces == 0 ? .empty : .ungrouped
+    }
+}
+
+enum PeopleHeaderText {
+    static func modelPanelTitle(hasPeople: Bool) -> String {
+        hasPeople
+            ? "Grouping new faces needs the Faces model. The people below stay as they are."
+            : "Download the Faces model to sort photos by person"
+    }
+
+    static func ungroupedMessage(grouping: Bool) -> String {
+        grouping
+            ? "FileID is sorting them into one card per person. This can take a few minutes for a large library."
+            : "Press Group faces to sort them into one card per person. This can take a few minutes for a large library."
+    }
+
+    static func countLine(people: Int, unnamed: Int, faces: Int, grouping: Bool) -> String {
+        if people == 0 && faces == 0 { return "" }
+        if people == 0 { return grouping ? "\(Plural.noun(faces, "face", "faces")) · grouping…" : "\(Plural.noun(faces, "face", "faces")) detected · not grouped yet" }
+        let base = unnamed > 0 ? "\(Plural.noun(people, "person", "people")) · \(unnamed) still unnamed" : "\(Plural.noun(people, "person", "people")) · all named"
+        return grouping ? base + " · still grouping faces" : base
     }
 }

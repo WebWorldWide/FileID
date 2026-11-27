@@ -13,6 +13,29 @@ fn request(value: serde_json::Value) -> CatalogRequest {
 }
 
 #[test]
+fn a_timeline_model_refused_for_memory_hands_the_job_to_the_smaller_one_that_ran() {
+    let mut conn = database();
+    let queued = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"moments"}));
+    let (id, _) = enqueue(&mut conn, &queued, Some("qwen3_vl_4b"), true).unwrap();
+    let mut recipe: Recipe = serde_json::from_str(
+        &conn.query_row("SELECT recipe_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get::<_, String>(0)).unwrap(),
+    )
+    .unwrap();
+    let note = adopt_smaller_model(&conn, &id, &mut recipe, "qwen3_vl_2b").unwrap();
+    assert!(note.contains(&model_label("qwen3_vl_4b")) && note.contains(&model_label("qwen3_vl_2b")), "{note}");
+    assert!(note.starts_with("Not enough memory is free for"));
+    let stored: Recipe = serde_json::from_str(
+        &conn.query_row("SELECT recipe_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get::<_, String>(0)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored, recipe);
+    assert_eq!(stored.model_kind, "qwen3_vl_2b");
+    assert_eq!(stored.model_version, frame_model_version("qwen3_vl_2b"));
+    assert!(stored.model_version.contains("qwen3_vl_2b"));
+    assert_eq!(stored.timeline_mode.as_deref(), Some("moments"));
+}
+
+#[test]
 fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     let mut conn = database();
     let ok = request(
@@ -20,7 +43,6 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     );
     let (id, response) = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), true).unwrap();
     assert_eq!(response.status, "ok");
-    // The Mac app's engine uses Apple Speech, which needs no model install.
     let speech_note = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
         "any speech"
     } else {
@@ -42,7 +64,6 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     let recipe: Recipe = serde_json::from_str(&recipe).unwrap();
     assert_eq!(recipe.model_kind, "qwen3_vl_4b");
     assert_eq!(recipe.timeline_mode.as_deref(), Some("moments"));
-    // The Mac app's engine shares the Swift engine's scene-pool coverage ids.
     if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
         assert!(recipe.model_version.starts_with("timeline-scene-v1/qwen3_vl_4b@"), "{}", recipe.model_version);
         assert!(!recipe.model_version.ends_with("@unversioned"));
@@ -89,9 +110,9 @@ fn recovery_pauses_interrupted_timeline_jobs_only() {
         })
         .collect();
     assert_eq!(states, ["paused", "paused", "completed", "running"]);
-    assert!(is_timeline_job(&conn, "a").unwrap());
-    assert!(!is_timeline_job(&conn, "d").unwrap());
-    assert!(!is_timeline_job(&conn, "missing").unwrap());
+    assert!(crate::commands::catalog::is_job_of_kind(&conn, "a", JOB_KIND).unwrap());
+    assert!(!crate::commands::catalog::is_job_of_kind(&conn, "d", JOB_KIND).unwrap());
+    assert!(!crate::commands::catalog::is_job_of_kind(&conn, "missing", JOB_KIND).unwrap());
 }
 
 #[test]
@@ -186,7 +207,6 @@ fn chapter_suggestions_replace_drafts_but_keep_user_edits() {
     };
     upsert_chapter(&conn, &edited).unwrap();
 
-    // The source file is absent, so persistence must refuse rather than write.
     assert!(persist_chapter_suggestions(&conn, 1, &source, "frame-v", 40.0).is_err());
 
     let titles = |conn: &Connection| -> Vec<String> {
@@ -258,7 +278,6 @@ fn chapter_suggestions_persist_when_source_is_unchanged() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Runs only where the vetted FFmpeg runtime is staged (FILEID_FFMPEG_DIR).
 #[test]
 fn vetted_runtime_decodes_signals_and_frames_for_analysis() {
     if !video_export::available() {
@@ -290,8 +309,6 @@ fn vetted_runtime_decodes_signals_and_frames_for_analysis() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// Scripted stand-in for the resident VLM: deterministic captions, a fixed
-/// moment answer, and an optional pause request after N caption calls.
 struct ScriptedModel {
     captions: Vec<&'static str>,
     calls: std::sync::atomic::AtomicUsize,
@@ -399,8 +416,7 @@ fn count(database: &Arc<Mutex<Connection>>, sql: &str) -> i64 {
 
 #[tokio::test]
 async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
-    // A still picture has no change peaks, so samples land on exact interval
-    // boundaries: 0, 10, 20 and 30 seconds.
+    // A still picture has no change peaks, so samples land on exact interval boundaries (0, 10, 20, 30 s).
     let Some((directory, database)) = media_fixture("color=c=gray:size=64x36:rate=5:duration=35") else {
         return;
     };
@@ -486,8 +502,193 @@ async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
 }
 
 #[tokio::test]
+async fn one_unreadable_video_is_skipped_and_the_rest_are_analysed() {
+    let Some((directory, database)) = media_fixture("color=c=gray:size=64x36:rate=5:duration=12") else {
+        return;
+    };
+    let good = std::fs::read_dir(&directory).unwrap().next().unwrap().unwrap().path();
+    let broken = directory.join("broken.mp4");
+    std::fs::write(&broken, b"this is not a video").unwrap();
+    let second = directory.join("second.mp4");
+    std::fs::copy(&good, &second).unwrap();
+    for (id, path) in [(2, &broken), (3, &second)] {
+        let metadata = std::fs::metadata(path).unwrap();
+        let modified = metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        database
+            .lock()
+            .execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,?3,?4,0,'video','mp4')",
+                params![id, path.to_str().unwrap(), metadata.len() as i64, modified],
+            )
+            .unwrap();
+    }
+    let (id, _) = enqueue(
+        &mut database.lock(),
+        &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1,2,3]})),
+        Some("qwen3_vl_4b"),
+        true,
+    )
+    .unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let model = scripted(vec!["A gray screen", "A gray screen again", "Still gray", "Gray"], None);
+    let skipped = process(&id, &job, &model, &directory.join("frames"), &Arc::new(AtomicBool::new(false)), &sink, &database, 1.0)
+        .await
+        .unwrap();
+    assert_eq!(skipped, 1);
+    assert!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE file_id=1") > 0);
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE file_id=2"), 0);
+    assert!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE file_id=3") > 0);
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_coverage WHERE file_id=2 AND status='sampled'"), 0);
+    let checkpoint: String = database.lock().query_row("SELECT checkpoint_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+    assert_eq!(checkpoint, "3");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn every_video_is_tried_even_when_the_first_cannot_be_read() {
+    let conn = crate::db::test_support::memory_db();
+    for id in 1..=3 {
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,10,1,0,'video','mp4')",
+            params![id, format!("/no/such/volume/clip-{id}.mp4")],
+        )
+        .unwrap();
+    }
+    let database = Arc::new(Mutex::new(conn));
+    let (id, _) = enqueue(
+        &mut database.lock(),
+        &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1,2,3]})),
+        Some("qwen3_vl_4b"),
+        true,
+    )
+    .unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let model = scripted(vec!["unused"], None);
+    let frames = std::env::temp_dir().join(format!("fileid-timeline-skip-{}", uuid::Uuid::new_v4()));
+    let outcome = process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database, 1.0).await;
+    assert!(outcome.is_err(), "when no video could be read the job reports it");
+    let checkpoint: String = database.lock().query_row("SELECT checkpoint_json FROM catalog_jobs WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+    assert_eq!(checkpoint, "3", "an unreadable video moves the checkpoint on instead of stopping the job at it");
+    let _ = std::fs::remove_dir_all(frames);
+}
+
+#[tokio::test]
+async fn the_job_stops_when_the_model_fails_on_several_videos_in_a_row() {
+    let model = scripted(vec!["unused"], None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let missing = Path::new("/no/such/frame.jpg");
+    let mut streak = 0;
+    for video in 1..=MODEL_FAILURE_LIMIT {
+        let error = caption_frame(&model, missing, "describe", &cancel).await.unwrap_err();
+        assert_eq!(model_keeps_failing(&mut streak, &error), video == MODEL_FAILURE_LIMIT, "video {video}");
+    }
+}
+
+#[test]
+fn the_stopped_job_says_so_in_plain_words_without_the_models_raw_error() {
+    let raw = anyhow!("mlx failed at /Users/someone/Models/x.safetensors: tensor shape mismatch").context(ModelFailed);
+    let text = crate::util::user_message::job_failure_text(&model_stopped(&raw));
+    assert!(text.contains("job stopped"), "{text}");
+    assert!(!text.contains("safetensors") && !text.contains("/Users"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unreadable_video_between_model_failures_does_not_count_against_the_model() {
+    let model = scripted(vec!["unused"], None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let model_error = caption_frame(&model, Path::new("/no/such/frame.jpg"), "describe", &cancel).await.unwrap_err();
+    let mut streak = 0;
+    assert!(!model_keeps_failing(&mut streak, &model_error));
+    assert!(!model_keeps_failing(&mut streak, &anyhow!("decode failed")));
+    assert!(!model_keeps_failing(&mut streak, &model_error));
+    assert!(!model_keeps_failing(&mut streak, &model_error));
+}
+
+fn frame_file(pixel: impl Fn(u32, u32) -> u8) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("fileid-frame-{}.png", uuid::Uuid::new_v4()));
+    image::GrayImage::from_fn(64, 64, |x, y| image::Luma([pixel(x, y)])).save(&path).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn an_empty_caption_on_a_black_or_flat_frame_is_no_description_not_a_model_failure() {
+    let model = scripted(vec![""], None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (black, flat) = (frame_file(|_, _| 2), frame_file(|_, _| 128));
+    for frame in [&black, &flat] {
+        assert_eq!(caption_frame(&model, frame, "describe", &cancel).await.unwrap(), "");
+    }
+    let busy = frame_file(|x, y| ((x * 37 + y * 11) % 200 + 30) as u8);
+    let error = caption_frame(&model, &busy, "describe", &cancel).await.unwrap_err();
+    assert!(error.is::<ModelFailed>(), "an empty caption on a frame with content still counts against the model");
+    for frame in [black, flat, busy] {
+        let _ = std::fs::remove_file(frame);
+    }
+}
+
+#[test]
+fn judging_failures_stops_the_job_only_on_a_streak_of_model_failures() {
+    let model_failed = || anyhow!("mlx").context(ModelFailed);
+    let mut streak = 0;
+    assert!(matches!(judge_failure(model_failed(), false, &mut streak), Failure::Skip(_)));
+    assert!(matches!(judge_failure(model_failed(), false, &mut streak), Failure::Skip(_)));
+    assert!(matches!(judge_failure(anyhow!("decode failed"), false, &mut streak), Failure::Skip(_)));
+    assert_eq!(streak, 0, "a video the model never saw ends the streak");
+    for _ in 1..MODEL_FAILURE_LIMIT {
+        assert!(matches!(judge_failure(model_failed(), false, &mut streak), Failure::Skip(_)));
+    }
+    let Failure::Stop(error) = judge_failure(model_failed(), false, &mut streak) else { panic!("the third in a row stops the job") };
+    assert!(error.to_string().contains("job stopped"));
+    assert!(matches!(judge_failure(model_failed(), true, &mut 0), Failure::Interrupted(_)), "a cancelled job is interrupted, not blamed on the model");
+}
+
+#[tokio::test]
+async fn dropping_a_prefetched_pool_stops_its_decode() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (started, stopped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (seen_start, seen_stop) = (started.clone(), stopped.clone());
+    let task = spawn_stoppable(&cancel, move |stop| {
+        seen_start.store(true, Ordering::SeqCst);
+        while !stop.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen_stop.store(true, Ordering::SeqCst);
+        bail!("stopped")
+    });
+    while !started.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(task);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !stopped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the decode must stop once its task is dropped");
+}
+
+#[tokio::test]
+async fn a_cancelled_job_stops_a_prefetched_pool_decode() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let seen_stop = stopped.clone();
+    let task = spawn_stoppable(&cancel, move |stop| {
+        while !stop.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen_stop.store(true, Ordering::SeqCst);
+        bail!("stopped")
+    });
+    cancel.store(true, Ordering::Release);
+    assert!(tokio::time::timeout(Duration::from_secs(5), task.finish()).await.expect("cancel must stop the decode").is_err());
+    assert!(stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
-    // Brightness ramps for three seconds, then holds: activity windows cover only the ramp.
     let Some((directory, database)) =
         media_fixture("color=c=black:size=64x36:rate=5:duration=6,geq=lum=if(lt(T\\,3)\\,40+T*60\\,16):cb=128:cr=128")
     else {
@@ -717,7 +918,6 @@ fn wav_header_sizes_are_rewritten_for_streamed_audio() {
 
 struct OrderedModel {
     log: Arc<Mutex<Vec<String>>>,
-    /// The first window's reply is not moment JSON.
     malformed_first: bool,
 }
 
@@ -890,7 +1090,6 @@ async fn a_malformed_moment_reply_leaves_only_its_window_incomplete() {
     .await
     .unwrap();
 
-    // As in the Swift engine: the job goes on, the bad window stays incomplete.
     let statuses = |status: &str| {
         count(
             &database,
@@ -946,8 +1145,8 @@ fn moment_plan_falls_back_to_overlapping_windows_without_a_grid() {
 
 #[test]
 fn on_disk_check_accepts_either_engines_rounding_of_the_same_modified_time() {
-    // A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and
-    // 518318480 ns; one engine stores ...256673 bits, Foundation's Date gives ...256674.
+    // A fixture that failed the cross-engine timeline cases: stat said 1794731299 s and 518318480 ns; one engine stores
+    // ...256673 bits, Foundation's Date gives ...256674.
     let nanos = std::time::Duration::new(1_794_731_299, 518_318_480);
     let plain = nanos.as_secs_f64();
     let foundation = f64::from_bits(4_745_314_456_662_256_674);

@@ -36,20 +36,9 @@ struct LibraryView: View {
     /// In-flight off-main reload. Cancelled before each new reload so a
     /// slow query can't land its rows after a newer one (latest-wins).
     @State private var reloadTask: Task<Void, Never>?
-    /// Tile-refresh epoch. `store.version` bumps on every change including
-    /// the per-second counter refresh during a live scan; keying each
-    /// visible tile's xattr/thumbnail `.task` on it re-reads Finder tags
-    /// for unchanged files every tick. Freeze the epoch during a scan —
-    /// Finder xattrs can't change while the engine only writes DB rows —
-    /// so tiles don't re-task; the terminal reload bumps `store.version`
-    /// once at the end to refresh them. Kept in sync with `store.version`
-    /// whenever no scan is active.
+    /// Tile-refresh epoch. Frozen during a scan (Finder xattrs can't change while the engine only writes DB rows) so tiles don't re-read tags every tick; the terminal reload bumps `store.version` to refresh them.
     @State private var frozenTileVersion: Int = 0
-    /// Edit-only epoch, bumped by in-app tag / undo writes. Unlike
-    /// `frozenTileVersion` it is NOT frozen during a scan, so a Finder-tag
-    /// edit, bulk-tag, or undo performed while the engine is scanning still
-    /// refreshes the affected tiles' dots instead of going stale until the
-    /// scan ends. Combined with the counter epoch in `tileRefreshToken`.
+    /// Edit-only epoch, bumped by in-app tag writes. Not frozen during a scan, so an edit mid-scan still refreshes the affected dots.
     @State private var editEpoch: Int = 0
     /// When set, the grid shows photos most-similar to this seed
     /// (CLIP image-embedding cosine).
@@ -74,6 +63,11 @@ struct LibraryView: View {
     private var kindFilter: String? {
         get { kindFilterRaw.isEmpty ? nil : kindFilterRaw }
     }
+    @AppStorage(LibrarySort.keyStorage) private var sortKeyRaw: String = LibrarySort.standard.key.rawValue
+    @AppStorage(LibrarySort.ascendingStorage) private var sortAscending: Bool = LibrarySort.standard.ascending
+    @AppStorage(LibrarySort.layoutStorage) private var layoutRaw: String = LibraryLayout.grid.rawValue
+    private var sort: LibrarySort { LibrarySort(storedKey: sortKeyRaw, ascending: sortAscending) }
+    private var layout: LibraryLayout { LibraryLayout(rawValue: layoutRaw) ?? .grid }
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
     @State private var lastCounterRefreshAt: Date = .distantPast
@@ -86,13 +80,15 @@ struct LibraryView: View {
     /// Keyword and plain listings page in from the database as the grid
     /// nears its end; similarity and semantic results are one ranked list.
     @State private var canLoadMore = false
+    @State private var pageCursor: LibraryCursor?
     @State private var loadingMore = false
     @State private var loadMoreTask: Task<Void, Never>?
+    @State private var scrollToEndToken = 0
     /// Query and kind of the rows on screen; a refresh with the same pair keeps
     /// every loaded page instead of dropping back to the first.
-    @State private var listedQuery: (String, String?)? = nil
-    private static let pageSize = 300
-    private static let refreshCap = 3_000
+    @State private var listedQuery: (String, String?, LibrarySort)? = nil
+    private static let pageSize = LibraryPageSizes.first
+    private static let tagChunk = LibraryPageSizes.tagChunk
     private static let liveReloadInterval: TimeInterval = 5
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
@@ -104,7 +100,6 @@ struct LibraryView: View {
     @State private var lastTagBatchAvailable: Bool = false
     @State private var undoStatus: String?
 
-    // Multi-select tag mode.
     @State private var selectMode: Bool = false
     // id→FileRow (not a Set) so a selected file survives a `rows` reload
     // (live-scan throttle / filter change re-fetches only the top-200 window);
@@ -120,11 +115,7 @@ struct LibraryView: View {
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
     }
 
-    /// The composite id each tile's `.task` keys on. The counter epoch is
-    /// frozen during a scan (see `frozenTileVersion`) so the per-second batch
-    /// bump doesn't re-task every visible tile; the edit epoch is never frozen
-    /// so an in-app tag / undo write still refreshes the dots mid-scan. Either
-    /// component changing re-tasks the affected tiles.
+    /// The composite id each tile's `.task` keys on: the counter epoch (frozen mid-scan) plus the edit epoch.
     private var tileRefreshToken: String {
         "\(scanActive ? frozenTileVersion : store.version)·\(editEpoch)"
     }
@@ -133,9 +124,7 @@ struct LibraryView: View {
         lifecycle(content)
             .onChange(of: searchText) { _, _ in
                 similarSeed = nil   // typing exits similarity mode
-                // Debounce: cancel any pending reload, schedule a new one.
-                // The DB hit + optional CLIP encode is ~50-100ms; without
-                // debounce, fast typers stutter their own keystrokes.
+                // Debounced: each reload costs a DB query plus an optional CLIP encode.
                 searchDebounce?.cancel()
                 searchDebounce = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 200_000_000)
@@ -144,6 +133,12 @@ struct LibraryView: View {
                 }
             }
             .onChange(of: kindFilterRaw) { _, _ in reloadWhenShown() }
+            .onChange(of: sort) { _, _ in
+                scrollToTopToken += 1
+                gridAtTop = true
+                reloadWhenShown()
+            }
+            .onChange(of: store.readerEpoch) { _, _ in reloadWhenShown() }
             .onChange(of: similarSeed?.id) { _, _ in reloadWhenShown() }
             .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
             // Keep the tile-refresh epoch tracking store.version while idle so a
@@ -152,7 +147,7 @@ struct LibraryView: View {
             .onChange(of: store.version) { _, v in
                 if !scanActive { frozenTileVersion = v }
             }
-            // The encoder's ORT session takes seconds to build after launch /
+            // The engine's text model takes seconds to load after launch /
             // install; without this the first search silently stays keyword-only.
             .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
                 if ready { reloadWhenShown() }
@@ -160,9 +155,7 @@ struct LibraryView: View {
             .onChange(of: tileRefreshToken, initial: true) { _, token in
                 if pageActive { shownTileToken = token }
             }
-            // Surface the undo outcome (renames or tags, incl. partial/total
-            // failures) — it was written to `undoStatus` but never shown, so
-            // failures were silent.
+        // Surface the undo outcome, including partial and total failures, so they aren't silent.
             .alert("Undo", isPresented: Binding(
                 get: { undoStatus != nil },
                 set: { if !$0 { undoStatus = nil } }
@@ -187,7 +180,29 @@ struct LibraryView: View {
             .onChange(of: queryHandoff) { _, _ in consumeQueryHandoff() }
             #if DEBUG
             .onReceive(NotificationCenter.default.publisher(for: .selfShotOpenPreview)) { note in
-                if let name = note.object as? String, let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row) }
+                guard let name = note.object as? String else { return }
+                if let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row); return }
+                searchText = name
+                Task { @MainActor in
+                    for _ in 0..<40 {
+                        try? await Task.sleep(for: .milliseconds(250))
+                        if let row = rows.first(where: { $0.url.lastPathComponent == name }) { openPreview(row); return }
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotClosePreview)) { _ in previewSelectedID = nil }
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+                guard pageActive, let action = note.object as? String else { return }
+                let parts = action.split(separator: ":", maxSplits: 1).map(String.init)
+                switch parts.first {
+                case "select": if parts.count == 2, let row = rows.first(where: { $0.url.lastPathComponent == parts[1] }) { paneSelectedID = row.id }
+                case "checks": selectMode = true; for row in rows.prefix(Int(parts.last ?? "") ?? 3) { checkedFiles[row.id] = row }
+                case "close": paneSelectedID = nil; selectMode = false; checkedFiles = [:]
+                case "end": jumpToEnd()
+                case "reload": SelfShot.jumpFinished = false; reload()
+            case "reset": paneSelectedID = nil; selectMode = false; checkedFiles = [:]; similarSeed = nil; if !searchText.isEmpty { searchText = "" }
+                default: break
+                }
             }
             #endif
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
@@ -203,10 +218,7 @@ struct LibraryView: View {
                 listedQuery = nil
                 reload()
             }
-            // Terminal reload: the 1 s batch throttle above can swallow the FINAL
-            // scan batch (it advances lastSeenBatchIndex before the throttle guard,
-            // so the last batch never triggers a reload if it lands within 1 s).
-            // Reloading on any terminal event guarantees the grid ends complete.
+            // The 1 s batch throttle can swallow the final scan batch, so any terminal event reloads.
             .onChange(of: engine.lastTerminalEventAt) { _, _ in
                 if pageActive { scanEnded() } else { missedWhileHidden.insert(.terminal) }
             }
@@ -268,7 +280,7 @@ struct LibraryView: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().opacity(0.4)
+            Hairline()
             if let p = engine.lastProgress,
                p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
                 inFlightHeadline(p)
@@ -310,19 +322,13 @@ struct LibraryView: View {
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .animation(Theme.spring, value: paneRow == nil)
+                .animation(Theme.springStandard, value: paneRow == nil)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Hidden ⌘F button focuses the search field. SwiftUI doesn't
-        // attach keyboardShortcut directly to TextField focus, so this
-        // is the standard idiom.
-        .background(
-            Button("") { searchFocused = true }
-                .keyboardShortcut(pageActive ? KeyboardShortcut("f", modifiers: .command) : nil)
-                .opacity(0)
-                .frame(width: 0, height: 0)
-        )
+        .onReceive(NotificationCenter.default.publisher(for: .fileIDFindInPage)) { _ in
+            if FindRouting.accepts(pageActive: pageActive) { searchFocused = true }
+        }
     }
 
     /// Inline post-scan banner used for "Grouping faces…" and
@@ -335,15 +341,14 @@ struct LibraryView: View {
                 .font(Theme.Font.body(13.5))
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.Font.body(13.5, .semibold))
-                Text(detail).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(detail).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
             Spacer()
             ProgressView().controlSize(.small).tint(Theme.ai)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.ai.opacity(0.08), stroke: Theme.ai.opacity(0.30))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -363,7 +368,7 @@ struct LibraryView: View {
     }
 
     private func refreshClipModelOnDisk() {
-        clipModelOnDisk = FileManager.default.fileExists(atPath: CLIPTextEncoder.defaultModelURL.path)
+        clipModelOnDisk = FileManager.default.fileExists(atPath: CLIPEmbeddingSpace.textModelURL.path)
     }
 
     private func consumeQueryHandoff() {
@@ -378,25 +383,34 @@ struct LibraryView: View {
         let title: String
         let detail: String
         var needsModel = false
+        var canResume = false
+    }
+
+    static let pausedSearchTitle = "Visual search is paused"
+
+    static func pausedSearchProblem(_ message: String?) -> SearchProblem? {
+        guard let message, message.contains(pausedSearchTitle) else { return nil }
+        return SearchProblem(title: pausedSearchTitle, detail: "Resume it to search by what’s in a picture. Names and text still match.", canResume: true)
     }
 
     /// Why a visual search gave nothing, in plain words.
-    private static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
-        let title = similar ? "Couldn't find similar files" : "Showing matches by name and text only"
+    static func searchProblem(_ response: CatalogResponse?, similar: Bool) -> SearchProblem {
+        let title = similar ? "Couldn’t find similar files" : "Showing matches by name and text only"
+        if let paused = pausedSearchProblem(response?.message) { return paused }
         var installed = false
         if case .installed = CLIPModelInstaller.shared.status { installed = true }
         if !installed {
-            return SearchProblem(title: title, detail: "Searching by what's in a picture needs the Search by description model. You can download it in Settings.", needsModel: true)
+            return SearchProblem(title: title, detail: "Searching by what’s in a picture needs the Search by description model. You can download it in Settings.", needsModel: true)
         }
         guard let response else {
-            return SearchProblem(title: title, detail: "FileID's helper didn't answer in time. Try again in a moment.")
+            return SearchProblem(title: title, detail: "FileID’s helper didn’t answer in time. Try again in a moment.")
         }
         if let message = response.message, !Sidebar.looksTechnical(message) {
             return SearchProblem(title: title, detail: message)
         }
         return SearchProblem(title: title, detail: similar
-            ? "FileID hasn't finished reading this file yet. Scan the folder again, then try once more."
-            : "Searching by what's in a picture isn't ready yet. Try again after the scan finishes.")
+            ? "FileID hasn’t finished reading this file yet. Scan the folder again, then try once more."
+            : "Searching by what’s in a picture isn’t ready yet. Try again after the scan finishes.")
     }
 
     @ViewBuilder
@@ -405,19 +419,21 @@ struct LibraryView: View {
             Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 1) {
                 Text(problem.title).font(Theme.Font.body(13.5, .semibold))
-                Text(problem.detail).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(problem.detail).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if problem.needsModel {
                 Button("Open Settings") { onSwitchTab(.settings) }.buttonStyle(.dsSecondary)
             }
+            if problem.canResume {
+                Button("Resume") { resumeVisualSearch() }.buttonStyle(.dsSecondary)
+            }
             DSIconButton("Dismiss", systemImage: "xmark", tint: Theme.text3) { searchProblem = nil }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.30), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.warning.opacity(0.08), stroke: Theme.warning.opacity(0.30))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -433,8 +449,8 @@ struct LibraryView: View {
                     .font(Theme.Font.body(13.5, .semibold))
                 Text(hint == .preparing
                      ? "Getting search by description ready… results update on their own."
-                     : "To search by what's in a photo (\"sunset at the beach\", \"red car\"), download the Search by description model in Settings.")
-                    .font(Theme.Font.body(11))
+                     : "To search by what’s in a photo (“sunset at the beach”, “red car”), download the Search by description model in Settings.")
+                    .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
             Spacer()
@@ -445,9 +461,8 @@ struct LibraryView: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.ai.opacity(0.08), stroke: Theme.ai.opacity(0.30))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -461,7 +476,7 @@ struct LibraryView: View {
                 Text("Photos similar to \(seed.url.lastPathComponent)")
                     .font(Theme.Font.body(13.5, .semibold))
                 Text("Most similar first. Clear to see every file again.")
-                    .font(Theme.Font.body(11))
+                    .font(Theme.Font.body(11.5))
                     .foregroundStyle(Theme.text3)
             }
             Spacer()
@@ -469,9 +484,8 @@ struct LibraryView: View {
                 .buttonStyle(.dsSecondary)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.10)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.ai.opacity(0.10), stroke: Theme.ai.opacity(0.4))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 8)
     }
 
@@ -479,60 +493,64 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func inFlightHeadline(_ p: ScanProgress) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let dateCheck = p.phase == .postScan ? p.captureDateCheck : nil
+        let work = p.phase == .postScan ? (p.postScanWork ?? dateCheck) : nil
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Image(systemName: "brain.head.profile")
+                Image(systemName: "doc.text.magnifyingglass")
                     .foregroundStyle(Theme.gold)
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.phase == .discovering ? "Finding files…"
-                         : p.phase == .tagging ? "Reading files…" : "Finishing up…")
+                         : p.phase == .tagging ? "Reading files…" : dateCheck != nil ? "Checking capture dates…" : work != nil ? "Adding tags and reading text…" : "Finishing up…")
                         .font(Theme.Font.body(14, .semibold))
-                    Text("Tagging photos and finding faces. You can browse while this runs.")
-                        .font(Theme.Font.body(11))
+                    Text(dateCheck != nil ? "A one-time check of when each photo and video was taken. You can browse while this runs."
+                         : "Tagging photos and finding faces. You can browse while this runs.")
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
-                Text(p.total > 0
-                     ? "\(p.processed.formatted()) of \(p.total.formatted()) files"
-                     : "\(p.discovered.formatted()) found so far")
+                Text(work.map { "\($0.done.formatted()) of \(Plural.noun($0.owed, dateCheck != nil ? "photo or video" : "file", dateCheck != nil ? "photos and videos" : "files"))" }
+                     ?? (p.total > 0
+                         ? "\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))"
+                         : "\(p.discovered.formatted()) found so far"))
                     .font(Theme.Font.body(13.5).monospacedDigit())
                     .foregroundStyle(Theme.text3)
             }
-            if p.total > 0 {
+            if let work {
+                ProgressView(value: Double(work.done), total: Double(max(work.owed, 1)))
+                    .tint(Theme.gold)
+            } else if p.total > 0 {
                 ProgressView(value: Double(p.processed),
                              total: Double(max(p.total, 1)))
                     .tint(Theme.gold)
             } else if p.phase == .discovering {
                 ProgressView()
-                    .progressViewStyle(.linear)
                     .tint(Theme.gold)
             }
+            if p.filesPerSecond >= 0.5 || (p.etaSeconds ?? 0) > 0 || p.failed > 0 {
             HStack(spacing: 16) {
-                Text(String(format: "%.0f files per second", p.filesPerSecond))
-                    .foregroundStyle(Theme.gold)
+                if p.filesPerSecond >= 0.5 {
+                    let rate = Int(p.filesPerSecond.rounded())
+                    Text("\(rate.formatted()) \(rate == 1 ? "file" : "files") per second")
+                        .foregroundStyle(Theme.gold)
+                }
                 if let eta = p.etaSeconds, eta > 0 {
                     Text("about \(DurationText.short(eta)) left")
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 if p.failed > 0 {
-                    Text("\(p.failed) couldn't be read").foregroundStyle(Theme.danger)
+                    Text("\(p.failed.formatted()) couldn’t be read").foregroundStyle(Theme.danger)
                 }
             }
             .font(Theme.Font.body(12).monospacedDigit())
             .help("Memory and resource details are in Settings → Advanced.")
+            }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                        .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.panel, stroke: Theme.gold.opacity(0.4))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 16)
     }
 
@@ -551,12 +569,12 @@ struct LibraryView: View {
                     Text("Describing files…")
                         .font(Theme.Font.body(14, .semibold))
                     Text("Writing a description and a suggested name for each file. Nothing is renamed until you approve it.")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 if let p {
-                    Text("\(p.processed.formatted()) of \(p.total.formatted()) files")
+                    Text("\(p.processed.formatted()) of \(Plural.noun(p.total, "file", "files"))")
                         .font(Theme.Font.body(13.5).monospacedDigit())
                         .foregroundStyle(Theme.text3)
                 }
@@ -567,7 +585,6 @@ struct LibraryView: View {
                     .tint(Theme.gold)
             } else {
                 ProgressView()
-                    .progressViewStyle(.linear)
                     .tint(Theme.gold)
             }
             if let p {
@@ -585,7 +602,7 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.text3)
             }
             if let last {
-                Divider().opacity(0.3)
+                Hairline(color: Theme.hairlineSoft)
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "wand.and.rays")
                         .foregroundStyle(Theme.gold)
@@ -606,15 +623,8 @@ struct LibraryView: View {
             }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                        .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 20)
+        .dsBannerSurface(fill: Theme.panel, stroke: Theme.gold.opacity(0.4))
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.top, 16)
     }
 
@@ -623,91 +633,69 @@ struct LibraryView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
-                    TextField("Filter files", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .help("Filter by name, tag, description or person")
-                        .accessibilityLabel("Filter by name, tag, description or person")
-                        .font(Theme.Font.body(13.5))
-                        .focused($searchFocused)
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
-                            .buttonStyle(.plain)
-                            .help("Clear search")
-                            .accessibilityLabel("Clear search")
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 10) {
+                    filterControls
+                    summaryControls(wrapped: false)
+                    Spacer(minLength: 8)
+                    viewControls
+                    modeControls
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterControls
+                        Spacer(minLength: 8)
+                        modeControls
+                    }
+                    HStack(alignment: .center, spacing: 10) {
+                        summaryControls(wrapped: true)
+                        Spacer(minLength: 8)
+                        viewControls
                     }
                 }
-                .padding(.horizontal, 10)
-                .frame(height: Theme.Metrics.controlLarge)
-                .frame(minWidth: 140, maxWidth: 320)
-                .layoutPriority(1)
-                .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
-
-                kindPicker
-
-                ViewThatFits(in: .horizontal) {
-                    if let visualSummary { MetaText(visualSummary, size: 11).fixedSize() }
-                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal), size: 11).fixedSize()
-                    MetaText(Self.shownSummary(rows: rows.count, total: shownTotal, short: true), size: 11).fixedSize()
-                    Color.clear.frame(width: 0, height: 0)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterControls
+                        Spacer(minLength: 8)
+                        if !selectMode { modeControls }
+                    }
+                    if selectMode {
+                        HStack(alignment: .center, spacing: 10) {
+                            Spacer(minLength: 8)
+                            modeControls
+                        }
+                    }
+                    HStack(alignment: .center, spacing: 10) {
+                        summaryControls(wrapped: true)
+                        Spacer(minLength: 8)
+                        viewControls
+                    }
                 }
-                .fixedSize(horizontal: false, vertical: true)
-
-                if hiddenWeaker > 0, !rows.isEmpty {
-                    Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
-                        .buttonStyle(.plain)
-                        .font(Theme.Font.body(11.5, .semibold))
-                        .foregroundStyle(Theme.gold)
-                        .fixedSize()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 10) {
+                        filterField
+                        Spacer(minLength: 8)
+                        if !selectMode { modeControls }
+                    }
+                    if selectMode {
+                        HStack(alignment: .center, spacing: 10) {
+                            Spacer(minLength: 8)
+                            modeControls
+                        }
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        kindPicker
+                        ScrollView(.horizontal, showsIndicators: false) { kindPicker }
+                    }
+                    HStack(alignment: .center, spacing: 10) {
+                        summaryControls(wrapped: true)
+                        Spacer(minLength: 8)
+                        viewControls
+                    }
                 }
-
-                Spacer(minLength: 8)
-
-            // multi-select mode toggle. Tiles render with check-
-            // boxes; "Tag selected" + "Done" appear in place of the
-            // normal action set.
-            if selectMode {
-                MetaText("\(checkedFiles.count) selected", size: 11)
-                selectionActions
-                Button {
-                    if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
-                } label: { Label("Tag selected", systemImage: "tag.fill") }
-                .buttonStyle(DSPrimaryButtonStyle(height: 28))
-                .disabled(checkedFiles.isEmpty)
-                .help(checkedFiles.isEmpty ? "Click files to choose them first" : "Add tags to the chosen files")
-                Button("Done") {
-                    selectMode = false
-                    checkedFiles.removeAll()
-                }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                .keyboardShortcut(pageActive ? KeyboardShortcut(.escape, modifiers: []) : nil)
-            } else {
-                Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                .fixedSize()
-                .help("Choose several files, then tag them all at once")
-            }
-
-            // Bulk-rename trigger lives in the Deep Analyze tab now —
-            // that's where smart names come from in the workflow. Keep
-            // only the per-row "Undo last rename" affordance here.
-            if lastBatchAvailable {
-                Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
-                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
-                .help("Reverse the most recent rename batch")
-            }
-
-            if lastTagBatchAvailable {
-                Button(action: undoLastTagBatch) { Label("Undo last tags", systemImage: "arrow.uturn.backward") }
-                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
-                .help("Remove only the tags FileID added in the most recent bulk tag batch")
-            }
-
             }
         }
+        .environment(\.fixedTextSize, true)
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 12)
         .sheet(isPresented: $bulkTagSheetOpen, onDismiss: refreshBulkState) {
             BulkTagSheet(
@@ -719,6 +707,168 @@ struct LibraryView: View {
                     editEpoch += 1   // refresh tile dots even mid-scan
                 }
             )
+            .environment(\.fixedTextSize, false)
+        }
+    }
+
+    @ViewBuilder
+    private var filterControls: some View {
+        filterField
+        kindPicker
+    }
+
+    private var filterField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
+            TextField("Filter files", text: $searchText)
+                .textFieldStyle(.plain)
+                .help("Filter by name, tag, description or person")
+                .accessibilityLabel("Filter by name, tag, description or person")
+                .font(Theme.Font.body(13.5, fixed: true))
+                .focused($searchFocused)
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
+                    .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
+                    .help("Clear search")
+                    .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: Theme.Metrics.controlLarge)
+        .frame(minWidth: 140, maxWidth: 320)
+        .layoutPriority(1)
+        .background(Theme.well, ignoresSafeAreaEdges: [])
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
+    }
+
+    private var orderIsRanked: Bool { similarSeed != nil || visualSummary != nil }
+
+    @ViewBuilder
+    private var viewControls: some View {
+        HStack(spacing: 8) {
+            sortMenu
+            layoutToggle
+        }
+        .fixedSize()
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(LibrarySortKey.allCases) { key in
+                Button { sortKeyRaw = sort.selecting(key).key.rawValue; sortAscending = sort.selecting(key).ascending } label: {
+                    if key == sort.key { Label(key.title, systemImage: "checkmark") } else { Text(key.title) }
+                }
+            }
+            Divider()
+            Button { sortAscending = true } label: {
+                if sort.ascending { Label("Ascending", systemImage: "checkmark") } else { Text("Ascending") }
+            }
+            Button { sortAscending = false } label: {
+                if !sort.ascending { Label("Descending", systemImage: "checkmark") } else { Text("Descending") }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.arrow.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.text3)
+                Text(sort.summary).font(Theme.Font.body(12.5, .medium, fixed: true)).foregroundStyle(Theme.text2).lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: Theme.Metrics.control)
+            .background(Theme.well, ignoresSafeAreaEdges: [])
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(orderIsRanked)
+        .opacity(orderIsRanked ? Theme.disabledOpacity : 1)
+        .help(orderIsRanked ? "Results are ordered by best match" : "Sort files")
+        .accessibilityLabel("Sort files")
+        .accessibilityValue(sort.summary)
+    }
+
+    private var layoutToggle: some View {
+        HStack(spacing: 0) {
+            ForEach([(LibraryLayout.grid, "square.grid.2x2", "Grid"), (LibraryLayout.list, "list.bullet", "List")], id: \.1) { item in
+                let active = layout == item.0
+                Button { withAnimation(Theme.spring) { layoutRaw = item.0.rawValue } } label: {
+                    Image(systemName: item.1)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(active ? Theme.onGold : Theme.text2)
+                        .frame(width: 34, height: Theme.Metrics.control)
+                        .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Show files as a \(item.2.lowercased())")
+                .accessibilityLabel(item.2)
+                .accessibilityAddTraits(active ? .isSelected : [])
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func summaryControls(wrapped: Bool) -> some View {
+        if !(rows.isEmpty && shownTotal == 0) {
+            if let visualSummary {
+                MetaText(visualSummary.hasSuffix(".") ? String(visualSummary.dropLast()) : visualSummary, size: 11).fixedSize(horizontal: !wrapped, vertical: true)
+            } else {
+                MetaText(Self.shownSummary(rows: rows.count, total: listingTotal, moreToLoad: canLoadMore), size: 11).fixedSize(horizontal: !wrapped, vertical: true)
+            }
+        }
+
+        if hiddenWeaker > 0, !rows.isEmpty {
+            Button("Show \(hiddenWeaker) weaker matches") { showWeaker = true; reload() }
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
+                .font(Theme.Font.body(11.5, .semibold))
+                .foregroundStyle(Theme.gold)
+                .fixedSize()
+        }
+    }
+
+    /// Multi-select toggle. Tiles render with check-boxes; the selection actions and "Done"
+    /// appear in place of the normal action set.
+    @ViewBuilder
+    private var modeControls: some View {
+        if selectMode {
+            MetaText("\(checkedFiles.count) selected", size: 11).fixedSize()
+            selectionActions
+            Button {
+                if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
+            } label: { Label("Tag selected", systemImage: "tag.fill").fixedSize() }
+            .buttonStyle(DSPrimaryButtonStyle(height: 28))
+            .fixedSize()
+            .disabled(checkedFiles.isEmpty)
+            .help(checkedFiles.isEmpty ? "Click files to choose them first" : "Add tags to the chosen files")
+            .readOnlyGated(engine.readOnlyGate.reasonIfAll(checkedFiles.values.map(\.url)))
+            Button("Done") {
+                selectMode = false
+                checkedFiles.removeAll()
+            }
+            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .fixedSize()
+            .keyboardShortcut(pageActive ? KeyboardShortcut(.escape, modifiers: []) : nil)
+        } else {
+            Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
+            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .fixedSize()
+            .help("Choose several files, then tag them all at once")
+        }
+
+        // Bulk rename starts from the Deep Analyze tab; only "Undo last rename" lives here.
+        if lastBatchAvailable {
+            Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
+            .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
+            .help("Reverse the most recent rename batch")
+        }
+
+        if lastTagBatchAvailable {
+            Button(action: undoLastTagBatch) { Label("Undo last tags", systemImage: "arrow.uturn.backward") }
+            .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
+            .help("Remove only the tags FileID added in the most recent bulk tag batch")
         }
     }
 
@@ -730,13 +880,15 @@ struct LibraryView: View {
             if allShown { checkedFiles.removeAll() } else { for row in rows { checkedFiles[row.id] = row } }
         }
         .buttonStyle(.dsGhost)
+        .fixedSize()
         .help(allShown ? "Unselect every file" : "Select every file shown (⇧-click selects a range, ⌘-click adds one)")
         .accessibilityLabel(allShown ? "Clear the selection" : "Select every file shown")
         Button { askAboutChecked() } label: { Label("Ask about \(checkedFiles.count)", systemImage: "bubble.left.and.text.bubble.right").fixedSize() }
             .buttonStyle(DSSecondaryButtonStyle(height: 28))
+            .fixedSize()
             .disabled(checkedFiles.isEmpty)
             .help(checkedFiles.isEmpty ? "Select files first" : "Open Chat with only these files attached")
-            .accessibilityLabel("Ask Chat about the \(checkedFiles.count) selected files")
+            .accessibilityLabel("Ask Chat about the \(Plural.noun(checkedFiles.count, "selected file", "selected files"))")
     }
 
     private func toggleCheck(_ row: FileRow) {
@@ -772,7 +924,7 @@ struct LibraryView: View {
             }
             undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
                 + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
-                + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
+                + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be renamed back" : "")
             editEpoch += 1   // refresh tiles (renamed files) even mid-scan
             refreshBulkState()
             reload()
@@ -790,7 +942,7 @@ struct LibraryView: View {
                 }
                 undoStatus = "Removed tags from \(result.undone) file\(result.undone == 1 ? "" : "s")"
                     + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
-                    + (result.failed > 0 ? " · \(result.failed) couldn't be changed" : "")
+                    + (result.failed > 0 ? " · \(result.failed.formatted()) couldn’t be changed" : "")
                     + (result.firstError.map { " — \($0)" } ?? "")
                 editEpoch += 1   // refresh tile dots even mid-scan
                 refreshBulkState()
@@ -801,10 +953,35 @@ struct LibraryView: View {
     }
 
     /// The listing can load a moment before the store's file count catches up after a scan;
-    /// the total never reads lower than the rows already drawn.
-    static func shownSummary(rows: Int, total: Int, short: Bool = false) -> String {
-        let total = max(total, rows)
-        return short ? "\(rows.formatted())/\(total.formatted())" : "\(rows.formatted()) of \(total.formatted()) shown"
+    /// the total never reads lower than the rows already drawn. A search or kind filter has no cheap total, so it says how many are loaded, with "+" while more pages wait.
+    static func shownSummary(rows: Int, total: Int?, moreToLoad: Bool = false, short: Bool = false) -> String {
+        guard let known = total else {
+            let loaded = rows.formatted() + (moreToLoad ? "+" : "")
+            return short ? loaded : "\(loaded) shown"
+        }
+        let shownOf = max(known, rows)
+        return short ? "\(rows.formatted())/\(shownOf.formatted())" : "\(rows.formatted()) of \(shownOf.formatted()) shown"
+    }
+
+    /// The scroll bar only spans the rows loaded so far; this says how many more wait below and offers the jump to the last file.
+    static func moreBelowNote(loaded: Int, total: Int?) -> String? {
+        guard let total, total > loaded else { return total == nil ? "More files below · Load all" : nil }
+        return "\(loaded.formatted()) of \(total.formatted()) loaded · Load all"
+    }
+
+    /// "3 of 472" once the listing's size is known; "3 of 300+" while more pages remain unloaded and the size isn't.
+    static func previewPosition(index: Int, loaded: Int, moreToLoad: Bool, knownTotal: Int?) -> String {
+        let position = (index + 1).formatted()
+        guard moreToLoad else { return "\(position) of \(loaded.formatted())" }
+        if let knownTotal { return "\(position) of \(max(knownTotal, loaded).formatted())" }
+        return "\(position) of \(loaded.formatted())+"
+    }
+
+    /// The whole listing's size when it is the plain kind listing: a search, similarity seed or narrowed kind has no cheap total.
+    private var listingTotal: Int? {
+        guard similarSeed == nil, searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              kindFilter == nil || kindFilter == ReadStore.unreadableFilter else { return nil }
+        return shownTotal
     }
 
     /// Files the current listing draws from: unreadable files appear only under their own filter.
@@ -815,6 +992,18 @@ struct LibraryView: View {
     private var unreadableKind: [(label: String, value: String?)] {
         guard store.scopedUnreadableFiles > 0 || kindFilter == ReadStore.unreadableFilter else { return [] }
         return [(label: "Unreadable \(store.scopedUnreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
+    }
+
+    private var kindFilterLabel: String? {
+        switch kindFilter {
+        case "image": "Images"
+        case "video": "Videos"
+        case "doc": "Docs"
+        case "pdf": "PDFs"
+        case "audio": "Audio"
+        case "other": "Other"
+        default: nil
+        }
     }
 
     @ViewBuilder
@@ -836,7 +1025,7 @@ struct LibraryView: View {
                     }
                 } label: {
                     Text(k.label)
-                        .font(Theme.Font.body(12.5, active ? .semibold : .medium))
+                        .font(Theme.Font.body(12.5, active ? .semibold : .medium, fixed: true))
                         .foregroundStyle(active ? Theme.onGold : Theme.text2)
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)
@@ -844,7 +1033,7 @@ struct LibraryView: View {
                         .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
@@ -854,29 +1043,79 @@ struct LibraryView: View {
     // MARK: - Grid
 
     @ViewBuilder
+    private var listing: some View {
+        if layout == .list {
+            LibraryListTable(
+                rows: rows,
+                tagsByFile: tagsByFile,
+                selectMode: selectMode,
+                checkedIDs: Set(checkedFiles.keys),
+                selectedID: previewSelectedID ?? paneSelectedID,
+                refreshToken: pageActive ? tileRefreshToken : shownTileToken,
+                contentVersion: rowsEpoch,
+                scrollToTopToken: scrollToTopToken,
+                scrollToEndToken: scrollToEndToken,
+                textSize: ContentTextScale.shared.size,
+                offline: offlineRoots,
+                sort: sort,
+                onSort: { key in
+                    let next = sort.choosing(key)
+                    sortKeyRaw = next.key.rawValue
+                    sortAscending = next.ascending
+                },
+                onSelect: { paneSelectedID = $0.id },
+                onOpen: { openPreview($0) },
+                onToggleCheck: toggleCheck,
+                onFindSimilar: { similarSeed = $0 },
+                onNearEnd: { loadMore() },
+                onJumpToEnd: { jumpToEnd() },
+                onJumpToStart: { scrollToTopToken += 1 },
+                onClearSelection: { paneSelectedID = nil },
+                onRangeCheck: checkRange,
+                onCommandCheck: { row in selectMode = true; toggleCheck(row) },
+                onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
+        } else {
+            LibraryCollectionGrid(
+                rows: rows,
+                tagsByFile: tagsByFile,
+                selectMode: selectMode,
+                checkedIDs: Set(checkedFiles.keys),
+                selectedID: previewSelectedID ?? paneSelectedID,
+                refreshToken: pageActive ? tileRefreshToken : shownTileToken,
+                contentVersion: rowsEpoch,
+                scrollToTopToken: scrollToTopToken,
+                scrollToEndToken: scrollToEndToken,
+                textSize: ContentTextScale.shared.size,
+                offline: offlineRoots,
+                sort: sort,
+                onSelect: { paneSelectedID = $0.id },
+                onOpen: { openPreview($0) },
+                onToggleCheck: toggleCheck,
+                onFindSimilar: { similarSeed = $0 },
+                onNearEnd: { loadMore() },
+                onJumpToEnd: { jumpToEnd() },
+                onJumpToStart: { scrollToTopToken += 1 },
+                onClearSelection: { paneSelectedID = nil },
+                onRangeCheck: checkRange,
+                onCommandCheck: { row in selectMode = true; toggleCheck(row) },
+                onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
+        }
+    }
+
+    @ViewBuilder
     private var grid: some View {
-        LibraryCollectionGrid(
-            rows: rows,
-            tagsByFile: tagsByFile,
-            selectMode: selectMode,
-            checkedIDs: Set(checkedFiles.keys),
-            selectedID: previewSelectedID ?? paneSelectedID,
-            refreshToken: pageActive ? tileRefreshToken : shownTileToken,
-            contentVersion: rowsEpoch,
-            scrollToTopToken: scrollToTopToken,
-            textSize: ContentTextScale.shared.size,
-            offline: offlineRoots,
-            onSelect: { paneSelectedID = $0.id },
-            onOpen: { openPreview($0) },
-            onToggleCheck: toggleCheck,
-            onFindSimilar: { similarSeed = $0 },
-            onNearEnd: { loadMore() },
-            onClearSelection: { paneSelectedID = nil },
-            onRangeCheck: checkRange,
-            onCommandCheck: { row in selectMode = true; toggleCheck(row) },
-            onAtTopChange: { atTop in if gridAtTop != atTop { gridAtTop = atTop } })
+        listing
         .overlay(alignment: .bottom) {
-            if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
+            if loadingMore {
+                ProgressView().controlSize(.small).padding(.bottom, 12)
+            } else if canLoadMore, similarSeed == nil, let note = Self.moreBelowNote(loaded: rows.count, total: listingTotal) {
+                Button { jumpToEnd() } label: { Text(note) }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .background(Theme.surfaceBase, in: RoundedRectangle(cornerRadius: Theme.Radius.s))
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                    .padding(.bottom, 10)
+                    .help("Load the rest of the listing and scroll to its last file (End).")
+            }
         }
         .overlay(alignment: .top) {
             if newFilesWaiting {
@@ -888,7 +1127,7 @@ struct LibraryView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(Theme.spring, value: newFilesWaiting)
+        .animation(Theme.springStandard, value: newFilesWaiting)
         // One stable sheet. `isPresented` stays true across navigation so the
         // sheet keeps identity; the displayed file is driven by selectedID.
         .sheet(isPresented: Binding(
@@ -904,6 +1143,7 @@ struct LibraryView: View {
             FilePreviewSheet(siblings: previewSiblings,
                               indexByID: previewIndex,
                               selectedID: $previewSelectedID,
+                              moreToLoad: canLoadMore, knownTotal: listingTotal,
                               store: store, engine: engine,
                               onEdit: { editEpoch += 1; refreshBulkState() },
                               onNearEnd: { loadMore() })
@@ -913,7 +1153,10 @@ struct LibraryView: View {
     @ViewBuilder
     private var empty: some View {
         if store.scopedTotalFiles == 0 {
-            if scanActive {
+            if !store.countersAvailable {
+                EmptyStateView(icon: "hourglass", title: "Opening your library",
+                               message: "FileID is counting the files it has already read.")
+            } else if scanActive {
                 EmptyStateView(icon: "hourglass", title: "Reading your files",
                                message: "Files appear here as the scan reads them.")
             } else if store.totalFiles > 0 {
@@ -921,8 +1164,7 @@ struct LibraryView: View {
                                message: "Choose All locations in the folder menu at the top, or scan this location again.")
             } else if let url = pickedURL {
                 EmptyStateView(icon: "folder.badge.plus", title: "No files yet",
-                               message: "Scan \(url.lastPathComponent) to see its files here. Nothing is moved or changed.",
-                               primaryAction: (label: "Scan", run: { engine.startScan(rootURL: url) }))
+                               message: "Press Scan in the sidebar to read \(url.lastPathComponent) and see its files here. Nothing is moved or changed.")
             } else {
                 EmptyStateView(icon: "folder.badge.plus", title: "No files yet",
                                message: "Choose a folder for FileID to read. Nothing is moved or changed.",
@@ -940,7 +1182,8 @@ struct LibraryView: View {
                 EmptyStateView(
                     icon: "magnifyingglass",
                     title: "No matches for \u{201C}\(shownQuery)\u{201D}",
-                    message: "Nothing has that in its name, tags or text, and no picture matches it. Try other words."
+                    message: kindFilterLabel.map { "Nothing in \($0) has that in its name, tags or text, and no picture matches it. Try other words, or choose All." }
+                        ?? "Nothing has that in its name, tags or text, and no picture matches it. Try other words."
                 )
             } else {
                 EmptyStateView(
@@ -974,30 +1217,35 @@ struct LibraryView: View {
     }
 
     private func reload(firstPageOnly: Bool = false) {
-        // Off the MainActor: similarity + semantic search cosine-scan the full
-        // clip_embeddings table (O(N·512)) and the keyword query hits multiple
-        // tables plus a face join — multi-second on a 50k library, and the live
-        // scan re-fires this on every throttled batch. Run them on a background
-        // task via ReadStore's *Async twins and assign only the results on main.
-        // Latest-wins: cancel any in-flight reload so a slow query can never
-        // overwrite a newer one's results.
+        // Off the MainActor: similarity and semantic search scan clip_embeddings (O(N·512)) and keyword queries join several tables, which is multi-second on a 50k library. Latest-wins: cancel any in-flight reload.
         let seed = similarSeed
         let query = searchText
         if query.trimmingCharacters(in: .whitespacesAndNewlines) != shownQuery { showWeaker = false }
         let kind = kindFilter
         let encoderReady = CLIPModelInstaller.shared.textEncoderReady
-        let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
-        let want = sameListing && !firstPageOnly ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
+        let sort = self.sort
+        let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind && $2 == sort } == true
+        let plan = LibraryReload.plan(loaded: rows.count, sameListing: sameListing, firstPageOnly: firstPageOnly,
+                                      searching: !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, complete: !canLoadMore)
+        let want = plan.want
+        let loadedRows = plan.keepsTail ? rows : []
+        let loadedCursor = pageCursor, couldLoadMore = canLoadMore
         newFilesWaiting = false
         reloadTask?.cancel()
         loadMoreTask?.cancel()
         loadingMore = false
         visualSearchPending = false
+        #if DEBUG
+        let reloadBegan = ContinuousClock.now
+        #endif
         reloadTask = Task { @MainActor in
             defer { if !Task.isCancelled { visualSearchPending = false } }
             var newRows: [FileRow]
+            var newCursor: LibraryCursor?
             var pageable = false
             var summary: String?
+            var keptTail = false
+            var headCursor: LibraryCursor?
             var hidden = 0
             var problem: SearchProblem?
             if let seed {
@@ -1011,34 +1259,59 @@ struct LibraryView: View {
                     problem = Self.searchProblem(response, similar: true)
                 }
             } else {
-                newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
-                pageable = newRows.count == want
+                #if DEBUG
+                let clock = ContinuousClock(), began = clock.now
+                #endif
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter {
-                    guard !Task.isCancelled else { return }
+                let visualTask = trimmed.count >= 3 && encoderReady && kind != ReadStore.unreadableFilter
+                    ? Task { @MainActor in await visualHalf(of: trimmed) } : nil
+                let first = await store.filesPageAsync(limit: want, search: query, kindFilter: kind, sort: sort)
+                newRows = first.rows
+                newCursor = first.cursor
+                headCursor = first.cursor
+                pageable = newRows.count == want
+                if plan.keepsTail, pageable, let spliced = LibraryReload.splice(head: newRows, onto: loadedRows) {
+                    keptTail = true
+                    pageable = couldLoadMore
+                    newCursor = loadedCursor
+                    newRows = spliced
+                }
+                if let visualTask {
+                    guard !Task.isCancelled else { visualTask.cancel(); return }
                     rows = newRows
                     rowsEpoch &+= 1
                     visualSearchPending = true
-                    if let vector = await engine.embedTextQuery(trimmed), !Task.isCancelled {
-                        let response = await catalogSearch(query: trimmed, vector: vector)
+                    #if DEBUG
+                    let keywordMs = (clock.now - began).milliseconds
+                    #endif
+                    let half = await withTaskCancellationHandler { await visualTask.value } onCancel: { visualTask.cancel() }
+                    if let half, !Task.isCancelled {
+                        let response = half.response
+                        #if DEBUG
+                        if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: visual search [\(trimmed)] keyword \(keywordMs) ms embed \(half.embedMs) ms engine \(half.engineMs) ms total \((clock.now - began).milliseconds) ms\n".utf8)) }
+                        #endif
                         guard !Task.isCancelled else { return }
                         if let response, response.status == "ok" {
                             #if DEBUG
                             if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: search reply status=\(response.status) hits=\(response.hits.count) message=\(response.message ?? "nil")\n".utf8)) }
                             #endif
                             let keywordRows = newRows
-                            let decision = LibrarySearchOutcome.decide(message: response.message, keywordCount: keywordRows.count, showWeaker: showWeaker)
                             let engineRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                            let message = kind == nil ? response.message
+                                : LibrarySearchOutcome.narrowed(message: response.message, hitIDs: response.hits.map(\.fileID),
+                                                                keptIDs: Set(engineRows.map(\.id))) ?? response.message
+                            let decision = LibrarySearchOutcome.decide(message: message, keywordCount: keywordRows.count, showWeaker: showWeaker)
                             switch decision.source {
                             case .engine:
                                 let known = Set(engineRows.map(\.id))
-                                newRows = engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : [])
+                                newRows = LibrarySearchOutcome.promotingNameMatches(engineRows + (decision.addKeywordRows ? keywordRows.filter { !known.contains($0.id) } : []), query: trimmed)
                             case .keyword:
                                 newRows = keywordRows
                             }
                             pageable = false
                             summary = decision.label
                             hidden = decision.hiddenWeaker
+                            problem = Self.pausedSearchProblem(response.message)
                         } else {
                             problem = Self.searchProblem(response, similar: false)
                         }
@@ -1046,23 +1319,74 @@ struct LibraryView: View {
                 }
             }
             guard !Task.isCancelled else { return }
-            // Batch chip tags for every visible tile in one SQL query — was
-            // N+1 across the grid before. Off-main too (same read-store scan).
-            let ids = newRows.map { $0.id }
+            // One chip-tag query for every visible tile, off-main.
+            let headCount = keptTail ? want : newRows.count
+            let ids = Array(newRows.prefix(Self.tagChunk).map { $0.id })
+            let laterIDs = newRows[min(Self.tagChunk, headCount)..<headCount].map { $0.id }
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
             guard !Task.isCancelled else { return }
             if rows.isEmpty { gridAtTop = true }
             rows = newRows
-            tagsByFile = tags
+            // The file counts lag the listing mid-scan: ask for them again so the page header agrees with the grid.
+            if LibraryCounters.needsRefresh(isSimilaritySeed: seed != nil, kind: kind, query: query, listedRows: newRows.count, scopedTotalFiles: store.scopedTotalFiles) { store.refreshCounters() }
+            if keptTail { tagsByFile.merge(tags) { _, new in new } } else { tagsByFile = tags }
             rowsEpoch &+= 1
             canLoadMore = pageable
+            pageCursor = newCursor
             visualSummary = summary
             hiddenWeaker = hidden
             shownQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
             searchProblem = problem
-            listedQuery = seed == nil ? (query, kind) : nil
+            listedQuery = seed == nil ? (query, kind, sort) : nil
+            #if DEBUG
+            if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: reload showed \(rows.count) rows in \((ContinuousClock.now - reloadBegan).milliseconds) ms\n".utf8)) }
+            #endif
+            if !laterIDs.isEmpty { await fillTags(for: laterIDs, query: query, kind: kind, sort: sort) }
+            if keptTail { await recheckTail(after: headCount, head: Array(newRows.prefix(headCount)), headCursor: headCursor, query: query, kind: kind, sort: sort) }
+            #if DEBUG
+            if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: reload settled with \(rows.count) rows after \((ContinuousClock.now - reloadBegan).milliseconds) ms\n".utf8)); SelfShot.jumpFinished = true }
+            #endif
+        }
+    }
+
+    /// The rows past a refreshed head were loaded before the refresh: check them against the catalog by id in the background, then swap the fresh copies in with one update. A listing whose size no longer matches took in rows somewhere in that tail, so it falls back to the head and pages on from there.
+    private func recheckTail(after headCount: Int, head: [FileRow], headCursor: LibraryCursor?, query: String, kind: String?, sort: LibrarySort) async {
+        let tail = Array(rows.dropFirst(headCount))
+        var fresh: [Int64: FileRow] = [:]
+        var start = 0
+        while start < tail.count {
+            let chunk = tail[start..<min(start + LibraryReload.recheckChunk, tail.count)].map(\.id)
+            start += chunk.count
+            fresh.merge(await store.listedRowsAsync(ids: chunk, kindFilter: kind)) { first, _ in first }
+            guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort else { return }
+        }
+        guard let size = await store.listingCountAsync(kindFilter: kind), !Task.isCancelled,
+              query == searchText, kind == kindFilter, sort == self.sort else { return }
+        #if DEBUG
+        if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: reload tail re-check of \(tail.count) rows done, listing \(size)\n".utf8)) }
+        #endif
+        let updated = LibraryReload.applying(fresh, checked: Set(tail.map(\.id)), to: rows)
+        if updated.count != size, !canLoadMore {
+            rows = head
+            canLoadMore = true
+            pageCursor = headCursor
+            rowsEpoch &+= 1
+        } else if updated != rows {
+            rows = updated
+            rowsEpoch &+= 1
+        }
+    }
+
+    private func resumeVisualSearch() {
+        Task { @MainActor in
+            let listing = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "jobs"), timeout: 10)
+            guard let job = listing?.jobs.first(where: { $0.kind == "catalogIndex" && $0.state == "paused" }) else { return }
+            let resumed = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "resumeJob", jobID: job.id), timeout: 10)
+            guard resumed?.status == "ok" else { return }
+            searchProblem = nil
+            reload()
         }
     }
 
@@ -1072,7 +1396,7 @@ struct LibraryView: View {
         for _ in 0..<120 {
             let request = CatalogRequest(requestID: UUID().uuidString, action: "search", query: query, fileID: seedID,
                                          searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
-                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: 60, rootID: rootID, resultScope: "files")
+                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: LibrarySearchOutcome.resultLimit, rootID: rootID, resultScope: "files")
             guard let response = await TakeRequests.send(engine, request, timeout: 10) else { return nil }
             if response.status != "indexing" { return response }
             do { try await Task.sleep(for: .seconds(1)) } catch { return nil }
@@ -1080,28 +1404,101 @@ struct LibraryView: View {
         return nil
     }
 
-    private func loadMore() {
+    /// The picture half of a search: the query's CLIP vector, then the engine's visual search. It starts beside the keyword listing so the two run together.
+    private func visualHalf(of text: String) async -> (response: CatalogResponse?, embedMs: Int, engineMs: Int)? {
+        let clock = ContinuousClock(), began = clock.now
+        guard let vector = await engine.embedTextQuery(text), !Task.isCancelled else { return nil }
+        let embedded = clock.now
+        let response = await catalogSearch(query: text, vector: vector)
+        return (response, (embedded - began).milliseconds, (clock.now - embedded).milliseconds)
+    }
+
+    private func loadMore() { loadPages(untilEnd: false) }
+
+    /// End and Command-Down: the rest of the listing loads in big pages, tags afterwards, and the view lands on the last row.
+    private func jumpToEnd() {
+        guard canLoadMore, similarSeed == nil else {
+            scrollToEndToken &+= 1
+            #if DEBUG
+            SelfShot.jumpFinished = true
+            #endif
+            return
+        }
+        loadMoreTask?.cancel()
+        loadingMore = false
+        loadPages(untilEnd: true)
+    }
+
+    private func loadPages(untilEnd: Bool) {
         guard canLoadMore, !loadingMore, similarSeed == nil else { return }
         loadingMore = true
-        let offset = rows.count, query = searchText, kind = kindFilter
+        let query = searchText, kind = kindFilter, sort = self.sort
         loadMoreTask = Task { @MainActor in
             defer { if !Task.isCancelled { loadingMore = false } }
-            let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind)
-            guard !Task.isCancelled, query == searchText, kind == kindFilter, offset == rows.count else { return }
-            let ids = page.map(\.id)
-            let tags = await Task.detached(priority: .userInitiated) { [store] in
-                store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
+            #if DEBUG
+            let clock = ContinuousClock(), began = clock.now, startRows = rows.count
+            #endif
+            var untagged: [Int64] = []
+            repeat {
+                let offset = rows.count, cursor = pageCursor
+                let limit = untilEnd ? LibraryPageSizes.jump : LibraryPageSizes.scroll(loaded: offset)
+                #if DEBUG
+                let pageStart = clock.now
+                #endif
+                let loaded = await store.filesPageAsync(offset: cursor == nil ? offset : 0, limit: limit, after: cursor, search: query, kindFilter: kind, sort: sort)
+                let page = loaded.rows
+                #if DEBUG
+                let queried = clock.now
+                #endif
+                guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort, offset == rows.count else { return }
+                pageCursor = loaded.cursor ?? cursor
+                var tags: [Int64: [String]] = [:]
+                if untilEnd {
+                    untagged += page.map(\.id)
+                } else {
+                    let ids = page.map(\.id)
+                    tags = await Task.detached(priority: .userInitiated) { [store] in
+                        store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
+                    }.value
+                    guard !Task.isCancelled, offset == rows.count else { return }
+                }
+                let known = Set(rows.map(\.id))
+                let fresh = page.filter { !known.contains($0.id) }
+                rows.append(contentsOf: fresh)
+                tagsByFile.merge(tags) { _, new in new }
+                rowsEpoch &+= 1
+                if previewSelectedID != nil {
+                    setPreviewSiblings(previewSiblings + fresh.filter { previewIndex[$0.id] == nil })
+                }
+                canLoadMore = page.count == limit
+                #if DEBUG
+                if SelfShot.isActive, untilEnd { FileHandle.standardError.write(Data("self-shot: page of \(page.count) at \(offset): query \((queried - pageStart).milliseconds) ms, append \((clock.now - queried).milliseconds) ms\n".utf8)) }
+                #endif
+            } while untilEnd && canLoadMore
+            if untilEnd {
+                scrollToEndToken &+= 1
+                #if DEBUG
+                SelfShot.jumpFinished = true
+                if SelfShot.isActive { FileHandle.standardError.write(Data("self-shot: jump to end loaded \(rows.count - startRows) more rows, \(rows.count) in all, in \((clock.now - began).milliseconds) ms\n".utf8)) }
+                #endif
+                await fillTags(for: untagged, query: query, kind: kind, sort: sort)
+            }
+        }
+    }
+
+    /// Chips for rows that arrived without their tags, from the bottom of the list up so the rows on screen fill first.
+    private func fillTags(for ids: [Int64], query: String, kind: String?, sort: LibrarySort) async {
+        var end = ids.count
+        while end > 0 {
+            let start = max(0, end - Self.tagChunk)
+            let chunk = Array(ids[start..<end])
+            end = start
+            let tags = await Task.detached(priority: .utility) { [store] in
+                store.topVisionTagsBulk(forFileIDs: chunk, limit: 4)
             }.value
-            guard !Task.isCancelled, offset == rows.count else { return }
-            let known = Set(rows.map(\.id))
-            let fresh = page.filter { !known.contains($0.id) }
-            rows.append(contentsOf: fresh)
+            guard !Task.isCancelled, query == searchText, kind == kindFilter, sort == self.sort else { return }
             tagsByFile.merge(tags) { _, new in new }
             rowsEpoch &+= 1
-            if previewSelectedID != nil {
-                setPreviewSiblings(previewSiblings + fresh.filter { previewIndex[$0.id] == nil })
-            }
-            canLoadMore = page.count == Self.pageSize
         }
     }
 }
@@ -1109,13 +1506,20 @@ struct LibraryView: View {
 // MARK: - Preview sheet
 //
 // Full-bleed preview + metadata panel + tags. Reveal-in-Finder.
-private struct FilePreviewSheet: View {
+struct FilePreviewSheet: View {
+    /// The sheet must fit inside the smallest window; the 340-pt info panel still leaves the picture room.
+    static let minimumWidth = WindowSizes.minimum.width - 60
     let siblings: [FileRow]              // for prev/next arrow nav
     /// Position of each sibling, built once when the list changes.
     let indexByID: [Int64: Int]
     @Binding var selectedID: Int64?
+    /// True while the grid has more pages than the siblings loaded so far.
+    let moreToLoad: Bool
+    /// The listing's real size when the library already knows it.
+    let knownTotal: Int?
     let store: ReadStore
     let engine: EngineClient
+    private var offlineRoots: OfflineRoots { OfflineRoots(engine.libraryRoots) }
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
     /// made in this sheet refreshes the underlying grid tile even mid-scan.
     var onEdit: () -> Void = {}
@@ -1205,7 +1609,7 @@ private struct FilePreviewSheet: View {
             await StyledNames.learn(engine: engine, shown: pending.rows, renamed: result.renamed, naming: pending.naming)
             renaming = false
             if result.renamed.isEmpty {
-                ToastCenter.shared.show(result.firstError.map { "The file wasn't renamed: \($0)" } ?? "The file wasn't renamed. Try again in a moment.")
+                ToastCenter.shared.show(result.firstError.map { "The file wasn’t renamed: \($0)" } ?? "The file wasn’t renamed. Try again in a moment.")
             } else {
                 onEdit()
                 dismiss()
@@ -1226,19 +1630,16 @@ private struct FilePreviewSheet: View {
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            .animation(Theme.spring, value: showInfo)
+            .animation(Theme.springStandard, value: showInfo)
         }
-        .frame(minWidth: 1040, idealWidth: 1280, minHeight: 680, idealHeight: 820)
-        .background(Color(hex: 0x0C0C0E), ignoresSafeAreaEdges: [])
+        .frame(minWidth: FilePreviewSheet.minimumWidth, idealWidth: 1280, minHeight: 680, idealHeight: 820)
+        .background(Theme.canvas, ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
         .focusable()
         .focusEffectDisabled()
         .focused($keyFocus)
-        // Grab key focus when the sheet appears so the arrow handlers fire
-        // without a click; reclaim it whenever the tag field gives focus up.
-        // The brief defer lets the sheet enter the responder hierarchy first —
-        // setting focus synchronously in .task doesn't reliably stick on a
-        // freshly presented sheet.
+        // Takes key focus so the arrow handlers fire without a click, and reclaims it when the
+        // tag field lets go. The short delay lets the sheet join the responder chain first.
         .task {
             try? await Task.sleep(for: .milliseconds(50))
             keyFocus = true
@@ -1258,16 +1659,13 @@ private struct FilePreviewSheet: View {
             step(1); return .handled
         }
         .task(id: "\(file.id):\(file.vlmAnalyzedAt?.timeIntervalSince1970 ?? 0)") {
-            // Generate a larger preview for the sheet (640px). Keyed on
-            // file id and analysis timestamp so it re-fires on sibling navigation
-            // and after Deep Analyze updates the current row. Clear first so the
-            // spinner shows and the prior preview never bleeds into the new state.
+            // Larger preview, regenerated on navigation and after Deep Analyze updates the
+            // row. Cleared first so the previous file's image never shows.
             preview = nil
             previewFailed = false
             tags = []
             people = []
-            // Read DB tags off the main actor (detached read doesn't inherit
-            // `.task` cancellation; drop it once `.task(id:)` superseded us — R7).
+            // A detached read doesn't inherit `.task` cancellation, so it is re-checked below.
             let fileID = file.id
             let loadedTags = await Task.detached { [store] in
                 store.tags(forFileID: fileID)
@@ -1277,12 +1675,11 @@ private struct FilePreviewSheet: View {
             let loadedPeople = await Task.detached { [store] in store.personNames(forFileID: fileID) }.value
             guard !Task.isCancelled else { return }
             people = loadedPeople
-            var image = file.kind == "image" ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
+            let offline = offlineRoots.isOffline(file.pathText)
+            var image = file.kind == "image" && !offline ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400) : nil
             if image == nil { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 1600) }
-            // ThumbnailService doesn't honor Task cancellation, so a slow load for
-            // the prior file (network volume) can resolve AFTER the user arrowed on;
-            // drop it once `.task(id:)` superseded us, else it overwrites the current
-            // file's image. Mirrors the FinderTagsEditor read guard.
+            if image == nil, offline { image = await ThumbnailService.shared.thumbnail(for: file.url, size: 256) }
+            // ThumbnailService ignores cancellation; drop a slow load for a file the user already left.
             guard !Task.isCancelled else { return }
             preview = image
             previewFailed = image == nil
@@ -1295,25 +1692,26 @@ private struct FilePreviewSheet: View {
                 Text(file.url.lastPathComponent)
                     .font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
                     .lineLimit(1).truncationMode(.middle)
-                Text(file.url.deletingLastPathComponent().path)
-                    .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
-                    .lineLimit(1).truncationMode(.head)
+                PathLabel(path: file.url.deletingLastPathComponent().path, font: Theme.Font.mono(11), color: Theme.text3)
             }
             Spacer(minLength: 12)
             if siblings.count > 1, let index = siblingIndex {
                 HStack(spacing: 2) {
                     iconButton("chevron.left", "Previous file (←)") { step(-1) }.disabled(index <= 0)
-                    Text("\(index + 1) of \(siblings.count)")
+                    Text(LibraryView.previewPosition(index: index, loaded: siblings.count, moreToLoad: moreToLoad, knownTotal: knownTotal))
                         .font(Theme.Font.body(12.5)).monospacedDigit().foregroundStyle(Theme.text2)
                         .frame(minWidth: 70)
                     iconButton("chevron.right", "Next file (→)") { step(1) }.disabled(index >= siblings.count - 1)
                 }
             }
-            if file.kind == "image" { DeepAnalyzeButton(engine: engine, file: file) }
+            let offline = offlineRoots.isOffline(file.pathText)
+            if file.kind == "image" { DeepAnalyzeButton(engine: engine, file: file).disabled(offline) }
             Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Label("Finder", systemImage: "folder") }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28)).help("Show in Finder")
+                .buttonStyle(DSSecondaryButtonStyle(height: 28)).disabled(offline)
+                .help(offline ? "Reconnect the drive to show this file in Finder" : "Show in Finder")
             Button { NSWorkspace.shared.open(file.url) } label: { Label("Open", systemImage: "arrow.up.right.square") }
-                .buttonStyle(DSSecondaryButtonStyle(height: 28)).help("Open in the default app")
+                .buttonStyle(DSSecondaryButtonStyle(height: 28)).disabled(offline)
+                .help(offline ? "Reconnect the drive to open this file" : "Open in the default app")
             iconButton("sidebar.right", showInfo ? "Hide info (⌘I)" : "Show info (⌘I)") { showInfo.toggle() }
                 .keyboardShortcut("i", modifiers: .command)
             iconButton("xmark", "Close preview (Esc)") { dismiss() }
@@ -1338,6 +1736,17 @@ private struct FilePreviewSheet: View {
     @ViewBuilder
     private func canvas(_ file: FileRow) -> some View {
         Group {
+            if offlineRoots.isOffline(file.pathText) {
+                VStack(spacing: 14) {
+                    if let preview {
+                        Image(nsImage: preview).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)).padding(.horizontal, 28).opacity(0.7)
+                    }
+                    Label("This file is offline", systemImage: "externaldrive.badge.xmark").font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text2)
+                    MetaText("Reconnect the drive to see the full preview. Its tags, faces and descriptions are kept.")
+                        .multilineTextAlignment(.center).padding(.horizontal, 28)
+                }
+            } else {
             switch file.kind {
             case "video": VideoPreview(url: file.url)
             case "audio": AudioPreview(url: file.url)
@@ -1360,6 +1769,7 @@ private struct FilePreviewSheet: View {
                 }
                 .animation(Theme.quick, value: preview == nil)
             default: UniversalPreview(url: file.url)
+            }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1396,6 +1806,7 @@ private struct FilePreviewSheet: View {
                                 .buttonStyle(.dsSecondary)
                                 .disabled(renaming)
                                 .help("Renames the file using your Name style, after you confirm. Undo last rename at the top of Library puts the old name back.")
+                                .readOnlyGated(engine.readOnlyGate.reasonIfAll([file.url]))
                             }
                             .padding(10)
                             .background(Theme.gold.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
@@ -1413,7 +1824,7 @@ private struct FilePreviewSheet: View {
                         }
                     }
                 }
-                FinderTagsEditor(file: file, store: store, isFocused: $tagFieldFocused, onEdit: onEdit)
+                FinderTagsEditor(file: file, store: store, readOnlyReason: engine.readOnlyGate.reasonIfAll([file.url]), isFocused: $tagFieldFocused, onEdit: onEdit)
                 DisclosureGroup {
                     VStack(spacing: 0) {
                         DetailRow("Path", file.pathText)
@@ -1455,7 +1866,7 @@ private struct DetailRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
+                    Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(70), alignment: .leading)
                     Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
                     Spacer(minLength: 0)
                 }
@@ -1470,8 +1881,12 @@ private struct FileDetailRows: View {
     let file: FileRow
     let people: [String]
     var body: some View {
-        DetailRow("Kind", FileKindLabel.title(file.kind) + " · " + file.extension.uppercased())
-        if file.failed { DetailRow("Status", "Couldn't be read, so it has no tags, faces or text. It may be damaged.") }
+        DetailRow("Kind", FileKindLabel.detail(kind: file.kind, fileExtension: file.extension))
+        if file.failed {
+                    DetailRow("Status", ReadStore.isTimedOut(errorMessage: file.errorMessage)
+                        ? "FileID ran out of time reading this file, so it has no tags, faces or text yet. It isn’t damaged."
+                        : "Couldn’t be read, so it has no tags, faces or text. It may be damaged.")
+                }
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
         if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }
@@ -1482,14 +1897,11 @@ private struct FileDetailRows: View {
 
 // MARK: - Finder tags editor
 
-/// Inline tag editor — reads the file's current macOS Finder tags
-/// (URLResourceKey.tagNamesKey), shows them as pills, lets the user
-/// add new tags via a text field. Writes go straight to the file via
-/// TagWriter so they show up everywhere macOS exposes Finder tags
-/// (Finder sidebar, Spotlight, Smart Folders).
+/// Inline tag editor: reads and writes the file's Finder tags via TagWriter, so changes show everywhere macOS exposes them.
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
+    var readOnlyReason: String?
     /// Bound to the preview sheet's tag-field focus so it can suppress
     /// arrow-key navigation while the user is typing a tag.
     var isFocused: FocusState<Bool>.Binding
@@ -1499,13 +1911,11 @@ private struct FinderTagsEditor: View {
     @State private var tags: [String] = []
     @State private var draft: String = ""
     @State private var error: String?
-    // Serial chain for off-main tag edits. addTags/removeTags are
-    // non-atomic read-modify-write on the xattr, so two quick edits must NOT run
-    // concurrently (one would clobber the other). Each edit awaits the previous.
+    // Serial chain for off-main tag edits: addTags/removeTags are a non-atomic xattr
+    // read-modify-write, so each edit awaits the previous one.
     @State private var tagEditChain: Task<Void, Never>?
-    // The file currently displayed. `file` is a by-value `let` captured stale in
-    // the edit closure; this @State reads live, so a write that finishes after the
-    // user arrowed to another file knows not to apply its result to that file.
+    // The file on screen now. `file` is captured by value in the edit closure, so a write
+    // finishing after the user moved on checks this instead.
     @State private var displayedFileID: Int64?
 
     var body: some View {
@@ -1528,32 +1938,28 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                         .font(Theme.Font.body(12))
                         .focused(isFocused)
                     Button("Add", action: addDraft)
                         .buttonStyle(DSSecondaryButtonStyle(height: 30))
                         .keyboardShortcut(.defaultAction)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .readOnlyGated(readOnlyReason)
                 }
+                if let readOnlyReason { MetaText(readOnlyReason, size: 11) }
                 if let e = error {
-                    Text(e).font(Theme.Font.body(11)).foregroundStyle(Theme.warning)
+                    Text(e).font(Theme.Font.body(11.5)).foregroundStyle(Theme.warning)
                 }
             }
         
         .task(id: file.id) {
-            // Record the now-displayed file so a still-in-flight tag write for the
-            // prior file can detect that the user navigated away (see runTagEdit).
+            // Lets an in-flight tag write for the previous file see the user moved on (see runTagEdit).
             displayedFileID = file.id
-            // Read xattr off the main thread — for files on slow / network
-            // volumes the read can stall the preview sheet for hundreds of
-            // milliseconds while the user is trying to scrub through.
+            // Off the main thread: an xattr read on a network volume can stall the sheet.
             let url = file.url
             let result = await Task.detached { TagWriter.readTags(at: url) }.value
-            // The detached read doesn't inherit `.task` cancellation; if the
-            // user arrowed to another file mid-read, a slow stale read on a
-            // network volume could land after the newer one and overwrite it.
-            // Drop it once `.task(id:)` is superseded.
+            // A detached read ignores `.task` cancellation; drop a stale result so it cannot overwrite a newer file's tags.
             guard !Task.isCancelled else { return }
             tags = result
             error = nil
@@ -1573,11 +1979,7 @@ private struct FinderTagsEditor: View {
         runTagEdit { try TagWriter.removeTags([tag], at: $0) }
     }
 
-    /// Run a non-atomic xattr read-modify-write OFF the main
-    /// thread (slow/network volumes can stall the sheet) while SERIALIZING edits
-    /// through `tagEditChain` so two quick taps can't interleave their RMW and
-    /// lose one. Each edit awaits the previous, then does its write on a detached
-    /// task, then assigns on the main actor.
+    /// Runs the non-atomic xattr read-modify-write off the main thread, serialised through `tagEditChain` so two quick taps can't lose an edit.
     private func runTagEdit(_ write: @escaping @Sendable (URL) throws -> [String]) {
         let url = file.url
         let targetID = file.id
@@ -1616,14 +2018,13 @@ private struct FinderTagsEditor: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text3)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Remove this tag")
             .accessibilityLabel("Remove this tag")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.15)))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .dsBannerSurface(fill: Theme.gold.opacity(0.15), stroke: Theme.gold.opacity(0.3))
         .foregroundStyle(Theme.gold)
     }
 }
@@ -1671,7 +2072,9 @@ private struct InlineMediaPlayer: View {
             } else if failed {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle").font(.system(size: 28)).foregroundStyle(Theme.warning)
-                    Text("This file can't be played on this Mac.").font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                    Text(isAudio ? "This file can’t be played on this Mac." : "This video can’t be played on this Mac, so FileID has no preview of it.")
+                        .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                        .multilineTextAlignment(.center)
                 }
             } else {
                 ProgressView().controlSize(.small)
@@ -1700,7 +2103,7 @@ private struct PDFPreview: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            Theme.well
             if let pageImage {
                 Image(nsImage: pageImage)
                     .resizable()
@@ -1720,7 +2123,7 @@ private struct PDFPreview: View {
         .task(id: url) {
             // Off the main thread — PDFDocument open + page render can
             // cost real time on a big PDF.
-            if let data = await Task.detached(priority: .userInitiated) { () -> Data? in
+            if let data = await Task.detached(priority: .userInitiated, operation: { () -> Data? in
                 guard let doc = PDFDocument(url: url),
                       let page = doc.page(at: 0) else { return nil }
                 let bounds = page.bounds(for: .mediaBox)
@@ -1731,7 +2134,7 @@ private struct PDFPreview: View {
                     height: bounds.height * scale
                 ), for: .mediaBox)
                 return img.tiffRepresentation
-            }.value {
+            }).value {
                 pageImage = NSImage(data: data)
             }
         }
@@ -1745,7 +2148,7 @@ private struct UniversalPreview: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            Theme.well
             AsyncThumbnail(url: url, size: 1024, contentMode: .fit) {
                 VStack(spacing: 10) {
                     Image(systemName: FileTypes.symbolName(forExtension: url.pathExtension))
@@ -1755,7 +2158,7 @@ private struct UniversalPreview: View {
                         .font(Theme.Font.body(13.5))
                         .lineLimit(1).truncationMode(.middle)
                     Text("Open in default app for full preview")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
             }
@@ -1781,7 +2184,7 @@ struct FlowLayout: Layout {
             rowHeight = max(rowHeight, s.height)
         }
         height += rowHeight
-        return CGSize(width: maxWidth, height: height)
+        return CGSize(width: proposal.width ?? max(0, width - spacing), height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -1824,11 +2227,12 @@ private struct LibrarySelectedPane: View {
                     Spacer()
                     Button(action: onClose) {
                         Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
-                            .frame(width: 22, height: 22)
+                            .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget)
                     }
                     .buttonStyle(.dsRow)
                     .keyboardShortcut(pageActive ? .cancelAction : nil)
                     .help("Close details")
+                    .accessibilityLabel("Close details")
                 }
                 ZStack {
                     Color.black.opacity(0.35)
@@ -1842,24 +2246,28 @@ private struct LibrarySelectedPane: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
                 .onTapGesture(count: 2, perform: onOpen)
+                .help("Double-click to open the full preview")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Preview of \(row.url.lastPathComponent)")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction(named: "Open full preview", onOpen)
+                .accessibilityAction(.default, onOpen)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(row.url.lastPathComponent)
                         .font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
                         .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                    Text(row.url.deletingLastPathComponent().path)
-                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
-                        .lineLimit(1).truncationMode(.head)
+                    PathLabel(path: row.url.deletingLastPathComponent().path, font: Theme.Font.mono(11), color: Theme.text3)
                 }
 
                 if offline {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         StatusPill(text: "OFFLINE", color: Theme.warning)
-                        MetaText("Its drive or folder isn't connected. Tags and descriptions are kept.", size: 11.5)
+                        MetaText("Its drive or folder isn’t connected. Tags and descriptions are kept.", size: 11.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Offline. Its drive or folder isn't connected. Tags and descriptions are kept.")
+                    .accessibilityLabel("Offline. Its drive or folder isn’t connected. Tags and descriptions are kept.")
                     .transition(.opacity)
                 }
 
@@ -1905,7 +2313,7 @@ private struct LibrarySelectedPane: View {
                         .help("Full preview with tags, the suggested name and Describe Files (or double-click the tile)")
                     HStack(spacing: 6) {
                         if row.kind == "image" || row.kind == "video" {
-                            Button(action: onFindSimilar) { Text("Similar").lineLimit(1).frame(maxWidth: .infinity) }
+                            Button(action: onFindSimilar) { Text("Find similar").lineLimit(1).frame(maxWidth: .infinity) }
                                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
                                 .help("Find visually similar files")
                         }
@@ -1953,4 +2361,8 @@ private struct PendingPreviewRename {
         return "\(oldName) → \(newName)"
             + (others > 0 ? "\n\(others.formatted()) matching file\(others == 1 ? "" : "s") shot with it \(others == 1 ? "is" : "are") renamed to match." : "")
     }
+}
+
+extension Duration {
+    var milliseconds: Int { Int((Double(components.seconds) * 1000 + Double(components.attoseconds) / 1e15).rounded()) }
 }

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import FileIDShared
+import FileIDModelInfo
 
 /// Files attached to the next chat question ("12 selected photos").
 struct ChatScope: Equatable {
@@ -20,14 +21,14 @@ struct ChatScope: Equatable {
         return ChatScope(fileIDs: unique, label: "\(unique.count) selected \(noun(kinds, count: unique.count))")
     }
 
-    /// Chosen answer files, labelled by their kind (photos unless a file plays).
+    /// Chosen answer files, labelled by their kind (photo, video, or plain file).
     static func selected(_ ids: [Int64], from hits: [CatalogHit]) -> ChatScope? {
         let paths = Dictionary(hits.map { ($0.fileID, $0.path) }, uniquingKeysWith: { a, _ in a })
         return selected(ids, kinds: ids.map { kind(paths[$0] ?? "") })
     }
 
     static func kind(_ path: String) -> String {
-        MediaPlayback.extensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) ? "video" : "image"
+        FileTypes.kind(forExtension: URL(fileURLWithPath: path).pathExtension).rawValue
     }
 
     /// The matches of a scoped answer, which become the scope of the next question.
@@ -58,14 +59,14 @@ struct ChatScopeChip: View {
             Text(scope.label).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
             Button(action: onRemove) {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.text2)
-                    .frame(width: 18, height: 18)
+                    .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget)
             }
             .buttonStyle(DSBareButtonStyle(radius: 9))
             .help("Ask about the whole library again")
             .accessibilityLabel("Remove \(scope.label) from the question")
         }
-        .padding(.leading, 9).padding(.trailing, 4)
-        .frame(height: 26)
+        .padding(.leading, 9).padding(.trailing, 0)
+        .frame(height: Theme.Metrics.hitTarget)
         .background(Theme.gold.opacity(0.12), in: Capsule())
         .overlay(Capsule().stroke(Theme.gold.opacity(0.5), lineWidth: 1))
         .accessibilityElement(children: .contain)
@@ -133,7 +134,7 @@ struct SelectionResultsStrip: View {
                 .disabled(target.count < 2)
                 .help(target.count < 2 ? "Choose at least two files" : "Save these as a group in Best Takes")
             Button(chosen.count == hits.count ? "Clear" : "Select all") {
-                withAnimation(Theme.springStandard) { chosen = chosen.count == hits.count ? [] : Set(hits.map(\.fileID)) }
+                withAnimation(Theme.spring) { chosen = chosen.count == hits.count ? [] : Set(hits.map(\.fileID)) }
             }
             .buttonStyle(.dsGhost)
             .accessibilityLabel(chosen.count == hits.count ? "Clear the selection" : "Select every file in this answer")
@@ -141,7 +142,7 @@ struct SelectionResultsStrip: View {
     }
 
     private func toggle(_ id: Int64) {
-        withAnimation(Theme.springStandard) { if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) } }
+        withAnimation(Theme.spring) { if chosen.contains(id) { chosen.remove(id) } else { chosen.insert(id) } }
     }
 }
 

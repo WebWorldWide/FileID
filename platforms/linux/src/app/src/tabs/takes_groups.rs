@@ -1,8 +1,5 @@
-// Manual Best Takes groups (DESIGN_V3_PORT "Best Takes", manual groups; macOS
-// TakeWorkbench): YOUR GROUPS, MAKE A GROUP BY HAND with clip search and Find
-// related, the group editor (Ctrl+S saves), the scoring job, the
-// recommendation and the take cards with Met / Missed / Unclear / Prefer /
-// Undo review. Lives inside the Best Takes page (takes.rs).
+// Manual Best Takes groups: the group editor, scoring job, recommendation and take cards.
+// Lives inside the Best Takes page (takes.rs).
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -108,7 +105,6 @@ fn field_row(label: &str, field: &gtk::Entry) -> gtk::Box {
 
 impl Manual {
     pub(super) fn new(candidates: Vec<CatalogHit>) -> Self {
-        // ── Pane sections (below POSSIBLE GROUPS) ──────────────────────────
         let pane = v3::vbox(2);
         pane.append(&soft_hairline());
         let events_header = v3::section("YOUR GROUPS · 0");
@@ -150,7 +146,6 @@ impl Manual {
         footer.append(&undo_delete);
         footer.set_visible(false);
 
-        // ── Page: group panel, scoring job, recommendation, take cards ────
         let body = v3::vbox(16);
         body.add_css_class("v3-page-pad");
         let panel = v3::panel("New group");
@@ -543,7 +538,6 @@ impl Manual {
         self.render_editor();
     }
 
-    // ── Rendering ─────────────────────────────────────────────────────────
 
     fn render_events(&self, ui: &Rc<Ui>) {
         v3::clear(&self.events_list);

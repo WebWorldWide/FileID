@@ -2,12 +2,8 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Files attached to the next chat question ("12 selected photos").</summary>
 internal sealed record ChatScope(IReadOnlyList<long> FileIDs, string Label);
 
-/// <summary>Exact-match questions over selected files (macOS <c>ChatScope</c> and
-/// <c>SelectionResultsStrip</c>): the scope label, the narrowed scope after an
-/// answer, and what the strip's buttons act on.</summary>
 internal static class ChatSelectionPolicy
 {
     public const int MaxFiles = 2000;
@@ -38,7 +34,6 @@ internal static class ChatSelectionPolicy
 
     public static bool HasResults(IReadOnlyList<CatalogHit> hits) => hits.Any(hit => hit.Match is not null);
 
-    /// <summary>The chosen tiles, or every match when none are chosen (every file when there are no matches).</summary>
     public static IReadOnlyList<long> Target(IReadOnlyList<CatalogHit> hits, IReadOnlySet<long> chosen)
     {
         if (chosen.Count > 0) return hits.Select(hit => hit.FileID).Where(chosen.Contains).ToArray();

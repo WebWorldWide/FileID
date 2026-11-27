@@ -1,13 +1,9 @@
-//! Skips a clustering pass when nothing it reads has changed since the last
-//! pass that finished. The pass re-runs after every scan; on an unchanged
-//! library it would redo minutes of work to arrive where it started.
+//! Skips a clustering pass when nothing it reads changed since the last finished pass (it re-runs after every scan; an
+//! unchanged library would redo minutes of work).
 //!
-//! The fingerprint is a SHA-256 over every row the pass reads (faces with
-//! their vectors and file revisions, people, verdicts, constraints,
-//! dismissals and the review queues), the face settings in the environment
-//! and the model space. It is taken after a pass commits and stored beside
-//! the catalog with that pass's summary; an equal fingerprint before the next
-//! pass means the catalog is exactly as that pass left it.
+//! The fingerprint is a SHA-256 over every row the pass reads (faces with vectors and file revisions, people, verdicts,
+//! constraints, dismissals, review queues), the face settings in the environment and the model space, taken after a
+//! pass commits and stored beside the catalog with its summary.
 
 use crate::ipc::FaceClusteringResult;
 use rusqlite::{types::ValueRef, Connection};
@@ -15,6 +11,10 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 const VERSION: &str = "face-clustering-fingerprint-1";
+
+/// Names the grouping rules; change it whenever the rules change so the next pass regroups instead of returning the
+/// summary of a pass run under the old ones.
+const GROUPING_RULES: &str = "grouping-rules-2";
 
 const TABLES: [&str; 9] = [
     "SELECT fp.id,fp.file_id,fp.person_id,fp.bbox,fp.face_quality,fp.excluded,fp.arcface_embedding,fp.embedding_model,\
@@ -42,9 +42,14 @@ fn put(hasher: &mut Sha256, bytes: &[u8]) {
 }
 
 pub(super) fn fingerprint(conn: &Connection) -> rusqlite::Result<String> {
+    fingerprint_under(conn, GROUPING_RULES)
+}
+
+fn fingerprint_under(conn: &Connection, rules: &str) -> rusqlite::Result<String> {
     let tx = conn.unchecked_transaction()?;
     let mut hasher = Sha256::new();
     put(&mut hasher, VERSION.as_bytes());
+    put(&mut hasher, rules.as_bytes());
     put(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
     put(&mut hasher, crate::commands::face_refresh::processing().as_bytes());
     put(&mut hasher, crate::commands::face_refresh::current_model().unwrap_or_default().as_bytes());
@@ -92,8 +97,7 @@ pub(super) fn fingerprint(conn: &Connection) -> rusqlite::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Runs `work` on a read-only connection so hashing the catalog does not
-/// hold the writer; an in-memory catalog only has its writer.
+/// A read-only connection keeps hashing from holding the writer; an in-memory catalog only has its writer.
 pub(super) fn with_reader<R>(writer: &parking_lot::Mutex<Connection>, work: impl FnOnce(&Connection) -> R) -> R {
     match crate::db::reader_for(writer) {
         Ok(Some(reader)) => work(&reader),
@@ -106,7 +110,6 @@ fn state_path(conn: &Connection) -> Option<PathBuf> {
     Some(PathBuf::from(path).with_extension("face-clustering.json"))
 }
 
-/// The last finished pass's summary when the catalog is exactly as it left it.
 pub(super) fn unchanged(conn: &Connection) -> Option<FaceClusteringResult> {
     let path = state_path(conn)?;
     let metadata = std::fs::metadata(&path).ok()?;
@@ -115,11 +118,17 @@ pub(super) fn unchanged(conn: &Connection) -> Option<FaceClusteringResult> {
     }
     let remembered: Remembered = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
     (fingerprint(conn).ok()? == remembered.fingerprint).then_some(remembered.result)
+        .map(|mut result| {
+            // A summary an older engine stored may count people another way than the People page does.
+            if let Ok(people) = crate::read::people::active_person_count(conn) {
+                result.person_count = people;
+            }
+            result
+        })
 }
 
-/// Remembers a pass that finished without error. A pass that deferred faces
-/// is not remembered: their files may come back (a drive plugged in again)
-/// without the catalog changing.
+/// A pass that deferred faces is not remembered: their files may come back (a drive plugged in again) without the
+/// catalog changing.
 pub(super) fn remember(conn: &Connection, result: &FaceClusteringResult) {
     let Some(path) = state_path(conn) else { return };
     if result.deferred_faces.unwrap_or(0) > 0 {
@@ -140,6 +149,32 @@ pub(super) fn remember(conn: &Connection, result: &FaceClusteringResult) {
     if let Err(error) = written {
         tracing::debug!(%error, "face clustering state was not saved; the next pass runs in full");
     }
+}
+
+fn running_path(conn: &Connection) -> Option<PathBuf> {
+    let path = conn.path().filter(|path| !path.is_empty() && !path.starts_with(':'))?;
+    Some(PathBuf::from(path).with_extension("face-clustering.running"))
+}
+
+/// A pass that is under way leaves this file beside the catalog; it is removed when the pass ends in any way except being
+/// cut off (the app quit, the engine was stopped), so the next launch knows grouping was interrupted and finishes it.
+pub(super) fn mark_running(conn: &Connection) {
+    if let Some(path) = running_path(conn)
+        && crate::util::read_only::require_writable(&path).is_ok()
+    {
+        let _ = std::fs::write(path, b"");
+    }
+}
+
+pub(super) fn mark_finished(conn: &Connection) {
+    if let Some(path) = running_path(conn) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "apple-adapters")))]
+pub(super) fn was_interrupted(conn: &Connection) -> bool {
+    running_path(conn).is_some_and(|path| path.is_file())
 }
 
 pub(super) fn forget(conn: &Connection) {
@@ -192,6 +227,24 @@ mod tests {
     }
 
     #[test]
+    fn a_change_of_grouping_rules_forces_a_new_pass() {
+        let fixture = fixture();
+        remember(&fixture.conn, &summary());
+        let remembered = fingerprint(&fixture.conn).unwrap();
+        assert_ne!(fingerprint_under(&fixture.conn, "grouping-rules-next").unwrap(), remembered);
+        assert_eq!(fingerprint_under(&fixture.conn, GROUPING_RULES).unwrap(), remembered);
+    }
+
+    #[test]
+    fn a_remembered_summary_reports_the_people_the_page_shows_now() {
+        let fixture = fixture();
+        let mut stale = summary();
+        stale.person_count = 24;
+        remember(&fixture.conn, &stale);
+        assert_eq!(unchanged(&fixture.conn).expect("unchanged").person_count, 1);
+    }
+
+    #[test]
     fn every_kind_of_change_the_pass_reads_forces_a_new_pass() {
         let changes = [
             "INSERT INTO face_prints(id,file_id,print_data,bbox) VALUES(30,2,x'00','0.5,0.5,0.1,0.1')",
@@ -218,6 +271,19 @@ mod tests {
             fixture.conn.execute(change, []).unwrap();
             assert!(unchanged(&fixture.conn).is_none(), "{change}");
         }
+    }
+
+    #[test]
+    fn a_pass_that_was_cut_off_is_remembered_until_one_ends() {
+        let fixture = fixture();
+        assert!(!was_interrupted(&fixture.conn));
+        mark_running(&fixture.conn);
+        assert!(was_interrupted(&fixture.conn), "still marked when the engine stops mid-pass");
+        mark_finished(&fixture.conn);
+        assert!(!was_interrupted(&fixture.conn));
+        let memory = crate::db::test_support::memory_db();
+        mark_running(&memory);
+        assert!(!was_interrupted(&memory), "a catalog with no file keeps no marker");
     }
 
     #[test]

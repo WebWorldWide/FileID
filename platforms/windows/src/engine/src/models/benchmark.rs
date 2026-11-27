@@ -1,15 +1,8 @@
-//! On-device model benchmark and launch tuning.
+//! On-device model benchmark and launch tuning: load time, llama-server prefill/decode rates, caption latency, peak
+//! resident memory, structured-output reliability and exact answers on locally rendered synthetic probes (no personal
+//! imagery).
 //!
-//! Measures what matters for FileID on the user's own hardware: load time,
-//! llama-server's prefill/decode rates, caption latency, peak resident memory,
-//! structured-output reliability, and exact answers on synthetic probes
-//! (colour, count, OCR). The probes are rendered locally, so no personal or
-//! third-party imagery is involved; they check instruction-following, not
-//! photo-caption quality.
-//!
-//! Tuning follows the magnitude approach: try a small grid of llama-server
-//! flags and keep the fastest configuration whose greedy answer is identical
-//! to the default configuration's.
+//! Tuning tries a small grid of llama-server flags and keeps the fastest whose greedy answer equals the default's.
 
 use super::launch_tuning;
 use super::vlm_server::{Timings, VlmServer};
@@ -62,7 +55,6 @@ const YELLOW: [u8; 3] = [240, 210, 20];
 const WHITE: [u8; 3] = [255, 255, 255];
 const GRAY: [u8; 3] = [200, 200, 200];
 
-/// Renders the deterministic probe set into `directory`.
 pub fn write_probes(directory: &Path) -> Result<Vec<Probe>> {
     std::fs::create_dir_all(directory)?;
     let canvas = |background: [u8; 3]| RgbImage::from_pixel(448, 448, Rgb(background));
@@ -100,7 +92,6 @@ pub fn write_probes(directory: &Path) -> Result<Vec<Probe>> {
     Ok(probes)
 }
 
-/// Lower-cased first word, digits kept, number words mapped to digits.
 pub fn normalize_answer(raw: &str) -> String {
     let word = raw
         .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ':' | ';' | '!' | '"' | '\''))
@@ -150,7 +141,6 @@ fn record(measurement: &mut Measurement, timings: Option<Timings>) {
     }
 }
 
-/// Samples a process's resident memory until finished.
 struct PeakSampler {
     pid: Option<u32>,
     peak: Arc<AtomicU64>,
@@ -185,8 +175,7 @@ impl PeakSampler {
 
     fn finish(&self) -> u64 {
         self.stop.store(true, Ordering::Relaxed);
-        // A run shorter than the sampler's first refresh would otherwise
-        // report no memory at all.
+        // A run shorter than the sampler's first refresh would otherwise report no memory.
         if self.peak.load(Ordering::Relaxed) == 0
             && let Some(pid) = self.pid {
                 let bytes = sysinfo::System::new().ok().and_then(|mut system| resident_bytes(&mut system, sysinfo::Pid::from_u32(pid)));
@@ -196,8 +185,6 @@ impl PeakSampler {
     }
 }
 
-/// Runs every probe, the caption timing pass and the structured-output pass
-/// against a loaded server. `progress(done, total)` is called per request.
 pub async fn measure(server: &VlmServer, probes: &[Probe], cancel: &Arc<AtomicBool>, mut progress: impl FnMut(usize, usize)) -> Result<Measurement> {
     let sampler = PeakSampler::start(server.pid());
     let mut measurement = Measurement { probes: probes.len(), ..Measurement::default() };
@@ -259,7 +246,6 @@ pub fn summarize(measurement: &Measurement, hardware: &str, tuned: Option<Vec<St
     }
 }
 
-/// Greedy answer and decode rate for one fixed tuning prompt.
 pub async fn tuning_sample(server: &VlmServer, probe: &Probe, cancel: &Arc<AtomicBool>) -> Result<(String, f64)> {
     let prompt = super::vlm::caption_prompt_with_faces(&[]);
     let started = Instant::now();
@@ -271,8 +257,6 @@ pub async fn tuning_sample(server: &VlmServer, probe: &Probe, cancel: &Arc<Atomi
     Ok((output, rate))
 }
 
-/// Tries each candidate through `launch` and returns the fastest one whose
-/// greedy output equals `baseline`, if it beats the baseline rate by 5%.
 pub async fn tune<L, F>(baseline: &(String, f64), candidates: Vec<Vec<String>>, mut launch: L) -> Option<(Vec<String>, f64)>
 where
     L: FnMut(Vec<String>) -> F,
@@ -289,11 +273,10 @@ where
     best.filter(|(_, rate)| *rate > baseline.1 * 1.05)
 }
 
-/// The Swift engine's store: one `ModelBenchmark` per model id, each carrying
-/// the hardware it was measured on. Only this machine's entries are returned.
+/// One `ModelBenchmark` per model id, each carrying its hardware; only this machine's entries are returned.
 type Store = BTreeMap<String, ModelBenchmark>;
 
-/// Rust's earlier format (`{"results": [{model, hardware, benchmark}]}`).
+/// The `results` list the Swift engine wrote; `import_legacy` converts it.
 #[derive(serde::Deserialize)]
 struct LegacyStore {
     results: Vec<LegacyEntry>,
@@ -312,8 +295,7 @@ pub(crate) fn store_path() -> Result<PathBuf> {
     Ok(crate::paths::root()?.join("model-benchmarks.json"))
 }
 
-/// The hardware string results are filed under. The engine the Mac app hosts
-/// uses the Swift engine's wording so both engines see each other's results.
+/// The Mac-hosted engine uses the Swift engine's wording so results the Swift engine saved still match this machine.
 pub fn hardware() -> String {
     #[cfg(target_os = "macos")]
     if crate::paths::APP_HOSTED {
@@ -341,7 +323,6 @@ fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
     String::from_utf8(buffer).ok()
 }
 
-/// `ModelBenchmarkRunner.hardwareFingerprint()` in the Swift engine.
 #[cfg(target_os = "macos")]
 fn mac_fingerprint() -> String {
     let chip = sysctl_string(c"machdep.cpu.brand_string").unwrap_or_else(|| "Mac".to_owned());
@@ -367,8 +348,6 @@ fn write_store(path: &Path, store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// One-shot import of Rust's earlier format: the file is rewritten in the
-/// Swift engine's format and the original kept beside it.
 fn import_legacy(path: &Path, bytes: &[u8], hardware: &str) -> Option<Store> {
     let legacy: LegacyStore = serde_json::from_slice(bytes).ok()?;
     let mut store = Store::new();
@@ -394,14 +373,12 @@ fn load_all(path: &Path, hardware: &str) -> Store {
     serde_json::from_slice(&bytes).ok().or_else(|| import_legacy(path, &bytes, hardware)).unwrap_or_default()
 }
 
-/// Benchmarks recorded for `hardware`, keyed by model id.
 pub fn load_in(path: &Path, hardware: &str) -> BTreeMap<String, ModelBenchmark> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect()
 }
 
-/// Stores `benchmark` for `model`, keeping what was measured on `hardware`
-/// (like the Swift engine, results from other hardware are dropped).
+/// Results from other hardware are dropped.
 pub fn save_in(path: &Path, model: &str, benchmark: ModelBenchmark, hardware: &str) -> Result<()> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store: Store = load_all(path, hardware).into_iter().filter(|(_, b)| b.hardware == hardware).collect();
@@ -409,13 +386,10 @@ pub fn save_in(path: &Path, model: &str, benchmark: ModelBenchmark, hardware: &s
     write_store(path, &store)
 }
 
-/// Benchmarks recorded on this machine, keyed by model id.
 pub fn local_results() -> std::collections::HashMap<String, ModelBenchmark> {
     store_path().map(|p| load_in(&p, &hardware())).unwrap_or_default().into_iter().collect()
 }
 
-/// Full benchmark of one installed model: verify, load, measure and
-/// optionally tune; persists the result for `listModels`.
 pub async fn run(model_kind: &str, tuning: bool, cancel: Arc<AtomicBool>, mut progress: impl FnMut(&str, usize, usize)) -> Result<ModelBenchmark> {
     let verified = super::model_provenance::verify_installed(model_kind, cancel.clone()).await.context("The model is not installed or failed verification")?;
     let (gguf, mmproj) = verified.paths();

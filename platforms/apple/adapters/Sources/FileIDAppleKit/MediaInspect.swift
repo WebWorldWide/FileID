@@ -4,8 +4,8 @@ import FileIDModelInfo
 import Foundation
 
 /// AVFoundation facts about a media file, in the shape the Rust engine's
-/// `media_recipes::MediaProbe` reads. Mirrors the Swift engine's
-/// `CommonMediaTools.inspect` (strict) and the timeline's read-only probe.
+/// `media_recipes::MediaProbe` reads, either strict for the media tools or the
+/// timeline's read-only probe.
 struct MediaProbe: Sendable {
     var duration: Double
     var videoCount = 0

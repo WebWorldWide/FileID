@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    TitleBar: Prototype v3 window chrome (48 px). Folder switcher on the left,
+    TitleBar: window chrome (48 px). Folder switcher on the left,
     "Search or ask" centred, activity / chat / settings on the right, the
     system caption buttons in the reserved trailing column. 1:1 port of the
     macOS Views/Shell/TitleBar.swift.

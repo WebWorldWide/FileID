@@ -11,6 +11,8 @@ public sealed class EngineErrorTextTests
     [InlineData("scan_failed", "The scan stopped")]
     [InlineData("db_unavailable", "The library couldn't be opened")]
     [InlineData("db_open_failed", "The library couldn't be opened")]
+    [InlineData("db_disk_full", "Your disk is full")]
+    [InlineData("scan_disk_full", "Your disk is full")]
     [InlineData("db_newer_than_engine", "This library needs a newer FileID")]
     [InlineData("folder_access_denied", "FileID can't reach that folder")]
     [InlineData("command_decode_failed", "FileID couldn't do that")]
@@ -24,6 +26,7 @@ public sealed class EngineErrorTextTests
     [InlineData("gpu_device_removed", "The graphics card stopped responding")]
     [InlineData("deep_analyze_failed", "Describing files stopped")]
     [InlineData("face_clustering_failed", "Grouping faces didn't finish")]
+    [InlineData("location_read_only", "This drive is read-only")]
     [InlineData("a_kind_nobody_mapped", "Something went wrong")]
     [InlineData(null, "Something went wrong")]
     public void EveryKindHasAPlainTitle(string? kind, string expected)
@@ -45,6 +48,17 @@ public sealed class EngineErrorTextTests
     public void KnownKindsIgnoreTheRawMessage(string kind, string expected)
     {
         Assert.Equal(expected, EngineErrorText.Text(kind, "rusqlite::Error(SqliteFailure(code=14))"));
+    }
+
+    [Theory]
+    [InlineData("\u201cD:\\\u201d is a read-only drive. FileID can show and search these files but can\u2019t change them.")]
+    [InlineData("\u201cMy_Passport\u201d is a read-only drive. FileID can show and search these files but can\u2019t change them.")]
+    public void AReadOnlyDriveSentenceIsShownAsTheEngineWroteIt(string message)
+    {
+        Assert.Equal(message, EngineErrorText.Text("location_read_only", " " + message + " "));
+        Assert.Equal(
+            "FileID can show and search these files but can\u2019t change them.",
+            EngineErrorText.Text("location_read_only", null));
     }
 
     [Fact]

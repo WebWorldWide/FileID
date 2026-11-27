@@ -1,9 +1,5 @@
 ﻿namespace FileID.Services;
 
-/// <summary>Plain titles and sentences for the errors FileID's helper
-/// reports, keyed on the error kind. Mirrors the Mac app's
-/// <c>errorTitle</c> / <c>errorText</c> (Sidebar.swift) and adds the kinds
-/// only the Windows helper sends.</summary>
 internal static class EngineErrorText
 {
     public const string TryAgain = "Try again. If it keeps happening, quit and reopen FileID.";
@@ -16,6 +12,7 @@ internal static class EngineErrorText
         "scan_already_running" => "A scan is already running",
         "db_unavailable" or "db_failed" or "db_open_failed" or "db_integrity_check_failed"
             or "plan_restructure_db_unavailable" => "The library couldn't be opened",
+        "db_disk_full" or "scan_disk_full" => "Your disk is full",
         "db_newer_than_engine" => "This library needs a newer FileID",
         "folder_access_denied" or "bookmark_unavailable" or "list_roots_failed" => "FileID can't reach that folder",
         "command_decode_failed" => "FileID couldn't do that",
@@ -38,18 +35,18 @@ internal static class EngineErrorText
             or "face_cluster_persist_failed" => "Grouping faces didn't finish",
         "face_clustering_busy" => "Faces are already being grouped",
         "find_merge_suggestions_failed" => "Looking for matching people didn't finish",
+        "location_read_only" => "This drive is read-only",
         _ => "Something went wrong"
     };
 
-    /// <summary>The sentence under the title. Known kinds get fixed wording;
-    /// anything else shows the helper's own message unless it reads like a
-    /// log line.</summary>
     public static string Text(string? kind, string? message) => kind switch
     {
         "scan_failed" => "Press Scan again. Files already read are skipped.",
         "scan_already_running" or "deep_analyze_already_running" or "face_clustering_busy" => "Wait for it to finish, then try again.",
         "db_unavailable" or "db_failed" or "db_open_failed" or "db_integrity_check_failed" or "plan_restructure_db_unavailable"
             => "Quit and reopen FileID. If it keeps happening, use Start over in the folder menu.",
+        "db_disk_full" => "Free some space on this computer (about 1 GB is plenty), then quit and reopen FileID.",
+        "scan_disk_full" => "Free some space on this computer, then scan again. What FileID already saved is kept.",
         "db_newer_than_engine" => "This library was made by a newer FileID. Update FileID.",
         "folder_access_denied" or "bookmark_unavailable" or "list_roots_failed" => "Choose the folder again so FileID can open it.",
         "command_decode_failed" => TryAgain,
@@ -67,11 +64,13 @@ internal static class EngineErrorText
         "face_clustering_failed" or "face_clustering_aborted" or "face_clustering_start_failed" or "face_cluster_persist_failed"
             => "Open People and press Refresh to try again.",
         "find_merge_suggestions_failed" => "Open People and try Suggested merges again in a moment.",
+        "location_read_only" => string.IsNullOrWhiteSpace(message)
+            ? "FileID can show and search these files but can\u2019t change them."
+            : message.Trim(),
         _ => Plain(message, TryAgain)
     };
 
-    /// <summary>The helper's own sentence when it reads like one, otherwise
-    /// <paramref name="fallback"/>.</summary>
+    /// <summary>The helper's own sentence when it reads like one, otherwise fallback.</summary>
     public static string Plain(string? message, string fallback) =>
         LooksTechnical(message) ? fallback : message!.Trim();
 

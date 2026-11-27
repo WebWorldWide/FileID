@@ -7,7 +7,6 @@ namespace FileID.Views.Library;
 
 public sealed partial class LibraryView
 {
-    /// <summary>Opens Chat with the selected files attached as the next question's scope.</summary>
     private void OnAskChatSelectedClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnAskChatSelectedClicked), () =>
         {

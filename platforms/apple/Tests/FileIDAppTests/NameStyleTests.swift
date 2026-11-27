@@ -117,7 +117,7 @@ struct NameStyleTests {
         #expect(rows.map(\.suffix) == [".JPG", ".ARW", ".ARW.xmp", ""])
         #expect(NameStyle.companionChip(rows[0], in: rows) == "+ ARW, XMP")
         #expect(NameStyle.companionChip(rows[1], in: rows) == nil && NameStyle.companionChip(rows[3], in: rows) == nil)
-        #expect(NameStyle.reasonLabel("unscannedCompanion") == "Its partner file isn't scanned yet")
+        #expect(NameStyle.reasonLabel("unscannedCompanion") == "Its partner file isn’t scanned yet")
         #expect(NameStyle.accessibilityLabel(rows[1], in: rows)
                 == "DSC_1.ARW, rename to beach-sunset_2.ARW, from the AI name, together with DSC_1.JPG, DSC_1.ARW.xmp")
     }
@@ -191,5 +191,14 @@ struct NameStyleTests {
                 == "From 12 renames: underscores between words, the date at the end, dates like 20230704, at most 2 words, without \u{201C}outdoor\u{201D}.")
         #expect(NameStyle.learnedSummary(NameStyle.Learned(samples: 2), enabled: true) == "No clear preference yet from 2 renames.")
         #expect(NameStyle.learnedSummary(learned, enabled: false) == "Names follow the style above only.")
+    }
+}
+
+@Suite struct SmartNameResultStatusTests {
+    @Test func theRenameOrUndoResultSurvivesTheReloadItTriggered() {
+        let result = "Renamed 0 files · 3 couldn’t be renamed."
+        #expect(SmartNamePreviewSheet.statusAfterPreview(result, keepingResult: true, hasUndoableBatch: false) == result)
+        #expect(SmartNamePreviewSheet.statusAfterPreview(result, keepingResult: false, hasUndoableBatch: true) == result)
+        #expect(SmartNamePreviewSheet.statusAfterPreview(result, keepingResult: false, hasUndoableBatch: false) == nil)
     }
 }

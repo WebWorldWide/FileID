@@ -31,17 +31,28 @@ public final class ReadStore: @unchecked Sendable {
     @ObservationIgnored private var duplicateTotals: (groups: Int, bytes: Int64, at: Date)?
     @ObservationIgnored private var duplicateTotalsStale = false
     private static let duplicateInterval: TimeInterval = 5
+    @ObservationIgnored private var retryTask: Task<Void, Never>?
+    @ObservationIgnored private var retryAttempts = 0
     private let dbURL: URL
     public private(set) var version: Int = 0
+    /// Bumps each time the read connection opens. A launch before the engine has created the catalog's -wal/-shm files cannot open it read-only, so the first listing reads nothing; views reload on this.
+    public private(set) var readerEpoch: Int = 0
     public private(set) var totalFiles: Int = 0
+    /// False until the first counters read lands, and again while the reader cannot open or the counters read fails;
+    /// `totalFiles` is then a placeholder, not a count of an empty library.
+    public private(set) var countersAvailable = false
+    /// `totalFiles` once it is a real count; nil while it is unknown.
+    var catalogedFileCount: Int? { countersAvailable ? totalFiles : nil }
     public private(set) var totalImages: Int = 0
     /// Files the scan could not decode or read; the Library hides them unless
     /// the Unreadable filter is chosen.
     public private(set) var unreadableFiles: Int = 0
+    /// The part of `unreadableFiles` that failed only because the machine was too busy; a later scan can still read them.
+    public private(set) var unreadableTimedOutFiles: Int = 0
     /// Files cataloged by name, size and dates only (archives, installers, unknown types).
     public private(set) var otherFiles: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
-    public private(set) var totalReclaimableMB: Double = 0
+    public private(set) var totalReclaimableBytes: Int64 = 0
     public private(set) var hasFacePrints = false
     public private(set) var hasNamedPerson = false
     public private(set) var hasCaptions = false
@@ -99,12 +110,14 @@ public final class ReadStore: @unchecked Sendable {
     public func openIfPossible() {
         guard FileManager.default.fileExists(atPath: dbURL.path) else {
             self.queue = nil
+            self.countersAvailable = true
             self.totalFiles = 0
             self.totalImages = 0
             self.unreadableFiles = 0
+            self.unreadableTimedOutFiles = 0
             self.otherFiles = 0
             self.totalDuplicateGroups = 0
-            self.totalReclaimableMB = 0
+            self.totalReclaimableBytes = 0
             self.hasFacePrints = false
             self.hasNamedPerson = false
             self.hasCaptions = false
@@ -114,12 +127,39 @@ public final class ReadStore: @unchecked Sendable {
             do {
                 try ReadOnlyLocations.requireWritable(dbURL)
                 self.queue = try Self.openReader(at: dbURL)
+                Task { @MainActor in self.readerEpoch &+= 1 }
             } catch {
                 reportError("Could not open DB: \(error)")
+                self.countersAvailable = false
+                scheduleRetry()
                 return
             }
         }
         refreshCounters()
+    }
+
+    /// A reader that cannot open the catalog, or a counters read that fails while the engine is still creating or
+    /// migrating it, is asked again with a growing delay until it works, so a launch never stays on a placeholder 0.
+    private func scheduleRetry() {
+        countersLock.withLock {
+            guard retryTask == nil else { return }
+            let delay = min(5.0, 0.5 * pow(2.0, Double(retryAttempts)))
+            retryAttempts += 1
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.countersLock.withLock { self.retryTask = nil }
+                await MainActor.run { self.openIfPossible() }
+            }
+        }
+    }
+
+    private func cancelRetry(resetBackoff: Bool) {
+        countersLock.withLock {
+            retryTask?.cancel()
+            retryTask = nil
+            if resetBackoff { retryAttempts = 0 }
+        }
     }
 
     public func notifyChanged() {
@@ -134,6 +174,7 @@ public final class ReadStore: @unchecked Sendable {
     /// until every in-flight read (each holding a strong `q`) drains, so
     /// closing never frees the connection out from under a reader.
     public func close() {
+        cancelRetry(resetBackoff: true)
         queue = nil
     }
 
@@ -141,12 +182,13 @@ public final class ReadStore: @unchecked Sendable {
         let totalFiles: Int
         let totalImages: Int
         let unreadableFiles: Int
+        let unreadableTimedOutFiles: Int
         let otherFiles: Int
         let scopedTotalFiles: Int
         let scopedUnreadableFiles: Int
         let scopedOtherFiles: Int
         let totalDuplicateGroups: Int
-        let totalReclaimableMB: Double
+        let totalReclaimableBytes: Int64
         let hasFacePrints: Bool
         let hasNamedPerson: Bool
         let hasCaptions: Bool
@@ -158,14 +200,7 @@ public final class ReadStore: @unchecked Sendable {
         case noDatabase
     }
 
-    /// Schedule a counters refresh off the main thread. The duplicate-group
-    /// window query is O(N log N) over the whole `files` table; run inline it
-    /// pegged the UI because a live scan calls `notifyChanged` up to once a
-    /// second from `@MainActor` views. A single background worker coalesces
-    /// bursts (one in-flight run, re-run once if more requests arrived while
-    /// it ran) and throttles successive heavy queries, so the main thread
-    /// never pays for scan ticks and the table is scanned at most ~once a
-    /// second during a burst. Property writes still land on the main actor.
+    /// Schedules a counters refresh off the main thread. The duplicate-group window query is O(N log N) and a live scan calls notifyChanged up to once a second, so one background worker coalesces bursts and throttles the heavy query.
     func refreshCounters() {
         countersLock.lock()
         countersDirty = true
@@ -178,11 +213,7 @@ public final class ReadStore: @unchecked Sendable {
 
         Task.detached(priority: .utility) { [weak self] in
             while let self {
-                // `withLock` (synchronous critical section) instead of bare
-                // lock()/unlock(): NSLock's lock() is unavailable in an async
-                // context under Swift 6 (it must never be held across a
-                // suspension point — it isn't here, but the scoped form makes
-                // that guarantee explicit and silences the diagnostic).
+                // `withLock` instead of lock()/unlock(): NSLock's lock() is unavailable in async contexts under Swift 6.
                 // nil: stop. Otherwise how long to wait first, which is non-zero
                 // only when the sole work left is a deferred duplicate total.
                 let wait = self.countersLock.withLock { () -> TimeInterval? in
@@ -204,9 +235,14 @@ public final class ReadStore: @unchecked Sendable {
 
                 switch self.computeCounters() {
                 case .ok(let snapshot):
+                    self.cancelRetry(resetBackoff: true)
                     await MainActor.run { self.applyCounters(snapshot) }
                 case .failure(let message):
-                    await MainActor.run { self.lastError = message }
+                    await MainActor.run {
+                        self.lastError = message
+                        self.countersAvailable = false
+                    }
+                    self.scheduleRetry()
                 case .noDatabase:
                     break
                 }
@@ -226,11 +262,12 @@ public final class ReadStore: @unchecked Sendable {
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL)") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
                 let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
+                let unreadableTimedOutFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(Self.timedOutSQL)") ?? 0
                 let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
                 var scoped = (total: totalFiles, unreadable: unreadableFiles, other: otherFiles)
                 if let scope {
                     let within = LibraryScope.sql("path_text")
-                    scoped = (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0,
+                    scoped = ((try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND \(within)", arguments: [scope.param]) ?? 0),
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL) AND \(within)", arguments: [scope.param]) ?? 0,
                               try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0 AND \(within)", arguments: [scope.param]) ?? 0)
                 }
@@ -276,12 +313,13 @@ public final class ReadStore: @unchecked Sendable {
                     totalFiles: totalFiles,
                     totalImages: totalImages,
                     unreadableFiles: unreadableFiles,
+                    unreadableTimedOutFiles: unreadableTimedOutFiles,
                     otherFiles: otherFiles,
                     scopedTotalFiles: scoped.total,
                     scopedUnreadableFiles: scoped.unreadable,
                     scopedOtherFiles: scoped.other,
                     totalDuplicateGroups: groups,
-                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
+                    totalReclaimableBytes: reclaimableBytes,
                     hasFacePrints: hasFacePrints,
                     hasNamedPerson: hasNamedPerson,
                     hasCaptions: hasCaptions
@@ -295,15 +333,18 @@ public final class ReadStore: @unchecked Sendable {
     @MainActor
     private func applyCounters(_ snapshot: CounterSnapshot) {
         // Observation notifies on every set, changed or not; unchanged counters stay quiet.
+        if !self.countersAvailable { self.countersAvailable = true }
+        if self.lastError != nil { self.lastError = nil }
         if self.totalFiles != snapshot.totalFiles { self.totalFiles = snapshot.totalFiles }
         if self.totalImages != snapshot.totalImages { self.totalImages = snapshot.totalImages }
         if self.unreadableFiles != snapshot.unreadableFiles { self.unreadableFiles = snapshot.unreadableFiles }
+        if self.unreadableTimedOutFiles != snapshot.unreadableTimedOutFiles { self.unreadableTimedOutFiles = snapshot.unreadableTimedOutFiles }
         if self.otherFiles != snapshot.otherFiles { self.otherFiles = snapshot.otherFiles }
         if self.scopedTotalFiles != snapshot.scopedTotalFiles { self.scopedTotalFiles = snapshot.scopedTotalFiles }
         if self.scopedUnreadableFiles != snapshot.scopedUnreadableFiles { self.scopedUnreadableFiles = snapshot.scopedUnreadableFiles }
         if self.scopedOtherFiles != snapshot.scopedOtherFiles { self.scopedOtherFiles = snapshot.scopedOtherFiles }
         if self.totalDuplicateGroups != snapshot.totalDuplicateGroups { self.totalDuplicateGroups = snapshot.totalDuplicateGroups }
-        if self.totalReclaimableMB != snapshot.totalReclaimableMB { self.totalReclaimableMB = snapshot.totalReclaimableMB }
+        if self.totalReclaimableBytes != snapshot.totalReclaimableBytes { self.totalReclaimableBytes = snapshot.totalReclaimableBytes }
         if self.hasFacePrints != snapshot.hasFacePrints { self.hasFacePrints = snapshot.hasFacePrints }
         if self.hasNamedPerson != snapshot.hasNamedPerson { self.hasNamedPerson = snapshot.hasNamedPerson }
         if self.hasCaptions != snapshot.hasCaptions { self.hasCaptions = snapshot.hasCaptions }
@@ -313,8 +354,16 @@ public final class ReadStore: @unchecked Sendable {
 
     /// `kindFilter` value that lists the files the scan could not read.
     public static let unreadableFilter = "unreadable"
-    /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
-    static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%' AND \(notEngineHiddenSQL)"
+    /// Every failed row the engine did not hide, including ones the next scan will retry, so the Library agrees with the scan's failed-file count.
+    static let unreadableSQL = notEngineHiddenSQL
+    /// Stored `error_message` of a row that failed because the machine was too busy (`tagging.rs` `TIMEOUT_MESSAGES`, and the "ran out of time" wording that replaces them).
+    nonisolated static let timedOutMessages = ["per-file timeout after 60s", "Vision pass timed out"]
+    nonisolated static let timedOutSQL =
+        "(COALESCE(error_message, '') IN (\(timedOutMessages.map { "'" + $0 + "'" }.joined(separator: ", "))) OR COALESCE(error_message, '') LIKE '%ran out of time%')"
+    nonisolated static func isTimedOut(errorMessage: String?) -> Bool {
+        guard let errorMessage else { return false }
+        return timedOutMessages.contains(errorMessage) || errorMessage.contains("ran out of time")
+    }
     /// The two `failed = 1` reasons the Rust engine writes for a row that is not a broken file: one removed from
     /// its folder (kept 30 days so a returning file re-binds) and an empty one. Same exact strings as
     /// `scan_session.rs` `HIDDEN_ROW_MESSAGE` and `db/zero_byte.rs` `ZERO_BYTE_REASON`.
@@ -328,12 +377,13 @@ public final class ReadStore: @unchecked Sendable {
 
     public func files(offset: Int = 0, limit: Int = 200,
                       search: String = "",
-                      kindFilter: String? = nil) -> [FileRow] {
+                      kindFilter: String? = nil,
+                      sort: LibrarySort = .standard) -> [FileRow] {
         guard let q = queue else { return [] }
         let scope = self.scope
         do {
             return try q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+                try Self.fetchFiles(db, offset: offset, limit: limit, after: nil, search: search, kindFilter: kindFilter, scope: scope, sort: sort).rows
             }
         } catch {
             reportError("Library query failed: \(error)")
@@ -341,10 +391,12 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    private static func fetchFiles(_ db: Database, offset: Int, limit: Int, search: String,
-                                   kindFilter: String?, scope: LibraryScope?) throws -> [FileRow] {
+    /// Rows for the Library grid. Search and sort run over ids only, so a top-N sorter never carries whole rows; the page's rows are fetched by id after. `after` continues from the last row of the previous page by its sort key; without it `offset` skips rows. The cursor is nil when the catalog has no `name_sort` key yet and the sort is Name or Kind, so the caller falls back to `offset`.
+    private static func fetchFiles(_ db: Database, offset: Int, limit: Int, after: LibraryCursor?, search: String,
+                                   kindFilter: String?, scope: LibraryScope?, sort: LibrarySort) throws -> LibraryPage {
         let unreadable = kindFilter == Self.unreadableFilter
-        var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
+        let keyed = try db.columns(in: "files").contains { $0.name == "name_sort" }
+        var base = unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0"
         var args: StatementArguments = []
         let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
         if !trimmedSearch.isEmpty {
@@ -356,25 +408,39 @@ public final class ReadStore: @unchecked Sendable {
             // NFC-normalize first: SQLite LIKE compares bytes, and
             // path_search stores the NFC form (v16) so an NFC query
             // matches names regardless of on-disk normalization.
-            let escapedSearch = trimmedSearch
-                .precomposedStringWithCanonicalMapping
+            let normalized = trimmedSearch.precomposedStringWithCanonicalMapping
+            let escapedSearch = normalized
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "%", with: "\\%")
                 .replacingOccurrences(of: "_", with: "\\_")
             let like = "%\(escapedSearch)%"
             let ftsQuery = FTSQuery.quoted(trimmedSearch)
-            // Keyword search across filename, OCR text, extracted
-            // document text, vision tags, smart names, VLM captions,
-            // and person names. CLIP semantic search runs separately
-            // when the encoder is installed.
-            sql += """
+            // The trigram index (v39) answers a substring of three or more characters from an index; shorter ones and older catalogs scan with LIKE, which matches the same rows.
+            let trigram = normalized.count >= 3 ? try db.tableExists("files_search_fts") : false
+            let nameMatch: String
+            let nameArgs: StatementArguments
+            if trigram {
+                nameMatch = "id IN (SELECT rowid FROM files_search_fts WHERE files_search_fts MATCH ?)"
+                let quote = "\u{22}"
+                nameArgs = [quote + normalized.replacingOccurrences(of: quote, with: quote + quote) + quote]
+            } else {
+                nameMatch = """
+                    path_search LIKE ? ESCAPE '\\'
+                          OR vlm_proposed_name LIKE ? ESCAPE '\\'
+                          OR vlm_description LIKE ? ESCAPE '\\'
+                    """
+                nameArgs = [like, like, like]
+            }
+            // The distinct tags (v27, kept by triggers) are scanned for the text, then the tags index finds the files.
+            let tagMatch = try db.tableExists("catalog_tag_vocab")
+                ? "id IN (SELECT file_id FROM tags WHERE tag IN (SELECT tag FROM catalog_tag_vocab WHERE tag LIKE ? ESCAPE '\\'))"
+                : "id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')"
+            base += """
                  AND (
                       id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
                       OR id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?)
-                      OR path_search LIKE ? ESCAPE '\\'
-                      OR vlm_proposed_name LIKE ? ESCAPE '\\'
-                      OR vlm_description LIKE ? ESCAPE '\\'
-                      OR id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')
+                      OR \(nameMatch)
+                      OR \(tagMatch)
                       OR id IN (
                           SELECT face_prints.file_id FROM face_prints
                           INNER JOIN persons ON persons.id = face_prints.person_id
@@ -387,41 +453,105 @@ public final class ReadStore: @unchecked Sendable {
                       )
                     )
                 """
-            args += [ftsQuery, ftsQuery, like, like, like, like, like, like, like, like, like, like]
+            args += [ftsQuery, ftsQuery]
+            args += nameArgs
+            args += [like, like, like, like, like, like, like]
         }
         if let k = kindFilter, !unreadable {
-            sql += " AND kind = ?"
+            base += " AND kind = ?"
             args += [k]
         }
         if let scope {
-            sql += " AND " + LibraryScope.sql("path_text")
+            base += " AND " + LibraryScope.sql("path_text")
             args += [scope.param]
         }
-        sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
-        args += [limit, offset]
-        let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-        return rows.map { Self.toFileRow($0) }
+        var ids: [Int64] = []
+        var cursor: LibraryCursor?
+        if offset > 0, sort.key == .dateTaken {
+            var skip = offset
+            for segment in sort.segments(after: nil, keyed: keyed) where ids.count < limit {
+                let counted = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(base) AND \(segment.condition)", arguments: args + StatementArguments(segment.arguments)) ?? 0
+                if skip >= counted { skip -= counted; continue }
+                let sql = "SELECT id FROM files WHERE \(base) AND \(segment.condition) ORDER BY \(segment.order) LIMIT ? OFFSET ?"
+                ids += try Int64.fetchAll(db, sql: sql, arguments: args + StatementArguments(segment.arguments) + [limit - ids.count, skip])
+                skip = 0
+            }
+        } else if offset > 0 {
+            let sql = "SELECT id FROM files WHERE \(base) ORDER BY \(sort.orderSQL(keyed: keyed)) LIMIT ? OFFSET ?"
+            ids = try Int64.fetchAll(db, sql: sql, arguments: args + [limit, offset])
+        } else {
+            let columns = sort.cursorColumns(keyed: keyed)
+            var last: Row?
+            for segment in sort.segments(after: after, keyed: keyed) where ids.count < limit {
+                let select = (["id"] + (columns ?? [])).enumerated().map { "\($1) AS c\($0)" }.joined(separator: ", ")
+                let sql = "SELECT \(select) FROM files WHERE \(base) AND \(segment.condition) ORDER BY \(segment.order) LIMIT ?"
+                let rows = try Row.fetchAll(db, sql: sql, arguments: args + StatementArguments(segment.arguments) + [limit - ids.count])
+                ids += rows.map { $0["c0"] as Int64 }
+                if let row = rows.last { last = row }
+            }
+            if let last, columns != nil {
+                cursor = sort.cursor(id: last["c0"], values: (1..<(columns!.count + 1)).map { last["c\($0)"] as DatabaseValue })
+            }
+        }
+        guard !ids.isEmpty else { return LibraryPage(rows: [], cursor: nil) }
+        let encoded = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
+        let rows = try Row.fetchAll(db, sql: "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?))", arguments: [encoded])
+        let byID = Dictionary(rows.map { ($0["id"] as Int64, Self.toFileRow($0)) }, uniquingKeysWith: { first, _ in first })
+        return LibraryPage(rows: ids.compactMap { byID[$0] }, cursor: cursor)
     }
 
-    /// Off-main twin of `files(...)`. The keyword search runs a
-    /// multi-table FTS + LIKE + face-join query; on a live scan the view
-    /// reloaded it on the MainActor on every throttled batch event,
-    /// stuttering the UI. Callers debounce and await this so the query
-    /// runs on a background task and only the assignment lands on main.
+    /// Off-main twin of `files(...)`: the keyword search is a multi-table FTS + LIKE + face-join query that would stutter the UI on every throttled scan batch.
     public func filesAsync(offset: Int = 0, limit: Int = 200,
                            search: String = "",
-                           kindFilter: String? = nil) async -> [FileRow] {
-        guard let q = queue else { return [] }
+                           kindFilter: String? = nil,
+                           sort: LibrarySort = .standard) async -> [FileRow] {
+        await filesPageAsync(offset: offset, limit: limit, search: search, kindFilter: kindFilter, sort: sort).rows
+    }
+
+    /// The page plus the cursor the next page continues from.
+    public func filesPageAsync(offset: Int = 0, limit: Int = 200, after: LibraryCursor? = nil,
+                               search: String = "",
+                               kindFilter: String? = nil,
+                               sort: LibrarySort = .standard) async -> LibraryPage {
+        guard let q = queue else { return LibraryPage(rows: [], cursor: nil) }
         let scope = self.scope
         do {
             // GRDB's async read interrupts the query when the calling task is
             // cancelled, so a superseded search stops instead of running out.
             return try await q.read { db in
-                try Self.fetchFiles(db, offset: offset, limit: limit, search: search, kindFilter: kindFilter, scope: scope)
+                try Self.fetchFiles(db, offset: offset, limit: limit, after: after, search: search, kindFilter: kindFilter, scope: scope, sort: sort)
             }
         } catch {
             if !(error is CancellationError), !Task.isCancelled { reportError("Library query failed: \(error)") }
-            return []
+            return LibraryPage(rows: [], cursor: nil)
+        }
+    }
+
+    /// The listing's rows for these ids as they are now; an id that left the listing is missing from the result.
+    public func listedRowsAsync(ids: [Int64], kindFilter: String? = nil) async -> [Int64: FileRow] {
+        guard !ids.isEmpty, let q = queue else { return [:] }
+        let scope = self.scope
+        return (try? await q.read { db in
+            let unreadable = kindFilter == Self.unreadableFilter
+            var sql = "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?)) AND " + (unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0")
+            var args: StatementArguments = [String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)]
+            if let kindFilter, !unreadable { sql += " AND kind = ?"; args += [kindFilter] }
+            if let scope { sql += " AND " + LibraryScope.sql("path_text"); args += [scope.param] }
+            return Dictionary(try Row.fetchAll(db, sql: sql, arguments: args).map { ($0["id"] as Int64, Self.toFileRow($0)) }, uniquingKeysWith: { first, _ in first })
+        }) ?? [:]
+    }
+
+    /// How many rows the unsearched listing has, nil when the query fails.
+    public func listingCountAsync(kindFilter: String? = nil) async -> Int? {
+        guard let q = queue else { return nil }
+        let scope = self.scope
+        return try? await q.read { db in
+            let unreadable = kindFilter == Self.unreadableFilter
+            var sql = "SELECT COUNT(*) FROM files WHERE " + (unreadable ? "failed = 1 AND \(Self.unreadableSQL)" : "failed = 0")
+            var args: StatementArguments = []
+            if let kindFilter, !unreadable { sql += " AND kind = ?"; args += [kindFilter] }
+            if let scope { sql += " AND " + LibraryScope.sql("path_text"); args += [scope.param] }
+            return try Int.fetchOne(db, sql: sql, arguments: args) ?? 0
         }
     }
 
@@ -497,11 +627,13 @@ public final class ReadStore: @unchecked Sendable {
     public struct TimelineTracks: Sendable, Equatable {
         public var examined: [TimelineSpan] = []
         public var speech: [TimelineSpan] = []
+        public var scenes: [TimelineSpan] = []
         public static let empty = TimelineTracks()
     }
 
     /// What the timeline analysis has looked at in a video: sampled frame
-    /// times (Examined) and transcribed speech passages (Speech). Stale rows
+    /// times (Examined), transcribed speech passages (Speech) and the
+    /// described scenes. Stale rows
     /// from an older revision of the file are left out.
     public func timelineTracks(forFileID id: Int64) -> TimelineTracks {
         guard let q = queue else { return .empty }
@@ -516,7 +648,12 @@ public final class ReadStore: @unchecked Sendable {
                 WHERE file_id = ? AND stale = 0 AND start_seconds IS NOT NULL AND id LIKE 'speech:%'
                 ORDER BY start_seconds LIMIT 4000
                 """, arguments: [id]).map { TimelineSpan(start: $0["start_seconds"], end: $0["end_seconds"], text: $0["text"]) }
-            return TimelineTracks(examined: examined, speech: speech)
+            let scenes = try Row.fetchAll(db, sql: """
+                SELECT start_seconds, COALESCE(end_seconds, start_seconds) AS end_seconds, text FROM catalog_passages
+                WHERE file_id = ? AND stale = 0 AND start_seconds IS NOT NULL AND id LIKE 'scene:%'
+                ORDER BY start_seconds LIMIT 200
+                """, arguments: [id]).map { TimelineSpan(start: $0["start_seconds"], end: $0["end_seconds"], text: $0["text"]) }
+            return TimelineTracks(examined: examined, speech: speech, scenes: scenes)
         }) ?? .empty
     }
 
@@ -583,40 +720,37 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Cleanup queries
 
-    private struct ExactCandidateLoad: Sendable {
+    struct ExactCandidateLoad: Sendable {
         let files: [FileRow]
         let candidateCount: Int
         let partial: Bool
+        var unshownClasses = 0
+        var unshownPotentialBytes: Int64 = 0
     }
 
-    private func exactDuplicateCandidates() -> ExactCandidateLoad {
+    func exactDuplicateCandidates() -> ExactCandidateLoad {
         guard let q = queue else {
             return ExactCandidateLoad(files: [], candidateCount: 0, partial: true)
         }
         do {
             return try q.read { db in
-                // Candidate SELECTION stays recipe-agnostic: membership is the
-                // whole same-size class (stored hashes are NEVER byte-proof —
-                // legacy BLAKE3/current SHA-256 rows and stale hashes must still
-                // meet in one class so verify()'s live read can pair them). The
-                // stored content_hash is used purely as a RANKING hint: classes
-                // whose members share a stored (hash, size) — near-certain real
-                // duplicates — load first, and each class is capped at
-                // memberCap files (same-hash twins ranked adjacently so the cap
-                // can't split a pair). Together those stop one dominant class of
-                // NON-duplicates (zero-byte files, fixed-size sidecars) from
-                // starving genuine groups out of the candidateCap file budget.
-                // `candidateCount` is the uncapped total membership so the
-                // partial-preview disclosure fires whenever any backstop drops
-                // real candidates.
+                // Candidate selection is recipe-agnostic: membership is the whole same-size class, since stored hashes are never byte-proof (legacy BLAKE3 and current SHA-256 rows and stale hashes must still meet in one class so verify()'s live read can pair them). The stored hash only ranks classes so near-certain duplicates load first, with same-hash twins ranked adjacently so memberCap can't split a pair; memberCap stops a dominant non-duplicate class from starving real groups out of candidateCap. candidateCount is uncapped so the partial-preview disclosure fires whenever a backstop drops candidates.
                 let candidateCount = try Int.fetchOne(db, sql: """
                     WITH candidate_sizes AS (
                         SELECT COUNT(*) AS n FROM files
-                        WHERE failed = 0 AND size_bytes >= 0
+                        WHERE failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
                         GROUP BY size_bytes HAVING n > 1
                     )
                     SELECT COALESCE(SUM(n), 0) FROM candidate_sizes
                     """) ?? 0
+                let sizeClassTotals = try Row.fetchOne(db, sql: """
+                    WITH classes AS (
+                        SELECT size_bytes AS s, COUNT(*) AS n FROM files
+                        WHERE failed = 0 AND size_bytes >= 0
+                        GROUP BY size_bytes HAVING n > 1
+                    )
+                    SELECT COUNT(*) AS classes, COALESCE(SUM((n - 1) * s), 0) AS bytes FROM classes
+                    """)
                 let rows = try Row.fetchAll(db, sql: """
                     WITH per_file AS (
                         -- twins: how many OTHER rows share this row's stored
@@ -628,7 +762,13 @@ public final class ReadStore: @unchecked Sendable {
                                         PARTITION BY content_hash, size_bytes
                                     ) - 1 END AS twins
                         FROM files
-                        WHERE failed = 0 AND size_bytes >= 0
+                        WHERE failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
+                          AND size_bytes <= \(ExactDuplicateVerifier.maxFileBytes)
+                          AND size_bytes IN (
+                              SELECT size_bytes FROM files
+                              WHERE failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
+                              GROUP BY size_bytes HAVING COUNT(*) > 1
+                          )
                     ),
                     candidate_sizes AS (
                         SELECT pf_size AS gsize, COUNT(*) AS n,
@@ -638,7 +778,7 @@ public final class ReadStore: @unchecked Sendable {
                     ),
                     top_groups AS (
                         SELECT gsize, n, hash_twins FROM candidate_sizes
-                        ORDER BY (hash_twins > 0) DESC, hash_twins DESC,
+                        ORDER BY (hash_twins > 0) DESC, hash_twins * gsize DESC,
                                  n DESC, gsize ASC
                         LIMIT ?
                     ),
@@ -660,7 +800,8 @@ public final class ReadStore: @unchecked Sendable {
                     )
                     SELECT * FROM ranked
                     WHERE member_rank <= ?
-                    ORDER BY (group_hash_twins > 0) DESC, group_hash_twins DESC,
+                    ORDER BY (group_hash_twins > 0) DESC,
+                             group_hash_twins * size_bytes DESC,
                              group_count DESC, size_bytes ASC, member_rank ASC
                     LIMIT ?
                     """, arguments: [
@@ -685,8 +826,17 @@ public final class ReadStore: @unchecked Sendable {
                 if files.count < min(candidateCount, ExactDuplicateVerifier.candidateCap) {
                     partial = true
                 }
+                var shownClasses: [Int64: Int64] = [:]
+                for file in files where shownClasses[file.sizeBytes] == nil {
+                    shownClasses[file.sizeBytes] = (rows.first { ($0["size_bytes"] as Int64?) == file.sizeBytes }?["group_count"] as Int64? ?? 1) - 1
+                }
+                let shownBytes = shownClasses.reduce(Int64(0)) { $0 + $1.key * max(0, $1.value) }
+                let totalClasses: Int = sizeClassTotals?["classes"] ?? 0
+                let totalBytes: Int64 = sizeClassTotals?["bytes"] ?? 0
                 return ExactCandidateLoad(
-                    files: files, candidateCount: candidateCount, partial: partial)
+                    files: files, candidateCount: candidateCount, partial: partial,
+                    unshownClasses: max(0, totalClasses - shownClasses.count),
+                    unshownPotentialBytes: max(0, totalBytes - shownBytes))
             }
         } catch {
             reportError("Exact duplicate candidate query failed: \(error)")
@@ -701,7 +851,67 @@ public final class ReadStore: @unchecked Sendable {
         return await ExactDuplicateVerifier.verify(
             candidates: load.files,
             candidateCount: load.candidateCount,
-            inputPartial: load.partial)
+            inputPartial: load.partial,
+            unshownClasses: load.unshownClasses,
+            unshownPotentialBytes: load.unshownPotentialBytes)
+    }
+
+    struct ExactStoredLoad: Sendable {
+        let groups: [DuplicateGroup]
+        let totalGroups: Int
+        let totalExtraCopies: Int
+        let totalBytes: Int64
+        var shownBytes: Int64 { groups.reduce(0) { $0 + $1.reclaimableBytes } }
+    }
+
+    /// The Cleanup list straight from the stored hashes: one indexed query, no file reads. Groups are ranked by what they could free; `ExactDuplicateVerifier.verifyStored` then re-reads what is shown. Totals cover every group, not just the ones listed.
+    func exactStoredGroups(offset: Int = 0, limit: Int = ExactDuplicateVerifier.groupCap) -> ExactStoredLoad {
+        guard let q = queue else { return ExactStoredLoad(groups: [], totalGroups: 0, totalExtraCopies: 0, totalBytes: 0) }
+        do {
+            return try q.read { db in
+                let totals = try Row.fetchOne(db, sql: """
+                    WITH twins AS (
+                        SELECT size_bytes AS s, COUNT(*) AS n FROM files
+                        WHERE failed = 0 AND content_hash IS NOT NULL AND \(ExactDuplicateVerifier.eligibleSQL)
+                        GROUP BY content_hash, size_bytes HAVING n > 1
+                    )
+                    SELECT COUNT(*) AS groups, COALESCE(SUM(n - 1), 0) AS extra, COALESCE(SUM((n - 1) * s), 0) AS bytes FROM twins
+                    """)
+                let top = try Row.fetchAll(db, sql: """
+                    SELECT content_hash AS h, size_bytes AS s FROM files
+                    WHERE failed = 0 AND content_hash IS NOT NULL AND \(ExactDuplicateVerifier.eligibleSQL)
+                    GROUP BY content_hash, size_bytes HAVING COUNT(*) > 1
+                    ORDER BY (COUNT(*) - 1) * size_bytes DESC, size_bytes DESC, content_hash
+                    LIMIT ? OFFSET ?
+                    """, arguments: [limit, offset])
+                var groups: [DuplicateGroup] = []
+                groups.reserveCapacity(top.count)
+                for key in top {
+                    let hash: Data = key["h"]
+                    let size: Int64 = key["s"]
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT * FROM files
+                        WHERE content_hash = ? AND size_bytes = ? AND failed = 0 AND \(ExactDuplicateVerifier.eligibleSQL)
+                        """, arguments: [hash, size])
+                    let files = rows.map(Self.toFileRow).sorted(by: ExactDuplicateVerifier.keeperComesFirst)
+                    guard files.count > 1 else { continue }
+                    groups.append(DuplicateGroup(
+                        id: ExactDuplicateVerifier.groupID(hash),
+                        files: Array(files.prefix(ExactDuplicateVerifier.memberCap)),
+                        totalFileCount: files.count, totalBytes: Int64(files.count) * size))
+                }
+                return ExactStoredLoad(
+                    groups: groups, totalGroups: totals?["groups"] ?? 0,
+                    totalExtraCopies: totals?["extra"] ?? 0, totalBytes: totals?["bytes"] ?? 0)
+            }
+        } catch {
+            reportError("Exact duplicate stored-hash query failed: \(error)")
+            return ExactStoredLoad(groups: [], totalGroups: 0, totalExtraCopies: 0, totalBytes: 0)
+        }
+    }
+
+    func exactStoredGroupsAsync(offset: Int = 0, limit: Int = ExactDuplicateVerifier.groupCap) async -> ExactStoredLoad {
+        await Task.detached(priority: .userInitiated) { [self] in exactStoredGroups(offset: offset, limit: limit) }.value
     }
 
     // MARK: - Perceptual near-duplicate queries
@@ -716,50 +926,23 @@ public final class ReadStore: @unchecked Sendable {
         return min(20, max(0, v))
     }
 
-    /// Above this image-with-dHash count the O(N²) pairwise scan is skipped rather
-    /// than hang the UI. The user's libraries are ~1.6K images (instant); a 50K
-    /// library would be ~1.25B comparisons.
-    public static let nearDupImageCap = 20_000
-
-    /// Display caps for the perceptual (similar) grouping below. Restored here
-    /// after the exact-duplicate rewrite removed the shared constant block while
-    /// this similar path still references them: at most 200 groups, 5,000 total
-    /// visible members across all groups, 500 members per group.
+    /// Display caps for similar-image grouping: at most 200 groups, 5,000 members in total, 500 per group.
     private static let cleanupMaxGroups = 200
     private static let cleanupMaxVisibleMembers = 5_000
     private static let cleanupMaxVisibleMembersPerGroup = 500
 
-    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within
-    /// `maxHamming` (Hamming distance) of one another, transitively unioned. Same
-    /// keeper ranking as exact dupes (aesthetic ↓, size ↓, createdAt ↑, path len ↑).
-    /// Pure byte-exact groups (every member shares one content_hash) are dropped —
-    /// they already appear in the Exact view, so this surfaces genuinely-perceptual
-    /// matches. Returns groups of size >= 2. Heavy CPU work runs outside the read
-    /// transaction; call via `similarImageGroupsAsync` to keep it off the MainActor.
+    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within `maxHamming` of one another, transitively unioned. Byte-exact groups are dropped because the Exact view shows them. Heavy work runs outside the read transaction; use `similarImageGroupsAsync` to keep it off the MainActor.
     public func similarImageGroups(maxHamming: Int) -> [DuplicateGroup] {
         guard let q = queue else { return [] }
         let rows: [Row]
         do {
-            let candidateCount = try q.read { db in
-                try Int.fetchOne(db, sql: """
-                    SELECT COUNT(*) FROM files
-                    WHERE kind = 'image' AND failed = 0
-                      AND phash IS NOT NULL AND phash != 0
-                    """) ?? 0
-            }
-            guard candidateCount <= Self.nearDupImageCap else {
-                reportError(
-                    "Visually similar comparison is unavailable for \(candidateCount.formatted()) images: " +
-                    "the exact Hamming matcher is capped at \(Self.nearDupImageCap.formatted()). " +
-                    "Exact duplicate cleanup remains available.")
-                return []
-            }
-            // phash == 0 is the engine's "none / failed" sentinel (see DBWriter),
+            // phash == 0 is the engine's "none / failed" sentinel (see `DBWriter` in the engine),
             // so exclude it alongside NULL — otherwise every blank-hash image would
-            // collapse into one giant false group.
+            // collapse into one giant false group. Only the columns grouping needs
+            // are read; full rows are fetched for the clustered members afterwards.
             rows = try q.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT * FROM files
+                    SELECT id, phash, content_hash, path_text FROM files
                     WHERE kind = 'image' AND failed = 0
                       AND phash IS NOT NULL AND phash != 0
                     ORDER BY id
@@ -771,22 +954,51 @@ public final class ReadStore: @unchecked Sendable {
         }
 
         guard rows.count > 1 else { return [] }
-        var fileByID: [Int64: FileRow] = [:]
-        fileByID.reserveCapacity(rows.count)
+        var pathByID: [Int64: String] = [:]
+        pathByID.reserveCapacity(rows.count)
         var contentHashByID: [Int64: Data] = [:]
         var items: [(id: Int64, phash: Int64)] = []
         items.reserveCapacity(rows.count)
         for r in rows {
-            guard let ph: Int64 = r["phash"] else { continue }
-            let fr = Self.toFileRow(r)
-            fileByID[fr.id] = fr
-            if let ch: Data = r["content_hash"] { contentHashByID[fr.id] = ch }
-            items.append((id: fr.id, phash: ph))
+            guard let ph: Int64 = r["phash"], let id: Int64 = r["id"] else { continue }
+            pathByID[id] = r["path_text"]
+            if let ch: Data = r["content_hash"] { contentHashByID[id] = ch }
+            items.append((id: id, phash: ph))
+        }
+        let hashByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.phash) })
+
+        let clusters = PerceptualGrouping.droppingRawTwins(
+            PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming),
+            paths: pathByID, hashes: hashByID, maxHamming: maxHamming
+        ).filter { ids in
+            let hashes = ids.map { contentHashByID[$0] }
+            return !(!hashes.contains(nil) && Set(hashes.compactMap { $0 }).count == 1)
+        }
+        return buildSimilarGroups(clusters: clusters, contentHashByID: contentHashByID)
+    }
+
+    /// Loads the clustered members as full rows, ranks each group's copies, and applies the display caps. `contentHashByID` drops a group of byte-identical files; an engine-made cluster has had that done already, so it passes none.
+    private func buildSimilarGroups(clusters: [[Int64]], trueSizes: [Int] = [], contentHashByID: [Int64: Data]) -> [DuplicateGroup] {
+        guard let q = queue, !clusters.isEmpty else { return [] }
+        var fileByID: [Int64: FileRow] = [:]
+        do {
+            let wanted = clusters.flatMap { $0 }
+            for start in stride(from: 0, to: wanted.count, by: 5_000) {
+                let chunk = Array(wanted[start..<min(start + 5_000, wanted.count)])
+                let encoded = String(decoding: try JSONEncoder().encode(chunk), as: UTF8.self)
+                let full = try q.read { db in
+                    try Row.fetchAll(db, sql: "SELECT * FROM files WHERE id IN (SELECT value FROM json_each(?))", arguments: [encoded])
+                }
+                for r in full { let fr = Self.toFileRow(r); fileByID[fr.id] = fr }
+            }
+        } catch {
+            reportError("Similar-image query failed: \(error)")
+            return []
         }
 
         var groups: [DuplicateGroup] = []
         var remaining = Self.cleanupMaxVisibleMembers
-        for ids in PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming) {
+        for (index, ids) in clusters.enumerated() {
             var files = ids.compactMap { fileByID[$0] }
             guard files.count > 1 else { continue }
             // Drop pure byte-exact clusters — already shown under "Exact".
@@ -802,9 +1014,8 @@ public final class ReadStore: @unchecked Sendable {
                 let bd = b.createdAt ?? .distantFuture
                 if ad != bd { return ad < bd }
                 if a.pathText.count != b.pathText.count { return a.pathText.count < b.pathText.count }
-                // Final tiebreaker on the unique id: Swift's sort isn't stable, so
-                // without this the displayed keeper (files[0]) of two rows tied on
-                // every rank key above would hop run-to-run. (display determinism)
+                // Final tiebreaker on the unique id: Swift's sort isn't stable, so without it the
+                // displayed keeper of two rows tied on every rank key above would change between runs.
                 return a.id < b.id
             }
             // Stable Identifiable id: the smallest member file id — independent of
@@ -812,7 +1023,8 @@ public final class ReadStore: @unchecked Sendable {
             // user's skip state) survives a mid-scan re-rank.
             let gid = files.map(\.id).min() ?? files[0].id
             guard remaining >= 2 else { break }
-            let totalCount = files.count
+            let cut = index < trueSizes.count ? max(0, trueSizes[index] - ids.count) : 0
+            let totalCount = files.count + cut
             let totalBytes = files.reduce(Int64(0)) { $0 + $1.sizeBytes }
             let visibleCount = min(
                 totalCount, Self.cleanupMaxVisibleMembersPerGroup, remaining)
@@ -827,11 +1039,41 @@ public final class ReadStore: @unchecked Sendable {
         return Array(groups.prefix(Self.cleanupMaxGroups))
     }
 
-    /// Off-main twin of `similarImageGroups`. The O(N²) Hamming scan + per-group
-    /// sort run on a background task; only the assignment lands on main. (mirrors
-    /// `duplicateGroupsAsync`)
-    public func similarImageGroupsAsync(maxHamming: Int = ReadStore.defaultNearDupHamming) async -> [DuplicateGroup] {
-        await Task.detached(priority: .userInitiated) { [self] in
+    public struct SimilarClusterPage: Sendable, Equatable {
+        public var clusters: [[Int64]]
+        public var total: Int
+        /// The engine's true size of each cluster; it sends at most 2,000 ids of a larger one.
+        public var sizes: [Int]
+        public init(clusters: [[Int64]], total: Int, sizes: [Int] = []) { self.clusters = clusters; self.total = total; self.sizes = sizes }
+    }
+
+    /// One request carries every group the page can show, so the engine groups the library once per load.
+    static let similarPageSize = cleanupMaxGroups
+
+    /// Collects the engine's look-alike clusters, largest first, up to the number the Cleanup page can show. Nil when the engine cannot answer, so the caller falls back to grouping locally.
+    static func collectSimilarClusters(page: @Sendable (_ offset: Int, _ limit: Int) async -> SimilarClusterPage?) async -> SimilarClusterPage? {
+        var collected = SimilarClusterPage(clusters: [], total: 0)
+        while collected.clusters.count < cleanupMaxGroups {
+            guard let next = await page(collected.clusters.count, similarPageSize) else { return collected.clusters.isEmpty ? nil : collected }
+            collected.clusters += next.clusters
+            collected.sizes += next.sizes.count == next.clusters.count ? next.sizes : next.clusters.map(\.count)
+            collected.total = next.total
+            if next.clusters.isEmpty || collected.clusters.count >= next.total { break }
+        }
+        return collected
+    }
+
+    /// Off-main twin of `similarImageGroups`; only the assignment lands on main. With `page` the engine finds the clusters, so the app never loads every photo's hash; without it, or when the engine cannot answer, they are found here.
+    public func similarImageGroupsAsync(
+        maxHamming: Int = ReadStore.defaultNearDupHamming,
+        page: (@Sendable (_ offset: Int, _ limit: Int) async -> SimilarClusterPage?)? = nil
+    ) async -> [DuplicateGroup] {
+        if let page, let collected = await Self.collectSimilarClusters(page: page) {
+            return await Task.detached(priority: .userInitiated) { [self] in
+                buildSimilarGroups(clusters: collected.clusters, trueSizes: collected.sizes, contentHashByID: [:])
+            }.value
+        }
+        return await Task.detached(priority: .userInitiated) { [self] in
             similarImageGroups(maxHamming: maxHamming)
         }.value
     }
@@ -843,6 +1085,8 @@ public final class ReadStore: @unchecked Sendable {
         public let startedAt: Date; public let completedAt: Date?
         public let lastFileIndex: Int?; public let totalFiles: Int?
         public let status: String
+        /// What the walk left out, as the engine's JSON object of reason to count; nil when it left nothing out or the catalog predates the record.
+        public var skippedJSON: String? = nil
     }
 
     public func recentSessions(limit: Int = 10) -> [ScanSessionRow] {
@@ -858,7 +1102,8 @@ public final class ReadStore: @unchecked Sendable {
                     completedAt: (r["completed_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
                     lastFileIndex: r["last_file_index"],
                     totalFiles: r["total_files"],
-                    status: r["status"]
+                    status: r["status"],
+                    skippedJSON: r["skipped"]
                 )
             }
         }) ?? []
@@ -898,6 +1143,17 @@ public final class ReadStore: @unchecked Sendable {
 
         /// True when any name component is set or the person is marked Unknown.
         public var hasAnyName: Bool { isUnknown || !tagName.isEmpty }
+    }
+
+    /// Whether `persons()` would return anything, without reading every face.
+    public func hasPersons() -> Bool {
+        guard let q = queue else { return false }
+        return (try? q.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM persons p WHERE IFNULL(p.is_unknown,0)=0 AND (
+                    EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR \(Self.personHasNameSQL("p."))))
+                """) ?? false
+        }) ?? false
     }
 
     public func persons(includeUnknown: Bool = false) -> [PersonRow] {
@@ -1030,21 +1286,21 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    /// The faces of `personID` on `fileIDs`: what "Move to another person"
+    /// The faces of `personID` on `fileIDs`, each with its photo: what "Move to another person"
     /// hands the engine, one face at a time. Every face of that person on a
     /// chosen photo moves, so a photo never stays half in each group.
-    public func faceIDs(personID: Int64, fileIDs: [Int64]) -> [Int64] {
+    public func faceFiles(personID: Int64, fileIDs: [Int64]) -> [(face: Int64, file: Int64)] {
         guard let q = queue, !fileIDs.isEmpty else { return [] }
-        return (try? q.read { db -> [Int64] in
-            var ids: [Int64] = []
+        return (try? q.read { db -> [(face: Int64, file: Int64)] in
+            var ids: [(face: Int64, file: Int64)] = []
             for start in stride(from: 0, to: fileIDs.count, by: 500) {
                 let chunk = fileIDs[start..<min(start + 500, fileIDs.count)]
                 let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
                 var args: [DatabaseValueConvertible] = [personID]
                 args.append(contentsOf: chunk.map { Int($0) })
-                ids += try Int64.fetchAll(db, sql: """
-                    SELECT id FROM face_prints WHERE person_id = ? AND file_id IN (\(placeholders)) ORDER BY id
-                    """, arguments: StatementArguments(args))
+                ids += try Row.fetchAll(db, sql: """
+                    SELECT id, file_id FROM face_prints WHERE person_id = ? AND file_id IN (\(placeholders)) ORDER BY id
+                    """, arguments: StatementArguments(args)).map { (face: $0["id"], file: $0["file_id"]) }
             }
             return ids
         }) ?? []
@@ -1143,12 +1399,10 @@ public final class ReadStore: @unchecked Sendable {
             return a < b ? a : b
         }
 
-        // Union-find over every person id touched.
         var parent: [Int64: Int64] = [:]
         func find(_ x: Int64) -> Int64 {
             var r = x
             while let p = parent[r], p != r { r = p }
-            // Path compression.
             var cur = x
             while let p = parent[cur], p != r {
                 parent[cur] = r
@@ -1159,11 +1413,7 @@ public final class ReadStore: @unchecked Sendable {
         func union(target: Int64, source: Int64) {
             let rt = find(target), rs = find(source)
             if rt == rs { return }
-            // Keep the higher-priority root (named > larger file_count >
-            // lower id) so a typed name is never deleted when a chain of
-            // borderline pairs links a named and an unnamed cluster — per-pair
-            // preferredTarget does not compose transitively, so union order alone
-            // would pick the wrong (possibly unnamed) root.
+            // Keep the higher-priority root so a typed name is never deleted by a chain of borderline pairs (see the note above).
             let keep = preferredRoot(rt, rs)
             parent[keep == rt ? rs : rt] = keep
         }
@@ -1173,7 +1423,6 @@ public final class ReadStore: @unchecked Sendable {
             union(target: t, source: s)
         }
 
-        // Collect: per-final-target → list of source ids being absorbed.
         var byTarget: [Int64: [Int64]] = [:]
         for id in parent.keys {
             let root = find(id)
@@ -1219,25 +1468,23 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Deep Analyze queries
 
-    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int) {
-        guard let q = queue else { return (0, 0) }
+    /// `pending`: files the chosen model has not described (a run with "only files not described yet" does these). `undescribed`: files no model has described.
+    public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int, undescribed: Int) {
+        guard let q = queue else { return (0, 0, 0) }
         return (try? q.read { db in
-            let total = try Int.fetchOne(db, sql:
-                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0") ?? 0
-            let pending = try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM files
+            let row = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(vlm_full_model IS NULL OR vlm_full_model != ?), 0) AS pending,
+                       COALESCE(SUM(vlm_full_model IS NULL), 0) AS undescribed
+                FROM files
                 WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
-                  AND (vlm_full_model IS NULL OR vlm_full_model != ?)
-                """, arguments: [modelKey]) ?? 0
-            return (total, pending)
-        }) ?? (0, 0)
+                """, arguments: [modelKey])
+            return (row?["total"] ?? 0, row?["pending"] ?? 0, row?["undescribed"] ?? 0)
+        }) ?? (0, 0, 0)
     }
 
-    /// All non-failed image files that have a non-empty
-    /// `vlm_proposed_name`. Used by the bulk-rename UI.
-    /// Item 5: (url, tags) for every file carrying ≥1 keyword tag, so the
-    /// "Apply tags" action can write them onto the files as Finder tags (making
-    /// Spotlight + Finder search work). Aggregated per file — one FS write each.
+    /// (url, tags) for every file carrying at least one keyword tag, so "Apply tags" can write
+    /// them as Finder tags. Aggregated per file, one write each.
     public func filesWithKeywordTags() -> [(url: URL, tags: [String])] {
         guard let q = queue else { return [] }
         do {
@@ -1288,9 +1535,8 @@ public final class ReadStore: @unchecked Sendable {
                       last: row["last_name"], suffix: row["suffix"], legacy: row["name"])
     }
 
-    /// Item 5: (url, names) for every file containing ≥1 NAMED person, so the
-    /// "Apply people as tags" action can write the person names onto the files.
-    /// Skips Unknown / unnamed clusters. Aggregated per file.
+    /// (url, names) for every file containing at least one named person, so "Apply people as tags"
+    /// can write the names onto the files. Skips Unknown and unnamed clusters.
     public func filesWithPersonTags() -> [(url: URL, names: [String])] {
         guard let q = queue else { return [] }
         do {
@@ -1343,6 +1589,21 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// Files in the library under `root` and every folder below it, the set an Organize Folders plan
+    /// for that root covers. The range `root/` … `root0` holds exactly the paths below `root`
+    /// ('0' sorts right after '/').
+    public func countFiles(under root: String) -> Int {
+        guard let q = queue else { return 0 }
+        var base = root
+        while base.count > 1, base.hasSuffix("/") { base.removeLast() }
+        let prefix = base == "/" ? "/" : base + "/"
+        let upper = String(prefix.dropLast()) + "0"
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(Self.notEngineHiddenSQL) AND path_text >= ? AND path_text < ?",
+                             arguments: [prefix, upper]) ?? 0
+        }) ?? 0
+    }
+
     /// Count-only twin of `filesWithProposedNames` — the badge/refresh
     /// paths only need the number, and SELECT * deserialized up to
     /// 5000 full rows per refresh. The inner LIMIT keeps the cap
@@ -1390,7 +1651,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     /// Concurrent read-only connections over the engine's WAL database: the
-    /// grid, search, tags, people and counters no longer queue behind one
+    /// grid, search, tags, people and counters do not queue behind one
     /// another. Each reader gets a 32 MB page cache and memory-mapped I/O.
     /// A pool of concurrent readers needs WAL (the engine's database always
     /// is). Other journal modes get one connection, since there a reader's
@@ -1409,6 +1670,7 @@ public final class ReadStore: @unchecked Sendable {
         config.maximumReaderCount = 6
         config.busyMode = .timeout(2)
         config.prepareDatabase { db in
+            db.add(collation: DatabaseCollation(LibrarySort.nameCollation) { $0.localizedStandardCompare($1) })
             try db.execute(sql: "PRAGMA cache_size = -32768")
             try db.execute(sql: "PRAGMA mmap_size = 268435456")
             try db.execute(sql: "PRAGMA temp_store = MEMORY")

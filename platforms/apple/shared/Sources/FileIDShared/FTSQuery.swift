@@ -13,4 +13,23 @@ public enum FTSQuery {
             .map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
             .joined(separator: " ")
     }
+
+    /// `quoted` with the last token of every term that holds at least two
+    /// letters or digits matched as a prefix (`"img 41" *`), so "IMG_41" finds
+    /// "IMG_4181". Terms of one character stay whole words. Empty when no term
+    /// qualifies. Mirrors `fts_prefix_query` in the Rust engine.
+    public static func prefixed(_ raw: String) -> String {
+        var any = false
+        let terms = raw.split(whereSeparator: { $0.isWhitespace })
+            .filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }
+            .map { token -> String in
+                let quoted = "\"" + token.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+                if token.filter({ $0.isLetter || $0.isNumber }).count >= 2 {
+                    any = true
+                    return quoted + " *"
+                }
+                return quoted
+            }
+        return any ? terms.joined(separator: " ") : ""
+    }
 }

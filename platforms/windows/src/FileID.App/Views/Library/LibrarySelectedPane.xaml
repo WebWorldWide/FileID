@@ -1,10 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    LibrarySelectedPane: the 300 px details pane a single click opens beside
-    the Library grid (macOS LibrarySelectedPane). 16:10 preview, name and
-    folder, OFFLINE note, Kind / Captured / Size / Camera / People rows,
-    caption, tags, Open preview / Similar / Show in Explorer / Open.
--->
+<!-- LibrarySelectedPane: the 300 px details pane that a single click opens beside the Library grid. -->
 <UserControl
     x:Class="FileID.Views.Library.LibrarySelectedPane"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"

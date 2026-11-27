@@ -67,7 +67,6 @@ fn owner(conn: &Connection, face: i64) -> Option<i64> {
     conn.query_row("SELECT person_id FROM face_prints WHERE id=?1", [face], |r| r.get(0)).unwrap()
 }
 
-/// Two people (1 along x, 2 along y), each with one assigned face, and new faces to place.
 fn library() -> Connection {
     let conn = db();
     for file in 1..=6 {
@@ -190,6 +189,26 @@ fn different_people_verdicts_bar_the_other_person() {
     conn.execute(
         "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,file_a,bbox_a,file_b,bbox_b) \
          VALUES(1,9,0,1,'user',0,1,'box1',3,'box3')",
+        [],
+    )
+    .unwrap();
+    run(&conn, &Settings::default());
+    assert_eq!(candidates(&conn)[0].1, 2);
+}
+
+#[test]
+fn different_people_verdicts_keyed_by_face_id_alone_bar_the_other_person() {
+    let conn = library();
+    face(&conn, 3, 3, None, (1.0, 0.6));
+    conn.execute(
+        "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) \
+         VALUES(1,9,0,1,'user',0,3,1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) \
+         VALUES(1,8,1,1,'user',0,3,2)",
         [],
     )
     .unwrap();

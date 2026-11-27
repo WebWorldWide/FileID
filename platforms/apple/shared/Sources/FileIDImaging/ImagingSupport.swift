@@ -33,7 +33,9 @@ package enum ImagingLog {
         guard var line = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }
         line.append(0x0A)
         lock.lock(); defer { lock.unlock() }
-        FileHandle.standardError.write(line)
+        // The throwing API: `write(_:)` raises an Objective-C exception, which Swift cannot catch, when the log disk is full or stderr is closed, and that took the whole engine down.
+        let stderr = FileHandle.standardError
+        try? stderr.write(contentsOf: line)
     }
 }
 

@@ -182,7 +182,8 @@ struct ReadStorePresentationTests {
 
         #expect(fixture.store.totalAnalyzableFiles() == 6)
         #expect(fixture.store.filesAnalysisStats() == (analyzable: 6, captioned: 2))
-        #expect(fixture.store.deepAnalyzePending(modelKey: "model") == (total: 6, pending: 4))
+        #expect(fixture.store.deepAnalyzePending(modelKey: "model") == (total: 6, pending: 4, undescribed: 3))
+        #expect(fixture.store.deepAnalyzePending(modelKey: "older") == (total: 6, pending: 5, undescribed: 3))
     }
 
     @Test("all active clusters remain visible regardless of size")
@@ -244,6 +245,20 @@ struct ReadStorePresentationTests {
         #expect(byID[3]?.displayName == "Person 3")
         #expect(byID[3]?.hasAnyName == false)
         #expect(fixture.store.namedPersonCount() == 2)
+        #expect(fixture.store.hasPersons())
+    }
+
+    @Test("hasPersons agrees with the people list for an empty catalog and for one with only hidden rows")
+    func hasPersonsAgreesWithPersons() throws {
+        let fixture = try makeStore { db in
+            try db.execute(sql: "INSERT INTO persons(id,name,is_unknown) VALUES (1,NULL,1),(2,NULL,0)")
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        #expect(fixture.store.persons().isEmpty)
+        #expect(!fixture.store.hasPersons())
     }
 
     @Test("merge suggestions reject people who appear in the same file")

@@ -6,9 +6,7 @@ using Microsoft.UI.Xaml.Media;
 
 namespace FileID.Services;
 
-/// <summary>Settings ▸ Appearance ▸ Text size, as on macOS `TextSize`: scales page text (file names,
-/// details, descriptions, chat) in half-point steps; Default leaves every size untouched. The title bar
-/// and sidebar keep their designed size because only the page host is attached.</summary>
+/// <summary>The title bar and sidebar keep their designed size because only the page host is attached.</summary>
 internal sealed class TextScaler
 {
     public static TextScaler Instance { get; } = new();
@@ -46,7 +44,6 @@ internal sealed class TextScaler
         }
     }
 
-    /// <summary>Scales everything under <paramref name="root"/> now and again after each layout pass that adds new text.</summary>
     public void Attach(FrameworkElement root)
     {
         _roots.Add(new WeakReference<FrameworkElement>(root));

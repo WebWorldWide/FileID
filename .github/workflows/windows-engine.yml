@@ -38,16 +38,13 @@ jobs:
             target: x86_64-pc-windows-msvc
             cross: false
 
-          # ARM64 native target. GitHub's `windows-11-arm` runner has been
-          # available since late 2024. If the runner shape changes, update
-          # this entry rather than the matrix structure.
+          # ARM64 native target on GitHub's `windows-11-arm` runner.
           - label: arm64-native
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             cross: false
 
-          # ARM64 cross-compile from x64 — proves the toolchain works for
-          # devs without ARM64 hardware. Tests are skipped (cross-runs).
+          # ARM64 cross-compile from x64; tests are skipped because the binaries cannot run here.
           - label: arm64-cross
             runner: windows-latest
             target: aarch64-pc-windows-msvc
@@ -92,9 +89,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # MSRV pinned to 1.98 in rust-toolchain.toml. Keep both files
-          # in sync — drift here means CI builds with a different toolchain
-          # than contributors use locally.
+          # Keep in sync with rust-toolchain.toml.
           toolchain: 1.98
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
@@ -111,26 +106,18 @@ jobs:
             cargo-${{ matrix.label }}-
 
       - name: Format check
-        # rustfmt.toml disables all formatting; this stays as a placeholder
-        # so the CI shape doesn't change. If a future commit drops the
-        # disable_all_formatting=true setting, this gate starts enforcing.
+        # rustfmt.toml disables all formatting, so this only gates if that setting is dropped.
         run: cargo fmt --all -- --check
 
       - name: Clippy (-D warnings, full)
-        # V15.3 Phase 6: tightened to `-D warnings` after a Cargo.toml
-        # [lints.clippy] cleanup pass moved style-only pedantic rules to
-        # `allow` with documented justifications. Real correctness lints
-        # remain `deny`. Any new style-only noise should land an allow in
-        # Cargo.toml with a comment, not a CI exception here.
+        # Style-only lints are allowed in Cargo.toml [lints.clippy]; add new allows there, not as CI exceptions.
         run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
 
       - name: Model integrity — every registry artifact pins a SHA256 (x64 only)
         if: matrix.label == 'x64'
         shell: pwsh
-        # Supply-chain gate: a downloadable model/runtime with `sha256: None`
-        # would load (into ONNX Runtime / llama.cpp) UNVERIFIED — a compromised
-        # mirror could serve a malicious artifact (RCE during inference). Every
-        # FileEntry in registry.rs MUST pin a SHA256; the downloader verifies it.
+        # Supply-chain gate: a downloadable model or runtime without a pinned sha256 would load
+        # unverified. Every FileEntry in registry.rs must pin one; the downloader verifies it.
         run: |
           $none = Select-String -Path "src/models/registry.rs" -Pattern 'sha256:\s*None,'
           if ($none) {
@@ -142,10 +129,7 @@ jobs:
 
       - name: Cache cargo-audit + cargo-deny binaries
         if: matrix.label == 'x64'
-        # V15.3 N9 followup: caches the compiled cargo-audit + cargo-deny
-        # binaries in ~/.cargo/bin so successive runs skip the
-        # `cargo install --locked` recompile (~5 min each from source).
-        # Cache key version (`v1`) is manually bumped to refresh tools.
+        # Caches the compiled cargo-audit and cargo-deny (about 5 minutes each to build). Bump `v1` to refresh them.
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: cache-cargo-tools
         with:
@@ -163,38 +147,21 @@ jobs:
 
       - name: cargo-deny (license + advisory + dup-version + ban gate)
         if: matrix.label == 'x64'
-        # V15.3 Phase 6: enforces deny.toml. License allowlist + advisory
-        # check + duplicate-version detection + source allowlist. This
-        # gate stays hard — deny.toml's advisories.ignore list lets us
-        # document specific RUSTSEC IDs we've reviewed and accepted.
+        # Enforces deny.toml: licenses, advisories, duplicate versions and sources.
+        # Reviewed RUSTSEC IDs are documented in its advisories.ignore list.
         run: cargo deny check
 
       - name: Cargo.lock freshness (x64 only)
         if: matrix.label == 'x64'
         shell: pwsh
-        # Fail if Cargo.lock is stale vs Cargo.toml (--locked errors instead of
-        # updating it). Keeps the committed lockfile authoritative — required for
-        # reproducible + SHA-pinnable release builds (ties to the WS-CD model-hash
-        # work). Cheap; no network.
+        # --locked fails if Cargo.lock is stale, keeping the committed lockfile authoritative for reproducible release builds.
         run: cargo metadata --locked --format-version 1 | Out-Null
 
       - name: Audit dependencies (x64 only)
         if: matrix.label == 'x64'
-        # V15.3 N9: Soft-warn gate (continue-on-error). Multiple iterations
-        # tried to make this a hard gate (with + without --deny warnings,
-        # with + without advisory-DB caching); each iteration tripped CI
-        # red on a clean Cargo.lock that local cargo audit reports green.
-        # The corpus drift between CI's cargo-audit (latest published) +
-        # CI's freshly-fetched advisory DB + my local 1090-advisory DB
-        # produced different findings.
-        #
-        # Until we either (a) pin cargo-audit version + advisory-DB snapshot
-        # together, or (b) gain log access to triage the specific advisory
-        # CI flags, soft-warn is the honest posture. The cargo deny check
-        # above is the actual advisory hard gate via deny.toml's
-        # advisories.* configuration.
-        #
-        # See shared/docs/DECISIONS.md 2026-05-16 entry for full triage path.
+        # Soft-warn (continue-on-error): the latest cargo-audit and a freshly fetched advisory DB
+        # flag a clean Cargo.lock that local runs pass. cargo deny above is the hard advisory gate.
+        # See shared/docs/DECISIONS.md 2026-05-16.
         continue-on-error: true
         run: cargo audit
 
@@ -202,29 +169,11 @@ jobs:
         if: matrix.label == 'x64'
         shell: pwsh
         working-directory: ${{ github.workspace }}
-        # V15.3 N9: outbound-URL allowlist. Scans the SOURCE (not the
-        # compiled binary — that'd drown in false positives from ORT /
-        # rustc / windows-rs DLL strings) for any `https?://` URL and
-        # asserts every host is on the allowlist below. Stops a future
-        # contributor from silently adding a new download site,
-        # telemetry endpoint, or analytics URL — even one that doesn't
-        # match the existing 22-string deny-list.
-        #
-        # Two host categories on the allowlist:
-        #
-        #   Egress hosts (real network endpoints we reach at runtime):
-        #     - huggingface.co                — model weight downloads
-        #     - github.com                    — llama.cpp release binaries
-        #     - developer.download.nvidia.com — cuDNN runtime
-        #     - developer.nvidia.com          — user-facing cuDNN help link
-        #
-        #   XML/XAML namespace identifiers (URN-like; never resolved):
-        #     - schemas.microsoft.com         — WinUI XAML namespace tokens
-        #     - schemas.openxmlformats.org    — XAML markup-compat tokens
-        #
-        # To add a host: edit this list AND add a rationale entry in
-        # shared/docs/DECISIONS.md. Reviewers should reject PRs that
-        # touch this list without the DECISIONS.md entry.
+        # Outbound-URL allowlist over the source (the compiled binary has too many false positives
+        # from runtime strings). Egress hosts: huggingface.co (model weights), github.com (llama.cpp
+        # binaries), developer.download.nvidia.com (cuDNN runtime), developer.nvidia.com (help link).
+        # schemas.microsoft.com and schemas.openxmlformats.org are XML namespace identifiers, never resolved.
+        # To add a host, edit the list and add a rationale entry in shared/docs/DECISIONS.md.
         run: |
           $allowedHosts = @(
             "huggingface.co",
@@ -239,12 +188,8 @@ jobs:
           $sources = Get-ChildItem -Path platforms/windows/src -Recurse -File `
             -Include *.rs,*.cs,*.xaml,*.xaml.cs |
             Where-Object { $_.FullName -notmatch '\\(bin|obj|target|packages)\\' }
-          # Loopback is exempt: a 127.0.0.1 / localhost URL never leaves the
-          # machine, so it can't be a download site, telemetry endpoint, or
-          # analytics URL — the only things this scan exists to catch. The
-          # local VLM server (llama-server) binds an ephemeral port on
-          # 127.0.0.1 and we format an http:// base URL for it; that's IPC,
-          # not egress. See shared/docs/DECISIONS.md (V16.20).
+          # Loopback is exempt: it never leaves the machine. The local VLM server (llama-server)
+          # binds an ephemeral 127.0.0.1 port and gets an http:// base URL; that is IPC, not egress.
           $loopbackHosts = @("127.0.0.1", "localhost", "0.0.0.0", "::1")
           $hits = @()
           foreach ($file in $sources) {
@@ -272,9 +217,7 @@ jobs:
 
       - name: Test
         if: matrix.cross == false
-        # --all-targets so the pure-Rust unit tests inside lib modules
-        # (e.g. `pipeline::identity_clustering`) run, not just integration
-        # tests at the workspace root.
+        # --all-targets also runs the unit tests inside lib modules, not just integration tests.
         run: cargo test --target ${{ matrix.target }} --all-targets
 
       - name: Verify binary exists
@@ -291,13 +234,9 @@ jobs:
         timeout-minutes: 15
         run: python "${{ github.workspace }}/shared/scripts/conformance.py" --engine "target/${{ matrix.target }}/release/FileIDEngine.exe"
 
-      # Per-vendor EP smoke: launch the engine, let it emit `ready` on stdout
-      # (carrying HardwareInfo + the chosen executionProvider), then send EOF
-      # via empty stdin so the engine exits cleanly. On CI hosts we expect
-      # CPU fallback (no GPU), so this proves the EP probe + dispatch + JSON
-      # serialization are alive on each target arch. On real-hardware
-      # verification runs the same step surfaces CUDA / DirectML / QNN.
-      - name: Smoke — engine startup + EP probe
+      # Smoke: the engine emits `ready` (HardwareInfo and the chosen executionProvider) on stdout,
+      # then exits cleanly on stdin EOF.
+      - name: Smoke — engine startup + hardware probe
         if: matrix.cross == false
         shell: pwsh
         env:
@@ -324,8 +263,7 @@ jobs:
             throw "Engine did not exit within 10 s of stdin EOF."
           }
           if ([string]::IsNullOrWhiteSpace($stdout)) { throw "No stdout from engine — startup failed." }
-          # Event JSON is { "t": "...", "payload": { "ready": { "_0": { ... } } } }
-          # so the variant tag appears as a JSON key inside payload — match that.
+          # Event JSON is { "t": "...", "payload": { "ready": { "_0": { ... } } } }; match the variant key.
           if (-not ($stdout -match '"ready"\s*:')) {
             Write-Error "engine.stdout did not contain a ready event"
             exit 1
@@ -336,9 +274,7 @@ jobs:
           }
           Write-Host "Engine startup + EP probe smoke passed. ✅"
 
-      # V14.9-P H6: smoke `verifyCudaPack` so a regression in
-      # probe_cuda_pack() (or the `HardwareReprobed` IPC contract) trips
-      # CI rather than reaching the Windows Settings card.
+      # Smoke `verifyCudaPack` so a regression in probe_cuda_pack() or the `HardwareReprobed` IPC contract fails CI.
       - name: Smoke — verifyCudaPack reprobe
         if: matrix.cross == false
         shell: pwsh
@@ -347,8 +283,7 @@ jobs:
         timeout-minutes: 1
         run: |
           $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
-          # One UUID-keyed command followed by EOF. Engine should emit a
-          # `hardwareReprobed` event on stdout, then exit on stdin close.
+          # One UUID-keyed command then EOF; the engine emits `hardwareReprobed` and exits.
           $cmd = '{"id":"00000000-0000-0000-0000-000000000001","payload":{"verifyCudaPack":{}}}'
           Set-Content -Path verify-stdin.txt -Value $cmd -NoNewline
           Add-Content -Path verify-stdin.txt -Value "`n"
@@ -370,8 +305,7 @@ jobs:
           }
           Write-Host "verifyCudaPack reprobe smoke passed. ✅"
 
-      # Privacy gate: shipped binary must NOT contain telemetry SDK strings.
-      # Failing this is a release blocker — no exception.
+      # The shipped binary must contain no telemetry SDK strings; a failure blocks the release.
       - name: Privacy — telemetry-string scan
         if: matrix.label != 'arm64-cross'
         shell: pwsh

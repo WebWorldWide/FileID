@@ -1,8 +1,6 @@
-// Under the shared Rust engine (`engine.backend` = rust) the engine installs the
-// ONNX models through `prewarmModel`, as it does on Windows and Linux, into the
-// same files the app's own installers write; with the Swift engine the app keeps
-// downloading them itself. The files on disk stay the only install state, so
-// each installer's `refreshStatus()` is unchanged.
+// The shared Rust engine installs the ONNX models through `prewarmModel`, as it does on
+// Windows and Linux, into the same files the app's own installers write. The files on
+// disk stay the only install state, so each installer's `refreshStatus()` is unchanged.
 import Foundation
 import FileIDShared
 
@@ -60,5 +58,5 @@ enum EngineModelInstall {
         }
     }
 
-    static let notResponding = "FileID isn't responding. Quit and reopen FileID, then try again."
+    static let notResponding = "FileID isn’t responding. Quit and reopen FileID, then try again."
 }

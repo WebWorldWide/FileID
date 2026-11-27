@@ -1,11 +1,6 @@
-//! `runFaceClustering` over macOS face spaces (Vision boxes and landmarks, the
-//! Swift alignment). A port of the Swift engine's `FaceClustering.runClustering`
-//! without its vector extraction, together with the `FaceClusterPersistence`,
-//! `StablePersonAssignments`, `ExactCosineJoin` and `FaceReview` holdout and
-//! assessment it relies on, so a Swift catalog clustered here keeps the same
-//! people, person ids, names, verdicts and queues. Keep in step with those
-//! Swift files; the portable pipeline in `face_clustering.rs` stays the default
-//! for every other face space.
+//! Face clustering over macOS face spaces (Vision boxes and landmarks): clustering, persistence, stable person ids,
+//! holdout and review. Catalogs written by the retired Swift engine keep the same people, ids, names, verdicts and
+//! queues. The portable `face_clustering.rs` handles every other face space.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -37,6 +32,22 @@ pub(crate) struct Space {
     pub processing: String,
 }
 
+/// Raised inside a pass that was asked to stop, so its transaction rolls back.
+#[derive(Debug)]
+struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("face grouping was stopped")
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+fn ensure_running(cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if cancelled() { Err(Stopped.into()) } else { Ok(()) }
+}
+
 pub(crate) struct Outcome {
     pub result: FaceClusteringResult,
     pub error: Option<(&'static str, &'static str)>,
@@ -62,13 +73,11 @@ fn env_bool(key: &str, default: bool) -> bool {
     std::env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// The face space to cluster with the Swift pipeline, or `None` for the
-/// portable one. The app-hosted engine on a Mac clusters its own namespace with
-/// the installed face model (or the one model the catalog used there); any
-/// engine clusters a catalog whose faces all sit in one macOS space the same way.
+/// The app-hosted Mac engine clusters its own namespace with the installed face model (or the one the catalog used);
+/// any engine clusters a catalog whose faces all sit in one macOS space the same way.
 pub(crate) fn selected_space(conn: &Connection) -> Option<Space> {
-    // A catalog with no macOS-space face at all is the common portable case;
-    // answer it from the index instead of reading every vector.
+    // A catalog with no macOS-space face is the common portable case; answer from the index instead of reading every
+    // vector.
     let any: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM face_prints WHERE processing_version >= ?1 AND processing_version < ?2)",
@@ -103,25 +112,60 @@ fn single_model(conn: &Connection, processing: &str) -> Option<String> {
     (models.len() == 1).then(|| models[0].clone())
 }
 
-// MARK: - Provenance (FaceCacheProvenance)
-
 fn source_revision(size: i64, modified: f64) -> String {
     format!("{size}:{}", modified.to_bits())
 }
 
-/// The catalog's modification time of a file (`catalog_unix_seconds`), the number the Swift
-/// engine stores too.
 pub(crate) fn catalog_mtime(metadata: &std::fs::Metadata) -> Option<f64> {
     metadata.modified().ok().and_then(crate::util::catalog_unix_seconds)
 }
 
 fn current_source_revision(path: &str) -> Option<String> {
+    #[cfg(test)]
+    tests::note_stat();
     let metadata = std::fs::metadata(Path::new(path)).ok()?;
     if !metadata.is_file() {
         return None;
     }
     let size = i64::try_from(metadata.len()).ok()?;
     Some(source_revision(size, catalog_mtime(&metadata)?))
+}
+
+/// What each face-bearing photo's file looks like on disk right now. Built once per pass before the catalog lock is taken, so a slow or sleeping drive never holds the writer.
+#[derive(Default)]
+pub(crate) struct Presence(HashMap<String, Option<String>>);
+
+impl Presence {
+    #[cfg(test)]
+    pub(crate) fn of(conn: &Connection) -> rusqlite::Result<Self> {
+        let paths = Self::paths(conn)?;
+        Ok(Self(paths.into_iter().map(|path| (path.clone(), current_source_revision(&path))).collect()))
+    }
+
+    /// One stat per photo, which takes seconds on a large library on a slow drive; `cancelled` is read between photos.
+    pub(crate) fn build(database: &Mutex<Connection>, cancelled: &dyn Fn() -> bool) -> Result<Self> {
+        let paths = match crate::db::reader_for(database)? {
+            Some(reader) => Self::paths(&reader)?,
+            None => Self::paths(&database.lock())?,
+        };
+        let mut revisions = HashMap::with_capacity(paths.len());
+        for path in paths {
+            ensure_running(cancelled)?;
+            let revision = current_source_revision(&path);
+            revisions.insert(path, revision);
+        }
+        Ok(Self(revisions))
+    }
+
+    fn paths(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+        conn.prepare("SELECT DISTINCT f.path_text FROM face_prints fp JOIN files f ON f.id=fp.file_id WHERE f.path_text IS NOT NULL AND f.path_text<>''")?
+            .query_map([], |row| row.get(0))?
+            .collect()
+    }
+
+    fn revision(&self, path: &str) -> Option<&str> {
+        self.0.get(path)?.as_deref()
+    }
 }
 
 fn normalized_embedding(blob: &[u8]) -> bool {
@@ -155,8 +199,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     sum
 }
 
-// MARK: - Selected partition
-
 #[derive(Debug, Clone, PartialEq)]
 struct FaceRow {
     id: i64,
@@ -188,7 +230,7 @@ struct Partition {
     overflowed: bool,
 }
 
-fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_quality: f64, limit: usize) -> rusqlite::Result<Partition> {
+fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_quality: f64, limit: usize, presence: &Presence) -> rusqlite::Result<Partition> {
     let mut statement = conn.prepare(
         "SELECT fp.id,fp.file_id,fp.person_id,fp.bbox,fp.face_quality,fp.excluded, \
                 CASE WHEN LENGTH(fp.arcface_embedding)=512 THEN fp.arcface_embedding END, \
@@ -200,7 +242,6 @@ fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_qua
     )?;
     let mut cursor = statement.query([])?;
     let mut partition = Partition { rows: Vec::new(), snapshots: Vec::new(), deferred: 0, overflowed: false };
-    let mut revisions: HashMap<String, Option<String>> = HashMap::new();
     while let Some(row) = cursor.next()? {
         let id: i64 = row.get(0)?;
         if skip.contains(&id) {
@@ -231,8 +272,7 @@ fn load_partition(conn: &Connection, space: &Space, skip: &HashSet<i64>, min_qua
             partition.deferred += 1;
             continue;
         };
-        let actual = revisions.entry(path.clone()).or_insert_with(|| current_source_revision(&path));
-        if !actual.as_deref().is_some_and(|actual| crate::util::same_source_revision(actual, &revision)) {
+        if !presence.revision(&path).is_some_and(|actual| crate::util::same_source_revision(actual, &revision)) {
             partition.deferred += 1;
             continue;
         }
@@ -285,16 +325,14 @@ fn is_current(
         && embedding.is_some_and(normalized_embedding)
 }
 
-fn require_unchanged(conn: &Connection, original: &Partition, space: &Space, skip: &HashSet<i64>, min_quality: f64) -> Result<u64> {
-    let current = load_partition(conn, space, skip, min_quality, MAX_FACES_PER_RUN)?;
+fn require_unchanged(conn: &Connection, original: &Partition, space: &Space, skip: &HashSet<i64>, min_quality: f64, presence: &Presence) -> Result<u64> {
+    let current = load_partition(conn, space, skip, min_quality, MAX_FACES_PER_RUN, presence)?;
     ensure!(
         !current.overflowed && current.rows == original.rows && current.snapshots == original.snapshots,
         "the face evidence changed during clustering"
     );
     Ok(current.deferred)
 }
-
-// MARK: - Identities and verdicts
 
 #[derive(Debug, Clone, PartialEq)]
 struct Prior {
@@ -419,8 +457,6 @@ fn verdicts(conn: &Connection, participants: Option<&HashSet<i64>>) -> Result<Ve
     Ok(out)
 }
 
-// MARK: - Clustering pass
-
 fn hyperparameters() -> (Hyperparameters, bool) {
     (
         Hyperparameters {
@@ -430,9 +466,11 @@ fn hyperparameters() -> (Hyperparameters, bool) {
             pass3_variance_threshold: 0.04,
             pass3_min_mean_cosine: 0.60,
             pass3_max_splits: 7,
-            k_nn: env_int("FILEID_FACE_KNN", 10, 4..=256),
+            k_nn: env_int("FILEID_FACE_KNN", 16, 4..=256),
+            oversized_faces: env_int("FILEID_FACE_OVERSIZED_FACES", 300, 2..=1_000_000),
+            oversized_min_mean_cosine: env_cos("FILEID_FACE_OVERSIZED_MEAN_COSINE", 0.72),
         },
-        env_bool("FILEID_FACE_MUTUAL_KNN", false),
+        env_bool("FILEID_FACE_MUTUAL_KNN", true),
     )
 }
 
@@ -440,7 +478,6 @@ fn compare(a: &Neighbor, b: &Neighbor) -> std::cmp::Ordering {
     b.similarity.total_cmp(&a.similarity).then_with(|| a.idx.cmp(&b.idx))
 }
 
-/// Cosine as the Swift engine derives it from its HNSW index: 1 − L2²/2.
 fn l2_cosine(a: &[f32], b: &[f32]) -> f32 {
     let mut squared = 0.0f32;
     for index in 0..a.len().min(b.len()) {
@@ -451,9 +488,72 @@ fn l2_cosine(a: &[f32], b: &[f32]) -> f32 {
     1.0 - distance * distance / 2.0
 }
 
-/// Dense cluster id → dense indexes, through the shared identity pipeline with
-/// the Swift engine's calibration (exact kNN up to 5,000 faces, HNSW above).
-fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
+/// The `k` nearest faces of every face, best first, itself included. Exact, so a large library groups the way a small one
+/// does; rows are split over a few threads yet each depends only on its own query, so the lists never vary with
+/// scheduling. (A graph index would build on one thread here: its layout depends on insertion order, and that took
+/// minutes at 78,000 faces.)
+fn nearest_lists(vectors: &[Vec<f32>], k: usize, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<Vec<Neighbor>>> {
+    const BLOCK: usize = 4;
+    const CHUNK: usize = 32;
+    let n = vectors.len();
+    let dim = vectors.first().map_or(0, Vec::len);
+    if n == 0 || dim == 0 || vectors.iter().any(|vector| vector.len() != dim) {
+        return Some(vec![Vec::new(); n]);
+    }
+    let flat: Vec<f32> = vectors.iter().flatten().copied().collect();
+    let norms: Vec<f32> = vectors.iter().map(|vector| crate::util::vector_math::dot(vector, vector)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let lists: Mutex<Vec<(usize, Vec<Vec<Neighbor>>)>> = Mutex::new(Vec::new());
+    let threads = crate::platform::performance_core_count().clamp(1, 8).min(n.div_ceil(CHUNK));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let start = next.fetch_add(CHUNK, std::sync::atomic::Ordering::Relaxed);
+                    if start >= n {
+                        return;
+                    }
+                    let end = (start + CHUNK).min(n);
+                    let mut done: Vec<Vec<Neighbor>> = Vec::with_capacity(end - start);
+                    for first in (start..end).step_by(BLOCK) {
+                        if cancelled() {
+                            stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return;
+                        }
+                        let rows: Vec<usize> = (first..(first + BLOCK).min(end)).collect();
+                        let mut best: Vec<Vec<Neighbor>> = rows.iter().map(|_| Vec::with_capacity(k + 1)).collect();
+                        for candidate in 0..n {
+                            let theirs = &flat[candidate * dim..(candidate + 1) * dim];
+                            for (slot, &row) in rows.iter().enumerate() {
+                                let dot = crate::util::vector_math::dot(&flat[row * dim..(row + 1) * dim], theirs);
+                                let similarity = 1.0 - (norms[row] + norms[candidate] - 2.0 * dot) / 2.0;
+                                let list = &mut best[slot];
+                                if list.len() == k && compare(&Neighbor { idx: candidate, similarity }, &list[k - 1]) != std::cmp::Ordering::Less {
+                                    continue;
+                                }
+                                let at = list.partition_point(|held| compare(held, &Neighbor { idx: candidate, similarity }) == std::cmp::Ordering::Less);
+                                list.insert(at, Neighbor { idx: candidate, similarity });
+                                list.truncate(k);
+                            }
+                        }
+                        done.extend(best);
+                    }
+                    lists.lock().push((start, done));
+                }
+            });
+        }
+    });
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let mut ordered = lists.into_inner();
+    ordered.sort_by_key(|(start, _)| *start);
+    Some(ordered.into_iter().flat_map(|(_, rows)| rows).collect())
+}
+
+/// Through the shared identity pipeline with exact nearest neighbours at every size.
+fn cluster(vectors: &[Vec<f32>], files: &[i64], cancelled: &(dyn Fn() -> bool + Sync)) -> Option<BTreeMap<usize, Vec<usize>>> {
     let (params, mutual) = hyperparameters();
     let k = params.k_nn + 1;
     let mut by_file: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
@@ -468,19 +568,15 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
             }
         }
     }
-    let index = (vectors.len() > BRUTE_FORCE_MAX).then(|| {
-        crate::util::hnsw_index::build_with_search_limit(vectors.iter().cloned().enumerate().map(|(i, v)| (v, i)).collect(), 50)
-    });
-    let mut search = crate::util::hnsw_index::Searcher::default();
+    let nearest = if vectors.len() > BRUTE_FORCE_MAX { Some(nearest_lists(vectors, k, cancelled)?) } else { None };
     let result = identity_clustering::cluster_with_options(
         vectors,
         |i| {
-            let mut hits: Vec<Neighbor> = match &index {
-                Some(index) => search
-                    .top_k(index, &vectors[i], k)
-                    .into_iter()
-                    .map(|(j, squared)| Neighbor { idx: j, similarity: 1.0 - squared / 2.0 })
-                    .collect(),
+            if cancelled() {
+                return Vec::new();
+            }
+            let mut hits: Vec<Neighbor> = match &nearest {
+                Some(lists) => lists[i].clone(),
                 None => (0..vectors.len()).map(|j| Neighbor { idx: j, similarity: l2_cosine(&vectors[i], &vectors[j]) }).collect(),
             };
             if hits.len() > k {
@@ -495,6 +591,9 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
         &cannot_links,
         mutual,
     );
+    if cancelled() {
+        return None;
+    }
     tracing::info!(
         faces = vectors.len(),
         clusters = result.cluster_count,
@@ -508,10 +607,8 @@ fn cluster(vectors: &[Vec<f32>], files: &[i64]) -> BTreeMap<usize, Vec<usize>> {
     for (dense, cluster) in result.cluster_ids.iter().enumerate() {
         out.entry(*cluster).or_default().push(dense);
     }
-    out
+    Some(out)
 }
-
-// MARK: - Persist
 
 #[derive(Debug, Default)]
 struct Stats {
@@ -673,6 +770,7 @@ struct Attach<'a> {
     face_ids: &'a [i64],
     different: &'a HashSet<Pair>,
     min_size: usize,
+    cancelled: &'a dyn Fn() -> bool,
 }
 
 impl Attach<'_> {
@@ -704,6 +802,9 @@ impl Attach<'_> {
         let mut ordered = candidates.to_vec();
         ordered.sort_unstable();
         for dense in ordered {
+            if (self.cancelled)() {
+                break;
+            }
             if self.vectors[dense].len() != DIM {
                 continue;
             }
@@ -761,8 +862,7 @@ fn cap(
     Ok((kept, truncated))
 }
 
-/// Stable person ids (`StablePersonAssignments.resolve`): a cluster keeps the
-/// person that owned at least half of that person's faces, largest overlap first.
+/// A cluster keeps the person that owned at least half of that person's faces, largest overlap first.
 fn stable_ids(priors: &[(i64, Vec<i64>)], clusters: &[(Vec<i64>, i64)], fixed: &[Option<i64>], preserved: &HashSet<i64>) -> Result<Vec<Option<i64>>> {
     ensure!(fixed.len() == clusters.len(), "invalid partition");
     let mut owner: HashMap<i64, i64> = HashMap::new();
@@ -819,8 +919,7 @@ struct Planned {
     radius: f32,
 }
 
-/// `FaceClusterPersistence.apply`: reuses or creates person rows, never deletes.
-fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: &HashSet<i64>, now: f64) -> Result<i64> {
+fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: &HashSet<i64>, now: f64, cancelled: &dyn Fn() -> bool) -> Result<i64> {
     ensure!(now.is_finite(), "invalid plan");
     let mut seen: HashSet<i64> = HashSet::new();
     let mut reused: HashSet<i64> = HashSet::new();
@@ -842,6 +941,7 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
             ensure!(person > 0 && !preserved.contains(&person) && reused.insert(person) && live == 1, "invalid plan");
         }
     }
+    prune_emptied_people(tx, &reused, preserved)?;
     let existing: i64 = tx.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?;
     let created = clusters.iter().filter(|cluster| cluster.person.is_none()).count();
     ensure!(existing as usize + created <= MAX_PERSONS, "too many people");
@@ -855,7 +955,6 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
         |row| row.get(0),
     )?;
     ensure!(free as usize == seen.len(), "invalid plan");
-    // Only rows whose person changes are written; each write fires a trigger.
     tx.execute(
         "UPDATE face_prints SET person_id=NULL WHERE id IN (SELECT value FROM json_each(?1)) \
            AND person_id IS NOT NULL AND person_id NOT IN (SELECT value FROM json_each(?2)) \
@@ -863,6 +962,7 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
         params![selected, protected, output],
     )?;
     for cluster in clusters {
+        ensure_running(cancelled)?;
         let blob = encode(&cluster.centroid);
         let radius = f64::from(cluster.radius);
         let person = match cluster.person {
@@ -892,10 +992,30 @@ fn apply(tx: &Connection, clusters: &[Planned], pool: &HashSet<i64>, preserved: 
          WHERE representative_face_id IS NULL OR representative_face_id NOT IN (SELECT id FROM face_prints WHERE person_id=persons.id)",
         [],
     )?;
+    prune_emptied_people(tx, &HashSet::new(), preserved)?;
     Ok(tx.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?)
 }
 
-/// Prior identity per new cluster by face overlap (at least half of the prior's faces).
+/// Merging and re-splitting leave unnamed people with no faces behind; they would pile up toward the people cap. Named, unknown-person and protected rows are never touched.
+fn prune_emptied_people(tx: &Connection, keep: &HashSet<i64>, preserved: &HashSet<i64>) -> Result<()> {
+    let keep: HashSet<i64> = keep.union(preserved).copied().collect();
+    let keep = face_review::json_ids(&keep);
+    let emptied = "FROM persons WHERE COALESCE(is_unknown,0)=0 \
+           AND NOT EXISTS (SELECT 1 FROM face_prints WHERE person_id=persons.id) \
+           AND id NOT IN (SELECT value FROM json_each(?1)) \
+           AND COALESCE(TRIM(name),'')='' AND COALESCE(TRIM(title),'')='' AND COALESCE(TRIM(first_name),'')='' \
+           AND COALESCE(TRIM(middle_name),'')='' AND COALESCE(TRIM(last_name),'')='' AND COALESCE(TRIM(suffix),'')=''";
+    tx.execute(
+        &format!(
+            "DELETE FROM face_verifications WHERE (face_a IS NULL OR face_b IS NULL) \
+               AND (person_a IN (SELECT id {emptied}) OR person_b IN (SELECT id {emptied}))"
+        ),
+        [&keep],
+    )?;
+    tx.execute(&format!("DELETE {emptied}"), [&keep])?;
+    Ok(())
+}
+
 fn match_priors(clusters: &[Vec<i64>], candidates: &[Prior]) -> Vec<Option<i64>> {
     let mut matches = vec![None; clusters.len()];
     let sets: Vec<HashSet<i64>> = clusters.iter().map(|faces| faces.iter().copied().collect()).collect();
@@ -936,8 +1056,11 @@ fn persist(
     min_quality: f64,
     min_size: usize,
     solo_floor: f64,
+    presence: &Presence,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Stats> {
-    let deferred = require_unchanged(tx, partition, space, skip, min_quality)?;
+    ensure_running(cancelled)?;
+    let deferred = require_unchanged(tx, partition, space, skip, min_quality, presence)?;
     let face_ids: Vec<i64> = partition.rows.iter().map(|row| row.id).collect();
     let vectors: Vec<Vec<f32>> = partition.rows.iter().map(|row| decode(&row.blob)).collect();
     let held: Vec<bool> = partition.rows.iter().map(|row| row.held).collect();
@@ -987,8 +1110,9 @@ fn persist(
     let candidates: Vec<usize> = (0..face_ids.len())
         .filter(|dense| !assigned.contains(dense) && !excluded.contains(&face_ids[*dense]) && !protected.faces.contains(&face_ids[*dense]))
         .collect();
-    let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size };
+    let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size, cancelled };
     let attached = attach.run(kept, &candidates);
+    ensure_running(cancelled)?;
     let (finals, truncated_faces) = cap(attached, &protected_clusters, preserved_count)?;
 
     let mut cluster_of: HashMap<i64, usize> = HashMap::new();
@@ -1090,17 +1214,16 @@ fn persist(
     let scoped: Vec<(i64, Vec<i64>)> =
         fresh.iter().map(|p| (p.id, p.faces.iter().copied().filter(|f| pool.contains(f)).collect())).collect();
     let shapes: Vec<(Vec<i64>, i64)> = next.iter().map(|cluster| (cluster.2.clone(), cluster.3)).collect();
+    ensure_running(cancelled)?;
     let ids = stable_ids(&scoped, &shapes, &fixed, &preserve)?;
     let planned: Vec<Planned> = next
         .into_iter()
         .zip(ids)
         .map(|((center, radius, faces, rep), person)| Planned { person, faces, representative: rep, centroid: center, radius })
         .collect();
-    let person_count = apply(tx, &planned, &pool, &preserve, face_review::now())?;
+    let person_count = apply(tx, &planned, &pool, &preserve, face_review::now(), cancelled)?;
     Ok(Stats { person_count, suppressed_faces, truncated_faces, deferred })
 }
-
-// MARK: - Centroid auto-merge (tightPairAutoMerge)
 
 struct VpNode {
     vantage: usize,
@@ -1193,8 +1316,6 @@ impl Join<'_> {
         }
     }
 
-    /// `ExactCosineJoin.edges`: every qualifying pair, strongest first, or
-    /// `None` when a budget runs out.
     fn edges(mut self) -> Option<Vec<(f32, usize, usize)>> {
         let n = self.vectors.len();
         if n < 2 {
@@ -1249,8 +1370,8 @@ impl Join<'_> {
     }
 }
 
-fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
-    let partition = load_partition(conn, space, &HashSet::new(), 0.0, MAX_FACES_PER_RUN)?;
+fn auto_merge(conn: &mut Connection, space: &Space, presence: &Presence, cancelled: &dyn Fn() -> bool) -> Result<usize> {
+    let partition = load_partition(conn, space, &HashSet::new(), 0.0, MAX_FACES_PER_RUN, presence)?;
     ensure!(!partition.overflowed, "face cache overflow");
     let priors = priors(conn)?;
     let participants: HashSet<i64> = partition.rows.iter().map(|row| row.id).collect();
@@ -1263,6 +1384,7 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     let by_id: HashMap<i64, &Prior> = priors.iter().map(|p| (p.id, p)).collect();
     let mut sums: BTreeMap<i64, Vec<f32>> = BTreeMap::new();
     let mut files: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut face_counts: HashMap<i64, usize> = HashMap::new();
     let mut owners: HashMap<i64, i64> = HashMap::new();
     for (row, snapshot) in partition.rows.iter().zip(&partition.snapshots) {
         let Some(owner) = snapshot.person_id.filter(|owner| complete.contains(owner)) else { continue };
@@ -1276,6 +1398,7 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
             *value += vector[index];
         }
         files.entry(owner).or_default().insert(snapshot.file_id);
+        *face_counts.entry(owner).or_default() += 1;
     }
     let mut blockers: HashSet<Pair> = verdicts
         .iter()
@@ -1308,20 +1431,27 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     struct Centroid {
         id: i64,
         vector: Vec<f32>,
+        sum: Vec<f32>,
+        faces: usize,
         files: usize,
         named: bool,
     }
     let mut clusters: Vec<Centroid> = Vec::new();
-    for (id, mut sum) in sums {
+    for (id, sum) in sums {
         let norm: f32 = sum.iter().map(|x| x * x).sum();
         if !norm.is_finite() {
             continue;
         }
         let inverse = 1.0 / norm.sqrt().max(f32::from_bits(1));
-        for value in &mut sum {
-            *value *= inverse;
-        }
-        clusters.push(Centroid { id, vector: sum, files: files.get(&id).map_or(0, HashSet::len), named: by_id[&id].has_name() });
+        let vector = sum.iter().map(|value| value * inverse).collect();
+        clusters.push(Centroid {
+            id,
+            vector,
+            sum,
+            faces: face_counts.get(&id).copied().unwrap_or(0),
+            files: files.get(&id).map_or(0, HashSet::len),
+            named: by_id[&id].has_name(),
+        });
     }
     let index_of: HashMap<i64, usize> = clusters.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
     let mut parent: Vec<usize> = (0..clusters.len()).collect();
@@ -1347,6 +1477,9 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
         }
     }
     let mut size = vec![1usize; clusters.len()];
+    let (params, _) = hyperparameters();
+    let mut group_sums: Vec<Vec<f32>> = clusters.iter().map(|c| c.sum.clone()).collect();
+    let mut group_faces: Vec<usize> = clusters.iter().map(|c| c.faces).collect();
     let vectors: Vec<Vec<f32>> = clusters.iter().map(|c| c.vector.clone()).collect();
     let small: Vec<bool> = clusters.iter().map(|c| c.files <= 1).collect();
     let join = Join {
@@ -1364,6 +1497,13 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
         if ri == rj || (has_named[ri] && has_named[rj]) || forbidden[ri].contains(&rj) || forbidden[rj].contains(&ri) {
             continue;
         }
+        let faces = group_faces[ri] + group_faces[rj];
+        if faces >= params.oversized_faces {
+            let joined: f32 = group_sums[ri].iter().zip(&group_sums[rj]).map(|(a, b)| (a + b) * (a + b)).sum();
+            if joined.sqrt() / (faces as f32) < params.required_mean_cosine(faces) {
+                continue;
+            }
+        }
         let (keep, drop) = if forbidden[ri].len() > forbidden[rj].len() || (forbidden[ri].len() == forbidden[rj].len() && size[ri] >= size[rj]) {
             (ri, rj)
         } else {
@@ -1371,6 +1511,11 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
         };
         parent[drop] = keep;
         size[keep] += size[drop];
+        group_faces[keep] += group_faces[drop];
+        let absorbed = std::mem::take(&mut group_sums[drop]);
+        for (total, add) in group_sums[keep].iter_mut().zip(&absorbed) {
+            *total += add;
+        }
         has_named[keep] = has_named[keep] || has_named[drop];
         let moved = std::mem::take(&mut forbidden[drop]);
         for neighbor in moved {
@@ -1412,8 +1557,9 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     if targets.is_empty() {
         return Ok(0);
     }
+    ensure_running(cancelled)?;
     let tx = conn.transaction()?;
-    require_unchanged(&tx, &partition, space, &HashSet::new(), 0.0)?;
+    require_unchanged(&tx, &partition, space, &HashSet::new(), 0.0, presence)?;
     ensure!(priors == self::priors(&tx)? && verdicts == self::verdicts(&tx, Some(&participants))?, "face evidence changed");
     let fresh: HashMap<i64, Prior> = priors.into_iter().map(|p| (p.id, p)).collect();
     let mut absorbed = 0;
@@ -1442,8 +1588,6 @@ fn auto_merge(conn: &mut Connection, space: &Space) -> Result<usize> {
     tx.commit()?;
     Ok(absorbed)
 }
-
-// MARK: - Review (FaceReview.holdout / finish / assess)
 
 fn holdout(conn: &Connection, space: &Space, min_quality: f64) -> rusqlite::Result<HashSet<i64>> {
     let incremental: bool = conn.query_row(
@@ -1736,10 +1880,8 @@ fn finish(conn: &mut Connection, pool: &[i64], held: &HashSet<i64>, space: &Spac
     Ok(queued)
 }
 
-// MARK: - Run
-
 fn person_count(conn: &Connection) -> u32 {
-    conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get::<_, i64>(0)).map_or(0, |count| count as u32)
+    crate::read::people::active_person_count(conn).unwrap_or(0)
 }
 
 fn result(person_count: u32, face_count: usize, unmatched: usize, started: Instant) -> FaceClusteringResult {
@@ -1753,27 +1895,38 @@ fn result(person_count: u32, face_count: usize, unmatched: usize, started: Insta
     }
 }
 
-/// One clustering pass in `space`, as the Swift engine runs it: the error kind
-/// it reports (if any) and the summary it always sends afterwards.
-pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
+/// `None` when `cancelled` stopped the pass. A stopped pass never leaves a half-written grouping: its transaction is rolled back, or committed whole before the stop was seen.
+pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Outcome> {
     let started = Instant::now();
     let min_quality = env_double("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0..=1.0);
+    let presence = match Presence::build(database, cancelled) {
+        Ok(presence) => presence,
+        Err(error) if error.is::<Stopped>() => return None,
+        Err(error) => {
+            tracing::warn!(?error, "face clustering query failed");
+            let count = person_count(&database.lock());
+            return Some(Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) });
+        }
+    };
     let loaded = {
         let conn = database.lock();
         (|| -> Result<(HashSet<i64>, HashSet<i64>, Partition)> {
             let unknown: HashSet<i64> = priors(&conn)?.into_iter().filter(|p| p.unknown).flat_map(|p| p.faces).collect();
             let held = holdout(&conn, space, min_quality)?;
             let skip: HashSet<i64> = unknown.union(&held).copied().collect();
-            let partition = load_partition(&conn, space, &skip, min_quality, MAX_FACES_PER_RUN)?;
+            let partition = load_partition(&conn, space, &skip, min_quality, MAX_FACES_PER_RUN, &presence)?;
             Ok((held, skip, partition))
         })()
     };
+    if cancelled() {
+        return None;
+    }
     let (held, skip, partition) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
             tracing::warn!(?error, "face clustering query failed");
             let count = person_count(&database.lock());
-            return Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) };
+            return Some(Outcome { result: result(count, 0, 0, started), error: Some(("face_clustering_failed", CACHE_ERROR)) });
         }
     };
     if partition.rows.is_empty() {
@@ -1782,14 +1935,14 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
         let mut summary = result(person_count(&conn), 0, 0, started);
         summary.deferred_faces = Some(partition.deferred);
         summary.review_queued = queued;
-        return Outcome { result: summary, error: None };
+        return Some(Outcome { result: summary, error: None });
     }
     let row_by_face: HashMap<i64, usize> = partition.rows.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
     let decoded: Vec<(i64, Vec<f32>)> =
         partition.rows.iter().filter(|row| !row.held).map(|row| (row.id, decode(&row.blob))).filter(|(_, v)| !v.is_empty()).collect();
     let Some(first_dim) = decoded.first().map(|(_, v)| v.len()) else {
         let count = person_count(&database.lock());
-        return Outcome { result: result(count, partition.rows.len(), partition.rows.len(), started), error: None };
+        return Some(Outcome { result: result(count, partition.rows.len(), partition.rows.len(), started), error: None });
     };
     let decoded: Vec<(i64, Vec<f32>)> = decoded.into_iter().filter(|(_, v)| v.len() == first_dim).collect();
     let file_by_face: HashMap<i64, i64> = partition.snapshots.iter().map(|s| (s.id, s.file_id)).collect();
@@ -1798,42 +1951,66 @@ pub(crate) fn run(database: &Arc<Mutex<Connection>>, space: &Space) -> Outcome {
     let _lease = crate::resource_scheduler::ResourceScheduler::shared().reserve(
         crate::resource_scheduler::Demand { memory_mb: 64 + (vectors.len() as u64).saturating_mul(4096).div_ceil(1_048_576), cpu: 1, io: 1 },
         crate::resource_scheduler::Priority::Background,
-        || false,
+        cancelled,
     );
+    if cancelled() {
+        return None;
+    }
+    let loaded_at = started.elapsed().as_secs_f64();
     let mut raw: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (cluster, members) in cluster(&vectors, &files) {
+    for (cluster, members) in cluster(&vectors, &files, cancelled)? {
         let rows: Vec<usize> = members.iter().filter_map(|dense| row_by_face.get(&decoded[*dense]).copied()).collect();
         raw.insert(cluster, rows);
     }
+    let clustered_at = started.elapsed().as_secs_f64();
     let min_size = env_int("FILEID_FACE_MIN_CLUSTER_SIZE", 3, 1..=10_000);
     let solo_floor = env_double("FILEID_FACE_SOLO_QUALITY", 0.50, 0.0..=1.0);
     let mut conn = database.lock();
     let stats = (|| -> Result<Stats> {
         let tx = conn.transaction()?;
-        let stats = persist(&tx, &partition, space, &raw, &skip, min_quality, min_size, solo_floor)?;
+        let stats = persist(&tx, &partition, space, &raw, &skip, min_quality, min_size, solo_floor, &presence, cancelled)?;
         tx.commit()?;
         Ok(stats)
     })();
     let stats = match stats {
         Ok(stats) => stats,
+        Err(error) if error.is::<Stopped>() => return None,
         Err(error) => {
             tracing::warn!(?error, "face cluster persist failed");
             let mut summary = result(person_count(&conn), decoded.len(), 0, started);
             summary.deferred_faces = Some(partition.deferred);
-            return Outcome { result: summary, error: Some(("face_cluster_persist_failed", PERSIST_ERROR)) };
+            return Some(Outcome { result: summary, error: Some(("face_cluster_persist_failed", PERSIST_ERROR)) });
         }
     };
-    let merged = auto_merge(&mut conn, space).unwrap_or_else(|error| {
+    let persisted_at = started.elapsed().as_secs_f64();
+    if cancelled() {
+        return None;
+    }
+    let merged = auto_merge(&mut conn, space, &presence, cancelled).unwrap_or_else(|error| {
         tracing::warn!(?error, "face auto-merge skipped");
         0
     });
+    if cancelled() {
+        return None;
+    }
+    let merged_at = started.elapsed().as_secs_f64();
     let pool: Vec<i64> = partition.rows.iter().map(|row| row.id).collect();
     let queued = finish(&mut conn, &pool, &held, space).map_err(|error| tracing::warn!(?error, "face review failed")).ok();
-    tracing::info!(persons = stats.person_count, merged, faces = decoded.len(), "[CLUSTER] macOS face space clustered");
+    tracing::info!(
+        persons = stats.person_count,
+        merged,
+        faces = decoded.len(),
+        loaded_seconds = loaded_at,
+        neighbours_and_passes_seconds = clustered_at - loaded_at,
+        persist_seconds = persisted_at - clustered_at,
+        merge_seconds = merged_at - persisted_at,
+        review_seconds = started.elapsed().as_secs_f64() - merged_at,
+        "[CLUSTER] macOS face space clustered"
+    );
     let mut summary = result(person_count(&conn), decoded.len(), stats.suppressed_faces + stats.truncated_faces, started);
     summary.deferred_faces = Some(stats.deferred);
     summary.review_queued = queued;
-    Outcome { result: summary, error: None }
+    Some(Outcome { result: summary, error: None })
 }
 
 #[cfg(test)]

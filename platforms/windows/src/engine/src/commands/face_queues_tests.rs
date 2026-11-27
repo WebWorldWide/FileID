@@ -71,7 +71,6 @@ fn listed(conn: &Connection, queue: &str) -> FaceReviewPage {
     list(conn, &payload).unwrap()
 }
 
-/// Alex (named, two faces) and an unnamed fragment of the same face.
 fn pair() -> Connection {
     let conn = db();
     person(&conn, 1, None, false);
@@ -128,6 +127,21 @@ fn merge_moves_faces_journals_and_undo_brings_the_person_back() {
 }
 
 #[test]
+fn undoing_a_merge_brings_back_the_suggestions_of_the_person_merged_away() {
+    let conn = pair();
+    person(&conn, 3, None, false);
+    face(&conn, 4, 10, 3, (0.98, 0.02));
+    refresh_all(&conn);
+    let before = merge_pairs(&conn);
+    assert!(before.iter().any(|(a, b)| (*a, *b) == (3, 1) || (*a, *b) == (1, 3)), "{before:?}");
+    let reply = act(&conn, 2, Some(1), "merge");
+    assert_eq!(reply.status, "ok");
+    assert!(!merge_pairs(&conn).iter().any(|(a, b)| *a == 1 || *b == 1));
+    assert_eq!(undo_op(&conn, &reply.operation_id.unwrap()).status, "ok");
+    assert_eq!(merge_pairs(&conn), before);
+}
+
+#[test]
 fn merge_is_refused_when_the_people_now_share_a_photo() {
     let conn = pair();
     refresh_all(&conn);
@@ -135,6 +149,52 @@ fn merge_is_refused_when_the_people_now_share_a_photo() {
     let reply = act(&conn, 2, Some(1), "merge");
     assert_eq!((reply.status.as_str(), reply.message.as_deref(), reply.queue.as_deref()), ("refused", Some(SHARED_PHOTO), Some("merges")));
     assert_eq!(owner(&conn, 1), Some(1));
+}
+
+fn two_large_people(shared: usize) -> Connection {
+    let conn = db();
+    for file in 41..=700 {
+        insert_file(&conn, file, &format!("/photos/{file}.jpg"), "image");
+    }
+    person(&conn, 1, None, false);
+    person(&conn, 2, None, false);
+    for file in 1..=350 {
+        face(&conn, file, file, 1, (1.0, 0.0));
+        face(&conn, 1000 + file, 350 + file, 2, (0.97, 0.05));
+    }
+    for file in 1..=shared as i64 {
+        face(&conn, 2000 + file, file, 2, (0.97, 0.05));
+    }
+    conn
+}
+
+#[test]
+fn two_large_people_sharing_a_few_photos_are_still_offered_and_can_be_merged() {
+    let conn = two_large_people(0);
+    refresh_all(&conn);
+    assert_eq!(merge_pairs(&conn).len(), 1);
+
+    let conn = two_large_people(7);
+    refresh_all(&conn);
+    let pairs = merge_pairs(&conn);
+    assert_eq!(pairs.len(), 1, "seven shared photos in 350 is one in fifty");
+    let (keep, other) = pairs[0];
+    assert_eq!(act(&conn, keep, Some(other), "merge").status, "ok");
+}
+
+#[test]
+fn two_large_people_sharing_many_photos_are_neither_offered_nor_merged() {
+    let conn = two_large_people(0);
+    refresh_all(&conn);
+    for file in 1..=8 {
+        face(&conn, 2000 + file, file, 2, (0.97, 0.05));
+    }
+    let reply = act(&conn, 1, Some(2), "merge");
+    assert_eq!((reply.status.as_str(), reply.message.as_deref()), ("refused", Some(SHARED_PHOTO)));
+
+    let conn = two_large_people(8);
+    refresh_all(&conn);
+    assert!(merge_pairs(&conn).is_empty(), "eight shared photos in 350 is more than one in fifty");
 }
 
 #[test]
@@ -173,7 +233,6 @@ fn dismissal_survives_new_person_ids_and_undo_forgets_it() {
     assert_eq!(merge_pairs(&conn), vec![(2, 10)]);
 }
 
-/// One person holding two different faces: four along x, three along y.
 fn mixed() -> Connection {
     let conn = db();
     person(&conn, 1, Some("Kim"), false);
@@ -195,6 +254,28 @@ fn split_flags_two_separated_groups_and_keeps_the_representative_face() {
     assert!(split.score < 0.2, "{}", split.score);
     let coherent = pair();
     assert_eq!(refresh_all(&coherent).1, 0);
+}
+
+#[test]
+fn a_person_holding_most_faces_is_offered_for_splitting_even_when_its_halves_look_alike() {
+    let conn = db();
+    person(&conn, 1, None, false);
+    person(&conn, 2, Some("Sam"), false);
+    let arc = [(1.0, 0.0), (0.99, 0.1), (0.98, 0.2), (0.95, 0.3), (0.9, 0.4), (0.85, 0.5), (0.8, 0.6), (0.75, 0.66)];
+    for (index, xy) in arc.into_iter().enumerate() {
+        let id = index as i64 + 1;
+        face(&conn, id, id, 1, xy);
+    }
+    face(&conn, 20, 20, 2, (0.0, 1.0));
+    assert_eq!(refresh_all(&conn).1, 0, "an ordinary person with close halves is left alone");
+    let big = QueueSettings { oversized_min_faces: 6, oversized_share: 0.6, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &big, 10.0).unwrap().1, 1);
+    let page = listed(&conn, "splits");
+    let split = &page.splits.as_ref().unwrap()[0];
+    assert_eq!(split.person_id, 1);
+    assert_eq!(split.keep_count + split.split_count, 8);
+    let few = QueueSettings { oversized_min_faces: 6, oversized_share: 0.95, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &few, 10.0).unwrap().1, 0, "a share below the bar is not oversized");
 }
 
 #[test]
@@ -256,4 +337,73 @@ fn two_groups_is_deterministic_and_separates_clear_groups() {
     assert_ne!(groups[0], groups[2]);
     assert!(dot(&first, &second).abs() < 1e-6);
     assert!(two_groups(&[&a, &a]).is_none());
+}
+
+fn library_of_files(count: i64) -> Connection {
+    let conn = memory_db();
+    conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    for file in 1..=count {
+        insert_file(&conn, file, &format!("/photos/{file}.jpg"), "image");
+    }
+    conn
+}
+
+#[test]
+fn a_chained_person_holding_a_tenth_of_a_big_library_is_still_offered_for_splitting() {
+    let conn = library_of_files(100);
+    person(&conn, 1, None, false);
+    let arc = [(1.0, 0.0), (0.99, 0.1), (0.98, 0.2), (0.95, 0.3), (0.9, 0.4), (0.85, 0.5), (0.8, 0.6), (0.75, 0.66)];
+    for (index, xy) in arc.into_iter().enumerate() {
+        let id = index as i64 + 1;
+        face(&conn, id, id, 1, xy);
+    }
+    for other in 0..9 {
+        person(&conn, 10 + other, None, false);
+        for slot in 0..8 {
+            let id = 100 + other * 8 + slot;
+            face(&conn, id, 10 + other * 8 + slot, 10 + other, (0.0, 1.0));
+        }
+    }
+    assert_eq!(refresh_all(&conn).1, 0, "a person of eight faces is not oversized in a library of eighty");
+    let thousands = QueueSettings { oversized_large_faces: 8, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &thousands, 10.0).unwrap().1, 1, "8 of 80 faces is over the large-person bar of 5%");
+    let share_too_high = QueueSettings { oversized_large_faces: 8, oversized_large_share: 0.2, ..QueueSettings::default() };
+    assert_eq!(refresh(&conn, "m", "p", &share_too_high, 10.0).unwrap().1, 0);
+}
+
+#[test]
+fn a_person_of_thousands_is_split_over_all_of_its_faces_not_the_first_two_thousand() {
+    let conn = library_of_files(2500);
+    person(&conn, 1, None, false);
+    for id in 1..=2500i64 {
+        let xy = if id <= 1250 { (1.0, 0.0) } else { (0.0, 1.0) };
+        face(&conn, id, id, 1, xy);
+    }
+    assert_eq!(refresh_all(&conn).1, 1);
+    let page = listed(&conn, "splits");
+    let split = &page.splits.as_ref().unwrap()[0];
+    assert_eq!((split.keep_count, split.split_count), (1250, 1250), "every face lands in one of the two groups");
+}
+
+#[test]
+fn a_person_of_many_look_alike_groups_offers_one_group_at_a_time_and_the_next_right_after() {
+    let conn = library_of_files(6100);
+    person(&conn, 1, None, false);
+    let groups = [(1.0, 0.0, 1500), (0.9, 0.44, 1500), (-1.0, 0.0, 1550), (-0.9, -0.44, 1550)];
+    let mut id = 0;
+    for (x, y, count) in groups {
+        for _ in 0..count {
+            id += 1;
+            face(&conn, id, id, 1, (x, y));
+        }
+    }
+    assert_eq!(refresh_all(&conn).1, 1);
+    let first = listed(&conn, "splits").splits.unwrap().remove(0);
+    let moved = first.keep_count.min(first.split_count);
+    assert!((1500..=1550).contains(&moved), "one look-alike group is offered, not two halves: {first:?}");
+    let reply = act(&conn, 1, None, "split");
+    assert_eq!(reply.status, "ok");
+    let next = listed(&conn, "splits");
+    assert_eq!(next.total, 1, "the person still holding several groups is offered its next group at once");
+    assert_eq!(next.splits.unwrap()[0].person_id, 1);
 }

@@ -29,7 +29,12 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # chrono declared unmaintained (no vulnerability). It also arrives through
+    # pdfium-render and rusqlite's `chrono` feature; moving the engine to jiff
+    # or time is tracked in NEXT.md. Remove this entry when that lands.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, not a vulnerability; migration tracked in NEXT.md" },
+]
 
 [licenses]
 # SPDX expressions only. Anything else is unknown = deny.
@@ -46,7 +51,8 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
-    "MPL-2.0",                  # firefox-style copyleft; safe to dynamically link
+    "MPL-2.0",                  # file-level copyleft; only the unmodified symphonia crates use it
+                                # (statically linked; compliance note in shared/docs/LICENSES.md)
     "CC0-1.0",
     "0BSD",
     "CDLA-Permissive-2.0",      # used by webpki-root-certs / webpki-roots
@@ -55,8 +61,7 @@ allow = [
 ]
 confidence-threshold = 0.92
 
-# FileID's own crate is publish = false; its license field is "TBD" pending
-# the public-release decision (see shared/docs/SHIP.md). The `private` section
+# FileID's own crates are Apache-2.0 with publish = false. The `private` section
 # below tells cargo-deny to skip license enforcement for workspace members.
 [licenses.private]
 ignore = true

@@ -1,8 +1,4 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    CleanupView — duplicate-group list with keeper selection.
-
--->
 <UserControl
     x:Class="FileID.Views.Cleanup.CleanupView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -29,10 +25,7 @@
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
-                <!-- Live stats — "N groups • M files non-keepers • S reclaimable".
-                     Mirrors macOS CleanupView's header counter so the user
-                     can see what Trash non-keepers is about to do before
-                     they click. Updates whenever a keeper radio flips. -->
+                <!-- Live stats ("N groups • M files non-keepers • S reclaimable"), updated whenever a keeper radio flips. -->
                 <TextBlock x:Name="HeaderStatsText"
                            Text="{x:Bind HeaderStats, Mode=OneWay}"
                            AutomationProperties.Name="{x:Bind HeaderStats, Mode=OneWay}"
@@ -88,7 +81,7 @@
                             ToolTipService.ToolTip="Look for extra copies again in the files FileID has scanned">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE72C;" />
-                            <TextBlock Text="Refresh" TextWrapping="NoWrap" />
+                            <TextBlock Text="Check again" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                 </StackPanel>
@@ -164,9 +157,7 @@
                                 <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
                                            AutomationProperties.HeadingLevel="Level2"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                <!-- Horizontal strip of thumbnail tiles (macOS CopyTile
-                                     parity). Thumbnails load lazily via the members
-                                     repeater's ElementPrepared (like LibraryView). -->
+                                <!-- Thumbnails load lazily via the members repeater's ElementPrepared, as in LibraryView. -->
                                 <ScrollViewer HorizontalScrollMode="Auto"
                                               HorizontalScrollBarVisibility="Auto"
                                               VerticalScrollMode="Disabled"

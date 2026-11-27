@@ -8,9 +8,6 @@ using Microsoft.UI.Xaml.Media;
 
 namespace FileID.Views.DeepAnalyze;
 
-/// <summary>Describe Files ▸ Folders not to describe (macOS DeepAnalyzeExclusionsCard): folders a
-/// whole-library Describe run skips. Their files stay in the library and searchable; describing a
-/// single file ignores the list.</summary>
 internal sealed class ExcludedFoldersCard : UserControl
 {
     private readonly Brush _text2 = ThemeHelper.GetBrushSafe("Text2Brush");

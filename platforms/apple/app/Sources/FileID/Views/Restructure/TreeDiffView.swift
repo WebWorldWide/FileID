@@ -10,9 +10,7 @@ struct TreeDiffView: View {
     let planVersion: Int
     var onTapSource: (String) -> Void = { _ in }
     var onTapDestination: (String) -> Void = { _ in }
-    /// Same hover bus the Sankey writes into. Hovering a folder row
-    /// here lights the matching node + ribbons in the diagram, and
-    /// vice versa.
+    /// The hover bus the Sankey also uses, so hovering a row lights the matching node and ribbons, and the reverse.
     var hoverBus: RestructureHoverBus
 
     enum FilterMode: String, CaseIterable, Identifiable {
@@ -32,8 +30,6 @@ struct TreeDiffView: View {
     @State private var filter: FilterMode = .all
     @State private var sourceRows: [SourceRow] = []
     @State private var destRows: [DestRow] = []
-
-    // MARK: - Data
 
     private struct SourceRow: Identifiable {
         var id: String { folder }
@@ -83,8 +79,6 @@ struct TreeDiffView: View {
             .sorted { $0.bucket.localizedCaseInsensitiveCompare($1.bucket) == .orderedAscending }
     }
 
-    // MARK: - Body
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -102,7 +96,7 @@ struct TreeDiffView: View {
                     sourceRowView(row)
                 }
                 paneCard(title: "After",
-                         subtitle: "Where they'll live",
+                         subtitle: "Where they’ll live",
                          rows: destRows) { row in
                     destRowView(row)
                 }
@@ -129,15 +123,11 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 16, height: 16)
                 .background(Circle().fill(tint))
-            Text(label).font(Theme.Font.body(11)).foregroundStyle(Theme.text2)
+            Text(label).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2)
         }
     }
 
-    // Rows are passed as DATA + a @ViewBuilder, not a pre-materialized
-    // [AnyView]. The old version eagerly built every row into an AnyView on
-    // each render, defeating LazyVStack virtualization (and erasing row
-    // identity) — fatal at 100k+ proposals. Now ForEach over Identifiable
-    // data lets the LazyVStack build only the visible rows.
+    // Rows are passed as data plus @ViewBuilder, not as [AnyView]: an eager AnyView per row defeats LazyVStack virtualization at 100k+ proposals.
     @ViewBuilder
     private func paneCard<Row: Identifiable, RowContent: View>(
         title: String, subtitle: String,
@@ -147,10 +137,10 @@ struct TreeDiffView: View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
-                Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                Text(subtitle).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
             .padding(.horizontal, 10).padding(.top, 8)
-            ScrollView {
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(rows) { item in
                         row(item)
@@ -165,8 +155,6 @@ struct TreeDiffView: View {
         .frame(minHeight: 280, idealHeight: 420, maxHeight: 600)
     }
 
-    // MARK: - Row views
-
     @ViewBuilder
     private func sourceRowView(_ row: SourceRow) -> some View {
         let (letter, tint) = sourceLetter(for: row.kind)
@@ -176,10 +164,12 @@ struct TreeDiffView: View {
         Button { onTapSource(row.folder) } label: { label }
             .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
         .help(sourceHelp(for: row))
+        .accessibilityLabel(RestructureSpeech.sourceFolder(name: row.displayName, files: row.movingFiles, staysBehind: row.kind == .mixed))
+        .accessibilityHint(RestructureSpeech.pathHint(row.folder))
         .onHover { hovering in
             hoverBus.set(hovering ? .sourceFolder(row.folder) : nil)
         }
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(Theme.quick, value: isHighlighted)
     }
 
     @ViewBuilder
@@ -191,8 +181,9 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
+                .accessibilityHidden(true)
             Image(systemName: "folder.fill")
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
             Text(row.displayName)
                 .font(Theme.Font.mono(11))
@@ -223,11 +214,13 @@ struct TreeDiffView: View {
                                  isHighlighted: isHighlighted)
         Button { onTapDestination(row.bucket) } label: { label }
             .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
+        .accessibilityLabel(RestructureSpeech.destination(name: row.bucket, files: row.count))
+        .accessibilityHint("Shows the files moving into this folder")
         .help("\(row.count) file\(row.count == 1 ? "" : "s") arriving in this folder.")
         .onHover { hovering in
             hoverBus.set(hovering ? .destBucket(row.bucket) : nil)
         }
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(Theme.quick, value: isHighlighted)
     }
 
     @ViewBuilder
@@ -239,8 +232,9 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
+                .accessibilityHidden(true)
             Image(systemName: bucketIconName(row.bucket))
-                .font(Theme.Font.body(11))
+                .font(Theme.Font.body(11.5))
                 .foregroundStyle(tint)
             Text(row.bucket)
                 .font(Theme.Font.mono(11))
@@ -279,4 +273,24 @@ struct TreeDiffView: View {
             return "Reorganized: \(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") moving out."
         }
     }
+}
+
+
+/// What VoiceOver says for Organize Folders rows and map folders: the name, how many files, and what happens, not the badge letter.
+enum RestructureSpeech {
+    private static func files(_ count: Int) -> String { Plural.noun(count, "file", "files") }
+
+    static func sourceFolder(name: String, files count: Int, staysBehind: Bool) -> String {
+        "\(name), \(files(count)) moving out, \(staysBehind ? "the folder stays" : "the folder is emptied")"
+    }
+
+    static func destination(name: String, files count: Int) -> String {
+        "\(name), \(files(count)) arriving"
+    }
+
+    static func mapFolder(direction: String, name: String, files count: Int) -> String {
+        "\(direction) \(name), \(files(count))"
+    }
+
+    static func pathHint(_ path: String) -> String { "In \(path). Shows the files moving out of this folder." }
 }

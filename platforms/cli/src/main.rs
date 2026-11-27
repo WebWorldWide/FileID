@@ -1,16 +1,4 @@
-//! `fileid` — the cross-platform FileID command-line front-end.
-//!
-//! A thin client over the shared Rust engine (`fileid-engine`). It links the
-//! engine as a library and reuses its DB schema/migrations, file
-//! classification, restructure cascade, and apply/trash code directly
-//! (in-process), so the CLI can never drift from the engine contract. Reads and
-//! plans are model-free; `dedupe --apply` / `restructure --apply` call the
-//! engine's exact apply path; `scan --models` spawns the engine binary to drive
-//! the full ML pipeline. Destructive actions are opt-in and prompt unless
-//! `--yes`.
-//!
-//! Cross-OS despite living under `platforms/`: builds and runs identically on
-//! macOS, Linux, and Windows.
+//! `fileid` CLI. Reads and apply paths run in-process on `fileid-engine`; `scan --models` spawns the engine binary because it owns the async runtime lifecycle.
 
 mod context;
 mod dedupe;
@@ -18,7 +6,6 @@ mod info;
 mod models;
 mod people;
 mod restructure;
-mod runtime;
 mod scan;
 mod scan_models;
 mod search;
@@ -52,8 +39,7 @@ Everything runs on-device — no cloud, no telemetry. Run a bare `fileid` for a 
 struct Cli {
     #[command(flatten)]
     global: GlobalArgs,
-    // A bare invocation prints the guided introduction below. Clap still owns
-    // help, version, and invalid-command errors.
+    // Optional so a bare invocation can print the intro; clap still owns help and errors.
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -136,7 +122,8 @@ enum Command {
 
     /// List (or, with `--apply`, remove) duplicate / near-duplicate groups.
     ///
-    /// Listing is read-only. `--apply` keeps the first file of each group and
+    /// Listing is read-only. `--apply` keeps one file of each group (for exact
+    /// duplicates the original: not a copy by name, then the oldest) and
     /// removes the rest — to the Recycle Bin / Trash by default (recoverable;
     /// Windows + Linux), or permanently with `--delete`. SAFE: nothing is
     /// removed without `--apply`, and `--apply` prompts unless `--yes`.
@@ -150,9 +137,9 @@ enum Command {
         /// Group near-duplicates by perceptual-hash Hamming distance.
         #[arg(long)]
         similar: bool,
-        /// Near-dup Hamming threshold (bits, 0–16).
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(0..=16))]
-        threshold: u32,
+        /// Near-dup Hamming threshold with `--similar` (bits, 0–16; default 8).
+        #[arg(long, requires = "similar", value_parser = clap::value_parser!(u32).range(0..=16))]
+        threshold: Option<u32>,
         /// Remove duplicates (keep one per group). Destructive — see `--delete`.
         #[arg(long)]
         apply: bool,
@@ -210,44 +197,6 @@ enum Command {
         #[command(subcommand)]
         cmd: ModelsCmd,
     },
-
-    /// Manage the ONNX Runtime library the full-ML scan loads (`status` /
-    /// `install`).
-    ///
-    /// Separate from `models` (the AI weights): this is the inference library
-    /// that loads them. On macOS it must be installed once (`ort` ships only a
-    /// static lib for arm64); on Windows/Linux the platform provides it.
-    ///
-    /// Example: fileid runtime status   ·   fileid runtime install
-    Runtime {
-        #[command(subcommand)]
-        cmd: RuntimeCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum RuntimeCmd {
-    /// Show whether ONNX Runtime is installed + where the engine looks for it.
-    ///
-    /// Example: fileid runtime status
-    Status,
-
-    /// Install the ONNX Runtime library where the engine loads it (macOS).
-    ///
-    /// Idempotent: reports + exits if it's already available (e.g. via
-    /// Homebrew). Provisions from a local copy when possible (no network), else
-    /// guides you through the one-time install. On Windows/Linux there's nothing
-    /// to install — the platform provides the runtime.
-    ///
-    /// Example: fileid runtime install
-    Install {
-        /// Reinstall into the engine runtime dir even if one is already found.
-        #[arg(long)]
-        force: bool,
-        /// Skip the confirmation prompt for a download.
-        #[arg(long)]
-        yes: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -292,9 +241,7 @@ fn parse_result_limit(raw: &str) -> Result<usize, String> {
     }
 }
 
-/// Friendly getting-started shown for a bare `fileid` (no subcommand) — what it
-/// is, the handful of commands worth trying first (copy-pasteable), and the
-/// model story. Replaces clap's terse "USAGE:" error.
+/// Intro for a bare `fileid`; replaces clap's terse "USAGE:" error.
 fn intro() -> &'static str {
     "FileID — on-device AI file organizer.\n\
      Tag, search, dedupe, and tidy your files locally — no cloud, no telemetry.\n\
@@ -320,14 +267,7 @@ fn intro() -> &'static str {
      (macOS: with no --db, commands read your FileID desktop app's library.)"
 }
 
-/// Point the engine at its OWN writable models dir for this process (and any
-/// engine subprocess we spawn), unless the user already pinned
-/// `FILEID_MODELS_DIR`. On macOS this is the XDG `~/.local/share/FileID/Models`,
-/// NOT the desktop app's read-only CoreML `~/Library/Application Support/...` —
-/// so `fileid models download` writes the engine's ONNX/GGUF weights somewhere
-/// it can also read for `scan --models`. On Windows/Linux this is exactly the
-/// default the engine already resolves to (so app-installed models are still
-/// found); it only makes that choice explicit + inheritable by the spawned engine.
+/// Pins the engine to its own writable models dir (not the read-only macOS CoreML app-support path) unless `FILEID_MODELS_DIR` is set, so `models download` and `scan --models` read the same weights.
 pub(crate) fn ensure_engine_models_dir() {
     if std::env::var_os("FILEID_MODELS_DIR").is_some_and(|v| !v.is_empty()) {
         return;
@@ -338,11 +278,7 @@ pub(crate) fn ensure_engine_models_dir() {
     }
 }
 
-/// Report a failure on stderr, honouring `--json`.
-///
-/// `--json` is documented as "machine-readable output", but the error paths
-/// always printed prose, so a run that failed emitted text no parser could
-/// read. Diagnostics stay on stderr either way — stdout remains pure data.
+/// Diagnostics go to stderr; with `--json` they are one JSON object so failures stay parseable.
 fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
     if json {
         eprintln!(
@@ -354,11 +290,39 @@ fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
     }
 }
 
+/// Exit status of a process killed by SIGPIPE, which is what a Unix tool conventionally reports when its reader goes away.
+const EXIT_STDOUT_CLOSED: u8 = 141;
+
+fn is_stdout_closed_panic(payload: &(dyn std::any::Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    message.is_some_and(|message| {
+        message.starts_with("failed printing to stdout")
+            && (message.contains("Broken pipe") || message.contains("os error 232"))
+    })
+}
+
+/// `println!` panics when the reader of a pipe (`fileid ... | head`) has gone away; that is the reader's choice, not a crash.
 fn main() -> ExitCode {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !is_stdout_closed_panic(info.payload()) {
+            default_hook(info);
+        }
+    }));
+    match std::panic::catch_unwind(run) {
+        Ok(code) => code,
+        Err(payload) if is_stdout_closed_panic(&*payload) => ExitCode::from(EXIT_STDOUT_CLOSED),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn run() -> ExitCode {
     let cli = Cli::parse();
     let json_output = cli.global.json;
 
-    // Bare `fileid`: print the friendly intro to stdout and exit cleanly.
     let Some(command) = cli.command else {
         println!("{}", intro());
         return ExitCode::SUCCESS;
@@ -404,7 +368,16 @@ fn main() -> ExitCode {
             dry_run,
             delete,
             yes,
-        } => dedupe::run(&ctx, exact, similar, threshold, apply, dry_run, delete, yes),
+        } => dedupe::run(
+            &ctx,
+            exact,
+            similar,
+            threshold.unwrap_or(dedupe::DEFAULT_SIMILAR_THRESHOLD),
+            apply,
+            dry_run,
+            delete,
+            yes,
+        ),
         Command::Restructure {
             plan,
             apply,
@@ -422,17 +395,12 @@ fn main() -> ExitCode {
                 names,
             } => models::download(&ctx, all, dry_run, yes, &names),
         },
-        Command::Runtime { cmd } => match cmd {
-            RuntimeCmd::Status => runtime::status(&ctx),
-            RuntimeCmd::Install { force, yes } => runtime::install(&ctx, yes, force),
-        },
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.downcast_ref::<scan::PartialScan>().is_some() => {
-            // Committed-but-partial scan: results are usable, some files were
-            // unreadable. Dedicated code (rsync-style) so scripts can branch.
+            // Exit 3 (rsync-style) lets scripts tell a partial scan from a failure.
             report_failure(json_output, "warning", "partialScan", &e);
             ExitCode::from(3)
         }
@@ -465,6 +433,25 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(args).is_err(), "accepted {args:?}");
         }
+    }
+
+    #[test]
+    fn only_a_closed_stdout_panic_counts_as_a_closed_pipe() {
+        let closed: Box<dyn std::any::Any + Send> =
+            Box::new("failed printing to stdout: Broken pipe (os error 32)".to_owned());
+        let other: Box<dyn std::any::Any + Send> = Box::new("index out of bounds");
+        let full: Box<dyn std::any::Any + Send> =
+            Box::new("failed printing to stdout: No space left on device (os error 28)".to_owned());
+        assert!(is_stdout_closed_panic(&*closed));
+        assert!(!is_stdout_closed_panic(&*other));
+        assert!(!is_stdout_closed_panic(&*full));
+    }
+
+    #[test]
+    fn a_similarity_threshold_needs_the_similar_flag() {
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--threshold", "4"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--exact", "--threshold", "4"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "dedupe", "--similar", "--threshold", "4"]).is_ok());
     }
 
     #[test]

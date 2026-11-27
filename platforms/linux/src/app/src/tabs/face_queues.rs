@@ -1,6 +1,5 @@
-// People review queues beyond single faces (IPC 1.25): suggested merges between
-// people, suggested splits of one person, and the face refresh backlog shown in
-// the People header. Wording matches the macOS and WinUI apps.
+// People review queues beyond single faces: suggested merges and splits, and the face refresh
+// backlog shown in the People header.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -224,7 +223,6 @@ pub(super) fn append_unique<T: Clone, K: PartialEq>(
     }
 }
 
-// ── Face refresh status ──────────────────────────────────────────────────────
 
 pub(super) fn refresh_list_payload(id: &str) -> ListFaceReviewPayload {
     ListFaceReviewPayload {
@@ -541,7 +539,6 @@ impl RefreshBar {
     }
 }
 
-// ── Merge and split queues ───────────────────────────────────────────────────
 
 enum Pending {
     Reload,
@@ -1307,6 +1304,8 @@ mod tests {
             take_groups: None,
             take_qualities: None,
             take_goal_ranking: None,
+            similar_groups: None,
+            similar_group_total: None,
         };
         assert_eq!(
             control_failed_text(&response),

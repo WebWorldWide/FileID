@@ -1,7 +1,4 @@
-﻿// DrillDownSheet code-behind. Filters the engine's RestructurePlan.Moves
-// list down to a single source-folder + category pair (Sankey ribbon),
-// or a single proposed folder (TreeDiff click), then renders one row
-// per file with a shell-thumbnail.
+﻿// DrillDownSheet code-behind. Filters the plan's moves down to one source-folder + category pair (Sankey ribbon) or one proposed folder (TreeDiff click) and renders a row per file.
 
 using System;
 using System.Collections.Generic;
@@ -17,12 +14,6 @@ namespace FileID.Views.Restructure;
 
 public sealed partial class DrillDownSheet : UserControl
 {
-    // Badge colors are a small fixed set (confidence: auto/review/hold,
-    // tier: Anchor/Mixed/Junk). Pill() formerly allocated 3 SolidColorBrush
-    // per badge per file; with a large move list that's thousands of
-    // DispatcherObject constructions. Pre-build the brush triples once and
-    // reuse — fill (accent @ 0x33 alpha) + border/foreground (full accent).
-    // Gold (#FFCC00) is shared by "review" + "Anchor"; one entry covers both.
     private static readonly Windows.UI.Color GreenAccent = Windows.UI.Color.FromArgb(0xFF, 0x6C, 0xC2, 0x4A);
     private static readonly Windows.UI.Color GoldAccent = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00);
     private static readonly Windows.UI.Color AmberAccent = Windows.UI.Color.FromArgb(0xFF, 0xF5, 0xB7, 0x4D);
@@ -46,11 +37,7 @@ public sealed partial class DrillDownSheet : UserControl
     private static uint Key(Windows.UI.Color c)
         => ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
-    // Cap on rows materialized per drill-down. BuildRow builds a UIElement AND
-    // fires a shell thumbnail per move (ItemsRepeater over a UIElement list does
-    // not virtualize), so an unbounded "See all" on a large outcome group froze
-    // the UI thread and flooded the shell. 200 fills several screens; the rest
-    // are summarized in the count line.
+    // BuildRow creates a UIElement and a shell thumbnail request per move, and ItemsRepeater over UIElements does not virtualize; an unbounded list froze the UI thread. The rest is summarized in the count line.
     private const int MaxRenderedRows = 200;
 
     public DrillDownSheet()
@@ -86,7 +73,6 @@ public sealed partial class DrillDownSheet : UserControl
         }
     }
 
-    /// <summary>Filter to the moves whose source-folder bucket = `source` AND category = `category`.</summary>
     public void SetSankeyFilter(RestructurePlan plan, string source, string category)
     {
         HeaderText.Text = $"{source} → {category}";
@@ -94,11 +80,6 @@ public sealed partial class DrillDownSheet : UserControl
         var all = plan.Moves;
         string SrcRaw(RestructureMove m) => TopLevel(TrimRoot(m.Source, libRoot));
 
-        // Reproduce the Sankey's top-N fold so clicking the folded "Other" ribbon
-        // drills into the SAME moves it represented (the long tail), not an empty
-        // set. MUST stay in sync with SankeyFlowControl.SourceBucket/CategoryBucket
-        // (MaxNodes=12, long tail -> "Other"); TopLevel/TrimRoot already match the
-        // Sankey's SourceOf.
         const int MaxNodes = 12;
         const string OtherKey = "Other";
         int distinctSources = all.Select(SrcRaw).Distinct(StringComparer.OrdinalIgnoreCase).Count();
@@ -130,7 +111,6 @@ public sealed partial class DrillDownSheet : UserControl
         Render(moves);
     }
 
-    /// <summary>Filter to the moves whose proposed destination starts with the given path.</summary>
     public void SetTreeFilter(RestructurePlan plan, string proposedPath)
     {
         HeaderText.Text = $"Going to: {proposedPath}";
@@ -147,9 +127,6 @@ public sealed partial class DrillDownSheet : UserControl
         Render(moves);
     }
 
-    /// <summary>Filter to the moves whose engine Tier maps to the given outcome
-    /// (Tidy = Mixed-tier, Reorganize = Junk-tier). Backs a recommendation card's
-    /// "See all N files" — mirrors macOS drillDownSheet(.outcome(...)).</summary>
     internal void SetOutcomeFilter(RestructurePlan plan, FileID.ViewModels.RestructureOutcome outcome, string title)
     {
         HeaderText.Text = title;
@@ -187,8 +164,7 @@ public sealed partial class DrillDownSheet : UserControl
             Background = FileID.Services.ThemeHelper.GetBrushSafe("SubtleFillColorSecondaryBrush"),
             ColumnSpacing = 12,
         };
-        // Accessible name for the whole row = the file name, so a screen reader
-        // reading the drill-down list announces each file.
+        // A screen reader announces each row by its file name.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(grid, Path.GetFileName(m.Source));
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -214,7 +190,6 @@ public sealed partial class DrillDownSheet : UserControl
             Style = FileID.Services.ThemeHelper.GetStyleSafe("BodyStrongTextBlockStyle")!,
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
-        // Plain-language "why filed here" (RESTRUCTURE.md §6 trust mechanic).
         if (!string.IsNullOrEmpty(m.Reason))
         {
             labelStack.Children.Add(new TextBlock
@@ -235,8 +210,6 @@ public sealed partial class DrillDownSheet : UserControl
         Grid.SetColumn(labelStack, 1);
         grid.Children.Add(labelStack);
 
-        // Right rail: butler confidence pill (auto / review / hold) above the
-        // engine-stamped Anchor / Mixed / Junk tier pill.
         var badges = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
         if (BuildConfidenceBadge(m.Confidence) is FrameworkElement cb) badges.Children.Add(cb);
         if (BuildTierBadge(m.Tier) is FrameworkElement tb) badges.Children.Add(tb);
@@ -248,8 +221,6 @@ public sealed partial class DrillDownSheet : UserControl
         return grid;
     }
 
-    /// <summary>Butler confidence pill — auto (green) / review (gold) / hold
-    /// (amber). Null when the engine didn't stamp a confidence.</summary>
     private static FrameworkElement? BuildConfidenceBadge(string? confidence)
     {
         (string label, Windows.UI.Color accent) = confidence switch
@@ -262,8 +233,6 @@ public sealed partial class DrillDownSheet : UserControl
         return string.IsNullOrEmpty(label) ? null : Pill(label, accent);
     }
 
-    /// <summary>Anchor (gold) / Mixed (cyan) / Junk (pink) folder-tier pill.
-    /// Null when the move has no tier (engine mismatch or skipped move).</summary>
     private static FrameworkElement? BuildTierBadge(string? tier)
     {
         Windows.UI.Color accent = tier switch
@@ -276,8 +245,6 @@ public sealed partial class DrillDownSheet : UserControl
         return string.IsNullOrEmpty(tier) || accent.A == 0 ? null : Pill(tier!, accent);
     }
 
-    /// <summary>A small rounded color-coded badge ("pill") used for both the
-    /// confidence and folder-tier labels.</summary>
     private static Border Pill(string text, Windows.UI.Color accent)
     {
         if (!PillBrushes.TryGetValue(Key(accent), out var brushes))
@@ -305,17 +272,12 @@ public sealed partial class DrillDownSheet : UserControl
 
     private static async System.Threading.Tasks.Task LoadThumbAsync(Image img, string path)
     {
-        // BitmapImage is a DispatcherObject. Capture img.DispatcherQueue
-        // before any await; constructing the BitmapImage on the worker thread
-        // that resumes the await is a known native fast-fail shape.
+        // Capture the dispatcher before any await: building a BitmapImage on the thread the await resumes on is a native fast-fail.
         var dispatcher = img.DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
             if (!File.Exists(path)) return;
-            // In-proc shell video/audio thumbnail providers can native-fast-fail the
-            // whole app. This path calls GetThumbnailAsync directly (bypasses
-            // ThumbnailService), so apply the same skip — single source of truth.
             if (Services.ThumbnailService.SkipShellThumbnailForExtension(path)) return;
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
             thumb = await file.GetThumbnailAsync(

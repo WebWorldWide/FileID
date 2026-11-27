@@ -26,7 +26,6 @@ fn unit(axis: usize) -> Vec<f32> {
     v
 }
 
-/// A photo on disk with `faces` boxes, stamped like a fresh Swift scan (no vectors).
 fn photo(conn: &Connection, dir: &Path, id: i64, faces: &[i64]) -> PathBuf {
     let path = dir.join(format!("{id}.jpg"));
     std::fs::write(&path, format!("photo {id}")).unwrap();
@@ -148,7 +147,7 @@ fn extract_pending_saves_vectors_crops_and_failures() {
     let crops = dir.0.join("face_crops");
     let fake = Fake { calls: AtomicUsize::new(0), fail_box: Some("0.1,0.1,0.2,0.21".into()) };
     let skip: HashSet<i64> = [60, 61].into_iter().collect();
-    let summary = extract_pending(&db, &fake, PROCESSING, &skip, Some(&crops), &|| false).unwrap();
+    let summary = extract_pending(&db, &fake, PROCESSING, &skip, Some(&crops), &|| false, &|_, _| {}).unwrap();
     assert_eq!(summary, Summary { pending: 11, extracted: 9, failed: 2, files: 6 });
     assert_eq!(fake.calls.load(Ordering::SeqCst), 5, "one call per readable photo; the missing one is not read");
     let conn = db.lock();
@@ -173,9 +172,124 @@ fn extract_pending_stops_when_cancelled() {
     photo(&conn, &dir.0, 1, &[1]);
     let db = database(conn);
     let fake = Fake { calls: AtomicUsize::new(0), fail_box: None };
-    let summary = extract_pending(&db, &fake, PROCESSING, &HashSet::new(), None, &|| true).unwrap();
+    let summary = extract_pending(&db, &fake, PROCESSING, &HashSet::new(), None, &|| true, &|_, _| {}).unwrap();
     assert_eq!(summary, Summary::default());
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     let failures: i64 = db.lock().query_row("SELECT COUNT(*) FROM face_refresh_failures", [], |r| r.get(0)).unwrap();
     assert_eq!(failures, 0);
+}
+
+#[test]
+fn extract_pending_reports_faces_read_out_of_all_pending() {
+    let dir = tempdir();
+    let conn = memory_db();
+    for file in 1..=4 {
+        photo(&conn, &dir.0, file, &[file * 10, file * 10 + 1]);
+    }
+    let db = database(conn);
+    let fake = Fake { calls: AtomicUsize::new(0), fail_box: None };
+    let skip: HashSet<i64> = [10].into_iter().collect();
+    let reports = Mutex::new(Vec::new());
+    extract_pending(&db, &fake, PROCESSING, &skip, None, &|| false, &|done, total| reports.lock().push((done, total))).unwrap();
+    let reports = reports.into_inner();
+    assert!(!reports.is_empty() && reports.iter().all(|&(done, total)| total == 7 && (1..=7).contains(&done)), "{reports:?}");
+    assert!(reports.windows(2).all(|pair| pair[0].0 <= pair[1].0), "{reports:?}");
+}
+
+#[test]
+fn extraction_runs_on_two_to_eight_threads() {
+    assert!((2..=8).contains(&extraction_threads()));
+}
+
+const OTHER_MODEL: &str = "sface128-sha256:other";
+
+/// One photo with face 4 assigned to the named person 7.
+fn assigned_face(dir: &Path) -> Connection {
+    let conn = memory_db();
+    photo(&conn, dir, 1, &[4]);
+    conn.execute("INSERT INTO persons(id,name,created_at) VALUES(7,'Confirmed Person',0)", []).unwrap();
+    conn.execute("UPDATE face_prints SET person_id=7 WHERE id=4", []).unwrap();
+    conn
+}
+
+fn number(conn: &Connection, sql: &str) -> Option<i64> {
+    conn.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn a_refreshed_vector_keeps_the_face_s_person_and_each_model_keeps_its_own_evidence() {
+    let dir = tempdir();
+    let conn = assigned_face(&dir.0);
+    let input = pending(&conn, MODEL, PROCESSING, 10, 0, 0.0).unwrap().remove(0);
+    assert!(persist(&conn, &input, &unit(0), MODEL, PROCESSING, 1.0).unwrap());
+    assert!(pending(&conn, MODEL, PROCESSING, 10, 0, 0.0).unwrap().is_empty());
+    assert_eq!(number(&conn, "SELECT person_id FROM face_prints WHERE id=4"), Some(7));
+    let name: String = conn.query_row("SELECT name FROM persons WHERE id=7", [], |r| r.get(0)).unwrap();
+    assert_eq!(name, "Confirmed Person");
+    assert_eq!(number(&conn, "SELECT person_id FROM catalog_observations WHERE id='faceprint:4'"), Some(7));
+    let unconfirmed: bool = conn.query_row("SELECT confidence=0 FROM catalog_observations WHERE id='faceprint:4'", [], |r| r.get(0)).unwrap();
+    assert!(unconfirmed, "a machine observation is not a confirmation");
+
+    let other = pending(&conn, OTHER_MODEL, PROCESSING, 10, 0, 0.0).unwrap().remove(0);
+    assert!(persist(&conn, &other, &unit(1), OTHER_MODEL, PROCESSING, 2.0).unwrap());
+    assert_eq!(number(&conn, "SELECT person_id FROM face_prints WHERE id=4"), Some(7));
+    assert_eq!(number(&conn, "SELECT COUNT(DISTINCT model) FROM catalog_embeddings"), Some(2), "each model's vector is kept apart");
+    conn.execute("UPDATE face_prints SET person_id=NULL WHERE id=4", []).unwrap();
+    assert_eq!(number(&conn, "SELECT COUNT(*) FROM catalog_observations WHERE person_id IS NULL"), Some(1), "the observation follows the face's person");
+}
+
+#[test]
+fn excluding_a_face_never_revives_changed_evidence_and_a_hand_edited_observation_survives() {
+    let dir = tempdir();
+    let conn = assigned_face(&dir.0);
+    let input = pending(&conn, MODEL, PROCESSING, 10, 0, 0.0).unwrap().remove(0);
+    assert!(persist(&conn, &input, &unit(0), MODEL, PROCESSING, 1.0).unwrap());
+    conn.execute("UPDATE face_prints SET excluded=1 WHERE id=4", []).unwrap();
+    assert_eq!(number(&conn, "SELECT stale FROM catalog_observations"), Some(1));
+    assert_eq!(pending(&conn, OTHER_MODEL, PROCESSING, 10, 0, 0.0).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [4]);
+    conn.execute("UPDATE files SET modified_at=modified_at+1 WHERE id=1", []).unwrap();
+    conn.execute("UPDATE face_prints SET excluded=0 WHERE id=4", []).unwrap();
+    assert_eq!(number(&conn, "SELECT stale FROM catalog_observations"), Some(1), "re-including a face of a changed photo keeps it stale");
+
+    conn.execute("UPDATE catalog_observations SET user_edited=1,region_json='manual marker' WHERE id='faceprint:4'", []).unwrap();
+    let changed = pending(&conn, OTHER_MODEL, PROCESSING, 10, 0, 0.0).unwrap().remove(0);
+    assert!(persist(&conn, &changed, &unit(1), OTHER_MODEL, PROCESSING, 2.0).unwrap());
+    let region: String = conn.query_row("SELECT region_json FROM catalog_observations", [], |r| r.get(0)).unwrap();
+    assert_eq!(region, "manual marker", "a refresh never overwrites a hand-edited observation");
+    assert_eq!(number(&conn, "SELECT stale FROM catalog_observations"), Some(1));
+    conn.execute("DELETE FROM face_prints WHERE id=4", []).unwrap();
+    let region: String = conn.query_row("SELECT region_json FROM catalog_observations", [], |r| r.get(0)).unwrap();
+    assert_eq!(region, "manual marker", "and it outlives the face");
+    assert_eq!(number(&conn, "SELECT stale FROM catalog_observations"), Some(1));
+    assert_eq!(number(&conn, "SELECT COUNT(*) FROM catalog_embeddings"), Some(0));
+}
+
+#[test]
+fn a_recorded_failure_never_hides_a_face_whose_box_was_edited_or_that_was_excluded() {
+    let dir = tempdir();
+    let conn = assigned_face(&dir.0);
+    let input = pending(&conn, MODEL, PROCESSING, 1, 0, 0.0).unwrap().remove(0);
+    record_failure(&conn, &input, MODEL, PROCESSING, "source_unavailable_or_changed", 100.0).unwrap();
+    conn.execute("UPDATE face_prints SET bbox='0,0,0.5,0.5' WHERE id=4", []).unwrap();
+    assert_eq!(pending(&conn, MODEL, PROCESSING, 1, 0, 101.0).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [4], "the failure was for the old box");
+    conn.execute("DELETE FROM face_refresh_failures", []).unwrap();
+    record_failure(&conn, &input, MODEL, PROCESSING, "no_embedding", 101.0).unwrap();
+    assert_eq!(number(&conn, "SELECT COUNT(*) FROM face_refresh_failures"), Some(0), "a failure for a box that no longer exists is not recorded");
+    conn.execute("UPDATE face_prints SET excluded=1 WHERE id=4", []).unwrap();
+    assert_eq!(pending(&conn, MODEL, PROCESSING, 1, 0, 1000.0).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [4]);
+}
+
+#[test]
+fn a_malformed_current_vector_is_repaired_in_place_and_keeps_the_person() {
+    let dir = tempdir();
+    let conn = assigned_face(&dir.0);
+    let input = pending(&conn, MODEL, PROCESSING, 1, 0, 0.0).unwrap().remove(0);
+    assert!(persist(&conn, &input, &unit(0), MODEL, PROCESSING, 1.0).unwrap());
+    let mut invalid: Vec<u8> = unit(0).iter().flat_map(|v| v.to_le_bytes()).collect();
+    invalid[..4].copy_from_slice(&[0, 0, 192, 127]);
+    conn.execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=4", [&invalid]).unwrap();
+    assert_eq!(pending(&conn, MODEL, PROCESSING, 1, 0, 0.0).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [4]);
+    assert!(persist(&conn, &input, &unit(0), MODEL, PROCESSING, 2.0).unwrap());
+    assert!(pending(&conn, MODEL, PROCESSING, 1, 0, 0.0).unwrap().is_empty());
+    assert_eq!(number(&conn, "SELECT person_id FROM face_prints WHERE id=4"), Some(7));
 }

@@ -2,12 +2,59 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// Returns true iff `name` is exactly one Normal path component:
-/// no slashes, no "..", no ".", no drive letter, no UNC, no leading/trailing
-/// whitespace that the OS would silently strip. Used as the path-traversal
-/// guard for `renameFiles`. Conservative — extra reject is safer than
-/// extra allow when the destination is computed by joining to a directory.
+/// True iff `name` is exactly one path component this platform can store. The path-traversal guard for `renameFiles` and Organize destinations; conservative, since the destination is computed by joining to a directory.
+///
+/// Windows rules (alternate data streams, reserved device names, trailing dot/space) are not applied elsewhere: a macOS or Linux file that already exists as `Meeting 10:30.jpg` or `a|b.jpg` is legal there, so refusing it only strands the file.
 pub(crate) fn is_safe_filename(name: &str) -> bool {
+    if cfg!(windows) {
+        is_safe_windows_filename(name)
+    } else {
+        is_safe_posix_filename(name)
+    }
+}
+
+/// What to tell the user when `is_safe_filename` refuses a name.
+pub(crate) fn unsafe_filename_reason() -> &'static str {
+    if cfg!(windows) {
+        "That name can't contain \\ / : * ? \" < > | or end with a space or a dot, and can't be a reserved name such as CON."
+    } else {
+        "That name can't contain / or \\, and it can't be empty, \".\" or \"..\"."
+    }
+}
+
+/// True when the volume holding `dir` is exFAT, FAT, NTFS or an SMB share, which cannot store the names `is_safe_posix_filename` allows. Only macOS reports the volume type; elsewhere the answer is false.
+pub(crate) fn volume_has_windows_name_rules(dir: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::mount_info(dir)
+            .is_some_and(|(fstype, _, _)| matches!(fstype.as_str(), "exfat" | "msdos" | "ntfs" | "smbfs"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// Names exFAT, FAT, NTFS and SMB refuse: the characters `: * ? " < > |` and a trailing space or dot.
+pub(crate) fn is_storable_on_windows_volume(name: &str) -> bool {
+    !name.contains([':', '*', '?', '"', '<', '>', '|']) && !name.ends_with([' ', '.'])
+}
+
+/// What to tell the user when `is_storable_on_windows_volume` refuses a name.
+pub(crate) fn windows_volume_name_reason() -> &'static str {
+    "This disk can’t store names with : * ? \" < > | or ending in a space or a dot. Choose a different name."
+}
+
+/// A single component with no separator of either kind and no control character (NUL included).
+fn is_safe_posix_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(|c: char| c == '/' || c == '\\' || (c as u32) < 0x20)
+}
+
+fn is_safe_windows_filename(name: &str) -> bool {
     if name.is_empty() || name.trim() != name {
         return false;
     }
@@ -74,10 +121,7 @@ pub(crate) fn is_safe_filename(name: &str) -> bool {
     )
 }
 
-/// SEC-7: best-effort canonicalize for a path that may not exist (the file
-/// is in the Recycle Bin). Returns the closest existing ancestor's canonical
-/// path joined with the missing tail. Same shape as `canonicalize_safely`
-/// in restructure_apply but lives here to avoid a cross-module dependency.
+/// SEC-7: best-effort canonicalize for a path that may not exist (e.g. in the Recycle Bin): the closest existing ancestor's canonical path joined with the missing tail. Mirrors `canonicalize_safely` in restructure_apply, kept here to avoid a cross-module dependency.
 pub(crate) fn canonicalize_for_containment(p: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(p) {
         return c;
@@ -101,22 +145,9 @@ pub(crate) fn canonicalize_for_containment(p: &Path) -> PathBuf {
     canonical
 }
 
-/// Stable hash for a file path, case-folded ONLY where the filesystem is
-/// case-insensitive. On NTFS / exfat / default HFS+/APFS a re-scan after a
-/// path-case change must produce the same hash — else the next ingest creates a
-/// duplicate `files` row — so we key `DefaultHasher` (SipHash) off
-/// `to_ascii_lowercase`. NTFS uses a Unicode case-folding table that's roughly
-/// equivalent for typical paths; a pathological Turkish-dotted-I name wouldn't
-/// round-trip exactly, but the collision is bounded (worst case: one duplicate
-/// row the next scan overwrites via UPSERT).
+/// Stable hash for a file path, case-folded ONLY where the filesystem is case-insensitive. On NTFS / exfat / default HFS+/APFS a re-scan after a path-case change must hash the same, else ingest creates a duplicate `files` row, so `DefaultHasher` (SipHash) is keyed off `to_ascii_lowercase`. NTFS's Unicode folding table differs for pathological names (Turkish dotted I), bounded to one duplicate row the next scan UPSERTs over.
 ///
-/// Linux's default filesystems (ext4 / btrfs / xfs / zfs) are case-SENSITIVE,
-/// so `Foo.jpg` and `foo.jpg` are genuinely distinct files. Lowercasing there
-/// would hash them to the same `path_hash` (the dedup/lookup key), letting one
-/// shadow or overwrite the other on UPSERT — silent data loss. So on Linux we
-/// hash the path as-is. Each platform owns its own DB, so this per-OS
-/// difference has no cross-platform implication. The wire schema stores the
-/// resulting i64 as-is.
+/// Linux filesystems (ext4 / btrfs / xfs / zfs) are case-SENSITIVE: lowercasing would give `Foo.jpg` and `foo.jpg` the same `path_hash` (the dedup/lookup key) and let one overwrite the other on UPSERT, silent data loss. So Linux hashes the path as-is; each platform owns its own DB, so the difference is not cross-platform. The wire schema stores the i64 as-is.
 pub fn stable_path_hash(path: &str) -> i64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -128,19 +159,9 @@ pub fn stable_path_hash(path: &str) -> i64 {
     h.finish() as i64
 }
 
-/// Convert an absolute path to Windows extended-length ("\\?\") form so
-/// Win32 file APIs accept it past the 260-char MAX_PATH limit. The engine
-/// process has no long-path manifest (the app's `longPathAware` doesn't
-/// cover this separate `.exe`) and the system `LongPathsEnabled` registry
-/// flag is off by default, so std::fs / jwalk silently fail on deep paths
-/// unless we prefix explicitly — a verbatim path bypasses MAX_PATH
-/// unconditionally. Stored + displayed paths stay in normal form (see
-/// `strip_extended_length`); the prefix is applied only at FS-access sites.
+/// Converts an absolute path to Windows extended-length ("\\?\") form so Win32 APIs accept it past MAX_PATH. The engine `.exe` has no long-path manifest (the app's `longPathAware` doesn't cover it) and `LongPathsEnabled` is off by default, so std::fs / jwalk silently fail on deep paths unless we prefix explicitly. Stored and displayed paths stay in normal form (see `strip_extended_length`); the prefix is applied only at FS-access sites.
 ///
-/// Only absolute paths convert (a verbatim path must be fully-qualified,
-/// backslash-separated, with no `.`/`..`). Relative paths, already-verbatim
-/// paths, and non-Windows builds pass through unchanged. Forward slashes are
-/// normalized to backslashes because verbatim paths reject `/`.
+/// Only absolute paths convert (a verbatim path must be fully-qualified, backslash-separated, with no `.`/`..`); relative, already-verbatim and non-Windows paths pass through. Forward slashes become backslashes because verbatim paths reject `/`.
 ///   `C:\a\b`            → `\\?\C:\a\b`
 ///   `\\server\share\x`  → `\\?\UNC\server\share\x`
 #[cfg(windows)]
@@ -159,17 +180,14 @@ pub(crate) fn to_extended_length(path: &Path) -> PathBuf {
         .map(|c| if c == FS { BS } else { c })
         .collect();
 
-    // Already "\\?\…" (after slash normalization) → leave it.
     if wide.starts_with(&[BS, BS, b'?' as u16, BS]) {
         return PathBuf::from(OsString::from_wide(&wide));
     }
     let out: Vec<u16> = if wide.starts_with(&[BS, BS]) {
-        // UNC "\\server\share\…" → "\\?\UNC\server\share\…"
         let mut v: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
         v.extend_from_slice(&wide[2..]);
         v
     } else {
-        // Drive "C:\…" → "\\?\C:\…"
         let mut v: Vec<u16> = r"\\?\".encode_utf16().collect();
         v.append(&mut wide);
         v
@@ -182,9 +200,7 @@ pub(crate) fn to_extended_length(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Inverse of `to_extended_length`: strip a "\\?\" / "\\?\UNC\" prefix so
-/// stored + displayed paths stay in normal user-facing form (matching the
-/// cross-platform DB + the C# side). Non-prefixed paths pass through.
+/// Inverse of `to_extended_length`: strips "\\?\" / "\\?\UNC\" so stored and displayed paths stay in the user-facing form.
 ///   `\\?\C:\a\b`              → `C:\a\b`
 ///   `\\?\UNC\server\share\x`  → `\\server\share\x`
 #[cfg(windows)]
@@ -221,6 +237,12 @@ pub(crate) fn normalize_for_exclusion(p: &Path) -> String {
     }
 }
 
+/// `normalize_for_exclusion` folded for matching a walked folder against a saved exclusion. macOS volumes (APFS, exFAT, HFS+) are case-insensitive, so a folder renamed `private` to `Private` in Finder must still match the exclusion saved earlier; the fold is kept out of `normalize_for_exclusion` itself because other callers use it as an identity key.
+pub(crate) fn normalize_for_exclusion_match(p: &Path) -> String {
+    let normalized = normalize_for_exclusion(p);
+    if cfg!(target_os = "macos") { normalized.to_lowercase() } else { normalized }
+}
+
 /// A user exclusion validated against a scan root. `original` keeps the
 /// caller's casing (verbatim-stripped, separators unified, trailing
 /// separators trimmed) for BINARY-collating `path_text` range scans;
@@ -231,14 +253,12 @@ pub(crate) struct ResolvedExclusion {
     pub normalized: String,
 }
 
-/// Resolve a single absolute path with no root-containment check — used by
-/// the `purgeExcluded` command, where any absolute folder is a valid purge
-/// target. Returns None for relative paths.
+/// Resolves one absolute path with no root-containment check, for `purgeExcluded` where any absolute folder is a valid target. None for relative paths.
 pub(crate) fn resolve_exclusion_unrooted(p: &Path) -> Option<ResolvedExclusion> {
     if !p.is_absolute() {
         return None;
     }
-    let normalized = normalize_for_exclusion(p);
+    let normalized = normalize_for_exclusion_match(p);
     let stripped = strip_extended_length(p);
     let s = stripped.as_os_str().to_string_lossy();
     let original = if cfg!(windows) {
@@ -254,7 +274,7 @@ pub(crate) fn resolve_exclusion_unrooted(p: &Path) -> Option<ResolvedExclusion> 
 /// relative paths, paths not strictly under the root, duplicates, and the
 /// root itself (excluding the root would exclude everything — warn instead).
 pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExclusion> {
-    let norm_root = normalize_for_exclusion(root);
+    let norm_root = normalize_for_exclusion_match(root);
     let sep = if cfg!(windows) { '\\' } else { '/' };
     let mut child_prefix = norm_root.clone();
     if !child_prefix.ends_with(sep) {
@@ -271,6 +291,7 @@ pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExc
             continue;
         }
         if !res.normalized.starts_with(&child_prefix) {
+            tracing::warn!("exclusion outside the scan root ignored");
             continue;
         }
         if seen.insert(res.normalized.clone()) {
@@ -280,14 +301,7 @@ pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExc
     out
 }
 
-/// Map an arbitrary string to a filename component safe on Windows NTFS, Linux,
-/// and BSD — byte-faithful with macOS `FilesystemNameSafe.componentSafe` so the
-/// restructure planner produces IDENTICAL folder names on every platform
-/// (otherwise the same library lays out two incompatible trees and learn-your-
-/// style folder prototypes never match cross-platform). Unlike the old
-/// restructure sanitizer it REPLACES illegal/control chars with `_` (not
-/// delete), trims trailing dots/spaces, suffixes Windows reserved basenames,
-/// caps length, and never returns empty. (PAR-69 / PAR-96)
+/// Maps a string to a filename component safe on NTFS, Linux and BSD, so the restructure planner produces IDENTICAL folder names on every platform (else learn-your-style prototypes never match cross-platform). Replaces illegal/control chars with `_`, trims trailing dots/spaces, suffixes Windows reserved basenames, caps length, never returns empty.
 pub fn safe_filename_component(raw: &str) -> String {
     safe_filename_component_max(raw, 200)
 }
@@ -310,11 +324,9 @@ pub fn safe_filename_component_max(raw: &str, max_len: usize) -> String {
             out.push(ch);
         }
     }
-    // Cap by Unicode scalar count (matches Swift's unicodeScalars.prefix).
     if out.chars().count() > max_len {
         out = out.chars().take(max_len).collect();
     }
-    // Windows strips trailing dots/spaces; do it ourselves so the name is stable.
     while matches!(out.chars().last(), Some('.' | ' ')) {
         out.pop();
     }
@@ -527,6 +539,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn a_folder_renamed_by_case_only_still_matches_its_saved_exclusion_on_macos() {
+        let saved = resolve_exclusions(Path::new("/Volumes/X"), &["/Volumes/X/private".to_string()]);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(normalize_for_exclusion_match(Path::new("/Volumes/X/Private")), saved[0].normalized);
+        let typed = resolve_exclusions(Path::new("/Volumes/x"), &["/Volumes/X/Private/".to_string()]);
+        assert_eq!(typed.len(), 1, "an exclusion typed in another case than the root is kept");
+        assert_eq!(normalize_for_exclusion(Path::new("/Volumes/X/Private")), "/Volumes/X/Private", "the identity key stays case-preserving");
+    }
+
+    #[test]
+    fn names_a_windows_volume_cannot_store_are_recognised() {
+        for bad in ["Meeting 10:30.jpg", "a|b.jpg", "what?.jpg", "x.", "trailing ", "q\"uote.jpg"] {
+            assert!(!is_storable_on_windows_volume(bad), "{bad}");
+        }
+        assert!(is_storable_on_windows_volume("Meeting 10-30.jpg"));
+        assert!(!windows_volume_name_reason().contains("os error"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_boot_volume_keeps_posix_name_rules() {
+        assert!(!volume_has_windows_name_rules(&std::env::temp_dir()));
+    }
+
+    #[test]
     fn resolve_exclusions_containment() {
         let (root, inside, inside_dup, outside) = if cfg!(windows) {
             (r"C:\Pics", r"C:\Pics\Raw\", r"c:\pics\RAW", r"D:\Other")
@@ -541,8 +579,8 @@ mod tests {
             "relative/x".to_string(), // relative → dropped
         ];
         let resolved = resolve_exclusions(Path::new(root), &raw);
-        // On Unix the "dup" differs by case and is a genuinely distinct dir.
-        let expected = if cfg!(windows) { 1 } else { 2 };
+        // On Linux the "dup" differs by case and is a genuinely distinct dir.
+        let expected = if cfg!(any(windows, target_os = "macos")) { 1 } else { 2 };
         assert_eq!(resolved.len(), expected);
         assert_eq!(
             resolved[0].original,
@@ -555,15 +593,11 @@ mod tests {
 
     #[test]
     fn component_safe_matches_macos_rules() {
-        // Illegal chars → '_', not deleted (parity with macOS componentSafe).
         assert_eq!(safe_filename_component("Mom: Vacation"), "Mom_ Vacation");
-        // Windows reserved basename → '_' prefix.
         assert_eq!(safe_filename_component("CON"), "_CON");
         assert_eq!(safe_filename_component("com1.txt"), "_com1.txt");
-        // Trailing dots/spaces stripped; control chars → '_'.
         assert_eq!(safe_filename_component("trip.  "), "trip");
         assert_eq!(safe_filename_component("a\tb"), "a_b");
-        // All-illegal collapses to placeholders, never empty.
         assert_eq!(safe_filename_component("///"), "___");
         assert_eq!(safe_filename_component(""), "_");
     }
@@ -639,7 +673,6 @@ mod tests {
         assert_eq!(std::fs::read(&source).unwrap(), b"source");
         assert_eq!(std::fs::read(&destination).unwrap(), b"occupant");
 
-        // A second hard link is a distinct name, never "the same file".
         std::fs::remove_file(&destination).unwrap();
         std::fs::hard_link(&source, &destination).unwrap();
         assert!(rename_no_replace_emulated(&source, &destination).is_err());
@@ -653,7 +686,6 @@ mod tests {
         assert_eq!(std::fs::metadata(&destination).unwrap().ino(), source_identity);
         assert_eq!(std::fs::read(&destination).unwrap(), b"source");
 
-        // A failed rename removes only the placeholder it created.
         let missing = root.join("missing");
         let target = root.join("target");
         assert!(rename_no_replace_emulated(&missing, &target).is_err());
@@ -695,54 +727,81 @@ mod tests {
     }
 
     #[test]
-    fn safe_filenames_accepted() {
+    fn posix_names_accept_what_the_filesystem_allows() {
+        for name in [
+            "Meeting 10:30 notes.jpg",
+            "shot \"final\".jpg",
+            "a|b.jpg",
+            "who?.jpg",
+            "trail dot..jpg",
+            "trailing space .jpg ",
+            " leading.jpg",
+            "CON.jpg",
+            "NUL",
+            "a<b>c*d.txt",
+        ] {
+            assert!(is_safe_posix_filename(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn posix_names_reject_separators_dots_and_control_characters() {
+        for name in ["", ".", "..", "a/b", "/abs", "back\\slash.jpg", "new\nline.jpg", "tab\t.jpg", "nul\0.jpg"] {
+            assert!(!is_safe_posix_filename(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn this_platform_picks_its_own_rules() {
+        assert_eq!(is_safe_filename("a:b.jpg"), !cfg!(windows));
+        assert_eq!(is_safe_filename("CON.jpg"), !cfg!(windows));
         assert!(is_safe_filename("photo.jpg"));
-        assert!(is_safe_filename("My Vacation Photo (2024).heic"));
-        assert!(is_safe_filename("a"));
+        assert!(!is_safe_filename("a/b"));
+    }
+
+    #[test]
+    fn safe_filenames_accepted() {
+        assert!(is_safe_windows_filename("photo.jpg"));
+        assert!(is_safe_windows_filename("My Vacation Photo (2024).heic"));
+        assert!(is_safe_windows_filename("a"));
     }
 
     #[test]
     fn traversal_rejected() {
-        assert!(!is_safe_filename(".."));
-        assert!(!is_safe_filename("."));
-        assert!(!is_safe_filename("../etc/passwd"));
-        assert!(!is_safe_filename("..\\windows\\system32"));
-        assert!(!is_safe_filename("a/b"));
-        assert!(!is_safe_filename("a\\b"));
-        assert!(!is_safe_filename("/abs"));
-        assert!(!is_safe_filename("\\abs"));
-        assert!(!is_safe_filename("C:\\evil.exe"));
-        assert!(!is_safe_filename("\\\\unc\\share\\evil.exe"));
-        assert!(!is_safe_filename(""));
-        assert!(!is_safe_filename("  "));
-        assert!(!is_safe_filename(" leading-space.jpg"));
-        assert!(!is_safe_filename("trailing-space.jpg "));
-        // NTFS Alternate Data Stream + other Windows-illegal characters.
-        assert!(!is_safe_filename("photo.jpg:evil"));
-        assert!(!is_safe_filename("a:b"));
-        assert!(!is_safe_filename("a<b"));
-        assert!(!is_safe_filename("a>b"));
-        assert!(!is_safe_filename("a|b"));
-        assert!(!is_safe_filename("a?b"));
-        assert!(!is_safe_filename("a*b"));
-        assert!(!is_safe_filename("a\"b"));
-        // Device names Win32 resolves despite padding or superscripts.
+        assert!(!is_safe_windows_filename(".."));
+        assert!(!is_safe_windows_filename("."));
+        assert!(!is_safe_windows_filename("../etc/passwd"));
+        assert!(!is_safe_windows_filename("..\\windows\\system32"));
+        assert!(!is_safe_windows_filename("a/b"));
+        assert!(!is_safe_windows_filename("a\\b"));
+        assert!(!is_safe_windows_filename("/abs"));
+        assert!(!is_safe_windows_filename("\\abs"));
+        assert!(!is_safe_windows_filename("C:\\evil.exe"));
+        assert!(!is_safe_windows_filename("\\\\unc\\share\\evil.exe"));
+        assert!(!is_safe_windows_filename(""));
+        assert!(!is_safe_windows_filename("  "));
+        assert!(!is_safe_windows_filename(" leading-space.jpg"));
+        assert!(!is_safe_windows_filename("trailing-space.jpg "));
+        assert!(!is_safe_windows_filename("photo.jpg:evil"));
+        assert!(!is_safe_windows_filename("a:b"));
+        assert!(!is_safe_windows_filename("a<b"));
+        assert!(!is_safe_windows_filename("a>b"));
+        assert!(!is_safe_windows_filename("a|b"));
+        assert!(!is_safe_windows_filename("a?b"));
+        assert!(!is_safe_windows_filename("a*b"));
+        assert!(!is_safe_windows_filename("a\"b"));
         for device in ["NUL .txt", "con  .jpg", "CONIN$", "conout$.log", "COM\u{b9}", "lpt\u{b3}.txt"] {
-            assert!(!is_safe_filename(device), "{device}");
+            assert!(!is_safe_windows_filename(device), "{device}");
         }
-        assert!(is_safe_filename("console.txt"));
-        assert!(is_safe_filename("COM10.txt"));
+        assert!(is_safe_windows_filename("console.txt"));
+        assert!(is_safe_windows_filename("COM10.txt"));
     }
 
-    // Property-based tests proving is_safe_filename and
-    // canonicalize_for_containment invariants on randomized inputs.
     proptest::proptest! {
-        // Any string containing a forward or back slash must be rejected:
-        // is_safe_filename only accepts single Component::Normal names.
         #[test]
         fn any_string_with_slash_is_rejected(s in "[a-zA-Z0-9./\\\\]{1,40}") {
             if s.contains('/') || s.contains('\\') {
-                proptest::prop_assert!(!is_safe_filename(&s));
+                proptest::prop_assert!(!is_safe_windows_filename(&s));
             }
         }
 
@@ -757,19 +816,13 @@ mod tests {
         ) {
             let s = format!("{prefix}{inner}{suffix}");
             if !prefix.is_empty() || !suffix.is_empty() {
-                proptest::prop_assert!(!is_safe_filename(&s));
+                proptest::prop_assert!(!is_safe_windows_filename(&s));
             } else {
-                // Bare alphanumeric/underscore IS safe (no slashes, no reserved name).
-                proptest::prop_assert!(is_safe_filename(&s));
+                proptest::prop_assert!(is_safe_windows_filename(&s));
             }
         }
 
-        // Case folding follows the filesystem. On case-INSENSITIVE volumes
-        // (NTFS/exfat/default APFS) C:\Users\Foo and c:\users\foo are the same
-        // file, so a re-scan after an Explorer rename mustn't create a duplicate
-        // row → equal hashes. On case-SENSITIVE Linux fs they're distinct files,
-        // so case-distinct paths must hash differently (else one shadows the
-        // other on UPSERT) while identical strings still collide.
+        // Case folding follows the filesystem: on case-INSENSITIVE volumes `C:\Users\Foo` and `c:\users\foo` must hash equal (no duplicate row after an Explorer rename); on case-SENSITIVE Linux, case-distinct paths must hash differently (else one shadows the other on UPSERT).
         #[test]
         fn stable_path_hash_case_sensitivity(
             s in "[a-zA-Z0-9_./\\\\]{1,80}",
@@ -786,17 +839,11 @@ mod tests {
             }
         }
 
-        // stable_path_hash must be deterministic: same input twice in a
-        // row must produce the same hash.
         #[test]
         fn stable_path_hash_is_deterministic(s in "[\\PC]{1,200}") {
             proptest::prop_assert_eq!(stable_path_hash(&s), stable_path_hash(&s));
         }
 
-        // Every Windows reserved device name (CON/PRN/AUX/NUL + COM0..9 +
-        // LPT0..9) must be rejected with or without an extension. Bare
-        // filenames like "COM3" and stems with up to four-letter
-        // extensions like "lpt0.txt" must both fail.
         #[test]
         fn reserved_device_names_are_rejected(
             stem in "(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])",
@@ -809,21 +856,13 @@ mod tests {
                 _ => stem.chars().enumerate().map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect(),
             };
             let name = if let Some(e) = ext { format!("{normalized}.{e}") } else { normalized };
-            proptest::prop_assert!(!is_safe_filename(&name), "reserved name {name} must be rejected");
+            proptest::prop_assert!(!is_safe_windows_filename(&name), "reserved name {name} must be rejected");
         }
     }
 
-    /// Cross-platform pin: the macOS engine re-implements this function in
-    /// Swift (FileIDShared/StablePathHash.swift, mirrored vectors in
-    /// StablePathHashTests) so `files.path_hash` is identical in both
-    /// engines' DBs. If DefaultHasher's algorithm ever changes, this fails
-    /// before the platforms silently drift apart.
+    /// Pin: `files.path_hash` values already stored in users' catalogs depend on DefaultHasher's algorithm; this fails if it ever changes.
     ///
-    /// Linux is intentionally excluded: its case-SENSITIVE filesystems make
-    /// `stable_path_hash` preserve case (see the fn doc), so these lowercased
-    /// macOS/Windows-parity vectors don't apply there. Linux's contract is the
-    /// `stable_path_hash_case_sensitivity` property test above. (DBs are never
-    /// shared across OSes, so the divergence is invisible in practice.)
+    /// Linux is excluded: its case-sensitive filesystems make `stable_path_hash` preserve case (see `stable_path_hash_case_sensitivity`), and DBs are never shared across OSes.
     #[test]
     #[cfg(not(target_os = "linux"))]
     fn stable_path_hash_pinned_vectors() {
@@ -853,12 +892,7 @@ mod tests {
         );
     }
 
-    // SEC-7: the trash-restore containment check uses `Path::starts_with`
-    // on canonicalized PathBufs. UNC paths must containment-match
-    // correctly — a restore target of \\srv\share\user\file.jpg must
-    // be ACCEPTED if \\srv\share\user is an authorized root, and
-    // REJECTED if it isn't. Rust's Path::starts_with treats UNC paths
-    // component-wise, which is what we want.
+    // SEC-7: the trash-restore containment check uses `Path::starts_with` on canonicalized PathBufs, which treats UNC paths component-wise: a restore target under an authorized UNC root must be ACCEPTED and one outside REJECTED.
     #[test]
     #[cfg(windows)]
     fn unc_path_containment_starts_with_matches_when_nested() {
@@ -883,8 +917,6 @@ mod tests {
         assert!(!path_srv2.starts_with(&root_srv1));
     }
 
-    /// A normal drive path round-trips through the verbatim helpers: prefix
-    /// for FS access, strip back to the form we store + display.
     #[test]
     #[cfg(windows)]
     fn extended_length_roundtrip_drive() {
@@ -894,8 +926,6 @@ mod tests {
         assert_eq!(strip_extended_length(&ext), p.to_path_buf());
     }
 
-    /// UNC paths use the "\\?\UNC\" verbatim form and round-trip back to the
-    /// "\\server\share" form.
     #[test]
     #[cfg(windows)]
     fn extended_length_roundtrip_unc() {
@@ -905,8 +935,6 @@ mod tests {
         assert_eq!(strip_extended_length(&ext), p.to_path_buf());
     }
 
-    /// Already-verbatim paths and relative paths pass through unchanged;
-    /// stripping a non-prefixed path is a no-op.
     #[test]
     #[cfg(windows)]
     fn extended_length_idempotent_and_passthrough() {
@@ -990,8 +1018,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// IPC callers may hand us forward slashes; the verbatim form must use
-    /// backslashes or Win32 rejects it.
     #[test]
     #[cfg(windows)]
     fn extended_length_normalizes_forward_slashes() {

@@ -1,7 +1,6 @@
 ﻿# FileID Windows — release publish + WiX Burn bundle.
 #
-# This is the canonical "I'm cutting a release" command. Produces ONE
-# downloadable artifact for end users: dist/installer/FileIDSetup.exe.
+# Cuts a release. Produces one downloadable artifact for end users: dist/installer/FileIDSetup.exe.
 #
 # What it chains:
 #   1. Toolchain probes (cargo, dotnet, MSVC ARM64 cl.exe, WiX v4 SDK)
@@ -48,12 +47,8 @@ if (-not $SigningAdapter) { $SigningAdapter = $env:FILEID_SIGNING_ADAPTER }
 if (-not $SignerSubject) { $SignerSubject = $env:FILEID_SIGNER_SUBJECT }
 if (-not $SignerPublicKeySha256) { $SignerPublicKeySha256 = $env:FILEID_SIGNER_PUBLIC_KEY_SHA256 }
 
-# A release build must never bypass signing or the privacy gate. release.yml
-# sets CI_RELEASE=true on the actual signing path; if -SkipSign / -SkipPrivacyGate
-# slipped through there it would ship unsigned/unverified binaries to users —
-# exactly the failure these gates exist to prevent. Local dev builds (CI_RELEASE
-# unset) may still -SkipSign for cert-less iteration; a cert-less CI dry-run must
-# NOT set CI_RELEASE.
+# A release build must never bypass signing or the privacy gate. release.yml sets CI_RELEASE=true
+# on the real signing path; local builds and cert-less CI dry-runs leave it unset and may -SkipSign.
 if ($env:CI_RELEASE -eq 'true') {
     if ($SkipSign) {
         Write-Host "ERROR: -SkipSign is forbidden on a release build (would ship unsigned binaries)." -ForegroundColor Red
@@ -94,7 +89,6 @@ Write-Host "  Signer key:     $(if ($SignerPublicKeySha256) { $SignerPublicKeySh
 Write-Host "  Skip privacy:  $SkipPrivacyGate"
 Write-Host ""
 
-# ─── 1. Toolchain probes ────────────────────────────────────────────────────
 function Require-Command($name, $hint) {
     if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
         Write-Host "ERROR: '$name' not found on PATH." -ForegroundColor Red
@@ -254,7 +248,6 @@ if (-not $SkipSign) {
     $env:FileIDExpectedSignerPublicKeySha256 = $SignerPublicKeySha256
 }
 
-# ─── 2. Build engine for each arch ─────────────────────────────────────────
 function Get-Sha256Hex($path) {
     $stream = [System.IO.File]::OpenRead($path)
     try {
@@ -369,13 +362,13 @@ function Resolve-NativeRuntimeDlls($architecture) {
             $resolved[[System.IO.Path]::GetFileName($path)] = $path
         }
     }
-    foreach ($required in @("onnxruntime.dll", "onnxruntime_providers_shared.dll", "DirectML.dll", "pdfium.dll")) {
+    foreach ($required in @("pdfium.dll")) {
         if (-not $resolved.ContainsKey($required) -or -not (Test-Path -LiteralPath $resolved[$required] -PathType Leaf)) {
             throw "fetch-runtime-deps.ps1 did not resolve required $architecture payload '$required'."
         }
     }
-    if ($resolved.Count -ne 4) {
-        throw "fetch-runtime-deps.ps1 returned $($resolved.Count) runtime payloads for $architecture; expected exactly four."
+    if ($resolved.Count -ne 1) {
+        throw "fetch-runtime-deps.ps1 returned $($resolved.Count) runtime payloads for $architecture; expected exactly one."
     }
     return $resolved
 }
@@ -398,7 +391,6 @@ if (-not $SkipArm64) {
     Build-Engine "aarch64-pc-windows-msvc"
 }
 
-# ─── 3. Publish app for each arch ──────────────────────────────────────────
 function Resolve-PublishDir($rid, $platform) {
     return Join-Path $PlatformDir "src/FileID.App/bin/$platform/Release/$AppTfm/$rid/publish"
 }
@@ -427,7 +419,6 @@ if (-not $SkipArm64) {
     Publish-App "win-arm64" "arm64"
 }
 
-# ─── 4. Stage engine into each publish dir ─────────────────────────────────
 function Resolve-EngineExe($triple) {
     return Join-Path $EngineDir "target/$triple/release-debuginfo/FileIDEngine.exe"
 }
@@ -438,6 +429,8 @@ function Stage-Engine($triple, $rid, $platform) {
     if (-not (Test-Path $src)) { throw "Missing engine binary: $src" }
     if (-not (Test-Path $dst)) { throw "Missing publish dir: $dst" }
     Copy-Item $src (Join-Path $dst "FileIDEngine.exe") -Force
+    Copy-Item -LiteralPath (Join-Path $PlatformDir '../../LICENSE') -Destination (Join-Path $dst 'LICENSE.txt') -Force
+    Copy-Item -LiteralPath (Join-Path $PlatformDir '../../THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $dst 'THIRD_PARTY_NOTICES.txt') -Force
     $enginePdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
     if (-not (Test-Path -LiteralPath $enginePdb -PathType Leaf)) {
         throw "Missing native crash symbols: $enginePdb"
@@ -496,7 +489,6 @@ if (-not $SkipArm64) {
     Assert-PeMachine (Join-Path (Resolve-PublishDir "win-arm64" "arm64") "FileIDEngine.exe") 0xAA64 "ARM64"
 }
 
-# ─── 5. Sign published binaries ────────────────────────────────────────────
 $script:ExpectedSignerPublicKeySha256 = $SignerPublicKeySha256
 
 function Assert-SignedFile($path) {
@@ -608,7 +600,6 @@ if (-not $SkipArm64) {
     Sign-PublishDir (Resolve-PublishDir "win-arm64" "arm64")
 }
 
-# ─── 6. Build per-arch MSIs ────────────────────────────────────────────────
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 Write-Host "Building FileID-x64.msi..." -ForegroundColor Cyan
@@ -619,13 +610,11 @@ if (-not $SkipArm64) {
     & dotnet build $MsiProj -c Release -p:Platform=arm64 -p:RestoreLockedMode=true --nologo
 }
 
-# ─── 7. Sign MSIs ──────────────────────────────────────────────────────────
 $MsiX64   = Join-Path $DistDir "FileID-x64.msi"
 $MsiArm64 = Join-Path $DistDir "FileID-arm64.msi"
 Sign-Binary $MsiX64
 if (-not $SkipArm64) { Sign-Binary $MsiArm64 }
 
-# ─── 8. Build Burn bundle ──────────────────────────────────────────────────
 Write-Host "Building FileIDSetup.exe (Burn bundle)..." -ForegroundColor Cyan
 $includeArm64 = (-not $SkipArm64).ToString().ToLowerInvariant()
 & dotnet build $BundleProj -t:Rebuild -c Release -p:IncludeArm64=$includeArm64 -p:RestoreLockedMode=true --nologo
@@ -636,12 +625,10 @@ if (-not (Test-Path $BundleExe)) {
     exit 1
 }
 
-# ─── 9. Sign bundle ────────────────────────────────────────────────────────
 # Burn caches its detached engine for repair/uninstall, so both that engine
 # and the final reattached bundle need valid publisher signatures.
 Sign-BurnBundle $BundleExe
 
-# ─── 10. Smoke ─────────────────────────────────────────────────────────────
 $bundleSize = [math]::Round((Get-Item $BundleExe).Length / 1MB, 1)
 Write-Host ""
 Write-Host "Smoke checks:" -ForegroundColor Cyan
@@ -661,10 +648,8 @@ if (-not $SkipSign) {
     }
     Write-Host "  Authenticode          OK (signed by $($sig.SignerCertificate.Subject))" -ForegroundColor Green
 
-    # The bundle being Valid doesn't prove the inner MSIs are signed — a
-    # half-signed set still trips SmartScreen + WinVerifyTrust after install.
-    # Verify every shipped MSI too (the publish-dir exes are signed via
-    # Sign-PublishDir above; the MSIs are the user-facing secondary artifacts).
+    # A valid bundle does not prove the inner MSIs are signed, and a half-signed set still trips
+    # SmartScreen and WinVerifyTrust after install, so verify every shipped MSI too.
     $msis = @($MsiX64)
     if (-not $SkipArm64) { $msis += $MsiArm64 }
     foreach ($msi in $msis) {
@@ -677,7 +662,6 @@ if (-not $SkipSign) {
     Write-Host "  Authenticode (MSIs)   OK" -ForegroundColor Green
 }
 
-# ─── 11. Privacy gate ──────────────────────────────────────────────────────
 if (-not $SkipPrivacyGate) {
     Write-Host ""
     Write-Host "Privacy gate: scanning shipped binaries..." -ForegroundColor Cyan

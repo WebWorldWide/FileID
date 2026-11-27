@@ -1,7 +1,5 @@
-//! Pure-Rust keyword extraction (RAKE-style). Splits text into phrases at
-//! stopword boundaries, scores each phrase by sum of word degree / frequency
-//! (the classic RAKE metric), returns the top-N as content tags. No ML
-//! model or new dependency, complementing the heavier semantic-text pipeline.
+//! Pure-Rust RAKE-style keyword extraction: phrases split at stopwords, scored by word degree / frequency, top-N
+//! returned as content tags.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,9 +20,7 @@ const STOPWORDS: &[&str] = &[
     "while", "would",
 ];
 
-/// Extract up to MAX_TAGS keyword tags from `text`. Returns `(tag, score)`
-/// pairs in descending salience order. Each tag is lowercase. Empty input
-/// or text shorter than a phrase returns `[]`.
+/// `(tag, score)` pairs, descending, lowercase; empty for empty input.
 pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -35,8 +31,6 @@ pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
         return Vec::new();
     }
 
-    // RAKE word scoring: degree = total co-occurrence count (Σ phrase length),
-    // freq = how often the word appears, score(word) = degree / freq.
     let mut word_freq: HashMap<String, u32> = HashMap::new();
     let mut word_degree: HashMap<String, u64> = HashMap::new();
     for phrase in &phrases {
@@ -49,9 +43,7 @@ pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
         }
     }
 
-    // Score each unique phrase by Σ score(word). Multiple occurrences of the
-    // same phrase keep the higher score (a phrase that appears multiple times
-    // is automatically boosted via its constituent word frequencies anyway).
+    // A repeated phrase keeps the higher score.
     let mut scores: HashMap<String, f32> = HashMap::new();
     for phrase in &phrases {
         if phrase.is_empty() {
@@ -122,7 +114,6 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
     let mut cur: Vec<String> = Vec::new();
     let flush = |cur: &mut Vec<String>, dst: &mut Vec<Vec<String>>| {
         if cur.len() > MAX_PHRASE_WORDS {
-            // A long unpunctuated run is a sentence fragment, not a noun phrase.
             dst.extend(cur.drain(..).map(|word| vec![word]));
         } else if !cur.is_empty() {
             dst.push(std::mem::take(cur));
@@ -135,22 +126,16 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
             continue;
         }
         if !word.is_empty() {
-            let w = word.to_ascii_lowercase();
+            let w = word.to_lowercase();
             word.clear();
-            // A digit-starting token (year, ID, ISO-8601 chunk like "02t09")
-            // is never a useful keyword on its own AND, left in the stream,
-            // chains adjacent digit-tokens into noise tags like
-            // "2026 03 02t09 01 02 06 00" — observed on a syncthing folder
-            // marker .txt. A one-letter token ("s" of a possessive) is no keyword either.
-            // All of these are phrase boundaries, like a stopword.
+            // Digit-starting tokens (years, IDs, ISO chunks like "02t09") would chain into noise tags, and a one-letter token is no keyword; both end a phrase like a stopword.
             if stops.contains(w.as_str()) || starts_with_digit(&w) || w.chars().count() == 1 {
                 flush(&mut cur, &mut phrases);
             } else {
                 cur.push(w);
             }
         }
-        // Punctuation, a line break or a tab ends the phrase; spaces, hyphens,
-        // apostrophes and underscores stay inside it.
+        // Spaces, hyphens, apostrophes and underscores stay inside a phrase.
         if !matches!(c, ' ' | '-' | '\'' | '\u{2019}' | '_') {
             flush(&mut cur, &mut phrases);
         }
@@ -166,6 +151,13 @@ fn starts_with_digit(w: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capitalised_non_ascii_words_fold_to_the_same_tag() {
+        let tags = extract("École primaire. école primaire.");
+        let labels: Vec<&str> = tags.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(labels, vec!["école primaire"]);
+    }
 
     #[test]
     fn punctuation_and_line_breaks_end_phrases() {
@@ -223,7 +215,6 @@ mod tests {
 
     #[test]
     fn tag_count_is_capped() {
-        // Generate a long unique-vocab paragraph; expect MAX_TAGS at most.
         let words: Vec<String> = (0..200).map(|i| format!("word{i:03}")).collect();
         let text = words.join(" ");
         let tags = extract(&text);
@@ -247,11 +238,7 @@ mod tests {
 
     #[test]
     fn iso_timestamp_does_not_become_a_tag() {
-        // Regression: syncthing folder marker .txt produced a phantom
-        // "2026 03 02t09 01 02 06 00" tag chip because each digit-token
-        // from the ISO timestamp chained into one phrase with no
-        // stopword separator. Real folder markers also include the words
-        // "syncthing folder marker" — those should still be tagged.
+        // A syncthing marker file once produced a "2026 03 02t09 01 02 06 00" tag; "syncthing folder marker" must still tag.
         let text = "folderID: fc881c\ncreated: 2026-03-02T09:01:02.06000Z\n\
                     syncthing folder marker";
         let raw = extract(text);

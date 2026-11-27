@@ -173,12 +173,6 @@ internal static class ExactCleanupProofBuilder
         return new ExactCleanupProof(identities, rejections, authorizationBytes);
     }
 
-    internal static TimeSpan EngineTimeout(long authorizationBytes)
-    {
-        var readSeconds = authorizationBytes / (10.0 * 1024 * 1024);
-        return TimeSpan.FromSeconds(Math.Clamp(120.0 + readSeconds, 120.0, 7_200.0));
-    }
-
     private static void ValidateFile(ExactCleanupFile file, string role)
     {
         if (file.FileId <= 0 || string.IsNullOrWhiteSpace(file.Path) || file.SizeBytes < 0)

@@ -1,6 +1,6 @@
 ﻿# FileID -- icon asset generator.
 #
-# One-shot Windows-side asset pipeline:
+# Asset pipeline:
 #   shared/docs/assets/FileID-Windows.png  (master, Windows-specific design)
 #     |
 #     +--> platforms/windows/src/FileID.App/Assets/FileID.ico  (multi-res .ico)
@@ -9,18 +9,11 @@
 #     +--> website/assets/app-icon.png
 #     +--> platforms/windows/installer/FileID.Bundle/theme/logo.png  (130x102 letterboxed)
 #
-# Why FileID-Windows.png and not FileID-AppIcon.png? FileID-AppIcon.png
-# is the macOS-style squircle icon (rounded-square with iridescent border)
-# meant for the Dock; FileID-Windows.png is the Windows-style design with
-# its own framing. Use the Windows master so the .exe icon, taskbar, and
-# Welcome hero look native on Windows.
+# The master is FileID-Windows.png, not the macOS squircle FileID-AppIcon.png, so the .exe icon,
+# taskbar and Welcome hero look native on Windows.
 #
-# Run once per master change. Generated assets are committed; end users
-# do not need to run this script. Idempotent: re-running with no master
-# change is a no-op (compares mtimes).
-#
-# Tooling: System.Drawing.Common (built-in on .NET / .NET Framework 4.x
-# under Windows PowerShell 5.1). Zero external deps.
+# Run once per master change; generated assets are committed. Re-running with an unchanged master
+# is a no-op (compares mtimes). Uses System.Drawing only.
 
 param(
     [switch]$Force    # regenerate even if mtimes say up-to-date
@@ -59,7 +52,6 @@ $StoreLogo      = Join-Path $StoreAssetsDir "StoreLogo.png"
 $WebsiteIcon    = Join-Path $WebsiteAssetsDir "app-icon.png"
 $BundleLogo     = Join-Path $BundleTheme "logo.png"
 
-# Idempotency: skip if every output is newer than the master.
 $masterMtime = (Get-Item $Master).LastWriteTimeUtc
 $outputs = @($IcoOut, $Logo16, $Logo96, $Logo256, $Store44, $Store150, $StoreLogo, $WebsiteIcon, $BundleLogo)
 $allUpToDate = $true
@@ -97,7 +89,6 @@ try {
         $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     }
 
-    # --- Logo PNGs ----------------------------------------------------
     Write-Host "Generating Logo PNGs..." -ForegroundColor Cyan
     foreach ($pair in @(
         @{ Size = 16;  Out = $Logo16 },
@@ -111,7 +102,6 @@ try {
         } finally { $bmp.Dispose() }
     }
 
-# --- Store + website icons -----------------------------------------
 Write-Host "Generating Store and website icons..." -ForegroundColor Cyan
 foreach ($pair in @(
     @{ Size = 44; Out = $Store44 },
@@ -126,7 +116,6 @@ foreach ($pair in @(
     } finally { $bmp.Dispose() }
 }
 
-# --- Burn bundle logo (130x102 letterbox) -------------------------
     Write-Host "Generating Burn theme logo (130x102 letterbox)..." -ForegroundColor Cyan
     $boxW = 130; $boxH = 102
     $bundleBmp = New-Object System.Drawing.Bitmap $boxW, $boxH
@@ -137,7 +126,6 @@ foreach ($pair in @(
         $g.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
         $g.Clear([System.Drawing.Color]::Transparent)
-        # Preserve aspect ratio; letterbox the shorter side.
         $scale = [Math]::Min($boxW / $srcImg.Width, $boxH / $srcImg.Height)
         $drawW = [int]($srcImg.Width * $scale)
         $drawH = [int]($srcImg.Height * $scale)
@@ -149,16 +137,11 @@ foreach ($pair in @(
     $bundleBmp.Dispose()
     Write-Host "  $BundleLogo  (130x102)" -ForegroundColor DarkGreen
 
-    # --- Multi-resolution .ico ----------------------------------------
-    # ICO format: 6-byte header, 16-byte ICONDIRENTRY per image, then
-    # raw image data appended. We embed PNG-encoded images (modern Vista+
-    # ICO format) for sizes >= 64; classic uncompressed BMP DIB for the
-    # smaller sizes too (System.Drawing's PNG encoder is fine for all
-    # sizes -- Windows accepts PNG entries down to 16x16).
+    # ICO format: 6-byte header, a 16-byte ICONDIRENTRY per image, then the image data.
+    # Every size is PNG-encoded; Windows accepts PNG entries down to 16x16.
     Write-Host "Generating multi-resolution FileID.ico..." -ForegroundColor Cyan
     $sizes = @(16, 32, 48, 64, 128, 256)
 
-    # Encode each size to a PNG byte array first.
     $pngs = @{}
     foreach ($s in $sizes) {
         $bmp = Resize-To $s
@@ -173,12 +156,10 @@ foreach ($pair in @(
     $ico = New-Object System.IO.MemoryStream
     $w = New-Object System.IO.BinaryWriter $ico
     try {
-        # ICONDIR header.
         $w.Write([UInt16]0)               # reserved
         $w.Write([UInt16]1)               # type = 1 (icon)
         $w.Write([UInt16]$sizes.Count)    # image count
 
-        # Compute offsets. First image data starts after the dir + entries.
         $offset = 6 + (16 * $sizes.Count)
         $entryStream = New-Object System.IO.MemoryStream
         $entryWriter = New-Object System.IO.BinaryWriter $entryStream

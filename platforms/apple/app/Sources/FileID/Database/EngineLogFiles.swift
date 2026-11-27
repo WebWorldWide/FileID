@@ -1,7 +1,7 @@
 import Foundation
 
-/// The log files either engine leaves under `<state>/logs`: the Swift engine writes `scan.jsonl` (and `.1`),
-/// the Rust engine `engine.jsonl.<date>`; both write `engine-stderr.log`, and the app writes `app.log`.
+/// The log files under `<state>/logs`: the engine writes `engine.jsonl.<date>` and `engine-stderr.log`,
+/// the app writes `app.log`. `scan.jsonl` and its `.1` only exist in catalogs older than the Rust engine.
 enum EngineLogFiles {
     nonisolated static func isEngineLog(_ name: String) -> Bool {
         name == "scan.jsonl" || name == "scan.jsonl.1" || name == "engine.jsonl" || name.hasPrefix("engine.jsonl.")

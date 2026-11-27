@@ -7,7 +7,6 @@ fn fixture() -> serde_json::Value {
     serde_json::from_str(FIXTURE).unwrap()
 }
 
-/// A temporary home and Hugging Face root; restores the environment on drop.
 struct Scratch {
     dir: PathBuf,
     saved: Vec<(&'static str, Option<OsString>)>,
@@ -58,7 +57,6 @@ fn test_repo(revision: &str, catalog: Option<&'static CatalogModel>) -> &'static
     }))
 }
 
-/// Writes the fixture's files into the repo folder and returns that folder.
 fn write_fixture_files(repo: &Repo) -> PathBuf {
     let dir = model_dir(repo).unwrap();
     for file in fixture()["files"].as_array().unwrap() {
@@ -168,13 +166,13 @@ fn favorites_follow_the_manifest_in_swift_order() {
 #[test]
 fn list_items_follow_the_swift_engine() {
     let _scratch = Scratch::new("list");
-    let items = catalog_items(None, 16.0, &HashMap::new());
+    let items = catalog_items(None, crate::commands::models::Memory { total_mb: 16384, available_mb: 12000 }, &HashMap::new());
     assert_eq!(items.len(), listed().count());
     let first = &items[0];
     assert_eq!((first.id.as_str(), first.name.as_str(), first.format.as_str()), ("qwen2_5_vl_7b", "Qwen2.5-VL 7B (4-bit)", "mlx"));
     assert_eq!((first.status.as_str(), first.role.as_str(), first.tier.as_str()), ("curated", "vision", "medium"));
     assert_eq!(first.family, "Qwen2.5-VL-7B-Instruct-4bit");
-    assert!(first.fits && first.runnable && !first.installed && first.parameters_billion.is_none());
+    assert!(first.fits && first.fits_now && first.runnable && !first.installed && first.parameters_billion.is_none());
     let gemma = items.iter().find(|item| item.id == "gemma_3_4b").unwrap();
     assert!(gemma.terms_required);
     assert_eq!((gemma.license.as_str(), gemma.quantization.as_str(), gemma.upstream.as_str()), ("Gemma", "4bit", "mlx-community/gemma-3-4b-it-qat-4bit"));
@@ -191,8 +189,8 @@ fn list_items_follow_the_swift_engine() {
         assert_eq!(item.license, "Apache-2.0");
         assert_eq!(item.name, entry.repo.rsplit('/').next().unwrap().replace('-', " "));
     }
-    assert!(catalog_items(Some("text"), 16.0, &HashMap::new()).iter().all(|item| item.role == "text"));
-    assert!(catalog_items(Some("embedding"), 16.0, &HashMap::new()).is_empty());
+    assert!(catalog_items(Some("text"), crate::commands::models::Memory { total_mb: 16384, available_mb: 12000 }, &HashMap::new()).iter().all(|item| item.role == "text"));
+    assert!(catalog_items(Some("embedding"), crate::commands::models::Memory { total_mb: 16384, available_mb: 12000 }, &HashMap::new()).is_empty());
 }
 
 #[test]
@@ -200,12 +198,18 @@ fn models_root_follows_model_cache_paths() {
     let scratch = Scratch::new("root");
     assert_eq!(models_root(), Some(scratch.dir.join("hf/models")));
     unsafe { std::env::set_var("FILEID_HF_CACHE_ROOT", "relative/path") };
-    assert_eq!(models_root(), Some(scratch.dir.join("home/Documents/huggingface/models")));
+    let support = "Library/Application Support/FileID/Models/huggingface";
+    assert_eq!(models_root(), Some(scratch.dir.join("home").join(support).join("models")), "a new install stays out of Documents");
     unsafe { std::env::set_var("CFFIXED_USER_HOME", scratch.dir.join("cf")) };
-    assert_eq!(models_root(), Some(scratch.dir.join("cf/Documents/huggingface/models")));
-    assert_eq!(cache_root(), Some(scratch.dir.join("cf/Documents/huggingface")), "the adapters' root follows the same home");
+    assert_eq!(cache_root(), Some(scratch.dir.join("cf").join(support)), "the adapters' root follows the same home");
+    let legacy_models = scratch.dir.join("cf/Documents/huggingface/models");
+    std::fs::create_dir_all(&legacy_models).unwrap();
+    std::fs::write(legacy_models.join(".DS_Store"), b"").unwrap();
+    assert_eq!(cache_root(), Some(scratch.dir.join("cf").join(support)), "an empty legacy folder does not count");
+    std::fs::create_dir_all(legacy_models.join("org")).unwrap();
+    assert_eq!(models_root(), Some(legacy_models.clone()), "a Documents folder that already holds models keeps being used");
     unsafe { std::env::set_var("APP_SANDBOX_CONTAINER_ID", "com.fileid.app") };
-    assert_eq!(models_root(), Some(scratch.dir.join("cf/Library/Application Support/FileID/Models/huggingface/models")));
+    assert_eq!(models_root(), Some(scratch.dir.join("cf").join(support).join("models")));
     let repo = lookup("qwen3_vl_4b").unwrap();
     assert!(model_dir(repo).unwrap().ends_with("models/lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"));
 }
@@ -230,8 +234,7 @@ fn listing_reads_the_hugging_face_tree() {
     assert!(parse_listing(b"{\"error\":\"nope\"}").is_err());
 }
 
-/// Unix only: the Swift record format proves files by device, inode and
-/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+/// Unix only: the Swift record format proves files by device, inode and change time.
 #[cfg(unix)]
 #[test]
 fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
@@ -262,8 +265,7 @@ fn plan_keeps_verified_files_and_finish_writes_the_rust_record() {
     assert!(installed(repo));
 }
 
-/// Unix only: the Swift record format proves files by device, inode and
-/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+/// Unix only: the Swift record format proves files by device, inode and change time.
 #[cfg(unix)]
 #[test]
 fn swift_record_is_accepted_and_gains_an_identity_record() {
@@ -307,8 +309,7 @@ fn wrong_revision_or_missing_file_is_not_installed() {
     assert!(!installed(repo));
 }
 
-/// Unix only: the Swift record format proves files by device, inode and
-/// change time, which Windows has no equivalent for (MLX installs are Mac-only).
+/// Unix only: the Swift record format proves files by device, inode and change time.
 #[cfg(unix)]
 #[test]
 fn catalog_models_must_carry_the_audited_weights() {

@@ -1,27 +1,7 @@
-﻿// EngineClient — owns the FileIDEngine.exe child process lifecycle.
-//
-// Responsibilities:
-//   1. Spawn FileIDEngine.exe with stdin/stdout/stderr redirected.
-//   2. Verify the engine binary's Authenticode signature before each spawn
-//      (warns on Unsigned, refuses on Untrusted; will tighten to require
-//      Trusted with a pinned EV thumbprint).
-//   3. Read engine stdout line-by-line, decode each as IpcEvent, dispatch
-//      to the UI thread, raise INotifyPropertyChanged for the relevant
-//      observable property.
-//   4. Provide an IObservable<IpcEvent> stream for non-UI subscribers.
-//   5. Send IpcCommand frames via stdin (as JSON + newline).
-//   6. Auto-respawn on crash with bounded backoff (1s, 4s, 16s within a
-//      60s window). After 3 strikes, transition to LifecycleState.Crashed
-//      and surface the last error.
-//   7. Bridge engine stderr → DebugLog (local-only) so engine tracing is
-//      visible in app.log.
-//   8. Throttle DeepAnalyzeFileDone events to 2 Hz (matches macOS — without
-//      it, fast VLM runs spam the UI ~50/s).
-//
-// PRIVACY: every log call site that includes a path goes through
-// PathRedactor.Redact. The engine never reaches the network on its own;
-// only the IPC `prewarmModel` / `deepAnalyzeAll` paths trigger downloads,
-// and the user explicitly initiated those.
+﻿// Owns the FileIDEngine.exe child process: spawns it after verifying its Authenticode signature (warns on Unsigned, refuses on Untrusted), reads stdout as IpcEvent frames,
+// dispatches them to the UI thread (INotifyPropertyChanged plus an IObservable<IpcEvent> for non-UI subscribers), sends IpcCommand frames on stdin, bridges stderr to DebugLog,
+// throttles DeepAnalyzeFileDone to 2 Hz, and auto-respawns on crash with bounded backoff (1s, 4s, 16s within 60s) before settling in LifecycleState.Crashed after 3 strikes.
+// Privacy: every log call site that includes a path goes through PathRedactor.Redact. The engine never reaches the network on its own; only the user-initiated IPC `prewarmModel` / `deepAnalyzeAll` paths trigger downloads.
 
 using System.Collections.Concurrent;
 using System.ComponentModel;
@@ -54,34 +34,19 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly GenerationHealthWaiters _healthWaiters = new();
     private int _transportFailureGeneration = -1;
 
-    // Bounded engine-stdout framing — a wedged/garbled engine that never
-    // emits a newline can't grow an unbounded read buffer and OOM the UI process.
-    // The 1 MiB cap this once used silently DROPPED the restructurePlan event (one
-    // move per file × ~300 B) above ~3.5k moves, leaving the Restructure tab empty
-    // on a real "tens of thousands of files" library. The engine caps OUTBOUND
-    // frames too (sink.rs MAX_FRAME_BYTES) — over-cap it substitutes a structured
-    // ipc_frame_too_large error rather than emitting a frame this reader would drop
-    // — so all four caps are kept symmetric. Bumped 32→64 MiB to hold
-    // a full ~200k-move whole-library plan while still bounding a runaway line. An
-    // oversize drop is also surfaced as a visible error (see StdoutLoopAsync), never silent.
+    // Bounded stdout framing: a wedged engine that never emits a newline cannot grow an unbounded buffer. 64 MiB fits a ~200k-move restructurePlan; the engine caps outbound frames at the same size (sink.rs MAX_FRAME_BYTES) and sends a structured ipc_frame_too_large error instead, so all four caps stay symmetric. An oversize drop surfaces as a visible error (see StdoutLoopAsync).
     private const int MaxFrameBytes = 64 * 1024 * 1024;
 
-    /// <summary>Per-loop stdout framing state (#22). Owned by a single
-    /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
-    /// loop from a respawn can't race another's buffer/resync flag.</summary>
+    /// <summary>Per-loop stdout framing state, owned by one StdoutLoopAsync invocation so an overlapping loop from a respawn can't race another's buffer/resync flag.</summary>
     internal sealed class StdoutFraming
     {
         public readonly StringBuilder Buffer = new();
         public readonly char[] Chunk = new char[16 * 1024];
         public readonly Encoder Utf8Encoder = Encoding.UTF8.GetEncoder();
         public long BufferedBytes;
-        // How many leading buffer chars are already confirmed newline-free, so a
-        // multi-MB frame isn't rescanned from index 0 on every chunk (the old
-        // O(n^2) that pegged a core for minutes on a large restructurePlan).
+        // Leading buffer chars already confirmed newline-free, so a multi-MB frame isn't rescanned from index 0 on every chunk (O(n^2) pegged a core for minutes on a large restructurePlan).
         public int Scanned;
         public bool Resyncing;
-        // Set when an over-cap frame was discarded, so StdoutLoopAsync can surface
-        // a one-shot visible error instead of failing silently.
         public bool OversizeDropped;
     }
 
@@ -97,65 +62,33 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private int _consecutiveFailures;
     private DateTime _failureWindowStart = DateTime.MinValue;
     private static readonly TimeSpan FailureWindow = TimeSpan.FromSeconds(60);
-    // The engine must stay continuously Ready at least this long before a
-    // subsequent crash counts as recovery (and clears the strike counter). A
-    // shorter Ready→crash is a flap that must keep ticking toward the 3-strike
-    // terminal cap instead of resetting every ~1s.
+    // The engine must stay Ready at least this long before a crash counts as recovery and clears the strike counter; a shorter Ready→crash is a flap that must keep ticking toward the 3-strike cap.
     private DateTime _lastReadyAt = DateTime.MinValue;
     private static readonly TimeSpan StabilitySettle = TimeSpan.FromSeconds(30);
 
-    // BUG-3: respawn debouncing — prevents two-spawn races during the
-    // 1s/4s/16s backoff window when the engine flaps quickly.
     private int _isStarting; // 0 = idle, 1 = StartAsync in flight
 
-    // BUG-6: distinguish user-initiated shutdown from a crash. Set by
-    // ShutdownAsync; OnProcessExited consumes it. Uses int + Interlocked
-    // (instead of bool) so reads/writes are atomic across threads on
-    // ARM64 — bool reads can theoretically tear on weakly-ordered
-    // architectures, and OnProcessExited fires on whichever thread
-    // detects process exit (not always the UI thread).
+    // Distinguishes user-initiated shutdown from a crash: set by ShutdownAsync, consumed by OnProcessExited. A concurrent map rather than a bool because OnProcessExited fires on whichever thread detects exit, and bool reads can tear on weakly-ordered ARM64.
     private readonly ConcurrentDictionary<Process, long> _expectedExitProcesses = new();
     private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
 
-    // Re-entrancy gate for any auto-triggered Deep Analyze pass. Released
-    // in the DeepAnalyzeCompleteEvent arm.
     private int _autoDeepAnalyzeInFlight;
 
-    // PAR-111: re-entrancy gate for the auto-triggered face-clustering pass.
-    // A rescan emits a SECOND ScanComplete in the same session; without this
-    // gate each one fire-and-forgets another RunFaceClustering, and the engine
-    // spawns one clustering task per IPC with no dedup of its own — so two
-    // passes race the same persons / face_prints.person_id writes. Acquired in
-    // AutoTriggerFaceClusteringAsync, released on FaceClusteringComplete or a
-    // clustering error. Mirrors macOS EngineClient.faceClusteringInFlight.
+    // Re-entrancy gate for the auto-triggered face-clustering pass. A rescan emits a SECOND ScanComplete, and the engine spawns one clustering task per IPC with no dedup, so two passes would race the same persons / face_prints.person_id writes. Released on FaceClusteringComplete or a clustering error.
     private int _faceClusterAutoInFlight;
 
-    // Throttle for scan FileDone events. A fast scan can emit hundreds per
-    // second; publishing each through the Rx Subject inflates UI work for
-    // every subscriber (LibraryView, transcript, etc.). Sample every Nth
-    // event so subscribers still see "files are flowing" without
-    // re-running expensive layouts at scan-throughput rate.
+    // Throttle for scan FileDone events: a fast scan emits hundreds per second, so sample every Nth rather than inflate UI work for every subscriber.
     private int _scanFileDoneEventCounter;
     private const int ScanFileDoneSampleN = 5;
 
-    // PerfAudit-#8: ScanProgress throttle. Engine emits one Progress
-    // per discovery/tagging batch; on a fast scan that's 100+ events/s.
-    // Throttle at 10 Hz so the sidebar's progress bar / counters don't
-    // re-render at scan-throughput rate. Phase transitions bypass the
-    // throttle (rare; user-visible).
+    // ScanProgress throttle (10 Hz): the engine emits 100+ per second on a fast scan. Phase transitions bypass it.
     private DateTime _lastProgressEmit = DateTime.MinValue;
     private ScanPhase? _lastProgressPhase;
 
-    // Highest phase rank shown during the current scan. Discovery and tagging
-    // run concurrently, so their ProgressEvents interleave; without this the
-    // displayed Phase — and the sidebar label/icon/pipeline dot bound to it —
-    // flicker Discovering<->Tagging several times a second. A ProgressEvent may
-    // only ADVANCE the displayed phase, never regress it within a scan. The
-    // authoritative PhaseChangedEvent still sets Phase directly and re-syncs
-    // this latch. Reset to -1 at each scan start (see EngineClient.Commands.cs).
+    // Highest phase rank shown during the current scan. Discovery and tagging run concurrently and their ProgressEvents interleave, so without this the displayed Phase (and sidebar label/icon/dot) flickers Discovering<->Tagging. A ProgressEvent may only ADVANCE it; the authoritative PhaseChangedEvent sets Phase directly and re-syncs this latch. Reset to -1 at each scan start (EngineClient.Commands.cs).
     private int _shownPhaseRank = -1;
 
     private static int PhaseRank(ScanPhase phase) => phase switch
@@ -165,32 +98,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         ScanPhase.Tagging => 2,
         ScanPhase.PostScan => 3,
         ScanPhase.Completed => 4,
-        // Terminal states sit above the progression so a late interleaved
-        // ProgressEvent can never clamp them away once PhaseChanged has synced
-        // the latch to them.
+        // Terminal states sit above the progression so a late interleaved ProgressEvent can't clamp them away.
         ScanPhase.Cancelled => 5,
         ScanPhase.Failed => 5,
         _ => 0,
     };
     private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(100); // 10 Hz
 
-    // throttled diagnostic counter for inbound progress events.
-    // Lets `[IPC IN] ModelDownloadProgress #N` lines correlate with engine
-    // activity without flooding app.log.
     private int _modelDownloadEventCount;
 
-    // monotonic Apply-call counter. Used by the [APPLY:N] enter/exit
-    // tracing to localize native fast-fails. The crash signature was an
-    // app process death with NO managed exception and NO crash dump
-    // (last-session.txt clean_exit=false). Without per-event tracing the
-    // only visible signal was a 3-4 s log gap between the StartScan IPC
-    // and process termination. The [APPLY:N] enter/exit pair makes the
-    // last-processed event identifiable from app.log alone — when the app
-    // dies, the highest-numbered `enter` without a matching `exit` is the
-    // killer event.
+    // Monotonic Apply-call counter for the [APPLY:N] enter/exit tracing. A native fast-fail killed the app with no managed exception or crash dump; the highest-numbered `enter` without a matching `exit` in app.log identifies the killer event.
     private int _applySeq;
-
-    // ─── Observable surface (mirror of macOS @Observable) ──────────────
 
     private LifecycleState _state = LifecycleState.Starting;
     internal const string StoppedReason = "Engine stopped";
@@ -245,9 +163,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     private EngineError? _lastWarning;
-    /// Non-fatal events the engine still wants the user to see (skipped
-    /// stages, partial discovery, stale-WAL warning). Kept in a separate
-    /// slot so a later per-file error can't clobber the banner.
     public EngineError? LastWarning
     {
         get => _lastWarning;
@@ -338,8 +253,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     private bool _canUndoRestructure;
-    /// <summary>True once an applyRestructure moved files and they haven't been
-    /// undone yet — drives the "Undo last run" button.</summary>
     public bool CanUndoRestructure
     {
         get => _canUndoRestructure;
@@ -371,9 +284,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastMergeSuggestions, value);
     }
 
-    /// <summary>Most recent out-of-process video thumbnail rendered by the
-    /// engine. ThumbnailService observes this (via PropertyChanged) to write
-    /// the base64 JPEG under its (Path, ModifiedAt) cache key.</summary>
     private ThumbnailGenerated? _lastThumbnailGenerated;
     public ThumbnailGenerated? LastThumbnailGenerated
     {
@@ -381,9 +291,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastThumbnailGenerated, value);
     }
 
-    /// <summary>latest CUDA/cuDNN re-probe result from the engine.
-    /// Settings → Performance "Verify install" binds to this to flip the
-    /// card to ✓ or surface a diagnostics string on failure.</summary>
     private HardwareReprobed? _lastHardwareReprobe;
     public HardwareReprobed? LastHardwareReprobe
     {
@@ -391,8 +298,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastHardwareReprobe, value);
     }
 
-    /// <summary>Result of the most recent engine-side wipeLibrary. The wipe
-    /// flow (SidebarFolderHeader) waits on this via WipeLibraryAndWaitAsync.</summary>
     private LibraryWiped? _lastLibraryWiped;
     public LibraryWiped? LastLibraryWiped
     {
@@ -407,11 +312,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _deepAnalyzeStarting, value);
     }
 
-    // AutoPilotStage enum + CurrentAutoPilotStage property removed.
-    // The AutoPilot button is gone (macOS doesn't have one); auto-advance
-    // from scan → face clustering is wired directly into Apply's
-    // ScanCompleteEvent handler. There's no multi-stage tracker to feed.
-
     private ScanPhase? _phase;
     public ScanPhase? Phase
     {
@@ -419,33 +319,19 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _phase, value);
     }
 
-    /// <summary>Hot stream of every IPC event. Used by tests + the optional
-    /// transcript log. Subscribe via System.Reactive.</summary>
     public IObservable<IpcEvent> Events => _events;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private EngineClient()
     {
-        // The singleton MUST be first-touched on the UI thread (App.OnLaunched
-        // ensures this). If it's first touched from a thread-pool thread,
-        // GetForCurrentThread returns null and there's no recovery — every
-        // subsequent _ui.TryEnqueue would silently no-op. Throw early so
-        // the misuse surfaces as a clean exception instead of silent UI
-        // staleness across the lifetime of the app.
+        // The singleton MUST be first-touched on the UI thread (App.OnLaunched ensures this): from a thread-pool thread GetForCurrentThread returns null with no recovery and every later _ui.TryEnqueue would silently no-op. Throw early instead.
         _ui = DispatcherQueue.GetForCurrentThread()
               ?? throw new InvalidOperationException(
                   "EngineClient must be constructed on the UI thread. "
                   + "First-touch the singleton from App.OnLaunched, not from a Task.Run continuation.");
     }
 
-    // ─── Lifecycle ─────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Spawn the engine. Idempotent — calling this while already running
-    /// is a no-op. On failure the state goes to Crashed; the caller can
-    /// poll/observe State to react.
-    /// </summary>
     public async Task StartAsync()
     {
         if (!_ui.HasThreadAccess)
@@ -477,28 +363,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         if (_process is { HasExited: false })
         {
-            // Engine is already running. Don't touch _isStarting — another
-            // caller may legitimately hold the gate while completing a
-            // spawn we collided with.
+            // Engine is already running. Don't touch _isStarting: another caller may hold the gate while completing a spawn we collided with.
             return;
         }
-        // strict CAS gate. The earlier formulation (BUG-3 comment)
-        // claimed the gate, then declined to bail when it lost the race,
-        // letting a second StartAsync caller fall through to a parallel
-        // spawn. That produced occasional double-spawn with a shared stdin/
-        // stdout pair — the second engine crashed on bind or fed corrupt
-        // IPC. Now: if we lose the CAS, return immediately.
+        // Strict CAS gate: losing the CAS returns immediately; otherwise a second StartAsync could spawn a parallel engine on a shared stdin/stdout pair (the second engine crashed on bind or fed corrupt IPC).
         if (Interlocked.CompareExchange(ref _isStarting, 1, 0) != 0)
         {
             DebugLog.Info("EngineClient.StartAsync: spawn already in flight; skipping.");
             return;
         }
 
-        // every code path below — including early-return on
-        // signature verdicts, hash failures, and the spawn catch — must
-        // release `_isStarting`, otherwise the gate latches at 1 forever
-        // and OnProcessExited's respawn can't claim it. Wrap the whole
-        // body in try/finally so the release is unconditional.
+        // Every path below (signature verdicts, hash failures, the spawn catch) must release `_isStarting` or the gate latches at 1 and OnProcessExited's respawn can't claim it, hence try/finally.
         try
         {
             if (_process is { HasExited: true } exitedProcess && ReferenceEquals(exitedProcess, _process))
@@ -510,9 +385,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 Cleanup();
             }
 
-            // Notify singleton services that any cached engine state is now
-            // stale and they should re-attach to PropertyChanged. Cheap +
-            // idempotent.
             try { Services.ModelInstallerService.Instance.Reset(); } catch { /* swallow */ }
 
             State = LifecycleState.Starting;
@@ -522,11 +394,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             var enginePath = AppPaths.EngineExePath;
             DebugLog.Info($"EngineClient: spawning {PathRedactor.Redact(enginePath)}");
 
-            // Pin the expected EV thumbprint via msbuild constant or env var
-            // (FILEID_EV_THUMBPRINT, settable at install time). Empty means
-            // dev build — accept Unsigned with a warning. Once a real cert is
-            // in play, ship with the constant defined and the strict path
-            // refuses Unsigned + tamper-mismatched binaries.
+            // Expected EV thumbprint from FILEID_SIGN_THUMBPRINT (msbuild constant or env var). Empty means a dev build: accept Unsigned with a warning; with a real cert the strict path refuses Unsigned and tampered binaries.
             var expectedThumb = Environment.GetEnvironmentVariable("FILEID_SIGN_THUMBPRINT");
             var expectedSubject = ReleaseSigningPolicy.ExpectedSignerSubject;
             var requireSignedEngine = ReleaseSigningPolicy.RequireSignedEngine
@@ -562,11 +430,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
             catch (FileNotFoundException)
             {
-                // Let the trust checker report a stable NotFound verdict.
             }
             catch (DirectoryNotFoundException)
             {
-                // Let the trust checker report a stable NotFound verdict.
             }
             catch (Exception ex)
             {
@@ -576,12 +442,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
             using var spawnPinLease = spawnPin;
-            // Off the UI thread: WinVerifyTrust does SHA-256 over the multi-MB engine
-            // binary AND can make an OCSP/CRL revocation round-trip — synchronously on
-            // the startup (UI) thread before the first frame, and again on every
-            // crash-respawn. await Task.Run keeps the security gate (the spawn still
-            // waits for the verdict) while unblocking first paint; the continuation
-            // resumes on the UI thread.
+            // Off the UI thread: WinVerifyTrust hashes the multi-MB engine binary AND can make an OCSP/CRL round-trip, on startup before first paint and on every crash-respawn. Task.Run keeps the gate (the spawn still waits for the verdict) while unblocking the UI.
             var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
                 enginePath,
                 expectedThumbprintHex: expectedThumb,
@@ -602,8 +463,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     return;
 
                 case IntegrityVerdict.Unsigned:
-                    // If a thumbprint was pinned (release mode), refuse to
-                    // spawn. Otherwise warn + continue (dev build).
                     if (requireSignedEngine)
                     {
                         CrashReason = "Engine binary is unsigned but signature verification is required.";
@@ -619,19 +478,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     break;
             }
 
-            // SEC: TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust
-            // returned its verdict, then re-hash + compare immediately
-            // before Process.Start. If a privileged adversary swaps the
-            // engine binary between Verify and spawn, the post-spawn hash
-            // diverges and we abort. Skipped in dev (no thumbprint pinned)
-            // because Visual Studio rebuilds change the hash legitimately.
+            // TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust returns, then re-hash and compare immediately before Process.Start; if an adversary swaps the binary in between, we abort. Skipped in dev (no thumbprint pinned) because rebuilds change the hash legitimately. Hashing runs off the UI thread (~95 MB).
             byte[]? preSpawnHash = null;
             if (!string.IsNullOrEmpty(expectedThumb))
             {
                 try
                 {
-                    // Off the UI thread — hashing a ~95 MB engine binary inline
-                    // would stutter the UI.
                     preSpawnHash = await Task.Run(() =>
                     {
                         using var sha = System.Security.Cryptography.SHA256.Create();
@@ -650,7 +502,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             try
             {
-                // Re-hash + compare immediately before Process.Start.
                 if (preSpawnHash is not null)
                 {
                     try
@@ -683,21 +534,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
-                    // `System.Text.Encoding.UTF8` is the
-                    // BOM-prefixing variant. On first write its
-                    // StreamWriter pushes three bytes (`EF BB BF`) into
-                    // the engine's stdin, which trips serde_json with
-                    // "expected value at line 1 column 1" and used to
-                    // surface as a red toast on every cold launch. The
-                    // explicit `new UTF8Encoding(false)` is identical
-                    // UTF-8 minus the preamble.
+                    // `Encoding.UTF8` is the BOM-emitting variant: its StreamWriter pushes `EF BB BF` into the engine's stdin, which trips serde_json ("expected value at line 1 column 1") and surfaced as a red toast on every cold launch. `new UTF8Encoding(false)` is the same UTF-8 without the preamble.
                     StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     StandardOutputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     StandardErrorEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     WorkingDirectory = AppPaths.Root,
                 };
-                // Pass the FILEID_LOG env to control engine tracing verbosity
-                // (debug in dev profiles, info in release).
                 psi.Environment["FILEID_LOG"] = Environment.GetEnvironmentVariable("FILEID_LOG") ?? "info";
                 if (AppViewModel.Instance.Settings.RestructureGranularityForEngine is { } granularity)
                 {
@@ -719,10 +561,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, p, generation, startupReady, ct), ct);
                 _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
 
-                // Hook exit so we can auto-respawn. Subscribe BEFORE enabling
-                // events — otherwise a process that exits in the gap between
-                // these two statements raises (and drops) Exited before the
-                // handler is attached, and the crash respawn never fires.
+                // Subscribe BEFORE enabling events: a process exiting in the gap would raise (and drop) Exited before the handler attaches, and the crash respawn would never fire.
                 p.Exited += OnProcessExited;
                 p.EnableRaisingEvents = true;
                 _ = VerifyStartupChannelAsync(p, generation, startupReady.Task, ct);
@@ -738,30 +577,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         finally
         {
-            // unconditional gate release. Every early-return path
-            // above + the spawn-catch + the normal completion path all
-            // converge here so OnProcessExited's respawn can always CAS
-            // the gate back from 0 → 1.
             Interlocked.Exchange(ref _isStarting, 0);
         }
     }
 
-    /// <summary>S4: read one newline-delimited engine frame, bounded to
-    /// <see cref="MaxFrameBytes"/>. A frame that exceeds the cap before a
-    /// newline arrives is discarded and we resync to the next newline, so a
-    /// never-terminating line can't OOM the UI. Returns null at EOF. All framing
-    /// state lives in the caller-owned <paramref name="st"/>, so each
-    /// StdoutLoopAsync owns its own — no cross-loop sharing (#22).</summary>
+    /// <summary>Reads one newline-delimited engine frame, bounded to <see cref="MaxFrameBytes"/>. A frame over the cap before a newline is discarded and we resync to the next newline, so a never-terminating line can't OOM the UI. Null at EOF. All framing state lives in the caller-owned <paramref name="st"/>, so no loops share it.</summary>
     internal static async Task<string?> ReadBoundedFrameAsync(
         StreamReader reader, StdoutFraming st, CancellationToken ct, int maxFrameBytes = MaxFrameBytes)
     {
         while (true)
         {
-            // Emit a completed frame if the buffer already holds a newline. Scan
-            // only the not-yet-scanned tail ([Scanned..Length)): during a long
-            // frame's accumulation Scanned == Length so this is a no-op, and after
-            // a Remove it rescans only the small (<= one chunk) leftover — so the
-            // multi-MB buffer is never re-indexed per chunk.
+            // Emit a completed frame if the buffer already holds a newline, scanning only the not-yet-scanned tail so a multi-MB buffer is never re-indexed per chunk.
             int nl = -1;
             for (int i = st.Scanned; i < st.Buffer.Length; i++)
             {
@@ -776,8 +602,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 st.BufferedBytes = st.Utf8Encoder.GetByteCount(st.Buffer.ToString().AsSpan(), flush: false);
                 if (st.Resyncing)
                 {
-                    // This frame is the tail of an oversize line — drop it and
-                    // resume normal framing from the next one.
                     st.Resyncing = false;
                     continue;
                 }
@@ -789,10 +613,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
                 return frame;
             }
-            // Everything currently buffered is newline-free.
             st.Scanned = st.Buffer.Length;
-            // No newline yet: if the buffer crossed the cap, the engine is
-            // emitting an oversize/garbage frame. Drop it and resync.
             if (st.BufferedBytes > maxFrameBytes)
             {
                 DebugLog.Warn($"Engine emitted an oversize IPC frame (> {maxFrameBytes} UTF-8 bytes); discarding and resyncing.");
@@ -806,7 +627,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             int read = await reader.ReadAsync(st.Chunk.AsMemory(), ct).ConfigureAwait(false);
             if (read == 0)
             {
-                // EOF. Surface a trailing partial frame, unless we were mid-resync.
                 if (!st.Resyncing && st.Buffer.Length > 0)
                 {
                     string tail = st.Buffer.ToString();
@@ -824,11 +644,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 }
                 return null;
             }
-            // Detect a newline in the freshly-read chunk via a FLAT array scan
-            // (O(read)) instead of re-indexing the StringBuilder. If this chunk
-            // carries a newline, rewind Scanned to just before it so the loop's
-            // indexed scan examines only this chunk's bytes — never the whole
-            // accumulated buffer (the O(n^2) on a large frame).
+            // Detect a newline in the fresh chunk with a flat array scan (O(read)) rather than re-indexing the StringBuilder; if found, rewind Scanned to just before it so the indexed scan examines only this chunk (the O(n^2) on a large frame).
             int bufLenBefore = st.Buffer.Length;
             st.Buffer.Append(st.Chunk, 0, read);
             st.BufferedBytes += st.Utf8Encoder.GetByteCount(st.Chunk.AsSpan(0, read), flush: false);
@@ -846,23 +662,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private async Task StdoutLoopAsync(StreamReader reader, Process captured, int generation,
         TaskCompletionSource<EngineInfo> startupReady, CancellationToken ct)
     {
-        // Per-loop framing state — a respawn starts a fresh loop with its own
-        // buffer, so stale bytes can never carry over or race (#22).
         var framing = new StdoutFraming();
-        // No stdout idle watchdog: it killed healthy idle engines (e.g.
-        // after auto-install of llama runtimes the engine sits quietly
-        // waiting for the user — 5 min
-        // of "idle" tripped the watchdog and forced a respawn that the
-        // respawn-CAS double-bookkeeping then dropped). A watchdog can't
-        // distinguish "engine hung" from "engine idle waiting for user".
-        // Genuine engine hangs are caught by:
-        //   - the engine's own parent-PID watchdog (which kills the
-        //     engine if the C# app dies),
-        //   - the engine's GPU TDR detection (sticky cancellation +
-        //     EngineError), and
-        //   - per-command timeouts on the C# side (WaitForReadyAsync
-        //     and model install stall guards).
-        // A global stdout idle timer is the wrong granularity.
+        // No stdout idle watchdog: it killed healthy idle engines (e.g. after auto-install of llama runtimes the engine waits quietly for the user) and can't distinguish "hung" from "idle". Genuine hangs are caught by the engine's parent-PID watchdog, its GPU TDR detection (sticky cancellation + EngineError), and per-command timeouts on the C# side (WaitForReadyAsync, install stall guards).
         while (!ct.IsCancellationRequested)
         {
             string? line;
@@ -881,9 +682,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             if (framing.OversizeDropped)
             {
                 framing.OversizeDropped = false;
-                // Surface the drop through the normal event-dispatch path: Apply
-                // runs on the UI thread, so observable state is never written from
-                // this loop thread (the off-UI-thread fast-fail class).
+                // Surface the drop through the normal dispatch path: Apply runs on the UI thread, so observable state is never written from this loop thread.
                 var oversize = IpcEvent.Now(new ErrorEvent(new EngineError(
                     "ipc_frame_too_large",
                     "The engine sent a response too large for the app to read, so it was dropped. " +
@@ -936,32 +735,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             catch (OperationCanceledException) { return; }
             catch { return; }
             if (line is null) return;
-            // Engine writes structured tracing JSON to stderr. The engine
-            // SHOULD redact paths via redact_path_for_log, but as a
-            // belt-and-suspenders defense the C# bridge also passes any
-            // detected path through PathRedactor. The detection is
-            // best-effort: lines containing a Windows-shaped absolute
-            // path (drive letter + colon + backslash) get reformatted
-            // with the canonical home-tilde substitution.
+            // The engine redacts paths via redact_path_for_log, but as defense in depth the bridge also passes any Windows-shaped absolute path (drive letter + colon + backslash) through PathRedactor, best-effort.
             DebugLog.Info("[engine] " + RedactWindowsPathsInLine(line));
         }
     }
 
     private static string RedactWindowsPathsInLine(string line)
     {
-        // Cheap path detection: only run the regex if there's a `\` in
-        // the line. Most engine tracing lines (event counters, model
-        // names, performance numbers) won't match.
         if (line.IndexOf('\\') < 0) return line;
         return s_pathInLine.Replace(line, m => PathRedactor.Redact(m.Value));
     }
 
-    // Match a drive path (C:\…) OR a UNC path (\\server\…), terminating only
-    // on quotes / brackets / commas / line ends — NOT on spaces. Windows paths
-    // routinely contain spaces ("C:\Users\Bob Smith\…"); stopping at the first
-    // space truncated the match and leaked the remainder ("Smith\…") into the
-    // log. Over-matching a little trailing text is fine — PathRedactor still
-    // collapses the home prefix to ~ and nothing PII escapes.
+    // Match a drive path (C:\…) or UNC path (\\server\…), terminating only on quotes / brackets / commas / line ends, NOT spaces: paths routinely contain spaces ("C:\Users\Bob Smith\…") and stopping at the first one leaked the remainder into the log. Over-matching trailing text is fine; PathRedactor still collapses the home prefix.
     private static readonly System.Text.RegularExpressions.Regex s_pathInLine =
         new(@"(?:[A-Za-z]:\\|\\\\)[^"",)\]}>\r\n]*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
@@ -979,10 +764,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private void OnProcessExited(object? sender, EventArgs e)
     {
-        // Capture the exit code from the process that ACTUALLY exited (sender),
-        // not the mutable _process field — by the time this UI-thread callback
-        // runs, _process may already point at a respawned process or be
-        // disposed, and reading its ExitCode then throws and aborts cleanup.
+        // Capture the exit code from the process that ACTUALLY exited (sender), not the mutable _process: by the time this UI-thread callback runs it may point at a respawned process or be disposed, and reading ExitCode then throws and aborts cleanup.
         var exited = sender as System.Diagnostics.Process;
         int? exitCode = null;
         try { exitCode = exited?.ExitCode; } catch { /* not-exited / disposed */ }
@@ -990,15 +772,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         {
             var expectedExit = ConsumeExpectedExit(exited);
 
-            // Ignore a stale exit from a process we've already replaced. In the
-            // RestartAsync path (StopAndWaitForExitAsync → StartAsync), the OLD
-            // process's Exited callback is queued to the UI thread and can run
-            // AFTER StartAsync installed the NEW _process/_stdin/_readCts. `sender`
-            // is the exact Process that exited; if it is no longer the live
-            // _process, running Cleanup() here would tear down the freshly-spawned
-            // engine (cancel its read loops, null its stdin) and mis-count it as a
-            // crash — wedging IPC with State stuck Starting. Dispose the dead sender
-            // and bail, leaving the live engine untouched.
+            // Ignore a stale exit from a process we've already replaced. In RestartAsync the OLD process's Exited callback is queued to the UI thread and can run AFTER StartAsync installed the NEW _process/_stdin/_readCts; running Cleanup() then would tear down the fresh engine and mis-count it as a crash, wedging IPC with State stuck Starting. Dispose the dead sender and bail.
             if (!ReferenceEquals(sender, _process))
             {
                 if (sender is Process dead)
@@ -1012,17 +786,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             Cleanup();
             ResetProcessBoundScanState();
 
-            // Notify install service immediately so any in-flight download
-            // owned by the now-dead engine flips to Failed instead of
-            // spinning forever. Runs on every exit (graceful shutdown,
-            // crash + respawn, 3-strike terminal crash). Idempotent.
+            // Notify the install service immediately so any in-flight download owned by the dead engine flips to Failed instead of spinning forever. Runs on every exit and is idempotent.
             try { Services.ModelInstallerService.Instance.Reset(); }
             catch (Exception ex) { DebugLog.Warn("OnProcessExited: ModelInstallerService.Reset threw: " + ex.Message); }
 
-            // BUG-6: user-initiated shutdown shouldn't count as a crash
-            // or trigger the auto-respawn — that would drag the engine
-            // back up after the user explicitly asked it to stop.
-            // Interlocked.Exchange both reads + clears in one atomic op.
+            // User-initiated shutdown must not count as a crash or auto-respawn. Interlocked.Exchange reads and clears atomically.
             if (expectedExit)
             {
                 CrashReason = StoppedReason;
@@ -1030,13 +798,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            // Auto-respawn with bounded backoff. The 3-strike window is
-            // 60 s wide; failures beyond that reset the counter.
             var now = DateTime.UtcNow;
-            // A crash that follows a STABLE Ready (engine ran continuously
-            // for >= StabilitySettle) is genuine recovery — clear the strike state.
-            // A crash that recurs faster than that (Ready→crash flapping) is NOT
-            // recovery and must keep ticking toward the 3-strike terminal cap.
+            // A crash after a STABLE Ready (>= StabilitySettle) is genuine recovery and clears the strike state; a faster Ready→crash flap is not, and keeps ticking toward the 3-strike terminal cap.
             if (_lastReadyAt != DateTime.MinValue && now - _lastReadyAt >= StabilitySettle)
             {
                 _consecutiveFailures = 0;
@@ -1057,7 +820,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            // 1s, 4s, 16s schedule.
             var delay = _consecutiveFailures switch
             {
                 1 => TimeSpan.FromSeconds(1),
@@ -1065,10 +827,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 _ => TimeSpan.FromSeconds(16),
             };
             DebugLog.Info($"EngineClient: respawning in {delay.TotalSeconds}s (attempt {_consecutiveFailures}/3).");
-            // No outer CAS — StartAsync has its own strict CAS at the top;
-            // an outer one was actively harmful: setting _isStarting=1
-            // here caused StartAsync's own CAS to see "already starting"
-            // and bail, so every auto-respawn was silently dropped.
+            // No outer CAS: StartAsync has its own strict CAS, and setting _isStarting=1 here made it see "already starting" and bail, silently dropping every auto-respawn.
             _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(async () =>
             {
                 try
@@ -1108,9 +867,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         _readCts?.Dispose();
         _readCts = null;
 
-        // BUG-2: take the same lock as SendCommandAsync so a concurrent
-        // writer can't see _stdin non-null then NRE on Write after we
-        // dispose it.
+        // Take the same lock as SendCommandAsync so a concurrent writer can't see _stdin non-null and then NRE on Write after we dispose it.
         StreamWriter? stdin;
         lock (_writeLock)
         {
@@ -1128,18 +885,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _spawnGeneration);
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
 
-        // Release the auto-advance gates on every engine teardown. A crash
-        // mid-clustering (or mid-deep-analyze) never emits the Complete/Failed
-        // event that normally clears these, so without this a respawned engine
-        // would see the gate still held and skip auto face-clustering / deep
-        // analyze for the rest of the session. Cleanup() is the single teardown
-        // chokepoint (crash, graceful shutdown, Dispose); the dead engine's
-        // in-flight job is moot here. (Mirrors macOS handleEngineExit.)
+        // Release the auto-advance gates on every engine teardown: a crash mid-clustering or mid-deep-analyze never emits the Complete/Failed event that clears them, so a respawned engine would skip auto face-clustering / deep analyze for the rest of the session. Cleanup() is the single teardown chokepoint.
         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
-        // Same for the undo affordance: a crash mid-undo never emits the terminal
-        // restructureApplyResult that clears this, so the next apply's result would
-        // be mis-attributed as the dead undo's. (app)
+        // Likewise the undo affordance: a crash mid-undo never emits the terminal restructureApplyResult, so the next apply's result would be mis-attributed as the dead undo's.
         UndoRestructureInFlight = false;
         Interlocked.Exchange(ref _restructureCommandInFlight, 0);
     }
@@ -1151,18 +900,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         _events.OnCompleted();
     }
 
-    // ─── Commands ──────────────────────────────────────────────────────
-
     /// <summary>
-    /// Block until the engine reaches <see cref="LifecycleState.Ready"/>.
-    /// Throws <see cref="TimeoutException"/> if the engine never becomes
-    /// ready within <paramref name="timeout"/>; throws
-    /// <see cref="InvalidOperationException"/> with the crash reason if
-    /// the engine has already crashed. Returns immediately if Ready.
-    /// Callers (the install flow) gate on this before sending an IPC
-    /// command, so a click that happens during cold start either waits
-    /// or surfaces a clean error — never silently throws "Engine not
-    /// running."
+    /// Blocks until the engine reaches <see cref="LifecycleState.Ready"/>. Throws <see cref="TimeoutException"/> on timeout, or <see cref="InvalidOperationException"/> with the crash reason if it already crashed; returns immediately if Ready. Install flows gate on this so a click during cold start waits or errors cleanly rather than throwing "Engine not running."
     /// </summary>
     internal static bool IsHealthTargetCurrent(int capturedGeneration, int currentGeneration,
         Process? captured, Process? current, bool capturedHasExited)
@@ -1278,8 +1017,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
         };
         PropertyChanged += handler;
-        // Re-check after subscribing in case the state changed between
-        // the early-return above and the handler attach.
         if (State == LifecycleState.Ready)
         {
             PropertyChanged -= handler;
@@ -1312,8 +1049,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
         }, ct);
     }
-
-    // ─── Event router ──────────────────────────────────────────────────
 
     private void ObserveAuthoritativeScanEvent(int generation)
     {
@@ -1352,27 +1087,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private void Apply(IpcEvent ev, int generation)
     {
         if (generation != SpawnGeneration) return;
-        // per-event diagnostic tracing. See _applySeq comment above
-        // for why this exists. Only logs the event TYPE, never the payload
-        // (payloads can contain user file paths — those route through
-        // existing per-arm logging which already path-redacts).
+        // Per-event diagnostic tracing (see _applySeq). Logs only the event TYPE, never the payload, which can contain user paths.
         var applySeq = Interlocked.Increment(ref _applySeq);
         var applyEventName = ev.Payload?.GetType().Name ?? "<null>";
         DebugLog.Info($"[APPLY:{applySeq}] enter {applyEventName} tid={Environment.CurrentManagedThreadId}");
 
-        // top-level try/wrap so a throw inside Set<T> →
-        // PropertyChanged subscriber fanout cannot escape Apply into the
-        // dispatcher loop. Two layers: inner catches per-arm routing
-        // exceptions + writes a crash dump; outer catches anything else
-        // (subject OnNext, sampling counter increment, the inner catch's
-        // own logging). Worst case: log + carry on.
+        // Top-level try so a throw inside Set<T> → PropertyChanged fan-out can't escape Apply into the dispatcher loop. The inner try catches per-arm routing exceptions and writes a crash dump; the outer catches anything else. Worst case: log and carry on.
         try
         {
-            // Always raise to subscribers first, even if the routing below
-            // throws (defense-in-depth — never silently drop an event).
-            // Scan FileDone events are sampled (every Nth) because a fast scan
-            // can emit hundreds per second and subscribers (LibraryView) don't
-            // need every one to feel responsive.
+            // Always raise to subscribers first, even if routing below throws. Scan FileDone events are sampled (every Nth) since a fast scan emits hundreds per second.
             bool publishToSubject = true;
             if (ev.Payload is FileDoneEventWrapper)
             {
@@ -1405,27 +1128,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case ProgressEvent p:
                         ObserveAuthoritativeScanEvent(generation);
-                        // Discovery + tagging emit ProgressEvents CONCURRENTLY
-                        // during the pipeline overlap (discovery still walking
-                        // while tagging workers consume). A late Discovering event
-                        // carries processed=0, eta=None, fps=0 and its own memory
-                        // reading; letting it replace LastProgress after Tagging
-                        // started made the sidebar's Tagged / ETA / Memory flicker
-                        // (N→0→N, real→"computing"→real, two RSS readings
-                        // alternating). Gate the WHOLE event on a monotonic phase
-                        // rank: drop any ProgressEvent whose phase is below the
-                        // latch, so LastProgress only ever holds one phase's stats
-                        // at a time. Tagging events carry the LIVE discovered count
-                        // (scan_session.rs), so "Discovered" keeps climbing from
-                        // them through the overlap. Equal-or-higher rank advances
-                        // the latch; the authoritative PhaseChangedEvent below also
-                        // syncs it.
+                        // Discovery and tagging emit ProgressEvents CONCURRENTLY during the pipeline overlap, and a late Discovering event carries processed=0, eta=None, fps=0 and its own memory reading; letting it replace LastProgress made the sidebar's Tagged / ETA / Memory flicker. Gate the whole event on a monotonic phase rank: drop any ProgressEvent below the latch. Tagging events carry the live discovered count, so "Discovered" keeps climbing. The authoritative PhaseChangedEvent below also syncs the latch.
                         var progRank = PhaseRank(p.Progress.Phase);
                         if (progRank < _shownPhaseRank) break;
                         _shownPhaseRank = progRank;
-                        // Throttle the heavy LastProgress-bound sidebar repaint to
-                        // 10 Hz; a phase boundary bypasses the throttle so the
-                        // Discovering→Tagging stat handoff is immediate (no blip).
                         var nowProg = DateTime.UtcNow;
                         if (nowProg - _lastProgressEmit >= ProgressThrottle
                             || p.Progress.Phase != _lastProgressPhase)
@@ -1439,14 +1145,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     case PhaseChangedEvent pc:
                         ObserveAuthoritativeScanEvent(generation);
                         Phase = pc.Phase;
-                        // Authoritative phase boundary — sync the monotonic latch
-                        // so a late interleaved ProgressEvent can't pull the
-                        // displayed phase back below it.
+                        // Authoritative phase boundary: sync the latch so a late interleaved ProgressEvent can't pull the displayed phase back below it.
                         _shownPhaseRank = PhaseRank(pc.Phase);
-                        // On cancel, also clear the in-flight tracking state.
-                        // The sidebar's CompletedPanel binds to LastScanDuration
-                        // + LastProgress; without this clear the prior-scan
-                        // numbers linger after the user hits Cancel mid-scan.
+                        // On cancel, also clear in-flight tracking state; otherwise the CompletedPanel (bound to LastScanDuration + LastProgress) shows the prior scan's numbers.
                         if (pc.Phase == ScanPhase.Cancelled)
                         {
                             IsPaused = false;
@@ -1454,36 +1155,21 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastProgress = null;
                             LastBatch = null;
                         }
-                        // Faces persist incrementally during a scan (dbwriter
-                        // commits per-batch), but auto-clustering otherwise fires
-                        // ONLY on ScanComplete. A Failed scan would leave
-                        // already-detected faces with no persons row, so fire the
-                        // (idempotent, zero-face-safe) auto-cluster there too so
-                        // persisted faces still surface. A user-Cancelled scan
-                        // instead DEFERS clustering to a manual re-cluster — the
-                        // user explicitly stopped, and auto-firing a clustering
-                        // pass on cancel races the engine's own teardown.
+                        // Faces persist incrementally (dbwriter commits per batch) but auto-clustering fires only on ScanComplete, so a Failed scan would leave detected faces with no persons row. Fire the idempotent, zero-face-safe auto-cluster there too. A user-Cancelled scan instead DEFERS clustering to a manual re-cluster, since auto-firing on cancel races the engine's teardown.
                         if (pc.Phase == ScanPhase.Failed)
                         {
                             _ = AutoTriggerFaceClusteringAsync();
                         }
                         break;
                     case DiscoveryCompleteEvent:
-                        // No dedicated property — UI consumes via LastProgress.Total,
-                        // which the engine populates immediately after this event.
                         break;
                     case FileDoneEventWrapper:
-                        // Per-file events are high-volume; we don't surface them as
-                        // an observable property. Library tab subscribes directly
-                        // via Events when it needs them.
                         break;
                     case BatchSummaryEvent b:
                         LastBatch = b.Summary;
                         break;
                     case ScanCompleteEvent sce:
                         ObserveAuthoritativeScanEvent(generation);
-                        // Authoritative final count for the completed-scan summary
-                        // (LastProgress.Processed can be throttle-stale by a batch).
                         LastScanProcessedFiles = sce.Result.ProcessedFiles;
                         IsPaused = false;
                         if (_scanStartedAt.HasValue)
@@ -1491,29 +1177,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
                             _scanStartedAt = null;
                         }
-                        // The engine now emits scanComplete for cancelled scans
-                        // too (IPC parity with macOS — it carries the final
-                        // counts). Cancelled is the terminal phase the user
-                        // chose: don't overwrite it with Completed, and don't
-                        // auto-advance to clustering (macOS gates its engine-side
-                        // auto-cluster on !isCancelled the same way).
+                        // The engine emits scanComplete for cancelled scans too (carrying final counts). Cancelled is the user's terminal phase: do not overwrite it with Completed or auto-advance to clustering.
                         if (Phase == ScanPhase.Cancelled || Phase == ScanPhase.Failed)
                         {
                             break;
                         }
                         Phase = ScanPhase.Completed;
                         _shownPhaseRank = PhaseRank(ScanPhase.Completed);
-                        // auto-advance to face clustering, matching macOS.
-                        // macOS engine itself auto-enqueues face clustering when the
-                        // scan finishes (FileIDEngineMain.swift:535+ ::
-                        // autoEnqueueFaceClusteringIfNeeded). On Windows the Rust
-                        // engine doesn't have that hook yet, so the app fires the
-                        // IPC after observing ScanComplete. The engine's
-                        // RunFaceClustering handler is a no-op when there are
-                        // zero face_prints (matches macOS's "no faces → skip"
-                        // path), so this is safe even on a library with no images.
-                        // Deep Analyze stays manual — matches macOS, which gates
-                        // it on the user naming ≥1 person first.
+                        // Auto-advance to face clustering: the engine has no such hook, so the app fires the IPC on ScanComplete; the handler is a no-op with zero face_prints, so it is safe on a library with no images. Deep Analyze stays manual.
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
@@ -1542,50 +1213,29 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
-                        // PAR-111: a clustering FAILURE must release the auto gate,
-                        // else auto-clustering stays suppressed for the rest of the
-                        // session. Match the EXACT failure kind — not a broad
-                        // Contains("cluster"), which also matched the newer
-                        // "face_clustering_busy" bounce (a pass is still running — the
-                        // opposite of a failure) and wrongly cleared the gate, letting
-                        // a later rescan's auto-cluster be silently dropped. The
-                        // in-flight pass emits its own FaceClusteringComplete /
-                        // face_clustering_failed that legitimately releases the gate.
+                        // A clustering FAILURE must release the auto gate, else auto-clustering stays suppressed for the session. Match the EXACT failure kind, not Contains("cluster"), which also matched the "face_clustering_busy" bounce (a pass still running, the opposite of a failure) and wrongly cleared the gate. The in-flight pass emits its own FaceClusteringComplete / face_clustering_failed.
                         if (e.Error.Kind == "face_clustering_failed" || (e.Error.Kind.StartsWith("face_clustering_", StringComparison.Ordinal) && e.Error.Kind != "face_clustering_busy"))
                         {
                             Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
                         }
                         break;
                     case LogEvent:
-                        // Engine LogLine events go to the transcript via Events.
-                        // Local app log already captured stderr.
                         break;
                     case FaceClusteringCompleteEvent fc:
                         LastFaceClustering = fc.Result;
-                        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // PAR-111: release the auto gate
+                        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // release the auto gate
                         break;
                     case DeepAnalyzeStartingEvent das:
                         DeepAnalyzeStarting = das.Starting;
-                        // Clear the previous run's terminal result. DeepAnalyzeComplete
-                        // is otherwise only cleared on the single-file path, so on a
-                        // 2nd+ "Analyze All" run the stale Complete makes the view's
-                        // SyncStream `complete` block clobber the live progress every
-                        // tick — the buttons + status text visibly fight between live
-                        // "{processed}/{total}" and the stale "Done — N captioned" at
-                        // ~4 Hz, with Cancel wrongly greyed out for the whole run.
+                        // Clear the previous run's terminal result. DeepAnalyzeComplete is otherwise cleared only on the single-file path, so on a 2nd+ "Analyze All" run the stale Complete makes the view's SyncStream clobber live progress every tick (buttons and status text fight at ~4 Hz, Cancel greyed out for the whole run).
                         DeepAnalyzeComplete = null;
-                        // Also clear the prior run's last-file result so a new run
-                        // starts with no carried-over DeepAnalyzeLast — otherwise the
-                        // view's run-start _proposedNameCount reset is immediately
-                        // undone when SyncStream reprocesses the stale last in the
-                        // same pass (over-counting smart-renames).
+                        // Also clear the last-file result so a new run starts with no carried-over DeepAnalyzeLast; otherwise the view's run-start _proposedNameCount reset is undone when SyncStream reprocesses the stale last (over-counting smart-renames).
                         DeepAnalyzeLast = null;
                         break;
                     case DeepAnalyzeProgressEvent dap:
                         DeepAnalyzeProgress = dap.Progress;
                         break;
                     case DeepAnalyzeFileDoneEvent dafd:
-                        // Throttle: 2 Hz. Without this, fast VLM runs spam ~50/s.
                         var now = DateTime.UtcNow;
                         if (now - _lastDeepAnalyzeFileDone >= DeepAnalyzeFileDoneThrottle)
                         {
@@ -1598,14 +1248,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         DeepAnalyzeComplete = dac.Result;
                         DeepAnalyzeProgress = null;
                         DeepAnalyzeStarting = null;
-                        // A finished/cancelled auto-pass re-arms the gate so
-                        // the next scan (or a later VLM-install) can trigger again.
                         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
                         break;
                     case ModelDownloadProgressEvent mdp:
-                        // Throttled to one log line per 1% (~100 events / model) so
-                        // app.log isn't flooded but the trail is dense enough to
-                        // diagnose stuck installs.
+                        // Throttled to one log line per 1% (~100 events per model) so app.log isn't flooded but stuck installs stay diagnosable.
                         _modelDownloadEventCount++;
                         if (_modelDownloadEventCount <= 5
                             || _modelDownloadEventCount % 50 == 0
@@ -1634,9 +1280,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         {
                             LastRestructureResultWasUndo = UndoRestructureInFlight;
                             LastRestructureResultWasShortcutApply = !UndoRestructureInFlight && _restructureApplyUsesSymlinks;
-                            // Toggle the "Undo last run" affordance: an apply that
-                            // moved files makes the run undoable; the undo's own reply
-                            // clears it.
+                            LastRestructureResultWasShortcutUndo = UndoRestructureInFlight && UndoRestructureShortcutToken is not null;
                             if (UndoRestructureInFlight)
                             {
                                 UndoRestructureInFlight = false;
@@ -1692,8 +1336,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             break;
                         }
                         LastHardwareReprobe = hr.Result;
-                        // Also refresh the cached HardwareInfo in Info so Settings
-                        // bindings to existing Info.Hardware fields update too.
                         if (Info is { } prevInfo && hr.Result.Hardware is { } hw)
                         {
                             Info = new EngineInfo(
@@ -1712,21 +1354,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         DebugLog.Info($"[IPC IN] thumbnailGenerated path={PathRedactor.Redact(tg.Generated.Path)} ({tg.Generated.Bytes.Length} b64 chars)");
                         break;
                     default:
-                        // Unknown TAGS never get here (the strict decoder
-                        // throws and the read loop logs the line). This
-                        // catches a DTO added to the schema without a
-                        // routing arm — log it so the gap is visible
-                        // instead of silently dropping state updates.
+                        // Unknown TAGS never get here (the strict decoder throws and the read loop logs it). This catches a DTO added to the schema without a routing arm, so the gap is visible rather than silently dropping state.
                         DebugLog.Warn($"[IPC IN] event type with no Apply routing: {ev.Payload?.GetType().Name ?? "<null>"}");
                         break;
                 }
             }
             catch (Exception ex)
             {
-                // route through WriteCrashDump so a routing-side fault
-                // leaves a forensic artifact (not just a log line). A null
-                // deref or malformed payload in one switch arm must NOT tear
-                // down the UI. Log + dump + carry on.
+                // Route through WriteCrashDump so a routing-side fault leaves a forensic artifact; a null deref or malformed payload in one arm must NOT tear down the UI.
                 DebugLog.Error($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"}) threw: {ex}");
                 try { DebugLog.WriteCrashDump($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"})", ex, terminating: false); }
                 catch { /* swallow */ }
@@ -1735,36 +1370,19 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         catch (Exception outerEx)
         {
-            // outer-frame catch — last line of defense before the
-            // dispatcher loop. Anything that escapes the inner switch
-            // try/catch (e.g., the catch itself throwing while writing
-            // a crash dump on a full disk, or a sampling counter
-            // increment hitting a wedge) lands here. Log only — never
-            // re-throw.
+            // Outer-frame catch, the last defense before the dispatcher loop (e.g. the inner catch failing to write a dump on a full disk). Log only, never re-throw.
             try { DebugLog.Error($"EngineClient.Apply OUTER catch: {outerEx}"); }
             catch { /* truly nothing we can do */ }
         }
 
-        // matching exit line for the [APPLY:N] enter above. After a
-        // native fast-fail, the absence of this exit line for the highest
-        // logged seq identifies the offending event. NOTE: the switch
-        // fires PropertyChanged synchronously, which fans out to every
-        // subscriber — those subscribers' [ENGINE-SUB:Class] entry lines
-        // are logged BEFORE this exit, so the trailing ENGINE-SUB line
-        // identifies the offending subscriber.
+        // Matching exit line for [APPLY:N] enter. After a native fast-fail, the highest seq without an exit identifies the offending event; PropertyChanged fires synchronously, so the trailing [ENGINE-SUB:Class] line identifies the offending subscriber.
         DebugLog.Info($"[APPLY:{applySeq}] exit {applyEventName}");
     }
 
-    /// <summary>scan-complete → face-clustering auto-advance.
-    /// Fire-and-forget so the Apply switch returns quickly; any failure
-    /// (engine not ready, IPC throw) is logged and swallowed because
-    /// scan completion itself succeeded — we don't want a downstream
-    /// clustering hiccup to surface as a scan failure.</summary>
+    /// <summary>Scan-complete → face-clustering auto-advance. Fire-and-forget so Apply returns quickly; failures are logged and swallowed because the scan itself succeeded.</summary>
     private async Task AutoTriggerFaceClusteringAsync()
     {
-        // PAR-111: skip if an auto-clustering pass is already in flight (e.g. a
-        // rescan completing while the prior pass still runs). Released on
-        // FaceClusteringComplete or a clustering error.
+        // Skip if an auto-clustering pass is already in flight (e.g. a rescan completing while the prior pass runs); released on FaceClusteringComplete or a clustering error.
         if (Interlocked.CompareExchange(ref _faceClusterAutoInFlight, 1, 0) != 0)
         {
             DebugLog.Info("[AUTO-ADVANCE] face clustering already in flight — skipping duplicate trigger");
@@ -1778,13 +1396,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
-            // The IPC send failed — release the gate so a later scan can retry.
             Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
             DebugLog.Warn("[AUTO-ADVANCE] face clustering trigger threw: " + ex.Message);
         }
     }
-
-    // ─── INotifyPropertyChanged plumbing ───────────────────────────────
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {

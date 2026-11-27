@@ -1,17 +1,4 @@
-﻿// SuggestedMergesSheet code-behind. Binds EngineClient's
-// LastMergeSuggestions to an ItemsRepeater via a DataTemplate over
-// MergeSuggestionVm (see PeopleViewModel). Each row shows side-by-side anchor
-// face JPEGs + similarity % + action buttons. Merge fires mergeClusters IPC;
-// Different-people writes a face_verifications row so we don't keep
-// re-suggesting it.
-//
-// Rendering is data-template-driven (not imperative UIElement construction):
-// the template resolves {ThemeResource} brushes natively and the ItemsRepeater
-// recycles containers, so we never index theme brushes off
-// Application.Resources (KeyNotFoundException) nor rebuild sibling UIElement
-// subtrees per engine event (layout-pass fast-fail) — the two crash shapes the
-// prior imperative BuildRow/BuildFaceImage path hit. See platforms/windows/
-// CLAUDE.md (V15.x DispatcherObject / ItemsRepeater notes).
+﻿// SuggestedMergesSheet code-behind. Renders EngineClient's merge suggestions through a data template: it resolves {ThemeResource} brushes natively (no Application.Resources lookups, which throw KeyNotFoundException) and the ItemsRepeater recycles containers instead of rebuilding UIElement subtrees per engine event (a layout-pass fast-fail).
 
 using System;
 using System.Collections.ObjectModel;
@@ -31,18 +18,11 @@ public sealed partial class SuggestedMergesSheet : UserControl
     public SuggestedMergesSheet()
     {
         InitializeComponent();
-        // subscribe in ctor (not Loaded). ContentDialog hosts
-        // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += OnUnloaded;
         Loaded += async (_, _) =>
         {
-            // Trigger a fresh suggestion fetch whenever the sheet opens, and
-            // bound-wait the engine's reply so the sheet doesn't sit forever on
-            // the placeholder when clustering is still running. On success the
-            // MergeSuggestionsEvent already drives Render() via the
-            // LastMergeSuggestions PropertyChanged subscription — nothing extra
-            // to do here.
+            // Fetch fresh suggestions on open; the bounded wait keeps the placeholder from lingering while clustering runs.
             HeaderText.Text = "Looking for similar clusters…";
             SetBusy(true);
             try
@@ -66,9 +46,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        // Guard any dispatcher tick that fires after the ContentDialog closes
-        // (Render would otherwise touch a torn-down sheet), and drop the
-        // engine subscription.
+        // A dispatcher tick after the dialog closes must not Render into a torn-down sheet.
         _unloaded = true;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
     }
@@ -124,10 +102,6 @@ public sealed partial class SuggestedMergesSheet : UserControl
                 sourceFaceIds = Array.Empty<long>();
             }
 
-            // Await the engine's bulkActionResult BEFORE dimming the row.
-            // Previously the row was marked resolved on a fire-and-forget
-            // send, so an engine-side merge failure left the pair greyed-out
-            // and un-actionable while the clusters stayed un-merged.
             var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "mergeClusters",
                 () => EngineClient.Instance.MergeClustersAsync(vm.SourcePersonId, vm.DestinationPersonId),
@@ -145,18 +119,11 @@ public sealed partial class SuggestedMergesSheet : UserControl
             _lastMergeRows.Clear();
             vm.IsResolved = true;
             _lastMergeRows.Add(vm);
-            // The merged-away source person no longer exists; resolve any other
-            // visible pair that references it so the user can't act on a
-            // now-dangling person (which would be a no-op merge).
             foreach (var other in _rows)
             {
                 if (other.IsResolved) continue;
                 if (other.SourcePersonId == vm.SourcePersonId
                     || other.DestinationPersonId == vm.SourcePersonId
-                    // The destination cluster's membership changed (it absorbed
-                    // the source's faces), so any other suggestion involving
-                    // the destination is now stale — its similarity score and
-                    // face anchors are invalidated by the merge.
                     || other.SourcePersonId == vm.DestinationPersonId
                     || other.DestinationPersonId == vm.DestinationPersonId)
                 {
@@ -177,8 +144,6 @@ public sealed partial class SuggestedMergesSheet : UserControl
         }
     }
 
-    // This sheet is shown inside a dialog, and only one dialog can be open at
-    // a time, so the confirmation is a flyout on the button that was pressed.
     internal static Task<bool> ConfirmMergeAsync(FrameworkElement anchor)
     {
         var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -254,10 +219,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
 
     private async Task MarkDifferentAsync(MergeSuggestionVm vm)
     {
-        // Route through the engine's single-writer connection (the app must
-        // not open its own DB writer). The engine persists the verdict keyed
-        // on the stable anchor face ids so findMergeSuggestions keeps
-        // suppressing the pair across re-clustering.
+        // The app never opens its own DB writer; go through the engine.
         try
         {
             await EngineClient.Instance.MarkPersonsDifferentAsync(

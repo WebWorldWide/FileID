@@ -1,8 +1,6 @@
-//! Deep Analyze in the engine the Mac app hosts: the batch loop of
-//! `run_deep_analyze_batch`, with the Swift engine's MLX analysis
-//! (`crate::apple::vlm`) as the only backend. Events follow the Swift runner
-//! (`DeepAnalyzeRunner.run`): loading, per-file progress with the live caption,
-//! one `deepAnalyzeFileDone` per file and a single terminal complete.
+//! Deep Analyze in the Mac-hosted engine: the batch loop of `run_deep_analyze_batch` with the MLX analysis
+//! (`crate::apple::vlm`) as the only backend. Events: loading, per-file progress with the live caption, one
+//! `deepAnalyzeFileDone` per file and a single terminal complete.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,7 +25,6 @@ async fn send_complete(sink: &Sink, complete: DeepAnalyzeComplete) {
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(complete)))).await;
 }
 
-/// `ModelDownloadProgress` frames for a load, as the Swift runner forwards them.
 fn load_progress(sink: &Sink, model_kind: &str) -> impl FnMut(Event) + use<> {
     let sink = sink.clone();
     let model_kind = model_kind.to_owned();
@@ -45,8 +42,7 @@ fn load_progress(sink: &Sink, model_kind: &str) -> impl FnMut(Event) + use<> {
     }
 }
 
-/// `AIModelKind(rawValue:)` refuses a kind outside the favourites and the catalog:
-/// Swift's error and one failure. True when refused.
+/// `AIModelKind(rawValue:)` refuses a kind outside the favourites and catalog: one failure, true when refused.
 async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
     if crate::models::mlx::repo(model_kind).is_some() {
         return false;
@@ -61,9 +57,8 @@ async fn refuse_unknown_kind(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-/// What the Swift engine sends for a Deep Analyze command before it resolves the
-/// targets: the refusal of an unknown kind, or "Queued" then "Finding files to
-/// analyze…". False when refused (the terminal event is sent).
+/// What is sent before resolving targets: the refusal of an unknown kind, or "Queued" then "Finding files to
+/// analyze…". False when refused (terminal event sent).
 pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     if refuse_unknown_kind(sink, model_kind).await {
         return false;
@@ -82,14 +77,17 @@ pub(crate) async fn announce(sink: &Sink, model_kind: &str) -> bool {
     true
 }
 
-/// Load the model for a batch. Emits the failure and the terminal complete
-/// itself and returns `None` when the batch can't start.
+pub(crate) fn display_name(kind: &str) -> String {
+    vlm::model_spec(kind).ok().and_then(|spec| spec["displayName"].as_str().map(str::to_owned)).unwrap_or_else(|| kind.to_owned())
+}
+
+/// Emits the failure and terminal complete itself and returns `None` when the batch can't start. A model refused for memory alone gives way to the largest smaller installed one, so a busy Mac runs the batch with what fits.
 async fn start(sink: &Sink, model_kind: &str, cancel: &Arc<AtomicBool>, started: Instant) -> Option<MlxLease> {
     if !vlm::installed(model_kind) {
         sink.send(
             EngineError::new(
                 "vlm_model_missing",
-                format!("The {model_kind} model isn't installed yet. Install it from the Deep Analyze tab, then try again."),
+                format!("The {} model isn't installed yet. Install it from the Deep Analyze tab, then try again.", display_name(model_kind)),
             )
             .with_model(model_kind.to_owned())
             .into_event(),
@@ -98,24 +96,43 @@ async fn start(sink: &Sink, model_kind: &str, cancel: &Arc<AtomicBool>, started:
         send_complete(sink, complete(model_kind, 0, 0, started, false)).await;
         return None;
     }
-    let display = vlm::model_spec(model_kind).ok().and_then(|spec| spec["displayName"].as_str().map(str::to_owned)).unwrap_or_else(|| model_kind.to_owned());
-    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
-        model_kind: model_kind.to_owned(),
-        phase: DeepAnalyzeStartingPhase::LoadingModel,
-        message: format!("Loading {display}…"),
-    }))))
-    .await;
-    match Resident::shared().acquire(model_kind, cancel, load_progress(sink, model_kind)).await {
-        Ok(lease) => Some(lease),
-        Err(_) if cancel.load(Ordering::Relaxed) => {
-            send_complete(sink, complete(model_kind, 0, 0, started, true)).await;
-            None
+    let mut candidates = vec![model_kind.to_owned()];
+    candidates.extend(crate::models::resident_model::smaller_installed(model_kind));
+    for (index, kind) in candidates.iter().enumerate() {
+        let display = display_name(kind);
+        let message = match index {
+            0 => format!("Loading {display}…"),
+            _ => format!("Not enough memory is free for {}; loading {display} instead…", display_name(&candidates[index - 1])),
+        };
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
+            model_kind: kind.clone(),
+            phase: DeepAnalyzeStartingPhase::LoadingModel,
+            message,
+        }))))
+        .await;
+        match Resident::shared().acquire(kind, cancel, load_progress(sink, kind)).await {
+            Ok(lease) => return Some(lease),
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                send_complete(sink, complete(model_kind, 0, 0, started, true)).await;
+                return None;
+            }
+            Err(error) if index + 1 < candidates.len() && error.downcast_ref::<crate::util::model_memory::MemoryShortfall>().is_some() => {}
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), model = %kind, "the description model could not be loaded");
+                sink.send(EngineError::new("deep_load_failed", load_failure_message(&display, &error)).into_event()).await;
+                send_complete(sink, complete(model_kind, 0, 0, started, false)).await;
+                return None;
+            }
         }
-        Err(error) => {
-            sink.send(EngineError::new("deep_load_failed", format!("Could not load {display}: {error:#}")).into_event()).await;
-            send_complete(sink, complete(model_kind, 0, 0, started, false)).await;
-            None
-        }
+    }
+    None
+}
+
+/// A memory shortfall already carries a plain sentence; anything else stays in the log.
+fn load_failure_message(display: &str, error: &anyhow::Error) -> String {
+    match error.chain().find_map(|cause| cause.downcast_ref::<crate::util::model_memory::MemoryShortfall>()) {
+        Some(shortfall) => shortfall.to_string(),
+        None => format!("FileID couldn’t load {display}. Try again, or choose a smaller model in Settings."),
     }
 }
 
@@ -128,6 +145,25 @@ fn already_done(db: &Mutex<rusqlite::Connection>, file_id: i64, model_kind: &str
     db.lock().query_row(sql, rusqlite::params![file_id, model_kind], |row| row.get::<_, bool>(0)).unwrap_or(false)
 }
 
+/// Drops what `model_kind` already described, in a few queries, so a finished library neither loads the model nor
+/// walks every file.
+fn not_yet_described(db: &Mutex<rusqlite::Connection>, file_ids: Vec<i64>, model_kind: &str, tags_only: bool) -> Vec<i64> {
+    let column = if tags_only { "vlm_model" } else { "vlm_full_model" };
+    let mut done = std::collections::HashSet::new();
+    for chunk in file_ids.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let sql = format!("SELECT id FROM files WHERE {column} = ? AND id IN ({marks})");
+        let conn = db.lock();
+        let Ok(mut statement) = conn.prepare(&sql) else { continue };
+        let params = std::iter::once(rusqlite::types::Value::Text(model_kind.to_owned()))
+            .chain(chunk.iter().map(|id| rusqlite::types::Value::Integer(*id)));
+        if let Ok(rows) = statement.query_map(rusqlite::params_from_iter(params), |row| row.get::<_, i64>(0)) {
+            done.extend(rows.flatten());
+        }
+    }
+    file_ids.into_iter().filter(|id| !done.contains(id)).collect()
+}
+
 fn image_path(db: &Mutex<rusqlite::Connection>, file_id: i64) -> Option<std::path::PathBuf> {
     db.lock()
         .query_row("SELECT path_text FROM files WHERE id=?1 AND kind='image'", [file_id], |row| row.get::<_, String>(0))
@@ -135,7 +171,6 @@ fn image_path(db: &Mutex<rusqlite::Connection>, file_id: i64) -> Option<std::pat
         .map(std::path::PathBuf::from)
 }
 
-/// Per-token live caption on `deepAnalyzeProgress`, throttled to 4 Hz.
 fn caption_stream(sink: &Sink, model_kind: &str, processed: u64, total: u64, eta: Option<f64>, path: Option<String>) -> impl FnMut(&str) + use<> {
     let sink = sink.clone();
     let model_kind = model_kind.to_owned();
@@ -159,8 +194,7 @@ fn caption_stream(sink: &Sink, model_kind: &str, processed: u64, total: u64, eta
     }
 }
 
-/// Keeps a run's proposed names unique per folder, as the Swift engine does
-/// (`RESERVES_PROPOSED_NAMES`), and stores the reserved name.
+/// Keeps proposed names unique per folder.
 fn reserve_name(
     db: &Arc<Mutex<rusqlite::Connection>>,
     file_id: i64,
@@ -183,13 +217,12 @@ fn reserve_name(
     unique
 }
 
-/// Deep Analyze `file_ids` with the MLX model; sends the terminal complete.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_batch(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
     model_kind: &str,
-    file_ids: Vec<i64>,
+    mut file_ids: Vec<i64>,
     cancel: Arc<AtomicBool>,
     skip_existing: bool,
     tags_only: bool,
@@ -214,6 +247,13 @@ pub(crate) async fn run_batch(
         emit_scope_failure(&sink, complete(model_kind, 0, 1, started, cancel.load(Ordering::Relaxed)), &ScopeFailure::from_error(&error.into())).await;
         return;
     }
+    if skip_existing {
+        file_ids = not_yet_described(&db, file_ids, model_kind, tags_only);
+        if file_ids.is_empty() {
+            send_complete(&sink, complete(model_kind, 0, 0, started, false)).await;
+            return;
+        }
+    }
     let mode = if tags_only {
         AnalyzeMode::TagsOnly
     } else if propose_renames {
@@ -222,6 +262,8 @@ pub(crate) async fn run_batch(
         AnalyzeMode::CaptionAndTags
     };
     let Some(mut lease) = start(&sink, model_kind, &cancel, started).await else { return };
+    let running = lease.kind().to_owned();
+    let model_kind = running.as_str();
 
     let total = file_ids.len() as u64;
     let grouping = crate::pipeline::near_duplicate_grouping::plan(&db.lock(), &file_ids);
@@ -240,6 +282,10 @@ pub(crate) async fn run_batch(
         if let Some(scope) = &scope
             && let Err(error) = scoped_catalog_path(&db, scope, file_id)
         {
+            if super::deep_analyze::file_left_the_scope(&error) {
+                failed += 1;
+                continue;
+            }
             emit_scope_failure(&sink, complete(model_kind, processed, failed + 1, started, cancel.load(Ordering::Relaxed)), &ScopeFailure::from_error(&error)).await;
             return;
         }
@@ -288,8 +334,7 @@ pub(crate) async fn run_batch(
         }))))
         .await;
 
-        // A queued Chat answer gets the model between files (the Swift
-        // runner's ChatYield); the weights stay loaded for the batch.
+        // A queued Chat answer gets the model between files; weights stay loaded.
         if Resident::shared().has_waiters() {
             drop(lease);
             tokio::task::yield_now().await;
@@ -300,13 +345,12 @@ pub(crate) async fn run_batch(
                     if cancelled {
                         send_complete(&sink, complete(model_kind, processed, failed, started, true)).await;
                     } else {
-                        emit_scope_failure(&sink, complete(model_kind, processed, failed, started, false), &ScopeFailure { message: error.to_string(), detail: format!("{error:#}") }).await;
+                        emit_scope_failure(&sink, complete(model_kind, processed, failed, started, false), &ScopeFailure { message: load_failure_message(&display_name(model_kind), &error), detail: format!("{error:#}") }).await;
                     }
                     return;
                 }
             }
         }
-        // Decode the next distinct photo while this one runs, as the Swift runner does.
         if let Some(next) = ordered[index + 1..]
             .iter()
             .find(|next| group.is_none() || grouping.group_of.get(next).copied() != group)
@@ -376,4 +420,66 @@ pub(crate) async fn run_batch(
     }
     tracing::info!(processed, failed, seconds = batch_started.elapsed().as_secs_f64(), "[DEEP] MLX batch done");
     send_complete(&sink, complete(model_kind, processed, failed, started, false)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn library_with(rows: &[(&str, &str, i64, Option<&str>)]) -> Arc<Mutex<rusqlite::Connection>> {
+        let db = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        for (path, kind, failed, full_model) in rows {
+            db.lock()
+                .execute(
+                    "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, vlm_full_model) VALUES (?1, 0, 1, 0.0, ?2, '', ?3, ?4)",
+                    rusqlite::params![path, kind, failed, full_model],
+                )
+                .unwrap();
+        }
+        db
+    }
+
+    fn drain(mut rx: tokio::sync::mpsc::Receiver<IpcEvent>) -> Vec<EventPayload> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event.payload);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_fully_described_library_finishes_without_loading_the_model() {
+        let db = library_with(&[("/lib/a.jpg", "image", 0, Some("qwen3_vl_2b")), ("/lib/b.jpg", "image", 0, Some("qwen3_vl_2b"))]);
+        let (sink, rx) = Sink::channel_for_test(64);
+        run_batch(sink, db, "qwen3_vl_2b", vec![1, 2], Arc::new(AtomicBool::new(false)), true, false, true, None).await;
+        let events = drain(rx);
+        assert_eq!(events.len(), 1, "only the terminal event: {}", events.len());
+        assert!(matches!(&events[0], EventPayload::DeepAnalyzeComplete(done) if done.inner.processed == 0 && done.inner.failed == 0 && !done.inner.cancelled));
+    }
+
+    #[test]
+    fn only_files_the_model_has_not_described_are_kept() {
+        let db = library_with(&[("/lib/a.jpg", "image", 0, Some("qwen3_vl_2b")), ("/lib/b.jpg", "image", 0, Some("gemma_3_4b")), ("/lib/c.jpg", "image", 0, None)]);
+        assert_eq!(not_yet_described(&db, vec![1, 2, 3], "qwen3_vl_2b", false), vec![2, 3]);
+    }
+
+    #[test]
+    fn a_load_failure_shows_a_plain_sentence_not_the_error_chain() {
+        let error = anyhow::anyhow!("mlx: weights.safetensors: Os {{ code: 2 }}").context("loading qwen3_vl_2b");
+        let message = load_failure_message("Qwen3-VL 2B", &error);
+        assert_eq!(message, "FileID couldn’t load Qwen3-VL 2B. Try again, or choose a smaller model in Settings.");
+        let shortfall: anyhow::Error = crate::util::model_memory::MemoryShortfall("Not enough memory is free.".into()).into();
+        assert_eq!(load_failure_message("Qwen3-VL 2B", &shortfall.context("admission")), "Not enough memory is free.");
+    }
+
+    #[tokio::test]
+    async fn describing_a_file_that_cannot_be_described_says_so() {
+        let db = library_with(&[("/lib/gone.jpg", "image", 1, None)]);
+        let (sink, rx) = Sink::channel_for_test(64);
+        let payload = crate::ipc::DeepAnalyzeFilePayload { file_id: 1, model_kind: "qwen3_vl_2b".into() };
+        crate::commands::deep_analyze::handle_deep_analyze_file(sink, db, payload, Arc::new(AtomicBool::new(false))).await;
+        let events = drain(rx);
+        assert!(events.iter().any(|event| matches!(event, EventPayload::Error(error) if error.inner.kind == "deep_analyze_failed")));
+        assert!(events.iter().any(|event| matches!(event, EventPayload::DeepAnalyzeComplete(done) if done.inner.failed == 1 && done.inner.processed == 0)));
+    }
 }

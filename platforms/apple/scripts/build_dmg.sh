@@ -72,10 +72,8 @@ if [ "$REBUILD" = "1" ]; then
     echo "🔨 Building release binaries…"
     if [ -d "$XCODE_DEV_DIR" ]; then
         DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
-        DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
     else
         swift build -c release --product FileID
-        swift build -c release --product FileIDEngine
     fi
 
     echo "📦 Assembling FileID.app bundle…"
@@ -84,12 +82,11 @@ if [ "$REBUILD" = "1" ]; then
     # Strip DWARF — clang's __FILE__ / debug paths leak the maintainer's home.
     echo "🧹 Stripping debug symbols…"
     strip -S "$APP/Contents/MacOS/FileID"
-    strip -S "$APP/Contents/MacOS/FileIDEngine"
 
     # MLX's vendored C++ bakes __FILE__ into __cstring; strip doesn't
     # touch it. Same-length byte rewrite keeps the binary valid.
     echo "🧹 Rewriting embedded source paths…"
-    python3 - <<'PY' "$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/FileIDEngine"
+    python3 - <<'PY' "$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/fileidd"
 import sys, os
 real = os.path.expanduser("~").encode()
 generic = b"/Users/developer"
@@ -126,12 +123,14 @@ fi
 
 [ -d "$APP" ] || { echo "❌ $APP not found. Run with --rebuild or run.sh first."; exit 1; }
 [ -x "$APP/Contents/MacOS/FileID" ] || { echo "❌ Missing $APP/Contents/MacOS/FileID"; exit 1; }
-[ -x "$APP/Contents/MacOS/FileIDEngine" ] || { echo "❌ Missing $APP/Contents/MacOS/FileIDEngine"; exit 1; }
+[ -x "$APP/Contents/MacOS/fileidd" ] || { echo "❌ Missing $APP/Contents/MacOS/fileidd"; exit 1; }
+[ ! -e "$APP/Contents/MacOS/FileIDEngine" ] || { echo "❌ $APP/Contents/MacOS/FileIDEngine is bundled; only fileidd ships"; exit 1; }
 
 echo "🔒 Scanning shipped binaries for forbidden telemetry markers…"
 python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
     "$APP/Contents/MacOS/FileID" \
-    "$APP/Contents/MacOS/FileIDEngine"
+    "$APP/Contents/MacOS/fileidd" \
+    "$APP/Contents/Frameworks/libFileIDAppleKit.dylib"
 
 if [ -d "/Volumes/$VOL_NAME" ]; then
     hdiutil detach "/Volumes/$VOL_NAME" -force -quiet 2>/dev/null || true

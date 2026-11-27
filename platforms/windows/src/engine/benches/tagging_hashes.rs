@@ -1,17 +1,11 @@
-//! Bench hot-path image hashing primitives.
-//!
-//! Measures `compute_dhash` and `resize_rgb_nearest` against fixed
-//! synthetic image buffers. These are pure CPU functions that run for
-//! every image during scan, so any regression here hits scan throughput
-//! linearly. Use `cargo bench -p fileid-engine --bench tagging_hashes`.
+//! `compute_dhash` and `resize_rgb_nearest` on fixed synthetic buffers: pure CPU functions run for every image during
+//! scan, so a regression hits throughput linearly. `cargo bench -p fileid-engine --bench tagging_hashes`.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use fileid_engine::pipeline::tagging::{compute_dhash, resize_rgb_nearest};
 
 fn synthetic_rgb(size: usize) -> Vec<u8> {
-    // Pseudo-random gradient. Deterministic + cheap — we're benching
-    // the hash, not the RNG, so a fixed seed-equivalent pattern keeps
-    // bench runs comparable across machines.
+    // Deterministic gradient so runs compare across machines (we bench the hash, not the RNG).
     let mut buf = Vec::with_capacity(size * size * 3);
     for y in 0..size {
         for x in 0..size {

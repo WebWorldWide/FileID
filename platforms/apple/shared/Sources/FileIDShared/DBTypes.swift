@@ -73,7 +73,13 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
 
     public var sizeMB: Double { Double(sizeBytes) / 1_048_576 }
 
-    public var displayDate: Date? { createdAt ?? modifiedAt }
+    /// FAT and exFAT volumes report 1 January 1980 for a file with no date, so nothing before 1981 is a real date.
+    public static let earliestRealDate = Date(timeIntervalSince1970: 347_155_200)
+
+    public var displayDate: Date? {
+        let limit = Date().addingTimeInterval(86_400)
+        return [createdAt, modifiedAt].lazy.compactMap { $0 }.first { $0 >= Self.earliestRealDate && $0 <= limit }
+    }
 
     public var isImage: Bool { kind == "image" }
     public var isVideo: Bool { kind == "video" }

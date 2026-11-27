@@ -1,22 +1,16 @@
-// MediaPipe Face Mesh V2 (Google, Apache-2.0), the 478-point face landmark
-// network from the Face Landmarker bundle, as a format-only ONNX conversion
-// pinned in shared/models/manifest.json. Used for eye openness in Best Takes:
-// YuNet's five landmarks cannot tell an open eye from a closed one.
+// MediaPipe Face Mesh V2 (Google, Apache-2.0), 478-point landmarks as a format-only ONNX conversion pinned in
+// shared/models/manifest.json; gives eye openness for Best Takes (YuNet's 5 landmarks cannot).
 //
-// Input `input_12`: [1, 256, 256, 3] RGB in [0, 1], a square crop around one
-// face with a 25% margin on each side, rolled so the eyes are level.
-// Outputs: `Identity` 478 × (x, y, z) in crop pixels, `Identity_1` the face
-// presence logit.
+// Input `input_12`: [1, 256, 256, 3] RGB in [0, 1], a square face crop with 25% margin, eyes level.
+// Outputs: `Identity` 478 × (x, y, z) in crop pixels, `Identity_1` face-presence logit.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ndarray::Array4;
-use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::value::Tensor;
 
 use super::face_geometry::Detection;
-use super::runtime::{classify_inference_error, commit_chain_session, ensure_gpu_inference_alive};
+use super::inference::{load_session, Dim, InferenceSession, InputSpec};
 
 const INPUT: usize = 256;
 const POINTS: usize = 478;
@@ -46,7 +40,7 @@ impl Crop {
 }
 
 pub struct FaceMesh {
-    session: Session,
+    session: InferenceSession,
     input_name: String,
 }
 
@@ -54,32 +48,21 @@ impl FaceMesh {
     pub fn load<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
-        let (session, input_name) = commit_chain_session("FaceMesh", path)?;
+        let (session, input_name) = load_session("FaceMesh", path, &input_contract())?;
         Self::checked(session, input_name)
     }
 
-    /// ORT's CPU provider with `intra_threads` threads, for callers that keep one
-    /// session per worker (the Mac's take workers): sessions sized for every
-    /// core each would oversubscribe the CPU.
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
-    pub fn load_cpu<P: AsRef<Path>>(weights: P, intra_threads: usize) -> Result<Self> {
-        use anyhow::Context;
+    pub fn load_cpu<P: AsRef<Path>>(weights: P) -> Result<Self> {
         let path = weights.as_ref();
         anyhow::ensure!(path.exists(), "Face mesh weights missing at {}", path.display());
-        crate::ort_runtime::commit_environment().context("ORT environment")?;
-        let session = Session::builder()
-            .context("ORT session builder")?
-            .with_log_level(ort::logging::LogLevel::Error)?
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
-            .with_intra_threads(intra_threads.max(1))?
-            .commit_from_file(path)
-            .context("ORT session commit (FaceMesh)")?;
-        let input_name = session.inputs.first().ok_or_else(|| anyhow::anyhow!("Face mesh ONNX has no inputs"))?.name.clone();
+        let session = InferenceSession::load("FaceMesh", path, &input_contract())?;
+        let input_name = session.input_names().first().ok_or_else(|| anyhow::anyhow!("Face mesh ONNX has no inputs"))?.clone();
         Self::checked(session, input_name)
     }
 
-    fn checked(session: Session, input_name: String) -> Result<Self> {
-        let names: Vec<&str> = session.outputs.iter().map(|o| o.name.as_str()).collect();
+    fn checked(session: InferenceSession, input_name: String) -> Result<Self> {
+        let names: Vec<&str> = session.output_names().iter().map(String::as_str).collect();
         anyhow::ensure!(
             names.contains(&LANDMARKS) && names.contains(&PRESENCE),
             "Face mesh ONNX outputs {names:?} don't match the landmark contract"
@@ -90,8 +73,7 @@ impl FaceMesh {
         Ok(model)
     }
 
-    /// Eye openness 0…1 for one detected face in `rgb`, or `None` when the
-    /// network says the crop holds no face.
+    /// Eye openness 0…1, or `None` when the network says the crop holds no face.
     pub fn eyes_open(&mut self, rgb: &[u8], width: u32, height: u32, face: &Detection) -> Result<Option<f64>> {
         Ok(self.eye_ratio(rgb, width, height, face)?.map(openness))
     }
@@ -107,23 +89,25 @@ impl FaceMesh {
     }
 
     fn run(&mut self, rgb: &[u8], width: u32, height: u32, crop: &Crop) -> Result<Option<Vec<[f32; 2]>>> {
-        let input = Tensor::from_array(sample(rgb, width as usize, height as usize, crop)).context("Face mesh input tensor")?;
-        let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
-        let outputs: SessionOutputs = self
-            .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("Face mesh session.run")
-            .map_err(classify_inference_error)?;
-        let (_, presence) = outputs[PRESENCE].try_extract_tensor::<f32>().context("Face mesh presence")?;
-        let (_, landmarks) = outputs[LANDMARKS].try_extract_tensor::<f32>().context("Face mesh landmarks")?;
-        anyhow::ensure!(landmarks.len() == POINTS * 3, "Face mesh produced {} values, expected {}", landmarks.len(), POINTS * 3);
-        let logit = presence.first().copied().unwrap_or(f32::NAN);
+        let (landmarks, logit) = self.forward(sample(rgb, width as usize, height as usize, crop))?;
         if logit.is_nan() || logit < MIN_PRESENCE_LOGIT || !landmarks.iter().all(|v| v.is_finite()) {
             return Ok(None);
         }
         Ok(Some(landmarks.as_chunks::<3>().0.iter().map(|p| crop.project(p[0], p[1])).collect()))
     }
+
+    fn forward(&mut self, input: Array4<f32>) -> Result<(Vec<f32>, f32)> {
+        let input_name = self.input_name.clone();
+        let outputs = self.session.run(vec![(input_name.as_str(), input.into())]).context("Face mesh session.run")?;
+        let find = |name: &str| outputs.iter().find(|output| output.name == name).map(|output| &output.data).with_context(|| format!("Face mesh output {name}"));
+        let (presence, landmarks) = (find(PRESENCE)?, find(LANDMARKS)?);
+        anyhow::ensure!(landmarks.len() == POINTS * 3, "Face mesh produced {} values, expected {}", landmarks.len(), POINTS * 3);
+        Ok((landmarks.clone(), presence.first().copied().unwrap_or(f32::NAN)))
+    }
+}
+
+fn input_contract() -> [InputSpec; 1] {
+    [InputSpec::f32(&[Dim::Fixed(1), Dim::Fixed(INPUT), Dim::Fixed(INPUT), Dim::Fixed(3)])]
 }
 
 fn sample(rgb: &[u8], width: usize, height: usize, crop: &Crop) -> Array4<f32> {
@@ -176,7 +160,6 @@ fn crop_from_points(points: &[[f32; 2]]) -> Option<Crop> {
     (side.is_finite() && side >= 1.0).then_some(Crop { cx: mx * crop.cos - my * crop.sin, cy: mx * crop.sin + my * crop.cos, side, ..crop })
 }
 
-/// Mean eye aspect ratio over both eyes: eyelid gap over eye width.
 pub fn eye_aspect_ratio(points: &[[f32; 2]]) -> Option<f64> {
     if points.len() < POINTS {
         return None;
@@ -194,7 +177,6 @@ pub fn openness(ratio: f64) -> f64 {
     ((ratio - CLOSED_RATIO) / (OPEN_RATIO - CLOSED_RATIO)).clamp(0.0, 1.0)
 }
 
-/// `face_mesh/face_landmarks.onnx` under the models folder.
 pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?.join("face_mesh").join("face_landmarks.onnx"))
 }
@@ -299,5 +281,31 @@ mod tests {
         for case in fixture["openness"].as_array().unwrap() {
             assert!((openness(case["ratio"].as_f64().unwrap()) - case["expect"].as_f64().unwrap()).abs() < 1e-9);
         }
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::models::golden::{check, model_file, synthetic_rgb, Probe, Tolerance};
+
+    const PATH: &str = "face_mesh/face_landmarks.onnx";
+
+    #[test]
+    fn landmarks_match_the_golden_vectors() {
+        let Some(path) = model_file(PATH) else { return };
+        let mut model = FaceMesh::load(&path).unwrap();
+        let crop = Crop { cx: 128.0, cy: 128.0, side: 256.0, cos: 1.0, sin: 0.0 };
+        let (landmarks, presence) = model.forward(sample(&synthetic_rgb(256, 256), 256, 256, &crop)).unwrap();
+        check(
+            "face_mesh",
+            PATH,
+            "synthetic_rgb(256, 256) sampled with the identity crop into 1x256x256x3; 478x3 landmarks in 256 px and the presence logit",
+            Tolerance { max_abs: 1e-2, rel_norm: 1e-3 },
+            &[
+                Probe { name: LANDMARKS, shape: vec![POINTS * 3], values: &landmarks },
+                Probe { name: PRESENCE, shape: vec![1], values: &[presence] },
+            ],
+        );
     }
 }

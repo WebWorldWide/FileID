@@ -350,7 +350,6 @@ impl Hover {
     }
 }
 
-/// Node focus under the current hover (macOS `isNodeFocused`).
 pub fn node_lit(layout: &MapLayout, node: &Node, hover: Option<&Hover>) -> bool {
     match hover {
         None => false,

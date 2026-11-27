@@ -237,6 +237,7 @@ char *fileid_apple_pdf_ocr(const char *path);
  * skips it). Until it is ready, text reads use the fast tier only. */
 void fileid_apple_ocr_warmup(void);
 bool fileid_apple_ocr_ready(void);
+bool fileid_apple_ocr_paused(void);
 
 /* Document text as the Swift engine extracts it (plain text, PDFKit, the
  * Cocoa text system for Word/RTF/OpenDocument), at most max_chars. Returns

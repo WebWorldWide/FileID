@@ -1,6 +1,4 @@
-//! `proposeNames`: preview smart names in a saved style from stored catalog
-//! evidence only. No model call, no file or row change. Lockstep with macOS
-//! `CatalogNameProposals.swift`.
+//! `proposeNames`: preview smart names from stored catalog evidence only (no model call, nothing written).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -15,6 +13,7 @@ use crate::util::smart_name_learning::{self as learning, Learned, Sample};
 use crate::util::smart_name_style::{self as style, Evidence, Options, Outcome, Style};
 
 const MAX_FILES: usize = 1000;
+const SIBLING_FOLDERS: usize = 24;
 const MAX_EDIT_SCALARS: usize = 1000;
 const SAMPLE_KIND: &str = "nameStyle";
 
@@ -45,12 +44,33 @@ pub(crate) fn propose(conn: &Connection, request: &CatalogRequest) -> Result<Vec
     if request.naming.as_ref().is_some_and(|naming| naming.learn) {
         options.learned = learned(conn)?;
     }
+    propose_ids(conn, options, ids)
+}
+
+/// New names with their extensions for files Chat renames, in the style Library offers before the person changes its
+/// settings, so both name files alike. Files whose name stays are left out.
+pub(crate) fn default_names(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, String, String)>> {
+    let options = Options { style: Style::Short, max_length: 40, people: true, event: true, date: false, learned: learned(conn)? };
+    let mut seen = HashSet::new();
+    let mut names = Vec::new();
+    for chunk in ids.chunks(MAX_FILES) {
+        for hit in propose_ids(conn, options.clone(), chunk)? {
+            if !hit.text.is_empty() && seen.insert(hit.file_id) {
+                names.push((hit.file_id, hit.path, hit.text));
+            }
+        }
+    }
+    Ok(names)
+}
+
+pub(crate) fn propose_ids(conn: &Connection, options: Options, ids: &[i64]) -> Result<Vec<CatalogHit>> {
     let mut run = Run {
         conn,
         options,
         person_words: person_words(conn)?,
         folders: HashMap::new(),
         claimed: HashMap::new(),
+        sibling_dirs: HashMap::new(),
         seen: HashSet::new(),
         hits: Vec::new(),
     };
@@ -62,10 +82,11 @@ pub(crate) fn propose(conn: &Connection, request: &CatalogRequest) -> Result<Vec
         let parent = Path::new(&file.path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let names = run.folder(&parent).names.clone();
         let members = companions::members(&file.name, &names);
-        if members.is_empty() {
+        let siblings = run.siblings(&file, &parent, &members)?;
+        if members.is_empty() && siblings.is_empty() {
             run.single(id, file, &parent);
         } else {
-            run.group(id, file, &parent, members)?;
+            run.group(id, file, &parent, members, siblings)?;
         }
     }
     Ok(run.hits)
@@ -82,6 +103,7 @@ struct Run<'a> {
     person_words: HashSet<String>,
     folders: HashMap<String, Folder>,
     claimed: HashMap<String, HashSet<String>>,
+    sibling_dirs: HashMap<String, Vec<String>>,
     seen: HashSet<i64>,
     hits: Vec<CatalogHit>,
 }
@@ -104,15 +126,89 @@ impl Run<'_> {
         outcome
     }
 
-    fn names_for(&mut self, parent: &str, stem: &str, members: &[(String, String)]) -> Option<Vec<String>> {
-        self.folder(parent);
-        let taken = &self.folders[parent].taken;
-        let batch = self.claimed.entry(parent.to_string()).or_default();
-        let names = companions::shared_names(stem, members, taken, batch)?;
-        if names.iter().zip(members).any(|(name, (_, own))| style::lower(name) != *own) {
-            batch.extend(names.iter().map(|name| style::lower(name)));
+    fn names_for(&mut self, stem: &str, members: &[(String, String, String)]) -> Option<Vec<String>> {
+        for (dir, _, _) in members {
+            self.folder(dir);
+            self.claimed.entry(dir.clone()).or_default();
+        }
+        let specs: Vec<(String, String)> = members.iter().map(|(_, suffix, own)| (suffix.clone(), own.clone())).collect();
+        let names = companions::shared_names(stem, &specs, |index, key| {
+            let dir = &members[index].0;
+            !self.folders[dir].taken.contains(key) && !self.claimed[dir].contains(key)
+        })?;
+        for (name, (dir, _, own)) in names.iter().zip(members) {
+            if style::lower(name) != *own {
+                self.claimed.entry(dir.clone()).or_default().insert(style::lower(name));
+            }
         }
         Some(names)
+    }
+
+    /// The RAW or JPEG of this shot filed in a sibling folder (`JPEGs/` next to `RAWs/`): same stem, a role this shot
+    /// lacks, already scanned, same capture time, one match per folder. It is named in step with the file.
+    fn siblings(&mut self, file: &Loaded, parent: &str, local: &[Member]) -> Result<Vec<(String, Member, i64)>> {
+        let Some((stem, _, role)) = companions::base(&file.name) else { return Ok(Vec::new()) };
+        if role == Role::Sidecar {
+            return Ok(Vec::new());
+        }
+        let Some(grandparent) = Path::new(parent).parent().map(|p| p.to_string_lossy().into_owned()) else {
+            return Ok(Vec::new());
+        };
+        if !self.sibling_dirs.contains_key(&grandparent) {
+            let mut dirs: Vec<String> = std::fs::read_dir(&grandparent)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.'))
+                        .map(|e| e.path().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            dirs.sort();
+            dirs.truncate(SIBLING_FOLDERS);
+            self.sibling_dirs.insert(grandparent.clone(), dirs);
+        }
+        let key = style::lower(&stem);
+        let mut roles: HashSet<Role> = local.iter().map(|m| m.role).collect();
+        roles.insert(role);
+        let own_created: Option<f64> = self
+            .conn
+            .query_row("SELECT created_at FROM files WHERE path_text=?1", [&file.path], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let Some(own_created) = own_created else { return Ok(Vec::new()) };
+        let mut found = Vec::new();
+        for dir in self.sibling_dirs[&grandparent].clone() {
+            if dir == parent {
+                continue;
+            }
+            let matches: Vec<Member> = self
+                .folder(&dir)
+                .names
+                .iter()
+                .filter_map(|name| {
+                    let (other, suffix, other_role) = companions::base(name)?;
+                    (other_role != Role::Sidecar && style::lower(&other) == key)
+                        .then(|| Member { name: name.clone(), suffix, role: other_role })
+                })
+                .collect();
+            let [member] = matches.as_slice() else { continue };
+            if roles.contains(&member.role) {
+                continue;
+            }
+            let path = Path::new(&dir).join(&member.name).to_string_lossy().into_owned();
+            let row: Option<(i64, Option<f64>)> = self
+                .conn
+                .query_row("SELECT id,created_at FROM files WHERE path_text=?1", [&path], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            if let Some((row, Some(created))) = row
+                && (created - own_created).abs() <= 2.0
+            {
+                roles.insert(member.role);
+                found.push((dir, member.clone(), row));
+            }
+        }
+        Ok(found)
     }
 
     fn push(&mut self, file_id: i64, path: String, text: String, reason: String) {
@@ -134,7 +230,7 @@ impl Run<'_> {
             Some(stem) => {
                 let suffix = if file.extension.is_empty() { String::new() } else { format!(".{}", file.extension) };
                 let own = style::lower(&file.name);
-                match self.names_for(parent, &stem, &[(suffix, own.clone())]) {
+                match self.names_for(&stem, &[(parent.to_string(), suffix, own.clone())]) {
                     Some(names) if style::lower(&names[0]) == own => (String::new(), "unchanged"),
                     Some(mut names) => (names.remove(0), outcome.reason),
                     None => (String::new(), "collision"),
@@ -145,7 +241,19 @@ impl Run<'_> {
         self.push(id, file.path, text, learning::tagged(reason, &outcome.learned));
     }
 
-    fn group(&mut self, id: i64, file: Loaded, parent: &str, members: Vec<Member>) -> Result<()> {
+    fn group(
+        &mut self,
+        id: i64,
+        file: Loaded,
+        parent: &str,
+        mut members: Vec<Member>,
+        siblings: Vec<(String, Member, i64)>,
+    ) -> Result<()> {
+        if members.is_empty()
+            && let Some((_, suffix, role)) = companions::base(&file.name)
+        {
+            members.push(Member { name: file.name.clone(), suffix, role });
+        }
         let mut resolved: Vec<Companion> = Vec::new();
         for member in members {
             let path = Path::new(parent).join(&member.name).to_string_lossy().into_owned();
@@ -155,9 +263,14 @@ impl Run<'_> {
                 self.conn.query_row("SELECT id FROM files WHERE path_text=?1", [&path], |r| r.get(0)).optional()?
             };
             if row.is_some() || (member.role != Role::Sidecar && std::fs::metadata(&path).is_ok_and(|m| m.is_file())) {
-                resolved.push(Companion { member, path, row });
+                resolved.push(Companion { member, dir: parent.to_string(), path, row });
             }
         }
+        for (dir, member, row) in siblings {
+            let path = Path::new(&dir).join(&member.name).to_string_lossy().into_owned();
+            resolved.push(Companion { member, dir, path, row: Some(row) });
+        }
+        resolved.sort_by(|a, b| a.member.role.cmp(&b.member.role).then_with(|| a.member.name.cmp(&b.member.name)));
         if !companions::is_group(&resolved.iter().map(|c| c.member.clone()).collect::<Vec<_>>()) {
             self.single(id, file, parent);
             return Ok(());
@@ -204,10 +317,12 @@ impl Run<'_> {
         let mut texts = vec![String::new(); order.len()];
         let reason = match &outcome.stem {
             Some(stem) => {
-                let specs: Vec<(String, String)> =
-                    order.iter().map(|&i| (known[i].0.member.suffix.clone(), style::lower(&known[i].0.member.name))).collect();
-                match self.names_for(parent, stem, &specs) {
-                    Some(names) if names.iter().zip(&specs).all(|(name, (_, own))| style::lower(name) == *own) => "unchanged",
+                let specs: Vec<(String, String, String)> = order
+                    .iter()
+                    .map(|&i| (known[i].0.dir.clone(), known[i].0.member.suffix.clone(), style::lower(&known[i].0.member.name)))
+                    .collect();
+                match self.names_for(stem, &specs) {
+                    Some(names) if names.iter().zip(&specs).all(|(name, (_, _, own))| style::lower(name) == *own) => "unchanged",
                     Some(names) => {
                         texts = names;
                         outcome.reason
@@ -226,8 +341,7 @@ impl Run<'_> {
     }
 }
 
-/// learnNames: stores one sample per edit with the unlearned name the engine
-/// would propose for that file now, then replies with the preferences.
+/// Stores one sample per edit with the unlearned name the engine would propose now, then replies with the preferences.
 pub(crate) fn learn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
     let options = options(request)?;
     let style_name = request.naming.as_ref().map(|naming| naming.style.clone()).unwrap_or_default();
@@ -260,8 +374,8 @@ pub(crate) fn learn(conn: &mut Connection, request: &CatalogRequest) -> Result<V
     preferences(conn)
 }
 
-/// unlearnNames: after renames are undone, deletes for each edit the newest
-/// sample for that file whose applied name matches, then replies with the preferences.
+/// After renames are undone, deletes the newest sample per edit whose applied name matches, then replies with the
+/// preferences.
 pub(crate) fn unlearn(conn: &mut Connection, request: &CatalogRequest) -> Result<Vec<CatalogHit>> {
     let edits: &[CatalogNameEdit] = request.name_edits.as_deref().unwrap_or(&[]);
     if edits.is_empty() || edits.len() > MAX_FILES || !edits.iter().all(|e| e.applied.chars().count() <= MAX_EDIT_SCALARS) {
@@ -308,7 +422,6 @@ fn learned(conn: &Connection) -> Result<Learned> {
     Ok(learning::derive(&samples))
 }
 
-/// The learned preferences as namePreference hits, then the stored sample count as nameSamples.
 pub(crate) fn preferences(conn: &Connection) -> Result<Vec<CatalogHit>> {
     let learned = learned(conn)?;
     let hit = |kind: &str, key: Option<&str>, text: String| CatalogHit {
@@ -333,6 +446,7 @@ pub(crate) fn preferences(conn: &Connection) -> Result<Vec<CatalogHit>> {
 
 struct Companion {
     member: Member,
+    dir: String,
     path: String,
     row: Option<i64>,
 }
@@ -576,6 +690,43 @@ mod tests {
                 (13, "", "unscannedCompanion|group:13"),
                 (14, "lone-hill.ARW", "proposedName"),
             ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_raw_and_jpeg_in_sibling_folders_are_named_in_step() {
+        let dir = std::env::temp_dir().join(format!("fileid-sibling-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let jpegs = dir.join("JPEGs");
+        let raws = dir.join("RAWs");
+        std::fs::create_dir_all(&jpegs).unwrap();
+        std::fs::create_dir_all(&raws).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for (id, folder, name, created, proposed) in [
+            (1, &jpegs, "DSC01171.JPG", 1688472000.0, Some("baseball player batter")),
+            (2, &raws, "DSC01171.ARW", 1688472000.0, None),
+            (3, &jpegs, "DSC09999.JPG", 1688479999.0, Some("lone tree")),
+            (4, &raws, "DSC09999.ARW", 1688470000.0, Some("other tree")),
+        ] {
+            let path = folder.join(name);
+            std::fs::write(&path, name).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,created_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,?3,0,'image','x',0,?4)",
+                params![id, path.to_string_lossy(), created, proposed],
+            )
+            .unwrap();
+        }
+        std::fs::write(raws.join("baseball-player-batter.ARW"), b"other photo").unwrap();
+        let hits = propose(
+            &conn,
+            &request(serde_json::json!({"requestID":"n","action":"proposeNames","fileIDs":[1,2,3,4],"naming":{"style":"short","maxLength":40}})),
+        )
+        .unwrap();
+        let got: Vec<(i64, &str)> = hits.iter().map(|h| (h.file_id, h.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [(1, "baseball-player-batter_2.JPG"), (2, "baseball-player-batter_2.ARW"), (3, "lone-tree.JPG"), (4, "other-tree.ARW")]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

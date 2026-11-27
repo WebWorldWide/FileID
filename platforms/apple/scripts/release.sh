@@ -107,28 +107,23 @@ echo "🔨 Building release binaries (v${VERSION}, build ${BUILD_NUM})…"
 XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
 if [ -d "$XCODE_DEV_DIR" ]; then
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
 else
     swift build -c release --product FileID
-    swift build -c release --product FileIDEngine
 fi
 
-# Developer ID builds bundle the shared Rust engine (fileidd, the default
-# engine since Stage 10) with the pinned ONNX Runtime; the Swift engine stays
-# bundled and selectable. FILEID_WITH_RUST_ENGINE=0 ships the Swift engine only.
-FILEID_WITH_RUST_ENGINE="${FILEID_WITH_RUST_ENGINE:-1}" FILEID_REQUIRE_ORT=1 \
-    bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
+# The bundle's only engine is the shared Rust engine (Contents/MacOS/fileidd),
+# built by assemble_app.sh (its models run on tract, so no ONNX Runtime ships).
+# No Swift engine ships.
+bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP" "$VERSION" "$BUILD_NUM"
 
 # ── Strip + scrub (must precede signing — both invalidate the cdhash) ────────
 echo "🧹 Stripping debug symbols…"
 strip -S "$APP/Contents/MacOS/FileID"
-strip -S "$APP/Contents/MacOS/FileIDEngine"
 
 # MLX's vendored C++ bakes __FILE__ into __cstring; strip doesn't touch it.
 # Same-length byte rewrite keeps the binary valid.
 echo "🧹 Rewriting embedded source paths…"
-REWRITE_BINARIES=("$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/FileIDEngine")
-[ -f "$APP/Contents/MacOS/fileidd" ] && REWRITE_BINARIES+=("$APP/Contents/MacOS/fileidd")
+REWRITE_BINARIES=("$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/fileidd")
 python3 - "${REWRITE_BINARIES[@]}" <<'PY'
 import sys, os
 real = os.path.expanduser("~").encode()
@@ -153,12 +148,11 @@ mv "$APP" "$SIGN_TMP/$APP"
 SIGNED_APP="$SIGN_TMP/$APP"
 find "$SIGN_TMP/$APP" -exec xattr -c {} \; 2>/dev/null || true
 
-# Nested code first (inside-out, no --deep): the metallibs live in
-# Contents/MacOS and, for fileidd's FileIDAppleKit, Contents/Frameworks (MLX
-# loads them colocated with the binary that links it), so
-# codesign treats them as nested code that must carry its own signature
+# Nested code first (inside-out, no --deep): the metallib lives in
+# Contents/Frameworks beside FileIDAppleKit (MLX loads it colocated with the
+# binary that links it), so codesign treats it as nested code that must carry its own signature
 # before the bundle seal. They sign as Format=generic.
-for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib "$SIGN_TMP/$APP/Contents/Frameworks/"*.metallib; do
+for lib in "$SIGN_TMP/$APP/Contents/Frameworks/"*.metallib; do
     [ -f "$lib" ] || continue
     codesign --force $TIMESTAMP_FLAG --sign "$IDENTITY" "$lib"
 done
@@ -178,14 +172,7 @@ done
 # refuses to spawn an engine whose Team ID differs from the app's.
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
-    "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
-# Shared Rust engine (bundled unless FILEID_WITH_RUST_ENGINE=0): same identity
-# and entitlements as the Swift engine.
-if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
-    codesign --force --options runtime $TIMESTAMP_FLAG \
-        --entitlements "$ENGINE_ENTITLEMENTS" --sign "$IDENTITY" \
-        "$SIGN_TMP/$APP/Contents/MacOS/fileidd"
-fi
+    "$SIGN_TMP/$APP/Contents/MacOS/fileidd"
 codesign --force --options runtime $TIMESTAMP_FLAG \
     --entitlements "$APP_ENTITLEMENTS" --sign "$IDENTITY" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileID"
@@ -196,31 +183,25 @@ codesign --force --options runtime $TIMESTAMP_FLAG \
 echo "🔍 Verifying signatures…"
 codesign --verify --deep --strict --verbose=2 "$SIGN_TMP/$APP"
 APP_TEAM=$(codesign -dv "$SIGN_TMP/$APP" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
-ENGINE_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
+ENGINE_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/fileidd" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
 echo "   app:    $APP_TEAM"
 echo "   engine: $ENGINE_TEAM"
 if [ "$APP_TEAM" != "$ENGINE_TEAM" ]; then
-    echo "❌ Team ID mismatch between app and engine — the in-app integrity gate will refuse to spawn the engine."
+    echo "❌ Team ID mismatch between app and the engine (fileidd) — the in-app integrity gate will refuse to spawn it."
     exit 1
 fi
-PRIVACY_BINARIES=("$SIGN_TMP/$APP/Contents/MacOS/FileID" "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine")
-if [ -f "$SIGN_TMP/$APP/Contents/MacOS/fileidd" ]; then
-    RUST_TEAM=$(codesign -dv "$SIGN_TMP/$APP/Contents/MacOS/fileidd" 2>&1 | grep "^TeamIdentifier" || echo "TeamIdentifier=adhoc")
-    echo "   rust:   $RUST_TEAM"
-    if [ "$APP_TEAM" != "$RUST_TEAM" ]; then
-        echo "❌ Team ID mismatch between app and the Rust engine (fileidd)."
-        exit 1
-    fi
-    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
+if [ -e "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine" ]; then
+    echo "❌ A Swift engine binary is in the bundle; Developer ID bundles ship only fileidd."
+    exit 1
 fi
-ORT_CHECK=()
-if [ -f "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
-    PRIVACY_BINARIES+=("$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
-    ORT_CHECK=(--ort-runtime "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib")
+PRIVACY_BINARIES=("$SIGN_TMP/$APP/Contents/MacOS/FileID" "$SIGN_TMP/$APP/Contents/MacOS/fileidd" "$SIGN_TMP/$APP/Contents/Frameworks/libFileIDAppleKit.dylib")
+if [ -e "$SIGN_TMP/$APP/Contents/Frameworks/libonnxruntime.dylib" ]; then
+    echo "❌ An ONNX Runtime library is in the bundle; the engine runs its models on tract."
+    exit 1
 fi
 
 echo "🔍 Scanning signed binaries for telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" ${ORT_CHECK[@]+"${ORT_CHECK[@]}"} "${PRIVACY_BINARIES[@]}"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "${PRIVACY_BINARIES[@]}"
 
 # ── Notarize the app ─────────────────────────────────────────────────────────
 if [ "$SKIP_NOTARIZE" = "0" ]; then
@@ -299,7 +280,7 @@ if [ "$SKIP_NOTARIZE" = "0" ]; then
     fi
 else
     echo "ℹ️  Dry run (--skip-notarize): Gatekeeper assessment skipped."
-    echo "   Launch test: mount '$DMG_OUT' and open $APP — verify the engine spawns"
+    echo "   Launch test: mount '$DMG_OUT' and open $APP — verify fileidd spawns"
     echo "   (both sides share the signing team) and Deep Analyze runs"
     echo "   under the hardened runtime."
 fi

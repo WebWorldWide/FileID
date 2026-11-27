@@ -1,8 +1,6 @@
-//! Speech pass with an on-device recogniser that needs no model install
-//! (Apple Speech in the Mac app's engine). Rows match the Swift engine's
-//! `TimelineAnalysis.transcribeSpeech` byte for byte: one coverage row per
-//! file and per overlapping chunk, so a job resumed by either engine skips the
-//! chunks the other verified, and an unreadable chunk stays incomplete.
+//! Speech pass with an on-device recogniser needing no model install (Apple Speech in the Mac-hosted engine). One
+//! coverage row per file and per overlapping chunk, so a resumed job skips verified chunks and an unreadable chunk
+//! stays incomplete.
 
 use super::{
     blocking, interrupted_or, publish, running_source, set_progress, upsert_coverage, while_running, with_db,
@@ -18,15 +16,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub(super) trait Recognizer: Send + Sync + 'static {
-    /// Whether recognition can run now; may show the system permission prompt.
     fn available(&self) -> bool;
     fn model_version(&self) -> String;
-    /// Words of `[start, end)`, timestamps relative to `start`.
     fn transcribe(&self, source: &Path, start: f64, end: f64, cancel: &AtomicBool) -> Result<Vec<Segment>>;
 }
 
-/// Apple Speech runs in the Mac app's engine unless FILEID_TIMELINE_SPEECH=0,
-/// the Swift engine's switch.
+pub(super) const SPEECH_UNAVAILABLE_NOTE: &str = "Spoken words weren’t transcribed because Speech Recognition isn’t available to FileID. You can allow it in System Settings, under Privacy & Security, Speech Recognition.";
+
+/// On in the Mac-hosted engine unless FILEID_TIMELINE_SPEECH=0.
 pub(super) fn enabled() -> bool {
     cfg!(all(target_os = "macos", feature = "apple-adapters")) && std::env::var("FILEID_TIMELINE_SPEECH").as_deref() != Ok("0")
 }
@@ -55,17 +52,16 @@ pub(super) async fn transcribe(
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
     visual_share: f64,
-) -> Result<()> {
+) -> Result<Option<&'static str>> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     return transcribe_with(Arc::new(AppleSpeech), super::timeline_media::probe, id, job, cancel, sink, database, visual_share).await;
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     {
         let _ = (id, job, cancel, sink, database, visual_share);
-        Ok(())
+        Ok(None)
     }
 }
 
-/// What the speech pass needs to know about a video: the decoder's probe.
 pub(super) type Probe = fn(&Path, &AtomicBool) -> Result<super::video_export::AnalysisProbe>;
 
 #[allow(clippy::too_many_arguments)]
@@ -78,7 +74,8 @@ pub(super) async fn transcribe_with<R: Recognizer>(
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
     visual_share: f64,
-) -> Result<()> {
+) -> Result<Option<&'static str>> {
+    let mut speech_unavailable = false;
     let total = job.ids.len().max(1);
     for (index, &file_id) in job.ids.iter().enumerate() {
         let source = running_source(database, id, file_id).await?;
@@ -112,6 +109,7 @@ pub(super) async fn transcribe_with<R: Recognizer>(
             blocking(move || Ok(recognizer.available())).await?
         };
         if !available {
+            speech_unavailable = true;
             continue;
         }
         let mut complete = true;
@@ -158,10 +156,9 @@ pub(super) async fn transcribe_with<R: Recognizer>(
         })
         .await?;
     }
-    Ok(())
+    Ok(speech_unavailable.then_some(SPEECH_UNAVAILABLE_NOTE))
 }
 
-/// The Swift engine's `persistSpeechChunk`.
 fn persist_chunk(
     conn: &Connection,
     file_id: i64,
@@ -198,7 +195,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    /// Scripted words per chunk; `None` makes that chunk unreadable.
     struct Scripted {
         available: bool,
         chunks: Mutex<Vec<Option<Vec<Segment>>>>,
@@ -292,7 +288,7 @@ mod tests {
         assert_eq!(statuses.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), ["incomplete", "verified", "incomplete", "verified"]);
         let extract: (f64, f64) = database.lock().query_row(
             "SELECT start_seconds,end_seconds FROM catalog_coverage WHERE id LIKE '%:chunk:1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(extract, (43.5, 91.5), "chunk coverage spans the overlapping extract, as in the Swift engine");
+        assert_eq!(extract, (43.5, 91.5), "chunk coverage spans the overlapping extract");
 
         resumed.chunks.lock()[1] = Some(words("Blow out the candles", 5.0));
         transcribe_with(resumed.clone(), probe_100s, &id, &job, &cancel, &sink, &database, 0.8).await.unwrap();
@@ -311,7 +307,8 @@ mod tests {
         let job = start(&database.lock(), &id).unwrap().unwrap();
         let (sink, _events) = Sink::channel_for_test(1_024);
         let recognizer = Arc::new(Scripted { available: false, chunks: Mutex::new(vec![None; 3]), calls: 0.into(), pause: None });
-        transcribe_with(recognizer.clone(), probe_100s, &id, &job, &Arc::new(AtomicBool::new(false)), &sink, &database, 0.8).await.unwrap();
+        let note = transcribe_with(recognizer.clone(), probe_100s, &id, &job, &Arc::new(AtomicBool::new(false)), &sink, &database, 0.8).await.unwrap();
+        assert_eq!(note, Some(SPEECH_UNAVAILABLE_NOTE));
         assert_eq!(recognizer.calls.load(Ordering::SeqCst), 0);
         let coverage = rows(&database, "SELECT id,status FROM catalog_coverage WHERE id LIKE 'speech-coverage:%'");
         assert_eq!(coverage.len(), 1);

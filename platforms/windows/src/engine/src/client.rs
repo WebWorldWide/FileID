@@ -56,7 +56,6 @@ pub fn locate_engine() -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
-/// Spawn the engine with piped stdin/stdout and the given stderr disposition.
 pub fn spawn(engine: &Path, envs: &[(&str, &OsStr)], stderr: Stdio) -> std::io::Result<Child> {
     let mut command = Command::new(engine);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr);
@@ -221,7 +220,7 @@ pub fn drive_scan<R: Read, W: Write>(
     match (scan, read) {
         (Some(_), _) => ScanOutcome::Error {
             kind: "face_clustering_aborted".to_string(),
-            message: "engine exited before face clustering completed".to_string(),
+            message: "FileID’s helper stopped before it finished grouping faces. Press Group faces in People to try again.".to_string(),
         },
         (None, Err(error)) => ScanOutcome::Error {
             kind: "engine_output_error".to_string(),

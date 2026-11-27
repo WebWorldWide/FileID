@@ -1,6 +1,5 @@
 //! Final Restructure stage: keep what the user already organized.
-//! Port of macOS `RestructureRespect.swift` (see shared/docs/RESTRUCTURE.md,
-//! 2026-10-15). Files in named folders stay; no move crosses events or lands in
+//! See shared/docs/RESTRUCTURE.md. Files in named folders stay; no move crosses events or lands in
 //! another format's folder; folder names never come from camera filenames or
 //! tag identifiers; misfiled RAW/JPEG/video files move to their sibling format
 //! folder; loose files captured during an event join it.
@@ -28,14 +27,13 @@ const GENERIC_FOLDERS: &[&str] = &[
     "downloads", "downloaded", "new folder", "untitled folder", "untitled", "temp", "tmp", "misc",
     "miscellaneous", "other", "others", "stuff", "things", "files", "unsorted", "desktop", "dump", "inbox",
     "to sort", "to-sort", "import", "imports", "camera uploads", "dcim", "export", "exports", "screenshots",
-    "screen shots",
+    "screen shots", "lib", "photo library", "camera roll",
 ];
 
 pub fn kill_switch_off() -> bool {
     std::env::var("FILEID_RESTRUCTURE_RESPECT").map(|v| v == "0").unwrap_or(false)
 }
 
-/// Generic or camera-generated folder names ("DCIM", "100MSDCF", "New Folder 3").
 pub fn is_generic_folder_name(raw: &str) -> bool {
     let name = raw.trim().to_lowercase();
     if name.is_empty() || GENERIC_FOLDERS.contains(&name.as_str()) {
@@ -106,7 +104,6 @@ pub fn fits(file: FormatRole, folder: Option<FormatRole>) -> bool {
     }
 }
 
-/// Folder names between the library root and the file, outermost first.
 pub fn components(path: &Path, root: &Path) -> Vec<String> {
     let Ok(relative) = path.strip_prefix(root) else { return Vec::new() };
     let mut parts: Vec<String> =
@@ -123,7 +120,6 @@ pub fn event_root(path: &Path, root: &Path) -> Option<String> {
     components(path, root).into_iter().next()
 }
 
-/// A camera filename stem or a raw tag identifier is not a folder name.
 pub fn is_usable_folder_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.chars().count() < 3 || trimmed.contains('_') {
@@ -206,7 +202,6 @@ pub fn is_format_correction(m: &ProposedMove, kind: FileKind, root: &Path) -> bo
     destination.is_some() && !fits(role, source) && fits(role, destination)
 }
 
-/// RAW in "JPEGs" (or the reverse) → sibling folder for its format.
 pub fn format_corrections(files: &[FileForClassify], root: &Path) -> Vec<ProposedMove> {
     let mut siblings: HashMap<PathBuf, Vec<(String, FormatRole)>> = HashMap::new();
     for f in files {
@@ -282,8 +277,8 @@ where
     let mut loose: Vec<(&FileForClassify, f64)> = files
         .iter()
         .filter(|f| matches!(f.kind, FileKind::Image | FileKind::Video) && !is_organized(&f.source, root))
-        .map(|f| (f, f.created_unix.unwrap_or(f.modified_unix)))
-        .filter(|(_, t)| *t > 0.0)
+        .map(|f| (f, f.date_unix()))
+        .filter(|(_, t)| *t >= super::restructure::MIN_PLAUSIBLE_UNIX)
         .collect();
     loose.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
     let mut groups: Vec<Vec<(&FileForClassify, f64)>> = Vec::new();
@@ -344,8 +339,8 @@ pub fn event_spans(files: &[FileForClassify], root: &Path) -> Vec<EventSpan> {
         if is_generic_folder_name(top) {
             continue;
         }
-        let t = f.created_unix.unwrap_or(f.modified_unix);
-        if t > 0.0 {
+        let t = f.date_unix();
+        if t >= super::restructure::MIN_PLAUSIBLE_UNIX {
             times.entry(top.clone()).or_default().push(t);
         }
         if folders.last().and_then(|n| folder_role(n)).is_some()
@@ -383,8 +378,11 @@ pub fn event_spans(files: &[FileForClassify], root: &Path) -> Vec<EventSpan> {
 }
 
 pub fn event_destination(f: &FileForClassify, spans: &[EventSpan]) -> Option<PathBuf> {
-    let t = f.created_unix.unwrap_or(f.modified_unix);
-    if t <= 0.0 {
+    if !matches!(f.kind, FileKind::Image | FileKind::Video) {
+        return None;
+    }
+    let t = f.date_unix();
+    if t < super::restructure::MIN_PLAUSIBLE_UNIX {
         return None;
     }
     let slack = 3.0 * 3_600.0;
@@ -405,8 +403,6 @@ pub fn event_destination(f: &FileForClassify, spans: &[EventSpan]) -> Option<Pat
     Some(folder.join(f.source.file_name()?))
 }
 
-/// Applies the stage to a full proposal set. Returns the kept/added moves and
-/// the source folders that stay untouched (reported as Keep).
 pub fn apply(proposed: Vec<ProposedMove>, files: &[FileForClassify], root: &Path) -> (Vec<ProposedMove>, HashSet<PathBuf>) {
     let kinds: HashMap<i64, &FileForClassify> = files.iter().map(|f| (f.file_id, f)).collect();
     let spans = event_spans(files, root);
@@ -571,6 +567,20 @@ mod tests {
         assert_eq!(event_destination(&loose, &spans), Some(Path::new(ROOT).join("Kyle Baseball Game 9-19-26/Photos/RAWs/D5.ARW")));
         let old = file(98, "Downloads/old.JPG", FileKind::Image, Some(day - 200.0 * 86_400.0));
         assert_eq!(event_destination(&old, &spans), None);
+    }
+
+    #[test]
+    fn a_pdf_or_song_made_during_an_event_is_not_filed_into_the_photo_event() {
+        let day = 1_790_000_000.0;
+        let files: Vec<_> = (0..6)
+            .map(|i| file(i, &format!("Kyle Baseball Game 9-19-26/Photos/RAWs/K{i}.ARW"), FileKind::Image, Some(day + i as f64 * 600.0)))
+            .collect();
+        let spans = event_spans(&files, Path::new(ROOT));
+        for (name, kind) in [("Downloads/receipt.pdf", FileKind::Pdf), ("Downloads/song.m4a", FileKind::Audio), ("Downloads/notes.docx", FileKind::Doc)] {
+            assert_eq!(event_destination(&file(90, name, kind, Some(day + 1_200.0)), &spans), None, "{name}");
+        }
+        let (moves, _) = apply(vec![mv(91, "Downloads/receipt.pdf", "Documents/receipt.pdf")], &[file(91, "Downloads/receipt.pdf", FileKind::Pdf, Some(day + 1_200.0))], Path::new(ROOT));
+        assert!(moves.iter().all(|m| !m.destination.starts_with(Path::new(ROOT).join("Kyle Baseball Game 9-19-26"))));
     }
 
     #[test]

@@ -70,8 +70,13 @@ package enum DocumentKeywords {
                 if words.count >= 3 { break }
             }
         }
-        guard words.count >= 3 else { return nil }
-        return DeepAnalyze.sanitize(filename: words.prefix(5).joined(separator: "-"))
+        // The filename sanitizer keeps ASCII only and would split "Zürich" into "z-rich": fold accents first and drop any word that is still not plain ASCII.
+        let plain = words.compactMap { word -> String? in
+            let folded = word.folding(options: .diacriticInsensitive, locale: nil)
+            return folded.unicodeScalars.allSatisfy { $0.isASCII } ? folded : nil
+        }
+        guard plain.count >= 3 else { return nil }
+        return DeepAnalyze.sanitize(filename: plain.prefix(5).joined(separator: "-"))
     }
 
     private static func splitIntoPhrases(_ text: String) -> [[String]] {

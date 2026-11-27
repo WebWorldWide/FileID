@@ -1,11 +1,6 @@
 import SwiftUI
 
-/// Nested value types for SankeyFlowView's layout. Lives in a sibling
-/// extension file so the main `SankeyFlowView.swift` focuses on the View
-/// body + drawing + hit-testing, and the layout primitives are easy to
-/// find. Public access shape (`SankeyFlowView.Layout`, `SankeyFlowView.Node`,
-/// `SankeyFlowView.Flow`, `SankeyFlowView.Slot`) is unchanged — Swift
-/// resolves nested types across all extensions of the parent type.
+/// Nested layout value types for SankeyFlowView, kept in this extension file so the view file stays on body, drawing and hit-testing.
 extension SankeyFlowView {
     struct Layout {
         var sources: [Node]
@@ -18,9 +13,7 @@ extension SankeyFlowView {
         var destinationsForSource: [String: Set<String>]
         var sourcesForDestination: [String: Set<String>]
         var nodesByOutcome: [RestructureOutcome: Set<String>]
-        /// Long-tail source folder paths that were collapsed into the
-        /// "+ N more folders" rollup node. Tapping the rollup drills
-        /// down into these.
+        /// Long-tail source folder paths collapsed into the "+ N more folders" node.
         var rollupSourceFolders: [String]
         var rollupDestBuckets: [String]
         var isPopulated: Bool
@@ -29,6 +22,28 @@ extension SankeyFlowView {
         static func folderCount(nodes: Int, rolledUp: Int) -> Int { rolledUp == 0 ? nodes : nodes - 1 + rolledUp }
         var sourceFolderCount: Int { Self.folderCount(nodes: sources.count, rolledUp: rollupSourceFolders.count) }
         var destinationFolderCount: Int { Self.folderCount(nodes: destinations.count, rolledUp: rollupDestBuckets.count) }
+
+        /// The node a source folder is drawn in: its own, or the rollup when it fell in the long tail.
+        func sourceNodeID(forFolder folder: String) -> String { srcSlots["src:\(folder)"] != nil ? "src:\(folder)" : SankeyFlowView.otherSourceID }
+        func destNodeID(forBucket bucket: String) -> String { dstSlots["dst:\(bucket)"] != nil ? "dst:\(bucket)" : SankeyFlowView.otherDestID }
+
+        /// The ribbons a hover traces: the folder's or bucket's own flows, the flows of an outcome, or the single hovered ribbon.
+        func highlightedFlowIDs(for context: RestructureHoverContext?) -> Set<String> {
+            switch context {
+            case .none:
+                return []
+            case .flow(let folder, let bucket)?:
+                return Set(flows.filter { $0.sourceFolder == folder && $0.destBucket == bucket }.map(\.id))
+            case .sourceFolder(let folder)?:
+                let node = sourceNodeID(forFolder: folder)
+                return Set(flows.filter { $0.sourceID == node }.map(\.id))
+            case .destBucket(let bucket)?:
+                let node = destNodeID(forBucket: bucket)
+                return Set(flows.filter { $0.destID == node }.map(\.id))
+            case .outcome(let outcome)?:
+                return Set(flows.filter { $0.outcomes.contains(outcome) }.map(\.id))
+            }
+        }
 
         static let empty = Layout(
             sources: [], destinations: [], flows: [],
@@ -61,6 +76,10 @@ extension SankeyFlowView {
         let destBucket: String
         let tint: Color
         let count: Int
+        /// What the ribbon's ends are called: the folder, or "N other folders" when an end is the rolled-up long tail.
+        var sourceName: String = ""
+        var destName: String = ""
+        var outcomes: Set<RestructureOutcome> = []
     }
 
     struct Slot: Hashable {

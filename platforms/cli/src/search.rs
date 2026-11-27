@@ -1,14 +1,4 @@
-//! `fileid search <query>` — FTS keyword search (model-free).
-//!
-//! Matches the engine's `doc_fts` (document text) and `ocr_fts` (image OCR
-//! text) FTS5 indexes, plus a filename substring fallback.
-//!
-//! `--similar <path-or-id>` is the visual / semantic nearest-neighbor path: it
-//! reads the seed file's stored CLIP image embedding and ranks every other
-//! embedded file by cosine similarity — the same `clip_embeddings` the engine's
-//! "Find similar" action uses. Those embeddings are written only by a full
-//! engine scan (`scan --models` / desktop); on a model-free library the command
-//! reports that none are present.
+//! `fileid search`: model-free FTS keyword search over the engine's `doc_fts` and `ocr_fts` indexes, plus a filename fallback. `--similar` ranks CLIP embeddings, which only a full engine scan writes.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -16,9 +6,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::context::{
-    Ctx, display_path, escape_like, file_size_i64, print_json, resolve_file_id, terminal_text,
-};
+use crate::context::{Ctx, display_path, escape_like, file_size_i64, print_json, resolve_file_id};
 
 struct Hit {
     id: i64,
@@ -27,9 +15,7 @@ struct Hit {
     size: i64,
     source: &'static str,
     snippet: Option<String>,
-    /// Rank position within this hit's source tier (0 = best). The FTS queries
-    /// `ORDER BY rank`, so capturing the row index preserves relevance order
-    /// through the id-keyed dedup map and the truncation to `limit`.
+    /// Rank within this hit's source tier (0 = best), so relevance order survives the id-keyed dedup.
     ordinal: usize,
 }
 
@@ -85,8 +71,7 @@ pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> 
     let conn = fileid_engine::db::open_read(&ctx.db)?;
     let fts_expr = fileid_engine::read::text::fts_phrase_query(raw);
 
-    // id → Hit, insertion order preserved within source tier by BTreeMap on id;
-    // we re-sort by source tier for display so content matches lead.
+    // Re-sort by source tier so content matches lead.
     let mut hits: BTreeMap<i64, Hit> = BTreeMap::new();
 
     if !fts_expr.is_empty() {
@@ -188,9 +173,7 @@ fn collect_filename(
     limit: usize,
     out: &mut BTreeMap<i64, Hit>,
 ) -> Result<()> {
-    // Escape LIKE metacharacters so a literal `%` or `_` in the query matches
-    // itself instead of acting as a wildcard. Lowercase first (to match
-    // `lower(path_text)`), then escape — the escape `\` is added last.
+    // Escape LIKE metacharacters so a literal `%` or `_` matches itself; lowercase first to match `lower(path_text)`.
     let like = format!("%{}%", escape_like(&raw.to_lowercase()));
     let mut stmt = conn.prepare(
         "SELECT id, path_text, kind, size_bytes FROM files \
@@ -407,11 +390,8 @@ fn absent(ctx: &Ctx, kind: &str, msg: &str, seed_id: Option<i64>) -> Result<()> 
             "message": msg,
             "seedId": seed_id,
         }));
-    } else {
-        println!("{}", ctx.bold("Similarity search unavailable."));
-        println!("  {}.", terminal_text(msg));
     }
-    Ok(())
+    anyhow::bail!("similarity search unavailable: {msg}")
 }
 
 #[cfg(test)]

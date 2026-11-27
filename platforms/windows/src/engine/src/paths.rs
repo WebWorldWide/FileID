@@ -1,29 +1,15 @@
-//! Per-OS state directory layout.
-//!
-//! - Windows: `%LOCALAPPDATA%\FileID\` (mirror of macOS `AppSupportPath.swift`).
+//! Per-OS state directory layout; never transmitted off-device.
+//! - Windows: `%LOCALAPPDATA%\FileID\` (the Mac app uses `~/Library/Application Support/FileID/`).
 //! - Linux/BSD, and macOS for the CLI/TUI: `$XDG_DATA_HOME/FileID/` → `~/.local/share/FileID/`.
-//! - macOS, the engine the app hosts (`apple-adapters` builds only):
-//!   `~/Library/Application Support/FileID/` (inside the container when
-//!   sandboxed, where `HOME` is the container), or the folder of
-//!   `FILEID_DATABASE_PATH` when set, exactly like the Swift engine.
-//!
-//! The engine writes only inside these directories; the app reads from
-//! the same paths. None of these are ever transmitted off-device.
+//! - macOS app-hosted engine (`apple-adapters`): `~/Library/Application Support/FileID/` (the container when sandboxed),
+//!   or the folder of `FILEID_DATABASE_PATH` when set.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Root state directory.
-///
-/// On Windows we honor `LOCALAPPDATA` first (the canonical envvar); fall
-/// back to `%USERPROFILE%\AppData\Local\FileID` if it's missing.
-///
-/// On non-Windows platforms we follow the XDG Base Directory spec:
-/// `XDG_DATA_HOME` (defaults to `~/.local/share`) joined with `FileID`.
-/// macOS-native deployments override XDG_DATA_HOME → `~/Library/Application Support`
-/// at the system level if you set it, but otherwise default to the
-/// XDG path which is also the natural location for a cross-platform engine.
+/// Windows honors `LOCALAPPDATA`, falling back to `%USERPROFILE%\AppData\Local\FileID`; elsewhere `XDG_DATA_HOME`
+/// (default `~/.local/share`) joined with `FileID`.
 #[cfg(windows)]
 fn resolve_root() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("LOCALAPPDATA") && !s.is_empty() {
@@ -35,13 +21,10 @@ fn resolve_root() -> Result<PathBuf> {
     anyhow::bail!("could not resolve %LOCALAPPDATA% or %USERPROFILE% for FileID state dir")
 }
 
-/// True for the engine the macOS app hosts (`fileidd`). Its state is the
-/// Swift engine's; CLI and TUI builds never enable `apple-adapters`, so their
-/// state never merges with the app's.
+/// CLI and TUI builds never enable `apple-adapters`, so their state never merges with the Mac app's.
 pub const APP_HOSTED: bool = cfg!(all(target_os = "macos", feature = "apple-adapters"));
 
-/// The app-hosted engine's explicit database: `FILEID_DATABASE_PATH` (the
-/// Swift engine's variable), then `FILEID_DB`. Empty values are ignored.
+/// `FILEID_DATABASE_PATH`, then `FILEID_DB`; empty values are ignored.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 fn app_database_override() -> Option<PathBuf> {
     ["FILEID_DATABASE_PATH", "FILEID_DB"]
@@ -51,8 +34,8 @@ fn app_database_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// App-hosted state root. An explicit database keeps every journal, plan and
-/// log beside it, so an isolated engine never touches the user's library.
+/// An explicit database keeps every journal, plan and log beside it, so an isolated engine never touches the user's
+/// library.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 fn resolve_app_root() -> Result<PathBuf> {
     if let Some(database) = app_database_override() {
@@ -90,17 +73,14 @@ pub fn root() -> Result<PathBuf> {
     resolve_root()
 }
 
-/// Unit tests never write the owner's real state folder: undo journals,
-/// recovery sidecars and logs go to a per-process temporary root.
+/// Unit tests never write the owner's real state folder.
 #[cfg(test)]
 pub fn root() -> Result<PathBuf> {
     Ok(std::env::temp_dir().join(format!("fileid-engine-tests-{}", std::process::id())).join("FileID"))
 }
 
-/// Library database path. `FILEID_DB` is an explicit front-end/test override;
-/// empty values are ignored so a misconfigured shell never resolves to the
-/// current working directory. Desktop apps leave it unset and retain the
-/// canonical per-OS path.
+/// `FILEID_DB` is an explicit front-end/test override; empty values are ignored so a misconfigured shell never resolves
+/// to the working directory.
 pub fn db_path() -> Result<PathBuf> {
     if APP_HOSTED && let Some(path) = app_database_override() {
         return Ok(path);
@@ -111,17 +91,10 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(root()?.join("fileid.sqlite"))
 }
 pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
-// `models_dir` is the single resolution point for every model artifact — the
-// registry download dests, the install sentinels, and the per-model loaders all
-// go through it — so it's the one place that has to know where weights live.
-//
-/// `FILEID_MODELS_DIR` overrides the per-OS default on every platform (highest
-/// priority). The cross-platform `fileid` CLI points it at the engine's OWN
-/// writable model dir ([`engine_models_dir`]) so `fileid models download` writes
-/// the engine's ONNX/GGUF weights somewhere it can also read for `scan --models`
-/// — never into the macOS desktop app's read-only CoreML dir — and the engine
-/// it spawns inherits the same path. Unset → the per-OS [`default_models_dir`]
-/// below is byte-identical to before, so the desktop apps are unaffected.
+/// The single resolution point for every model artifact (registry destinations, install sentinels, per-model loaders).
+/// `FILEID_MODELS_DIR` overrides the per-OS default (highest priority). The `fileid` CLI points it at
+/// [`engine_models_dir`] so downloads never land in the macOS app's read-only CoreML dir and a spawned engine inherits
+/// the same path.
 pub fn models_dir() -> Result<PathBuf> {
     if let Some(over) = std::env::var_os("FILEID_MODELS_DIR")
         && !over.is_empty() {
@@ -130,56 +103,26 @@ pub fn models_dir() -> Result<PathBuf> {
     default_models_dir()
 }
 
-/// The engine's OWN writable model directory, ignoring both the
-/// `FILEID_MODELS_DIR` override and the macOS desktop-app preference: always
-/// `<root>/Models` (`%LOCALAPPDATA%\FileID\Models`, `$XDG_DATA_HOME/FileID/Models`,
-/// or `~/.local/share/FileID/Models` on a Mac). This is where the engine
-/// downloads + loads its ONNX/GGUF weights — distinct from the macOS Swift app's
-/// CoreML `~/Library/Application Support/FileID/Models`, which is read-only by
-/// contract. The CLI puts this value into `FILEID_MODELS_DIR` so every
-/// model-aware code path (and any spawned engine) agrees on it.
-///
-/// Used by the cross-platform `fileid` CLI (an external lib consumer); the
-/// engine binary itself never calls it.
+/// Always `<root>/Models`, ignoring `FILEID_MODELS_DIR` and the macOS desktop-app preference; distinct from the Mac
+/// app's read-only CoreML `~/Library/Application Support/FileID/Models`. The CLI exports it as `FILEID_MODELS_DIR`.
+/// Used by the CLI (an external lib consumer), never by the engine binary.
 pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-/// The engine's runtime-dependency directory: `<root>/runtime`.
-///
-/// On macOS this is where `fileid runtime install` (or the
-/// `shared/scripts/install_onnxruntime_macos.sh` script) drops
-/// `libonnxruntime.dylib` so the engine's `load-dynamic` ONNX Runtime build can
-/// `dlopen` it — `ort`'s `download-binaries` ships only a STATIC
-/// `libonnxruntime.a` for macOS arm64, so a load-dynamic build has no runtime
-/// library otherwise (see `shared/docs/RUNTIME.md` + `src/ort_runtime.rs`).
-/// Defined cross-platform so the path is named in one place; Windows resolves
-/// its ORT DLLs via the accelerator-pack pin in `main.rs` and Linux via the
-/// system / `download-binaries` path, so neither writes here today.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Nothing is installed here any more (tract is compiled in); the path stays so a data reset recognises it and keeps
+/// what a user put there.
+#[allow(dead_code)]
 pub fn runtime_dir() -> Result<PathBuf> { Ok(root()?.join("runtime")) }
 
 #[cfg(not(target_os = "macos"))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-/// macOS, `FILEID_MODELS_DIR` UNSET only: prefer the desktop (SwiftUI) app's
-/// model directory `~/Library/Application Support/FileID/Models` when it exists —
-/// that's where the Swift front-end installs weights — else the XDG default
-/// (`~/.local/share/FileID/Models`). Used when probing for the app's already-
-/// installed weights; READ-only by construction (scanning reads here; this path
-/// never writes into the app dir).
-///
-/// The cross-platform `fileid` CLI and `fileid-tui` instead pin
-/// `FILEID_MODELS_DIR` to [`engine_models_dir`] (the engine's OWN writable XDG
-/// `~/.local/share/FileID/Models`), so `models_dir` returns the override and
-/// never reaches this branch: `fileid models download --all` (or the TUI's
-/// Settings `D`) installs the engine's ONNX/GGUF weights there, and full-ML
-/// `scan --models` then works on macOS too — no desktop app required (though a
-/// desktop-app scan remains a valid way to populate a library). Windows/Linux
-/// are unaffected — the `cfg(not(macos))` definition above is the byte-for-byte
-/// original.
+/// macOS with `FILEID_MODELS_DIR` UNSET only: prefer the Mac app's `~/Library/Application Support/FileID/Models` when
+/// it exists, else the XDG default. Read-only by construction; the CLI/TUI pin `FILEID_MODELS_DIR` to
+/// [`engine_models_dir`] so they never reach this branch.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-#[cfg(all(target_os = "macos", not(feature = "apple-adapters")))]
+#[cfg(all(target_os = "macos", not(feature = "apple-adapters"), not(test)))]
 fn default_models_dir() -> Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         let app_models =
@@ -190,21 +133,23 @@ fn default_models_dir() -> Result<PathBuf> {
     }
     Ok(root()?.join("Models"))
 }
-/// ONNX weights the Mac app installs under other names: same manifest
-/// artifact, same SHA-256. Rust-layout path first, Swift-layout path second,
-/// both relative to the models folder.
+
+#[cfg(all(target_os = "macos", not(feature = "apple-adapters"), test))]
+fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
+
+/// ONNX weights the Mac app installs under other names (same manifest artifact, same SHA-256): Rust-layout path,
+/// Mac-layout path, both relative to the models folder.
 pub const SWIFT_MODEL_LAYOUT: &[(&str, &str)] = &[
     ("sface/face_recognition_sface_2021dec.onnx", "face_recognition_sface_2021dec.onnx"),
     ("mobileclip/mobileclip_s2_image.onnx", "mobileclip_image/clip_vitb32_image.onnx"),
 ];
 
-/// `path` when it exists. On macOS, a missing Rust-layout model file falls
-/// back to the Swift app's copy of the same artifact in the same models
-/// folder, so models installed once serve both engines.
+/// On macOS a model file missing from the layout asked for falls back to the same artifact under the other layout
+/// (engine or Mac app), so models installed once serve both.
 pub fn installed_model_file(path: &Path) -> PathBuf {
     if cfg!(target_os = "macos")
         && !path.exists()
-        && let Some(alias) = swift_layout_alias(path)
+        && let Some(alias) = other_layout_alias(path)
         && alias.is_file()
     {
         return alias;
@@ -212,7 +157,7 @@ pub fn installed_model_file(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn swift_layout_alias(path: &Path) -> Option<PathBuf> {
+fn other_layout_alias(path: &Path) -> Option<PathBuf> {
     let root = models_dir().ok()?;
     let relative = path
         .strip_prefix(&root)
@@ -223,8 +168,12 @@ fn swift_layout_alias(path: &Path) -> Option<PathBuf> {
         .join("/");
     SWIFT_MODEL_LAYOUT
         .iter()
-        .find(|(rust, _)| *rust == relative)
-        .map(|(_, swift)| swift.split('/').fold(root, |path, part| path.join(part)))
+        .find_map(|&(rust, swift)| match relative.as_str() {
+            name if name == rust => Some(swift),
+            name if name == swift => Some(rust),
+            _ => None,
+        })
+        .map(|other| other.split('/').fold(root, |path, part| path.join(part)))
 }
 
 pub fn hf_cache_dir() -> Result<PathBuf> { Ok(models_dir()?.join("HuggingFace")) }
@@ -234,12 +183,10 @@ pub fn restructure_plans_dir() -> Result<PathBuf> { Ok(root()?.join("restructure
 pub fn restructure_shortcut_undo_dir() -> Result<PathBuf> {
     Ok(root()?.join("restructure_shortcut_undo"))
 }
-/// The C# app's settings file (separate from the engine's probe-cache
-/// `settings.json`). Read-only from the engine; the app owns writes.
+/// Separate from the engine's `settings.json`; read-only from the engine, the app owns writes.
 pub fn app_settings_path() -> Result<PathBuf> { Ok(root()?.join("app-settings.json")) }
 pub fn trash_log_path() -> Result<PathBuf> { Ok(root()?.join("trash_log.json")) }
 
-/// Create the full state-directory layout. Idempotent; safe on every launch.
 pub fn ensure_state_dirs() -> Result<PathBuf> {
     let root = root()?;
     for sub in [
@@ -277,10 +224,8 @@ mod tests {
         }
     }
 
-    /// Regression: a set-but-EMPTY `%LOCALAPPDATA%` must not collapse to the
-    /// CWD-relative path `FileID`; it must fall through to `%USERPROFILE%`,
-    /// matching the non-Windows empty-`$XDG_DATA_HOME` guard. (An UNSET var is a
-    /// distinct, already-correct case: `var()` returns `Err` and falls through.)
+    /// A set-but-EMPTY `%LOCALAPPDATA%` must fall through to `%USERPROFILE%`, not collapse to the CWD-relative
+    /// `FileID`.
     #[cfg(windows)]
     #[test]
     fn root_empty_localappdata_falls_back_to_userprofile() {
@@ -309,8 +254,8 @@ mod tests {
         assert_eq!(unset.unwrap(), want);
     }
 
-    /// The non-Windows reference behavior the Windows guard now mirrors: empty
-    /// `$XDG_DATA_HOME` falls back to `$HOME`, never to a CWD-relative path.
+    /// The non-Windows behavior the Windows guard mirrors: empty `$XDG_DATA_HOME` falls back to `$HOME`, never a
+    /// CWD-relative path.
     #[cfg(all(not(windows), not(all(target_os = "macos", feature = "apple-adapters"))))]
     #[test]
     fn root_empty_xdg_data_home_falls_back_to_home() {
@@ -340,8 +285,12 @@ mod tests {
     fn db_override_is_exact_and_empty_value_falls_back() {
         let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("FILEID_DB");
+        let saved_app = std::env::var_os("FILEID_DATABASE_PATH");
         let default = {
-            unsafe { std::env::remove_var("FILEID_DB") };
+            unsafe {
+                std::env::remove_var("FILEID_DB");
+                std::env::remove_var("FILEID_DATABASE_PATH");
+            }
             db_path().unwrap()
         };
 
@@ -352,10 +301,9 @@ mod tests {
         unsafe { std::env::set_var("FILEID_DB", "") };
         assert_eq!(db_path().unwrap(), default);
         restore("FILEID_DB", saved);
+        restore("FILEID_DATABASE_PATH", saved_app);
     }
 
-    /// The engine the Mac app hosts keeps state where the Swift engine does:
-    /// beside an explicit database, else in Application Support.
     #[test]
     fn app_hosted_root_matches_the_swift_engine() {
         let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -389,8 +337,23 @@ mod tests {
         }
     }
 
-    /// Models the Mac app installed under its own names serve the Rust engine
-    /// when the Rust-layout file is missing; the Rust layout wins when present.
+    #[test]
+    fn rust_model_layout_is_found_when_the_swift_path_is_asked_for_on_macos() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let dir = std::env::temp_dir().join(format!("fileid-rust-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sface")).unwrap();
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+        let rust = dir.join("sface").join("face_recognition_sface_2021dec.onnx");
+        let swift = dir.join("face_recognition_sface_2021dec.onnx");
+        std::fs::write(&rust, b"sface").unwrap();
+        let expected = if cfg!(target_os = "macos") { &rust } else { &swift };
+        assert_eq!(&installed_model_file(&swift), expected);
+        restore("FILEID_MODELS_DIR", saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn swift_model_layout_is_found_on_macos() {
         let _g = TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

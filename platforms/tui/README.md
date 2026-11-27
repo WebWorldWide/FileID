@@ -120,13 +120,7 @@ fileid models download mobileclip_s2 arcface
 ```
 
 On macOS these are the Rust engine's ONNX weights under its writable model
-directory; the native app's Core ML weights are separate. A Rust-engine scan on
-macOS also needs the one-time ONNX Runtime setup:
-
-```bash
-fileid runtime status
-fileid runtime install
-```
+directory; the native app's Core ML weights are separate.
 
 The engine executable is resolved from `$FILEID_ENGINE_BIN`, beside
 `fileid-tui`, the repository's engine build directories, and then `PATH`. An

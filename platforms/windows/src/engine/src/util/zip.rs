@@ -1,22 +1,14 @@
-//! Hardened zip extraction. Used by the prewarm flow for `.zip` downloads
-//! (llama.cpp runtime, Performance Packs). Files in nested folders inside
-//! the zip land under the same nested folders next to the zip.
+//! Hardened zip extraction for `.zip` downloads (llama.cpp runtime, Performance Packs).
 //!
-//! Hardened against:
-//! - **Zip slip** (entries with absolute / `..` paths). `enclosed_name()`
-//!   blocks `..`; we ALSO canonicalize-and-`starts_with`-check the
-//!   destination against the parent to catch any junction/symlink
-//!   traversal at the FS layer.
-//! - **Zip bombs** — caps total uncompressed bytes at 2 GiB and entry
-//!   count at 10,000.
-//! - **Symlink/special entries** — skipped (we only write regular files
-//!   and create directories).
+//! - **Zip slip**: `enclosed_name()` blocks `..`; the destination is also canonicalized and `starts_with`-checked
+//!   against the parent to catch junction/symlink traversal.
+//! - **Zip bombs**: caps total uncompressed bytes at 2 GiB and entry count at 10,000.
+//! - **Symlink/special entries** are skipped; only regular files and directories are written.
 
 use std::path::Path;
 
 use anyhow::Context;
 
-/// Extract every entry of `zip_path` into its parent directory.
 pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
     const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
     const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
@@ -60,8 +52,8 @@ fn extract_archive(
         );
     }
 
-    let mut total_bytes: u64 = 0;     // declared (central-directory) sizes
-    let mut total_written: u64 = 0;   // actual decompressed bytes written
+    let mut total_bytes: u64 = 0;
+    let mut total_written: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("zip entry")?;
         let name = entry
@@ -88,8 +80,7 @@ fn extract_archive(
                 max_entry_bytes
             );
         }
-        // Cheap early-out on an honest header; the AUTHORITATIVE cumulative cap
-        // is charged the ACTUAL decompressed bytes after the copy below (ENG-88).
+        // Cheap early-out on an honest header; the authoritative cap is charged the actual bytes after the copy.
         if total_bytes.saturating_add(entry_size) > max_bytes {
             anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", max_bytes);
         }
@@ -104,11 +95,8 @@ fn extract_archive(
             .create_new(true)
             .open(&dest)
             .with_context(|| format!("creating staged entry {}", dest.display()))?;
-        // Bound the ACTUAL decompressed output, not the attacker-controlled
-        // declared entry.size(): a lying central directory could otherwise
-        // make io::copy inflate far past the caps (zip bomb, ENG-88). The cap
-        // shrinks to the remaining cumulative budget; +1 so an entry exactly
-        // at the cap copies fully while an over-cap one is still detected.
+        // Bound the actual decompressed output, not the declared size, which a lying central directory controls. The extra
+        // byte lets an entry exactly at the cap copy fully while an over-cap one is still detected.
         let entry_cap = max_entry_bytes.min(max_bytes.saturating_sub(total_written));
         let mut limited = std::io::Read::take(&mut entry, entry_cap.saturating_add(1));
         let written = std::io::copy(&mut limited, &mut out)
@@ -194,7 +182,10 @@ where
     files.sort();
 
     for relative in &files {
-        ensure_real_destination_dirs(parent, relative.parent().unwrap_or_else(|| Path::new("")))?;
+        if let Err(error) = ensure_real_destination_dirs(parent, relative.parent().unwrap_or_else(|| Path::new(""))) {
+            let _ = std::fs::remove_dir_all(&backup);
+            return Err(error);
+        }
         match std::fs::symlink_metadata(parent.join(relative)) {
             Ok(metadata) if metadata.is_dir() => {
                 let _ = std::fs::remove_dir_all(&backup);
@@ -376,6 +367,22 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_destination_folder_leaves_no_backup_directory_behind() {
+        let temp = std::env::temp_dir().join(format!("fileid_zip_blocked_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("bin"), b"a file where a folder is needed").unwrap();
+        let zip = make_zip_with_entries(&temp, &[("bin/x.dll", b"x")]);
+        assert!(extract_into_parent(&zip).is_err());
+        let strays: Vec<String> = std::fs::read_dir(&temp)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".fileid-backup-"))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
     fn extracts_simple_zip() {
         let temp = std::env::temp_dir().join(format!(
             "fileid_zip_simple_{}",
@@ -515,20 +522,14 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&temp).unwrap();
-        // The zip crate's enclosed_name() should already block this — we
-        // assert it bails rather than landing the file outside `parent`.
         let zip = make_zip_with_entries(&temp, &[("../escape.txt", b"oops")]);
         let res = extract_into_parent(&zip);
         assert!(res.is_err(), "zip-slip path must be rejected");
         std::fs::remove_dir_all(&temp).ok();
     }
 
-    // Property tests prove the safety invariants of extract_into_parent
-    // on randomized inputs — every output file must land under `parent`,
-    // or the function must return Err. No panic, no escape, no leak.
     proptest::proptest! {
-        // Invariant: extract_into_parent never panics and never writes
-        // outside `parent`, regardless of entry name shape.
+        // Invariant: never panics, and every file lands under `parent` or the call returns Err.
         #[test]
         fn never_escapes_parent(
             names in proptest::collection::vec(
@@ -541,16 +542,8 @@ mod tests {
                 uuid::Uuid::new_v4()
             ));
             std::fs::create_dir_all(&temp).expect("temp dir");
-            // Dedupe input names — the zip crate rejects duplicate
-            // filenames at write time with `InvalidArchive("Duplicate
-            // filename")`. The proptest generator occasionally produces
-            // colliding strings (especially short 1-3 char names); when
-            // it does, `make_zip_with_entries` panics on `start_file`
-            // and the test reports as "failed" even though the safety
-            // invariant we're testing has nothing to do with dedup.
-            // Filter to a unique-by-name set BEFORE constructing the zip
-            // so we test the actual property: that extract_into_parent
-            // never lets a file escape its parent dir, for any valid zip.
+            // Dedupe names: the zip crate rejects duplicates at write time, and generator collisions would fail the
+            // test for a reason unrelated to the property.
             let mut seen = std::collections::HashSet::new();
             let unique_names: Vec<&str> = names
                 .iter()
@@ -565,10 +558,7 @@ mod tests {
                 unique_names.iter().map(|n| (*n, b"x" as &[u8])).collect();
             let zip = make_zip_with_entries(&temp, &entries);
             let parent_canon = std::fs::canonicalize(&temp).unwrap_or(temp.clone());
-            // The result is either Ok (every file written under parent)
-            // or Err (rejected before write). Either way: no escape.
             let _ = extract_into_parent(&zip);
-            // Walk `temp` and confirm every file is under parent_canon.
             for entry in walkdir::WalkDir::new(&temp).into_iter().flatten() {
                 if entry.file_type().is_file() {
                     let real = std::fs::canonicalize(entry.path())

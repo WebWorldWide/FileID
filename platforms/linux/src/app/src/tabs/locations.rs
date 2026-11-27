@@ -1,6 +1,4 @@
-// Settings → Locations (macOS `LocationsCard`): every folder or drive the
-// catalog has scanned and whether it is reachable now. An unplugged drive
-// reads OFFLINE and its catalog rows are kept.
+// An unplugged drive reads OFFLINE and its catalog rows are kept.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -137,6 +135,11 @@ impl Locations {
         if !root.online {
             title.append(&v3::pill("OFFLINE", Tone::Warning));
         }
+        let read_only = root.read_only == Some(true);
+        if read_only {
+            title.append(&v3::pill("READ-ONLY", Tone::Warning));
+            title.set_tooltip_text(Some("FileID can search these files but won't change them."));
+        }
         text.append(&title);
         let line = summary(root, now);
         text.append(&v3::label(&line, &["dim-label"]));
@@ -166,9 +169,10 @@ impl Locations {
         });
         row.append(&rescan);
         let spoken = format!(
-            "{}, {}, {line}",
+            "{}, {}{}, {line}",
             root.display,
-            if root.online { "online" } else { "offline" }
+            if root.online { "online" } else { "offline" },
+            if read_only { ", read-only" } else { "" }
         );
         row.update_property(&[gtk::accessible::Property::Label(&spoken)]);
         row
@@ -218,10 +222,12 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
         }
     });
     let rx = engine.borrow_mut().subscribe();
-    let weak = Rc::downgrade(&this);
+    let card_alive = card.downgrade();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
-            let Some(this) = weak.upgrade() else { break };
+            if card_alive.upgrade().is_none() {
+                break;
+            }
             let waiting = !this.request.borrow().is_empty();
             match &*event {
                 EngineState::ScanComplete(_) if this.list.is_mapped() => this.refresh(),
@@ -246,6 +252,47 @@ pub(super) fn build(engine: Engine) -> gtk::Widget {
 mod tests {
     use super::*;
 
+    fn descendants(widget: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            descendants(&current, found);
+            child = current.next_sibling();
+            found.push(current);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_card_fills_in_when_refresh_is_pressed() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let engine = Rc::new(RefCell::new(crate::engine_client::EngineClient::new()));
+        let card = build(engine);
+        let mut widgets = Vec::new();
+        descendants(&card, &mut widgets);
+        let refresh = widgets
+            .iter()
+            .find_map(|widget| widget.downcast_ref::<gtk::Button>().filter(|b| b.label().as_deref() == Some("Refresh")))
+            .expect("refresh button");
+        let status = widgets
+            .iter()
+            .find_map(|widget| widget.downcast_ref::<gtk::Label>().filter(|label| !label.is_visible()))
+            .expect("status label");
+        let list = card.last_child().expect("location list");
+
+        refresh.emit_clicked();
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !status.is_visible() && list.first_child().is_none() {
+            while context.pending() {
+                context.iteration(false);
+            }
+            assert!(std::time::Instant::now() < deadline, "the card never rendered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn root(count: i64, bytes: i64, last_scan_at: Option<f64>) -> LibraryRoot {
         LibraryRoot {
             id: 1,
@@ -258,6 +305,7 @@ mod tests {
             total_bytes: bytes,
             last_scan_at,
             last_status: None,
+            read_only: None,
         }
     }
 

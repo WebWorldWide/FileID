@@ -1,14 +1,10 @@
-//! Pure-Rust text extraction for plain-text + Office documents (txt, md,
-//! docx, pptx, xlsx) and — when the `pdf-analyze` feature is on — text-layer
-//! PDFs via pdfium. Image-only PDFs (no text layer) continue to flow through
-//! the existing `shell::ocr` path for OCR.
+//! Pure-Rust text extraction for plain-text and Office documents (txt, md, docx, pptx, xlsx) and, with the `pdf-analyze` feature, text-layer PDFs via pdfium. Image-only PDFs go through `shell::ocr`.
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// Soft cap on text extracted per file. 256 KB is plenty for keyword/NER
-/// extraction + a useful FTS5 snippet without bloating the DB on huge docs.
+/// Soft cap on text extracted per file: enough for keyword/NER extraction and a useful FTS5 snippet without bloating the DB.
 pub(crate) const MAX_TEXT_BYTES: usize = 256 * 1024;
 
 /// Hard cap on the RAW bytes decompressed from any single zip member
@@ -22,26 +18,14 @@ const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
 /// limits alone let many individually small slides form a ZIP bomb.
 const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Cap on the number of glob-matched members iterated (e.g. `ppt/slides/`
-/// slide parts). A crafted .pptx can list millions of `slideN.xml` entries; even
-/// with the per-member byte cap, sorting + parsing every one of them burns
-/// unbounded CPU on a decoder thread. No real presentation has tens of thousands
-/// of slides, and `out` saturates at MAX_TEXT_BYTES long before then, so a bound
-/// here is a pure DoS guard, never a correctness loss.
+/// Cap on glob-matched members iterated (e.g. `ppt/slides/`). A crafted .pptx can list millions of `slideN.xml` entries and sorting + parsing them burns unbounded CPU even with the per-member byte cap; `out` saturates at MAX_TEXT_BYTES long before any real deck reaches this, so it is a pure DoS guard.
 const MAX_GLOB_MEMBERS: usize = 5_000;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_CENTRAL_DIRECTORY_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Extract text from `path` based on extension. Returns `Ok(None)` when the
-/// extension is recognised-as-doc-but-unsupported (e.g. `.doc` legacy OLE)
-/// AND when the extension isn't a document at all — callers treat both as
-/// "no doc text" without distinguishing.
+/// Extracts text from `path` based on extension. `Ok(None)` for both unsupported document types (e.g. legacy `.doc`) and non-documents; callers don't distinguish.
 ///
-/// `bytes` is an optional pre-read content buffer (decoder thread reads the
-/// file once for hashing + extraction on small files). When supplied, the
-/// zip / text path skips a second file open; when `None`, the path-based
-/// reader is used. PDF always uses the path because pdfium owns the file
-/// handle and typical PDFs blow past the pre-read size cap.
+/// `bytes` is an optional pre-read buffer (the decoder thread reads small files once for hashing and extraction), sparing the zip/text paths a second open. PDF always uses the path because pdfium owns the file handle.
 pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String>> {
     let ext = path
         .extension()
@@ -49,7 +33,7 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = match ext.as_str() {
-        // Plain text: notes + source code + prose markup (lockstep with macOS FileTypes.code).
+        // Plain text: notes + source code + prose markup.
         "txt" | "md" | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
         | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
         | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua" | "dart"
@@ -59,8 +43,6 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         }
         "html" | "htm" => Some(html_to_text(&read_plain(path, bytes)?)),
         "docx" => Some(extract_zip_xml(path, bytes, &["word/document.xml"], &["w:t"])?),
-        // OpenDocument Text: content.xml, paragraph/heading/span runs (text:p / text:h /
-        // text:span). Near-identical to the macOS textutil odt path (same words).
         "odt" => Some(extract_zip_xml(path, bytes, &["content.xml"], &["p", "h", "span"])?),
         "pptx" => Some(extract_zip_xml_glob(path, bytes, "ppt/slides/slide", ".xml", &["a:t"])?),
         "xlsx" => Some(extract_zip_xml(path, bytes, &["xl/sharedStrings.xml"], &["t"])?),
@@ -85,8 +67,6 @@ fn truncate_to_max(mut t: String) -> String {
     t
 }
 
-/// Visible text of an HTML page: tags removed, script/style/head bodies dropped, common
-/// entities decoded, whitespace collapsed.
 fn html_to_text(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len() / 2);
@@ -98,7 +78,11 @@ fn html_to_text(html: &str) -> String {
                 i += rest.find("-->").map_or(rest.len(), |end| end + 3);
                 continue;
             }
-            let skip = ["script", "style", "head"].iter().find(|tag| lower[i..].starts_with(&format!("<{tag}")));
+            let skip = ["script", "style", "head"].iter().find(|tag| {
+                let open = format!("<{tag}");
+                lower[i..].starts_with(&open)
+                    && lower.as_bytes().get(i + open.len()).is_none_or(|b| matches!(b, b'>' | b'/') || b.is_ascii_whitespace())
+            });
             if let Some(tag) = skip {
                 let close = format!("</{tag}");
                 i += lower[i..].find(&close).map_or(rest.len(), |end| end + rest[end..].find('>').map_or(rest.len() - end, |gt| gt + 1));
@@ -124,16 +108,10 @@ fn html_to_text(html: &str) -> String {
 
 fn read_plain(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
     if let Some(b) = bytes {
-        // Lossy decode keeps the existing semantics — `read_to_string` would
-        // reject invalid UTF-8 with an error, and a single bad byte in a 1 MB
-        // text file shouldn't sink the whole extraction. The keyword extractor
-        // and FTS5 snippets can handle U+FFFD replacement chars fine.
+        // Lossy decode: a single bad byte in a large text file shouldn't sink the whole extraction, and keyword extraction and FTS5 snippets handle U+FFFD fine.
         return Ok(String::from_utf8_lossy(b).into_owned());
     }
-    // Read at most MAX_TEXT_BYTES (+ a small margin) instead of slurping
-    // the whole file and truncating afterward — a multi-GB .txt/.md must not
-    // be fully materialized just to keep 256 KB. Lossy decode matches the
-    // bytes=Some path above.
+    // Read at most MAX_TEXT_BYTES (+ a small margin) rather than slurping a multi-GB .txt/.md; lossy decode matches the bytes=Some path.
     let p = crate::util::path_safety::to_extended_length(path);
     let file = std::fs::File::open(&p).with_context(|| format!("open text {}", p.display()))?;
     let mut buf = Vec::with_capacity(MAX_TEXT_BYTES.min(64 * 1024));
@@ -143,18 +121,13 @@ fn read_plain(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// PDF text extraction via the same `pdfium-render` binding `deep_analyze`
-/// uses for rasterization. Pages are concatenated with newlines; image-only
-/// PDFs (no text layer) return Ok("") — the OCR path picks them up.
 #[cfg(feature = "pdf-analyze")]
 fn extract_pdf_text(path: &Path) -> Result<String> {
     use pdfium_render::prelude::Pdfium;
 
     let p = crate::util::path_safety::to_extended_length(path);
-    // Pdfium::default() unwraps the bind result and panics on a missing
-    // pdfium.dll — taking the entire engine down per OS LoadLibrary error
-    // 126. Bind explicitly so a missing/broken DLL becomes a per-file Err
-    // that the caller (extract() above) silently turns into "no PDF text".
+    // Pdfium::default() panics on a missing pdfium.dll. Bind explicitly so a
+    // missing or broken DLL becomes a per-file Err, which extract() treats as "no PDF text".
     let bindings = Pdfium::bind_to_system_library()
         .map_err(|e| anyhow::anyhow!("pdfium bind: {e}"))?;
     let pdfium = Pdfium::new(bindings);
@@ -176,7 +149,6 @@ fn extract_pdf_text(path: &Path) -> Result<String> {
     Ok(out)
 }
 
-/// Pull text out of named members in a zip archive.
 fn extract_zip_xml(
     path: &Path,
     bytes: Option<&[u8]>,
@@ -221,10 +193,7 @@ fn extract_zip_xml_inner<R: Read + Seek>(
     Ok(out)
 }
 
-/// Read a single zip member into a String, hard-bounded by `MAX_MEMBER_BYTES`
-/// so a zip bomb (a member that decompresses to gigabytes) can never be fully
-/// materialized — `take()` stops after the cap of DECOMPRESSED output. Lossy
-/// UTF-8 (the bytes=Some / read_plain paths already are).
+/// Reads one zip member into a String, hard-bounded by `MAX_MEMBER_BYTES` via `take()` on the DECOMPRESSED output so a zip bomb is never fully materialized. Lossy UTF-8.
 fn read_member_bounded(entry: impl Read, remaining_decompressed: &mut u64) -> Option<String> {
     let allowed = MAX_MEMBER_BYTES.min(*remaining_decompressed);
     if allowed == 0 {
@@ -245,9 +214,6 @@ fn read_member_bounded(entry: impl Read, remaining_decompressed: &mut u64) -> Op
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Pull text out of every member whose name starts with `prefix` and ends
-/// with `suffix` (e.g. `ppt/slides/slide` + `.xml` for PowerPoint). Members
-/// are visited in sorted (slide) order.
 fn extract_zip_xml_glob(
     path: &Path,
     bytes: Option<&[u8]>,
@@ -346,9 +312,6 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
     target_elems: &[&str],
 ) -> Result<String> {
     let mut zip = open_bounded_zip(reader, path)?;
-    // Collect only the glob-matched members, hard-capped at MAX_GLOB_MEMBERS so a
-    // zip-bomb-shaped pptx (millions of slide entries) can't make the sort +
-    // per-member parse below burn unbounded CPU.
     let mut names: Vec<String> = zip
         .file_names()
         .take(MAX_ARCHIVE_ENTRIES)
@@ -380,9 +343,7 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
     Ok(out)
 }
 
-/// EPUB → text. An EPUB is a zip of XHTML; concatenate the tag-stripped text of its
-/// (x)html members in reading (sorted) order, bounded the same way as the OOXML globs.
-/// Mirrors the macOS `DocText.epubText`.
+/// EPUB → text: the tag-stripped text of its (x)html members in sorted reading order, bounded like the OOXML globs.
 fn extract_epub(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
     if let Some(b) = bytes {
         extract_epub_inner(Cursor::new(b), path)
@@ -435,9 +396,7 @@ fn extract_epub_inner<R: Read + Seek>(reader: R, path: &Path) -> Result<String> 
     Ok(out)
 }
 
-/// Strip XML/HTML tags (each becomes a space) and collapse whitespace — cheap, dep-free,
-/// good enough for a BGE clustering snippet. Leaves entities (`&amp;`) as-is, matching the
-/// macOS `epubText` regex strip.
+/// Strips XML/HTML tags (each becomes a space) and collapses whitespace. Leaves entities (`&amp;`) as-is.
 fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
@@ -445,8 +404,6 @@ fn strip_tags(s: &str) -> String {
     for c in s.chars() {
         match c {
             '<' => in_tag = true,
-            // Each closed tag becomes a space (then whitespace collapses) — matches the
-            // macOS `epubText` regex replace, so the extracted text is the same.
             '>' => {
                 in_tag = false;
                 if !last_ws {
@@ -470,10 +427,26 @@ fn strip_tags(s: &str) -> String {
     out.trim().to_string()
 }
 
-/// Walk `xml` with quick-xml's pull parser, accumulating text from every
-/// element whose **local name** appears in `target_elems` (the namespace
-/// prefix before `:` is ignored). `["w:t", "t"]` matches `<w:t>`, `<a:t>`,
-/// and bare `<t>` alike.
+fn local_name(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+/// A paragraph, heading or shared-string entry ends a word; a run (`w:r`, `a:r`, `text:span`) does not, because Office splits one word across several runs.
+fn is_block_boundary(name: &str) -> bool {
+    matches!(local_name(name), "p" | "h" | "si")
+}
+
+fn is_inline_break(name: &str) -> bool {
+    matches!(local_name(name), "tab" | "br" | "line-break")
+}
+
+fn push_separator(out: &mut String) {
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
+    }
+}
+
+/// Walks `xml` with quick-xml's pull parser, accumulating text from every element whose local name is in `target_elems` (namespace prefix ignored): `["w:t", "t"]` matches `<w:t>`, `<a:t>` and bare `<t>`.
 fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
@@ -497,12 +470,23 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 if matches(&name) {
                     depth += 1;
                 }
+                if is_inline_break(&name) {
+                    push_separator(&mut out);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if is_inline_break(&name) {
+                    push_separator(&mut out);
+                }
             }
             Ok(Event::End(e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 if matches(&name) && depth > 0 {
                     depth -= 1;
-                    out.push(' ');
+                }
+                if is_block_boundary(&name) {
+                    push_separator(&mut out);
                 }
             }
             Ok(Event::Text(t)) if depth > 0 => {
@@ -514,10 +498,7 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 }
             }
             Ok(Event::GeneralRef(r)) if depth > 0 => {
-                // The `&amp;`/`&#8217;` runs the old `unescape()` used to fold
-                // into `Text`. Resolve numeric char refs and the five
-                // predefined named entities; drop unknown custom entities
-                // (the old `unescape()` errored on those and we skipped too).
+                // Resolve numeric char refs and the five predefined named entities; drop unknown custom entities.
                 if let Ok(Some(ch)) = r.resolve_char_ref() {
                     out.push(ch);
                 } else if let Ok(name) = r.decode()
@@ -605,8 +586,6 @@ mod tests {
 
     #[test]
     fn extract_zip_bytes_equivalent_to_path() {
-        // Minimal docx-shaped zip in memory: one entry word/document.xml with a
-        // <w:t> run. Skip the test if zip writing fails (extreme env weirdness).
         let mut buf = Vec::new();
         {
             use std::io::Write;
@@ -644,10 +623,30 @@ mod tests {
         assert!(out.contains("bb"));
     }
 
+
+    #[test]
+    fn a_word_split_across_office_runs_stays_one_word() {
+        let docx = r#"<w:body><w:p><w:r><w:t>Docu</w:t></w:r><w:r><w:t>ment</w:t></w:r></w:p><w:p><w:r><w:t>next</w:t></w:r></w:p></w:body>"#;
+        assert_eq!(xml_text_runs(docx, &["w:t"]).trim(), "Document next");
+        let odt = r#"<text:p>Docu<text:span>ment</text:span></text:p><text:p>two</text:p>"#;
+        assert_eq!(xml_text_runs(odt, &["p", "h", "span"]).trim(), "Document two");
+        let xlsx = r#"<sst><si><r><t>Docu</t></r><r><t>ment</t></r></si><si><t>cell</t></si></sst>"#;
+        assert_eq!(xml_text_runs(xlsx, &["t"]).trim(), "Document cell");
+        let tabbed = r#"<w:p><w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r></w:p>"#;
+        assert_eq!(xml_text_runs(tabbed, &["w:t"]).trim(), "a b");
+    }
+
+    #[test]
+    fn html_header_and_styles_like_tags_are_not_skipped_as_head_or_style() {
+        let page = "<html><header>Site name</header><body><p>Body text stays</p></body></html>";
+        assert_eq!(html_to_text(page), "Site name Body text stays");
+        assert_eq!(html_to_text("<heading>Open <p>kept</p>"), "Open kept");
+        assert_eq!(html_to_text("<html><head><title>t</title></head><body>shown</body></html>"), "shown");
+        assert_eq!(html_to_text("<style>p{}</style><scripture>verse</scripture>"), "verse");
+    }
     #[test]
     fn xml_text_runs_resolves_entities() {
-        // Guards the quick-xml 0.41 migration: text runs must still be
-        // entity-decoded (predefined + numeric), not left as raw `&amp;`.
+        // Text runs must be entity-decoded (predefined + numeric).
         let xml = r"<root><w:t>Tom &amp; Jerry &#8217;s day &lt;3</w:t></root>";
         let out = xml_text_runs(xml, &["w:t"]);
         assert_eq!(out.trim(), "Tom & Jerry \u{2019}s day <3");
@@ -655,26 +654,17 @@ mod tests {
 
     #[test]
     fn pptx_glob_member_iteration_is_capped() {
-        // A zip-bomb-shaped pptx: 2× MAX_GLOB_MEMBERS slide members, each emitting
-        // a single space (one <a:t> </a:t> run → one ' ' + a '\n' member separator
-        // ≈ 2 bytes). The matched-member set stays UNDER MAX_TEXT_BYTES, so the
-        // byte cap never fires and can't mask the count cap. Without the
-        // MAX_GLOB_MEMBERS `.take()`, all members are parsed; with it, at
-        // most MAX_GLOB_MEMBERS are. We count emitted member segments (newline
-        // separators) and assert the bound — order-independent, so it doesn't rely
-        // on zip iteration order.
+        // A zip-bomb-shaped pptx with 2× MAX_GLOB_MEMBERS slide members, each emitting one space plus a '\n' separator. The matched set stays under MAX_TEXT_BYTES so the byte cap can't mask the count cap; we count emitted member segments (order-independent).
         const OVER_CAP: usize = MAX_GLOB_MEMBERS * 2;
         let mut buf = Vec::new();
         {
             use std::io::Write;
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
-            // Stored (no deflate) keeps writing 100 K tiny members fast.
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             for i in 0..OVER_CAP {
                 zw.start_file::<_, ()>(format!("ppt/slides/slide{i:07}.xml"), opts)
                     .unwrap();
-                // A single empty text run → exactly one space of output per member.
                 zw.write_all(b"<p><a:t> </a:t></p>").unwrap();
             }
             zw.finish().unwrap();
@@ -688,8 +678,6 @@ mod tests {
             &["a:t"],
         )
         .unwrap();
-        // One '\n' is inserted between members, so processed-member count is
-        // (newlines + 1). Bounded by the cap rather than the full OVER_CAP.
         let processed = out.matches('\n').count() + 1;
         assert!(
             processed <= MAX_GLOB_MEMBERS,
@@ -752,15 +740,14 @@ mod tests {
         let s = "é".repeat(200_000);
         let truncated = truncate_to_max(s);
         assert!(truncated.len() <= MAX_TEXT_BYTES);
-        // Roundtrip valid UTF-8 (every char must still be 'é').
         assert!(truncated.chars().all(|c| c == 'é'));
     }
 
     #[test]
     fn truncate_handles_cut_inside_multibyte_char() {
         // 3-byte chars: MAX_TEXT_BYTES (262144) % 3 == 1, so the byte cut
-        // always lands mid-char — the case that used to panic in
-        // String::truncate before the boundary clamp.
+        // always lands mid-char, which would panic in String::truncate without
+        // the boundary clamp.
         let s = "夏".repeat(100_000);
         let truncated = truncate_to_max(s);
         assert!(truncated.len() <= MAX_TEXT_BYTES);

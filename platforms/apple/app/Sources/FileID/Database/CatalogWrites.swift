@@ -8,8 +8,7 @@ import FileIDShared
 
 @MainActor
 enum CatalogWrites {
-    static let notReady = "FileID is still getting ready. Try again in a moment."
-    static let noAnswer = "FileID didn't answer in time. Check the files before trying again."
+        static let noAnswer = "FileID didn’t answer in time. Check the files before trying again."
 
     /// Sends `command` and waits for its reply. `id` picks this request's
     /// reply out of others with the same action (a reply without per-item
@@ -19,7 +18,7 @@ enum CatalogWrites {
                         id: Int64?, timeout: Double) async -> BulkActionResult {
         var seen = engine.bulkActionResultSignal
         guard engine.send(command) else {
-            return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: notReady)])
+            return BulkActionResult(action: action, succeeded: 0, failed: 0, messages: [BulkActionItem(ok: false, message: HelperGate.unsentNote(engine))])
         }
         let matcher = BulkResultMatcher(actionPrefix: action, sentID: engine.lastSentCommandID)
         func mine(_ result: BulkActionResult) -> Bool {
@@ -40,7 +39,7 @@ enum CatalogWrites {
     }
 
     private static func answered(_ result: BulkActionResult) -> Bool {
-        !result.messages.contains { $0.fileID == nil && ($0.message == notReady || $0.message == noAnswer) }
+        !result.messages.contains { $0.fileID == nil && ([HelperGate.notReadyNote, HelperGate.stoppedNote, noAnswer].contains($0.message)) }
     }
 
     // MARK: - People
@@ -109,19 +108,41 @@ enum CatalogWrites {
         return merged
     }
 
-    /// Moves every face of `source` on `fileIDs` to `target`. Returns how many faces moved.
-    static func moveFaces(_ engine: EngineClient, store: ReadStore, from source: Int64, to target: Int64, fileIDs: [Int64]) async -> Int {
-        guard source != target, !fileIDs.isEmpty else { return 0 }
-        let faces = await Task.detached(priority: .userInitiated) { store.faceIDs(personID: source, fileIDs: fileIDs) }.value
-        var moved = 0
-        for face in faces {
-            let result = await request(engine, .reassignFace(faceID: face, destinationPersonID: target, createNewPerson: false),
-                                       action: "reassignFace", id: face, timeout: 30)
-            if result.succeeded == 1 { moved += 1 }
+    /// How a Move photos request ended: whole photos that moved out of the chosen ones.
+    struct FaceMoveOutcome: Equatable {
+        let photosMoved: Int
+        let photosAsked: Int
+
+        static func settle(faceFiles: [(face: Int64, file: Int64)], movedFaces: Set<Int64>, photosAsked: Int) -> FaceMoveOutcome {
+            var left = Set<Int64>(), all = Set<Int64>()
+            for pair in faceFiles {
+                all.insert(pair.file)
+                if !movedFaces.contains(pair.face) { left.insert(pair.file) }
+            }
+            return FaceMoveOutcome(photosMoved: all.subtracting(left).count, photosAsked: photosAsked)
+        }
+
+        func status(target: String) -> String {
+            if photosMoved == 0 { return "The photos didn’t move. Try again in a moment." }
+            let moved = Plural.noun(photosMoved, "photo", "photos")
+            if photosMoved < photosAsked { return "Moved \(moved) of \(photosAsked.formatted()) to \(target). The rest stayed where they were." }
+            return "Moved \(moved) to \(target)."
+        }
+    }
+
+    /// Moves every face of `source` on `fileIDs` to `target`. A photo counts as moved only when all of its faces did.
+    static func moveFaces(_ engine: EngineClient, store: ReadStore, from source: Int64, to target: Int64, fileIDs: [Int64]) async -> FaceMoveOutcome {
+        guard source != target, !fileIDs.isEmpty else { return FaceMoveOutcome(photosMoved: 0, photosAsked: fileIDs.count) }
+        let faceFiles = await Task.detached(priority: .userInitiated) { store.faceFiles(personID: source, fileIDs: fileIDs) }.value
+        var movedFaces = Set<Int64>()
+        for pair in faceFiles {
+            let result = await request(engine, .reassignFace(faceID: pair.face, destinationPersonID: target, createNewPerson: false),
+                                       action: "reassignFace", id: pair.face, timeout: 30)
+            if result.succeeded == 1 { movedFaces.insert(pair.face) }
             if !answered(result) { break }
         }
         store.notifyChanged()
-        return moved
+        return FaceMoveOutcome.settle(faceFiles: faceFiles, movedFaces: movedFaces, photosAsked: fileIDs.count)
     }
 
     // MARK: - Suggested-name renames
@@ -310,7 +331,7 @@ enum CatalogWrites {
 @Observable
 final class MergeUndoModel {
     static let shared = MergeUndoModel()
-    static let failed = "The merge couldn't be undone. Try again in a moment."
+    static let failed = "The merge couldn’t be undone. Try again in a moment."
 
     private(set) var operationID: String?
     private(set) var busy = false
@@ -322,7 +343,7 @@ final class MergeUndoModel {
 
     func offer(_ engine: EngineClient, store: ReadStore, operations: [String]) async {
         await refresh(engine)
-        let text = operations.count == 1 ? "Merged into one person." : "Finished \(operations.count) merges."
+        let text = operations.count == 1 ? "Merged into one person." : "Finished \(Plural.noun(operations.count, "merge", "merges"))."
         ToastCenter.shared.show(text, actionLabel: "Undo", duration: 10) {
             Task { @MainActor in
                 let result = await self.undo(engine, store: store, operations: operations)
@@ -332,8 +353,8 @@ final class MergeUndoModel {
     }
 
     static func summary(_ result: (undone: Int, message: String?), of total: Int) -> String {
-        if result.undone == total { return total == 1 ? "Merge undone. Both people are back." : "\(total) merges undone." }
-        if result.undone > 0 { return "\(result.undone) of \(total) merges undone. \(result.message ?? failed)" }
+        if result.undone == total { return total == 1 ? "Merge undone. Both people are back." : "\(Plural.noun(total, "merge", "merges")) undone." }
+        if result.undone > 0 { return "\(result.undone.formatted()) of \(Plural.noun(total, "merge", "merges")) undone. \(result.message ?? failed)" }
         return result.message ?? failed
     }
 
@@ -346,7 +367,7 @@ final class MergeUndoModel {
         var message: String?
         for operation in operations.reversed() {
             guard let page = await engine.faceReview({ .undoFaceReview(requestID: $0, operationID: operation) }) else {
-                message = CatalogWrites.notReady
+                message = HelperGate.unsentNote(engine)
                 break
             }
             if page.status == "ok" { undone += 1 } else if message == nil { message = page.message }

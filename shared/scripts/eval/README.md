@@ -108,8 +108,8 @@ queries with `split`, `present`, `matches` and `ambiguous` photos). It copies a 
 query words plus a client CLIP text vector from `--vector-engine`, default the engine under test)
 and also semantic-only, and scores the files the reply calls good matches: macro precision and
 recall over present queries, the share of present queries with a good match, and absent queries
-answered with none. Pass the Swift engine as `--vector-engine` to compare engines with identical
-client vectors; each engine still embeds its own prompt when CLIP text is installed in the home.
+answered with none. Pass another engine build as `--vector-engine` to compare builds with identical
+client vectors; each build still embeds its own prompt when CLIP text is installed in the home.
 
 ## Tags (`tag_eval.py`)
 
@@ -124,7 +124,6 @@ tag_eval.py --engine <fileid-engine> --home <eval home> --name wide --wide      
 tag_eval.py --db <wide catalog> --home <eval home> --simulate --rules '{"refine": true, "max_tags": 10}'
 ```
 
-The Rust engine on the Mac needs `--env ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib`
-and an eval home whose `models/` holds the Rust layout (`ram_plus/`, `mobileclip/`, `clip_text/`,
+The Rust engine needs an eval home whose `models/` holds the Rust layout (`ram_plus/`, `mobileclip/`, `clip_text/`,
 `sface/`, `yunet/`). `--simulate` re-selects tags from a wide catalog the way the engine does,
 so a rule can be tried in seconds; verify the engine afterwards with a default-mode scan.

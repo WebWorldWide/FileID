@@ -1,7 +1,6 @@
 ﻿# FileID Windows -- full dev build (engine + WinUI 3 app, x64).
 #
-# This is the canonical "I just cloned the repo, build me a runnable app"
-# command. Chains every step:
+# Builds a runnable app from a fresh clone:
 #
 #   1. Toolchain probes  (cargo, dotnet, MSBuild via VS Build Tools)
 #   2. Optional clean    (cargo clean + dotnet clean + remove dist/)
@@ -24,8 +23,7 @@
 #   pwsh build/build-all.ps1 -RunTests          # cargo test + dotnet test
 #   pwsh build/build-all.ps1 -MediaDir C:\absolute\path\to\media  # verified x64 development video runtime
 #
-# Failure modes the script catches and explains (instead of leaking a
-# raw stack trace):
+# Failures it explains instead of leaking a stack trace:
 #   - cargo not in PATH                  -> install Rust via rustup
 #   - x64 Rust target missing            -> auto-add via rustup
 #   - dotnet SDK 8 not installed         -> winget install
@@ -42,37 +40,23 @@ param(
     [switch]$SkipEngine,
     [switch]$SkipApp,
     [switch]$Desktop,
-    # Destructive wipe before build. Removes:
-    #   - All build artifacts (target/, bin/, obj/, dist/)
-    #   - Any prior staged copy at $env:USERPROFILE\Desktop\FileID\
-    #   - %LOCALAPPDATA%\FileID\ -- DB + downloaded models + logs + settings
-    # Forces a fresh "I just installed FileID" experience. Implies -Clean
-    # and -Desktop. Use when verifying first-run UX or reproducing bugs.
+    # Destructive wipe before build: build artifacts (target/, bin/, obj/, dist/), the staged copy at
+    # $env:USERPROFILE\Desktop\FileID\, and %LOCALAPPDATA%\FileID\ (DB, models, logs, settings).
+    # Implies -Clean and -Desktop.
     [switch]$Wipe,
-    # When set alongside -Wipe, preserve the downloaded model weights
-    # under %LOCALAPPDATA%\FileID\Models\ so iteration doesn't trigger a
-    # multi-GB re-download. The DB, logs, sentinels, and settings still
-    # get wiped — only the model artifact binaries survive.
+    # With -Wipe, keeps the model weights under %LOCALAPPDATA%\FileID\Models\ to avoid a multi-GB re-download.
     [switch]$PreserveModels,
-    # Lightest-possible wipe: delete ONLY fileid.sqlite{,.wal,.shm} from
-    # %LOCALAPPDATA%\FileID\ (and FileID-App\). Leaves Models, logs,
-    # settings, sentinels, cache, AND Desktop\FileID\ staging intact.
-    # Use when you want a fresh scan but don't want to lose anything else
-    # or rebuild from scratch. Does NOT imply -Clean or -Desktop.
-    # Mutually exclusive with -Wipe.
+    # Deletes only fileid.sqlite{,.wal,.shm} from %LOCALAPPDATA%\FileID\ (and FileID-App\).
+    # Does not imply -Clean or -Desktop; mutually exclusive with -Wipe.
     [switch]$WipeDbOnly,
-    # ARM64 cross-compile from x64 host. Builds the Rust engine for
-    # aarch64-pc-windows-msvc and the .NET app for win-arm64. Implies
-    # -Release because debug ARM64 + WinAppSDK has rough edges.
+    # ARM64 cross-compile from an x64 host (aarch64-pc-windows-msvc, win-arm64). Implies -Release.
     [switch]$Arm64,
     # Sign every built binary using `build/sign.ps1`. Requires either
     # -Thumbprint to be set or FILEID_EV_THUMBPRINT env var.
     [switch]$Sign,
     [string]$Thumbprint,
-    # Fast iteration mode: cargo uses the `release-fast` profile (thin LTO
-    # + parallel codegen, ~40-60% faster) and dotnet runs with explicit
-    # `-m` (max-CPU). Use for inner-loop iteration; ship builds use plain
-    # -Release for fat LTO.
+    # Inner-loop mode: cargo uses the `release-fast` profile (thin LTO, parallel codegen) and
+    # dotnet runs with `-m`. Ship builds use plain -Release for fat LTO.
     [switch]$Fast,
     [string]$MediaDir = ''
 )
@@ -87,30 +71,22 @@ if ($MediaDir -and $SkipEngine) {
     throw 'Build the engine when staging the portable media runtime.'
 }
 
-# -Wipe and -WipeDbOnly are mutually exclusive: one is "nuke everything",
-# the other is "touch only the SQLite triplet". Combining them is ambiguous.
 if ($Wipe -and $WipeDbOnly) {
     Write-Host "ERROR: -Wipe and -WipeDbOnly are mutually exclusive." -ForegroundColor Red
     Write-Host "       Pick one: -Wipe for a full reset, -WipeDbOnly for just the DB files." -ForegroundColor Yellow
     exit 1
 }
 
-# -Wipe implies -Clean + -Desktop. Destructive flag -- see param block.
 if ($Wipe) { $Clean = $true; $Desktop = $true }
 
-# -Desktop implies -Release: a publish folder is what users actually want
-# to drop on their Desktop and double-click. Debug builds need a .NET SDK
-# on the host to launch.
+# -Desktop implies -Release: debug builds need a .NET SDK on the host to launch.
 if ($Desktop) { $Release = $true }
 
-# ARM64 cross-compile mode: implies -Release; uses the aarch64-pc-windows-msvc
-# Rust target + win-arm64 .NET RID.
 if ($Arm64) { $Release = $true }
 $RustTarget    = if ($Arm64) { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
 $DotnetRid     = if ($Arm64) { "win-arm64" } else { "win-x64" }
 $ArchLabel     = if ($Arm64) { "arm64" } else { "x64" }
 
-# --- Paths ------------------------------------------------------------------
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
@@ -119,22 +95,13 @@ $Solution    = Join-Path $PlatformDir "FileID.sln"
 $DistDir     = Join-Path $PlatformDir "dist/$ArchLabel"
 $StagingDir  = Join-Path $DistDir "FileID"
 
-# Run dotnet from the platform dir so platforms/windows/global.json pins the
-# SDK (8.x) regardless of where this script was launched from. Without this,
-# invoking from the repo root resolves the machine-default SDK (e.g. 10.x) and
-# the "need 8.x/9.x" guard below trips even though SDK 8 is installed. (`pwsh
-# -File` runs in a child process, so this cwd change does not leak to your shell.)
+# Run dotnet from the platform dir so global.json pins SDK 10.x wherever the script was launched from.
 Set-Location $PlatformDir
 
-# Fixed target framework -- the .csproj pins net10.0-windows10.0.19041.0.
 $AppTfm      = "net10.0-windows10.0.19041.0"
 $AppRid      = $DotnetRid
 
 $Configuration = if ($Release) { "Release" } else { "Debug" }
-# Pick the cargo profile. -Fast = release-fast (thin LTO + parallel codegen)
-# is dramatically faster on a multi-core box and the perf delta vs
-# fat-LTO release is small for our hot paths. The plain `release`
-# profile stays the default for ship builds.
 $RustProfile   = if ($Fast -and $Release) { "release-fast" }
                   elseif ($Release)         { "release" }
                   else                       { "debug" }
@@ -147,7 +114,6 @@ Write-Host "  solution:      $Solution"
 Write-Host "  staging:       $StagingDir"
 Write-Host ""
 
-# --- 1. Toolchain probes ----------------------------------------------------
 function Require-Command($name, $hint) {
     if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
         Write-Host "ERROR: '$name' not found on PATH." -ForegroundColor Red
@@ -158,7 +124,6 @@ function Require-Command($name, $hint) {
 
 if (-not $SkipEngine) {
     Require-Command "cargo" "Install Rust via https://rustup.rs and re-open your shell."
-    # Ensure x64 target is installed.
     $targets = & rustup target list --installed 2>$null
     if ($LASTEXITCODE -eq 0 -and $targets -notcontains "$($RustTarget)") {
         Write-Host "Adding rust target $($RustTarget)..." -ForegroundColor Yellow
@@ -168,28 +133,22 @@ if (-not $SkipEngine) {
 
 if (-not $SkipApp) {
     Require-Command "dotnet" "Install .NET 10 SDK: winget install Microsoft.DotNet.SDK.10"
-    # `dotnet` the host shim can be on PATH with NO SDK installed (runtime-only,
-    # or a fresh box). In that case `dotnet --version` exits non-zero, which
-    # $PSNativeCommandUseErrorActionPreference would turn into a raw
-    # NativeCommandExitException. Capture the exit code ourselves and emit the
-    # actionable install hint instead of leaking a stack trace.
+    # The dotnet host shim can be on PATH with no SDK installed; `dotnet --version` then exits
+    # non-zero and $PSNativeCommandUseErrorActionPreference would raise a raw exception.
     $dotnetVer = & dotnet --version 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dotnetVer)) {
         Write-Host "ERROR: 'dotnet' is on PATH but no .NET SDK is installed (host shim only)." -ForegroundColor Red
         Write-Host "       Install the .NET 10 SDK: winget install Microsoft.DotNet.SDK.10" -ForegroundColor Yellow
         exit 1
     }
-    if (-not ($dotnetVer -match "^(8|9)\.")) {
-        Write-Host "ERROR: dotnet SDK $dotnetVer found; need 8.x or 9.x." -ForegroundColor Red
+    if (-not ($dotnetVer -match "^10\.")) {
+        Write-Host "ERROR: dotnet SDK $dotnetVer found; need 10.x." -ForegroundColor Red
         Write-Host "       winget install Microsoft.DotNet.SDK.10" -ForegroundColor Yellow
         exit 1
     }
 }
 
-# --- 1.5a. WipeDbOnly (lightest scope) -------------------------------------
-# Only delete the SQLite triplet. Don't touch Desktop\FileID, don't clean
-# build artifacts, don't wipe Models / logs / settings / sentinels / cache.
-# Use case: "I want a fresh scan but want to keep everything else."
+# Deletes only the SQLite triplet; Desktop staging, build artifacts, models, logs and settings stay.
 if ($WipeDbOnly) {
     Write-Host "WIPE-DB-ONLY: deleting only SQLite files; everything else preserved..." -ForegroundColor Yellow
     foreach ($dir in @(
@@ -209,9 +168,7 @@ if ($WipeDbOnly) {
     Write-Host ""
 }
 
-# --- 1.5. Wipe --------------------------------------------------------------
-# Destructive: removes user data dir + Desktop staging dir. The build-artifact
-# cleanup happens in the regular Clean block below (Wipe implies Clean).
+# Removes the user data dir and Desktop staging dir; build artifacts are cleaned by the Clean block below.
 if ($Wipe) {
     if ($PreserveModels) {
         Write-Host "WIPE (preserving Models/): removing prior install + user data, keeping downloaded weights..." -ForegroundColor Yellow
@@ -223,21 +180,15 @@ if ($Wipe) {
         Write-Host "  rm -rf $DesktopFileID" -ForegroundColor DarkGray
         Remove-Item -Recurse -Force -LiteralPath $DesktopFileID -ErrorAction SilentlyContinue
     }
-    # Two known LocalAppData dirs: FileID (engine canonical) and FileID-App
-    # (.NET self-contained sometimes drops here). Wipe both.
+    # The engine writes FileID; the self-contained .NET app sometimes writes FileID-App.
     foreach ($dir in @(
         (Join-Path $env:LOCALAPPDATA "FileID"),
         (Join-Path $env:LOCALAPPDATA "FileID-App")
     )) {
         if (-not (Test-Path $dir)) { continue }
         if ($PreserveModels -and $dir -like "*FileID") {
-            # Selective wipe: enumerate top-level entries and skip the
-            # Models subdir so the multi-GB ONNX/GGUF weights survive.
-            # CRITICAL: keep .sentinels/ too. The engine writes sentinels
-            # only at the END of handle_prewarm_model, and prewarm with a
-            # missing sentinel re-downloads from scratch — so wiping
-            # .sentinels while preserving the files forces a re-download
-            # anyway, defeating the whole point of -PreserveModels.
+            # Skips Models and .sentinels: prewarm re-downloads from scratch when a sentinel is
+            # missing, which would defeat -PreserveModels.
             foreach ($child in Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) {
                 if ($child.Name -eq "Models") { continue }
                 Write-Host "  rm -rf $($child.FullName)" -ForegroundColor DarkGray
@@ -256,7 +207,6 @@ if ($Wipe) {
     Write-Host ""
 }
 
-# --- 2. Clean ---------------------------------------------------------------
 if ($Clean) {
     Write-Host "Cleaning previous build artifacts..." -ForegroundColor Yellow
     if (-not $SkipEngine) {
@@ -269,10 +219,7 @@ if ($Clean) {
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 }
 
-# --- 3. Engine build + dotnet restore (in parallel) ------------------------
-# Cargo build and NuGet restore are fully independent -- running them
-# concurrently saves 20-40 seconds on a cold build. The dotnet build/
-# publish step below joins on both before continuing.
+# Cargo build and NuGet restore are independent, so restore runs in the background.
 $restoreJob = $null
 if (-not $SkipApp) {
     Write-Host "Restoring NuGet packages (background)..." -ForegroundColor Cyan
@@ -288,9 +235,6 @@ if (-not $SkipEngine) {
     Write-Host "Building engine ($RustProfile, $($RustTarget))..." -ForegroundColor Cyan
     Push-Location $EngineDir
     try {
-        # Cargo uses every CPU by default; `-j` is redundant but explicit
-        # makes the intent obvious. The big win is the profile choice
-        # ($RustProfile = release-fast under -Fast).
         $jobsArg = @("-j", [Environment]::ProcessorCount.ToString())
         if ($Fast -and $Release) {
             & cargo build --profile release-fast --target $($RustTarget) @jobsArg
@@ -318,16 +262,10 @@ if (-not $SkipEngine) {
     $sz = [math]::Round((Get-Item (Join-Path $StagingDir "FileIDEngine.exe")).Length / 1MB, 1)
     Write-Host ("  FileIDEngine.exe staged ({0} MB)" -f $sz) -ForegroundColor Green
 
-    # V14.9-V: stage ORT (FileID's telemetry-free DirectML build, see
-    # build-ort-runtime.ps1) + DirectML runtime DLLs alongside
-    # FileIDEngine.exe in every staging location. Without these DLLs the
-    # engine LoadLibrary's Windows System32's onnxruntime.dll (1.17.x), the
-    # ort crate panics on version mismatch ("expected 1.22.x, got 1.17.1"),
-    # and even when the version matches the DirectML EP can't initialize
-    # without DirectML.dll → silent fallback to CPU, no GPU acceleration.
+    # Stage pdfium.dll alongside FileIDEngine.exe in every staging location.
     $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
     if (Test-Path $fetchScript) {
-        Write-Host "Fetching runtime DLLs (ORT + DirectML)..." -ForegroundColor Cyan
+        Write-Host "Fetching runtime DLLs (PDFium)..." -ForegroundColor Cyan
         $runtimeOutput = & $fetchScript -Architecture $(if ($Arm64) { 'arm64' } else { 'x64' })
         $runtimeDlls = @{}
         foreach ($line in $runtimeOutput) {
@@ -336,9 +274,7 @@ if (-not $SkipEngine) {
                 $runtimeDlls[[System.IO.Path]::GetFileName($p)] = $p
             }
         }
-        # Drop them in the staging dir (dist/<arch>/FileID/), the cargo
-        # target dir (so iterate.ps1 / standalone engine runs find them),
-        # and later in the App publish dir.
+        # Copied to the staging dir, the cargo target dir (for iterate.ps1 and standalone engine runs), and later the app publish dir.
         $cargoOutDir = Split-Path -Parent $EngineBuildExe
         foreach ($name in $runtimeDlls.Keys) {
             $destStaging = Join-Path $StagingDir $name
@@ -348,10 +284,9 @@ if (-not $SkipEngine) {
             $destCargo = Join-Path $cargoOutDir $name
             Copy-Item -LiteralPath $runtimeDlls[$name] -Destination $destCargo -Force -ErrorAction SilentlyContinue
         }
-        # Stash for the App-staging step below so we don't re-resolve.
         $script:RuntimeDlls = $runtimeDlls
     } else {
-        Write-Host "WARN: fetch-runtime-deps.ps1 not found; engine may fail to find ORT/DirectML at runtime." -ForegroundColor Yellow
+        Write-Host "WARN: fetch-runtime-deps.ps1 not found; PDF analysis may fail at runtime." -ForegroundColor Yellow
         $script:RuntimeDlls = @{}
     }
 }
@@ -361,18 +296,14 @@ if ($MediaDir) {
     & $stageMedia -SourceDir $MediaDir -DestinationRoot $StagingDir
 }
 
-# --- 4. App build -----------------------------------------------------------
 if (-not $SkipApp) {
     if ($restoreJob) {
-        # Wait for the restore that started in step 3.
         $null = Wait-Job $restoreJob
         Receive-Job $restoreJob | Out-Null
         Remove-Job $restoreJob
     }
 
-    # MSBuild parallelism: -m:N spawns N worker processes. Default is
-    # the CPU count; we set it explicitly so the build line is identical
-    # under any future MSBuild change. `-bl:false` skips the binlog.
+    # -m:N is set explicitly (default is the CPU count); `-bl:false` skips the binlog.
     $cpuCount = [Environment]::ProcessorCount
     if ($Release) {
         Write-Host "Publishing FileID.App ($Configuration, $AppRid, self-contained, -m:$cpuCount)..." -ForegroundColor Cyan
@@ -392,11 +323,10 @@ if (-not $SkipApp) {
     if ($RunTests) {
         Write-Host "Running xUnit tests..." -ForegroundColor Cyan
         & dotnet test (Join-Path $PlatformDir "Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj") `
-            --nologo --no-build -c $Configuration
+            --nologo -c $Configuration
     }
 }
 
-# --- 5. Stage engine alongside app ------------------------------------------
 function Resolve-AppOutputDir {
     if ($Release) {
         return Join-Path $PlatformDir "src/FileID.App/bin/$ArchLabel/$Configuration/$AppTfm/$AppRid/publish"
@@ -419,12 +349,6 @@ if (-not $SkipApp) {
             Copy-Item $StagedEngine (Join-Path $AppOutDir "FileIDEngine.exe") -Force
             Write-Host "  FileIDEngine.exe colocated with FileID.exe" -ForegroundColor Green
         }
-        # V14.9-V: colocate ORT + DirectML DLLs with the engine in the
-        # publish output. Required so LoadLibrary finds our bundled 1.22
-        # DLL before Windows System32's 1.17 build (which our ort crate
-        # rejects with a fatal version mismatch). DirectML.dll also has
-        # to be next to the engine or DirectML EP silently falls back
-        # to CPU.
         if ($script:RuntimeDlls) {
             foreach ($name in $script:RuntimeDlls.Keys) {
                 Copy-Item -LiteralPath $script:RuntimeDlls[$name] -Destination (Join-Path $AppOutDir $name) -Force
@@ -436,7 +360,6 @@ if (-not $SkipApp) {
         }
     }
 
-    # --- Sign (optional) ----------------------------------------------------
     if ($Sign) {
         $signScript = Join-Path $ScriptDir "sign.ps1"
         if (Test-Path $signScript) {
@@ -453,7 +376,6 @@ if (-not $SkipApp) {
         }
     }
 
-    # --- 6. Smoke -----------------------------------------------------------
     $appSize = [math]::Round((Get-Item $AppExe).Length / 1KB, 0)
     Write-Host ("  FileID.exe       OK ({0} KB)" -f $appSize) -ForegroundColor Green
     $bootstrap = Join-Path $AppOutDir "Microsoft.WindowsAppRuntime.Bootstrap.dll"
@@ -465,12 +387,7 @@ if (-not $SkipApp) {
     }
 }
 
-# --- 7. Install to LocalAppData + Desktop shortcut --------------------------
-# WinUI 3 self-contained publish produces ~900 companion files (the .NET
-# runtime, WinAppSDK runtime, Win2D, project DLLs). Dumping that on the
-# Desktop is unfriendly. Instead: put the files in %LOCALAPPDATA% (out of
-# sight) and put ONE shortcut named "FileID" on the Desktop. User sees one
-# icon, double-clicks it, app runs -- like every other Windows app.
+# The self-contained publish has about 900 companion files, so they go in %LOCALAPPDATA% and the Desktop gets one shortcut.
 $InstallDir = $null
 if ($Desktop) {
     if ($SkipApp) {
@@ -482,8 +399,7 @@ if ($Desktop) {
     Write-Host ""
     Write-Host "Installing to $InstallDir..." -ForegroundColor Cyan
 
-    # If a previous run is still running, the .exe is locked. Kill it
-    # first so we can replace files cleanly.
+    # A running instance locks the .exe, so stop it first.
     Get-Process -Name "FileID", "FileIDEngine" -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "  Stopping running $($_.Name) (PID $($_.Id))..." -ForegroundColor Yellow
         try { $_ | Stop-Process -Force -ErrorAction Stop } catch { }
@@ -499,8 +415,6 @@ if ($Desktop) {
     $totalMb = [math]::Round(((Get-ChildItem -Recurse $InstallDir | Measure-Object -Property Length -Sum).Sum / 1MB), 1)
     Write-Host ("  Installed $fileCount files ({0} MB) under LocalAppData" -f $totalMb) -ForegroundColor Green
 
-    # Create / refresh the Desktop shortcut. WScript.Shell COM is the
-    # idiomatic way to make a .lnk from PowerShell; no extra deps.
     $InstalledExe = Join-Path $InstallDir "FileID.exe"
     $shell = New-Object -ComObject WScript.Shell
     $sc = $shell.CreateShortcut($ShortcutPath)
@@ -512,14 +426,11 @@ if ($Desktop) {
     Write-Host "  Desktop shortcut: $ShortcutPath" -ForegroundColor Green
 }
 
-# --- 8. Run -----------------------------------------------------------------
 if ($Run) {
     if ($SkipApp) {
         Write-Host "Cannot -Run with -SkipApp." -ForegroundColor Red
         exit 1
     }
-    # If -Desktop was set, launch from the installed copy. Otherwise run
-    # from the build output dir.
     $LaunchDir = if ($Desktop) { $InstallDir } else { Resolve-AppOutputDir }
     $LaunchExe = Join-Path $LaunchDir "FileID.exe"
     Write-Host "Launching $LaunchExe..." -ForegroundColor Cyan

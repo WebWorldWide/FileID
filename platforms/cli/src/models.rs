@@ -1,15 +1,4 @@
-//! `fileid models` — list + download the engine's AI model weights.
-//!
-//! Reuses the engine's canonical registry (`models::registry::lookup_full`) for
-//! URLs / dests / SHA256 pins / sizes and its SHA256-verified HuggingFace
-//! downloader (`downloader::install_model_blocking`) — the SAME code the desktop
-//! apps drive over IPC — so the CLI can never drift from the pinned,
-//! commercial-clean set. Downloads land in the engine's OWN models dir (see
-//! [`crate::ensure_engine_models_dir`]), so `fileid scan <folder> --models` then
-//! finds + uses them.
-//!
-//! Network egress: huggingface.co only (the pinned manifest URLs), triggered by
-//! this user-initiated command — the project's single allowed network call.
+//! `fileid models`: list and download the engine's AI model weights through the engine's pinned registry and SHA256-verified downloader, so the CLI cannot drift from the desktop apps. Network egress is this user-initiated huggingface.co download only.
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write as _};
@@ -101,12 +90,7 @@ fn ensure_license_acceptance(ctx: &Ctx, pending: &[&Resolved]) -> Result<()> {
     Ok(())
 }
 
-/// The models `fileid models` lists + downloads, in display order. The Windows
-/// accelerator runtime/EP packs (llama.cpp / cuDNN / ORT-CUDA / ORT-OpenVINO)
-/// are intentionally absent: they're platform-specific DLL bundles, not
-/// cross-platform model weights, and several aren't HuggingFace-hosted. Every
-/// entry here is permissively licensed (Apache-2.0 / MIT; Gemma under Google's
-/// commercially-usable Gemma Terms) per the commercial-clean posture.
+/// Display order. Excludes the Windows llama.cpp runtime bundles (platform DLLs, not HuggingFace weights). Every entry is permissively licensed (Apache-2.0 / MIT; Gemma under its commercially-usable terms).
 const CATALOG: &[Catalog] = &[
     Catalog {
         name: "arcface",
@@ -281,7 +265,7 @@ fn resolve(cat: &'static Catalog) -> Option<Resolved> {
         LookupResult::Found(m) => m,
         LookupResult::Unknown => return None,
     };
-    let installed = registry::sentinel_path(&model).is_some_and(|p| p.exists());
+    let installed = registry::installation_complete(&model);
     let size_bytes = model.files.iter().map(|f| f.approx_bytes).sum();
     let repo = hf_repo(model.files.first().map(|f| f.url.as_str()).unwrap_or(""));
     Some(Resolved {
@@ -304,8 +288,6 @@ fn hf_repo(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
-/// `fileid models list` — show every model, its installed state, size, license,
-/// and HF repo, plus where the engine expects them on disk.
 pub fn list(ctx: &Ctx) -> Result<()> {
     crate::ensure_engine_models_dir();
     let resolved: Vec<Resolved> = CATALOG.iter().filter_map(resolve).collect();
@@ -473,12 +455,9 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// `fileid models download [--all | <name>...] [--dry-run] [--yes]`.
-///
 pub fn download(ctx: &Ctx, all: bool, dry_run: bool, yes: bool, names: &[String]) -> Result<()> {
     crate::ensure_engine_models_dir();
 
-    // Resolve the requested set of catalog entries.
     let selected: Vec<&'static Catalog> = if all {
         CATALOG.iter().collect()
     } else if names.is_empty() {
@@ -504,7 +483,6 @@ pub fn download(ctx: &Ctx, all: bool, dry_run: bool, yes: bool, names: &[String]
     let pending: Vec<&Resolved> = resolved.iter().filter(|r| !r.installed).collect();
     let pending_bytes: u64 = pending.iter().map(|r| r.size_bytes).sum();
 
-    // ── Dry-run: report what WOULD download (repos + total) and fetch nothing. ──
     if dry_run {
         if ctx.json {
             let arr: Vec<_> = resolved
@@ -599,7 +577,6 @@ pub fn download(ctx: &Ctx, all: bool, dry_run: bool, yes: bool, names: &[String]
 
     ensure_license_acceptance(ctx, &pending)?;
 
-    // ── Download each pending model in turn, with overall progress. ──
     // The bar spans ALL pending models: `pending_bytes` is the
     // denominator and `completed_bytes` accumulates as each finishes.
     let ui = ProgressUi::resolve(ctx, pending_bytes, pending.len());
@@ -652,14 +629,7 @@ pub fn download(ctx: &Ctx, all: bool, dry_run: bool, yes: bool, names: &[String]
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Download progress rendering.
-//
-// One OVERALL bar/stream spans every pending model. The byte-weighted fraction
-// is monotonic by construction (file_index + bytes climb within a model;
-// completed models accumulate) and additionally clamped to a running max — the
-// downloader may report bundle files concurrently, so a raw sample can dip.
-// ─────────────────────────────────────────────────────────────────────────
+// The overall bar spans every pending model; the fraction is clamped to a running max because the downloader may report bundle files concurrently.
 
 /// How `models download` renders progress, resolved once per invocation.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -710,7 +680,6 @@ impl ProgressUi {
         ctx.progress(msg);
     }
 
-    /// `✓ <name> installed` milestone.
     fn model_done(&self, ctx: &Ctx, name: &str) {
         if self.mode == ProgressMode::Bar {
             clear_bar_line();
@@ -762,7 +731,6 @@ impl ProgressUi {
     }
 }
 
-/// Carriage-return to column 0 and clear to end of line, erasing the live bar.
 fn clear_bar_line() {
     let mut err = std::io::stderr().lock();
     let _ = write!(err, "\r\x1b[K");
@@ -775,11 +743,7 @@ fn bp_to_percent(bp: u64) -> u64 {
     ((bp + 50) / 100).min(100)
 }
 
-/// Overall download fraction in basis points (0..=10000), byte-weighted across
-/// the whole pending set. `completed_bytes` = Σ sizes of models already finished
-/// this run; `current_size` = the in-flight model's size; `pending_bytes` = the
-/// run's denominator. The per-model term is `(file_index + bytes_done/total) /
-/// file_count`, which climbs within a model.
+/// Byte-weighted overall download fraction in basis points (0..=10000) across the whole pending set.
 fn overall_basis_points(
     completed_bytes: u64,
     current_size: u64,
@@ -864,6 +828,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_marker_without_the_model_files_does_not_count_as_installed() {
+        let dir = std::env::temp_dir().join(format!("fileid-cli-models-{}", std::process::id()));
+        // SAFETY: no other unit test in this binary reads FILEID_MODELS_DIR.
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &dir) };
+        let arcface = CATALOG.iter().find(|cat| cat.kind == "arcface").unwrap();
+        let model = match registry::lookup_full(arcface.kind) {
+            LookupResult::Found(model) => model,
+            LookupResult::Unknown => panic!("arcface is in the registry"),
+        };
+        let marker = registry::sentinel_path(&model).unwrap();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+
+        assert!(!resolve(arcface).unwrap().installed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vlm_fit_keeps_a_system_ram_floor_even_with_large_vram() {
         let plenty = Some(200 * 1024 * 1024 * 1024);
         assert!(cli_vlm_fits(
@@ -940,11 +922,11 @@ mod tests {
         let samples = [
             (0, a, prog(0, 1, 10 * MB, Some(a), 0.0)),
             (0, a, prog(0, 1, 90 * MB, Some(a), 0.0)),
-            (0, a, prog(0, 1, a, Some(a), 0.0)), // A complete
+            (0, a, prog(0, 1, a, Some(a), 0.0)),
             (a, b, prog(0, 2, 10 * MB, Some(150 * MB), 0.0)),
-            (a, b, prog(1, 2, 5 * MB, Some(150 * MB), 0.0)), // file 2 starts
-            (a, b, prog(0, 2, 140 * MB, Some(150 * MB), 0.0)), // file 1 lags in late
-            (a, b, prog(1, 2, 150 * MB, Some(150 * MB), 0.0)), // B complete
+            (a, b, prog(1, 2, 5 * MB, Some(150 * MB), 0.0)),
+            (a, b, prog(0, 2, 140 * MB, Some(150 * MB), 0.0)),
+            (a, b, prog(1, 2, 150 * MB, Some(150 * MB), 0.0)),
         ];
 
         let max = std::sync::atomic::AtomicU64::new(0);

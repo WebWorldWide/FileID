@@ -1,13 +1,4 @@
-﻿// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
-//
-// Renders source-folder → category
-// flows with cubic-bezier ribbons whose thickness is proportional to
-// the file count flowing through them. Bezier paths use
-// Microsoft.UI.Xaml.Shapes.Path with PathFigure + BezierSegment so
-// every render is GPU-composited at vsync.
-//
-// Inputs: a collection of (source, category) pairs from the engine's
-// RestructurePlan.Moves list.
+﻿// SankeyFlowControl: Sankey diagram built from plain XAML shapes.
 
 using System;
 using System.Collections.Generic;
@@ -29,8 +20,6 @@ public sealed class SankeyFlowControl : Control
     private RestructurePlan? _plan;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer? _renderDebounce;
 
-    // Per-rendered ribbon: keep enough state to do proximity hit-testing
-    // + cross-highlight on pointer move. Rebuilt on each Render().
     private sealed class Ribbon
     {
         public required Microsoft.UI.Xaml.Shapes.Path Path { get; init; }
@@ -39,7 +28,6 @@ public sealed class SankeyFlowControl : Control
         public required int Count { get; init; }
         public required Brush IdleFill { get; init; }
         public required Brush HoverFill { get; init; }
-        // Sample points along the bezier mid-line for cheap proximity test.
         public required Point[] Samples { get; init; }
     }
     private readonly List<Ribbon> _ribbons = new();
@@ -48,24 +36,13 @@ public sealed class SankeyFlowControl : Control
     private readonly Dictionary<Rectangle, Brush> _rectIdleFill = new();
     private TextBlock? _hoverTooltip;
 
-    // Pre-cached brushes. Render() used to allocate ~2 brushes per ribbon
-    // (idle/hover) plus 1 per category rect plus 2 more on every hover
-    // (white highlight). With 12 sources × 12 categories that's up to
-    // 288 SolidColorBrush allocations per Render call, and Render fires on
-    // Loaded + SizeChanged — including during tab-swap mid-scan when the
-    // dispatcher is under burst load from EngineClient. Per CLAUDE.md's
-    // History, naked DispatcherObject construction on a
-    // mid-transition XAML tree is a fast-fail shape. Cache once at ctor
-    // (UI thread, dispatcher healthy) and reuse.
+    // Up to 288 brushes (12 sources x 12 categories) would otherwise be allocated per Render, which fires on Loaded and SizeChanged, including under dispatcher load mid-scan.
     private readonly Brush[] _ribbonIdleBrushes;
     private readonly Brush[] _ribbonHoverBrushes;
     private readonly Brush[] _categoryRectBrushes;
     private readonly SolidColorBrush _whiteHighlight;
     private readonly Brush _sourceBrush;
 
-    // Last size we actually laid out at. SizeChanged fires on every pixel of a
-    // resize drag; the layout is pixel-quantized, so only re-render when the
-    // rounded size actually changed (debounce). -1 forces the first render.
     private int _lastRenderW = -1;
     private int _lastRenderH = -1;
 
@@ -74,8 +51,6 @@ public sealed class SankeyFlowControl : Control
         DefaultStyleKey = typeof(SankeyFlowControl);
 
         _sourceBrush = ResolveBrush("GoldBrush", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
-        // Okabe-Ito colour-blind-safe categorical palette (RESTRUCTURE.md §7):
-        // distinct destination-category hues legible across all CVD types.
         // Brand gold/lavender/cyan/pink stay chrome-only (source rects, shell).
         var categoryColors = new[]
         {
@@ -100,10 +75,6 @@ public sealed class SankeyFlowControl : Control
         _whiteHighlight = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
 
         Loaded += (_, _) => Render();
-        // Debounce resize: a drag-resize fires SizeChanged many times per
-        // second; coalesce into one Render ~80 ms after the last change.
-        // RenderIfResized then skips renders where the pixel-quantized size
-        // didn't actually change.
         _renderDebounce = DispatcherQueue?.CreateTimer();
         if (_renderDebounce is not null)
         {
@@ -121,7 +92,6 @@ public sealed class SankeyFlowControl : Control
         Tapped += OnTapped;
     }
 
-    /// <summary>Fires (source, category) when the user clicks a ribbon.</summary>
     public event EventHandler<(string Source, string Category)>? RibbonInvoked;
 
     public void SetPlan(RestructurePlan? plan)
@@ -139,9 +109,7 @@ public sealed class SankeyFlowControl : Control
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => RenderIfResized();
 
-    // SizeChanged fires for every pixel during a resize drag. The layout is
-    // quantized to integer pixels, so re-rendering only when the rounded size
-    // actually changes keeps the O(S * C) layout off the hot drag path.
+    // Layout is quantized to integer pixels, so re-rendering only when the rounded size changes keeps the O(S * C) layout off the drag path.
     private void RenderIfResized()
     {
         int w = (int)Math.Round(ActualWidth);
@@ -153,12 +121,7 @@ public sealed class SankeyFlowControl : Control
     private void Render()
     {
         if (_canvas is null) return;
-        // Record the size being evaluated UP FRONT — even when we bail sub-threshold
-        // below — so the RenderIfResized debounce doesn't suppress a later restore to a
-        // prior size after a sub-threshold pass blanked the canvas (which would leave
-        // the diagram permanently blank, e.g. after the Flow/Tree toggle or a
-        // narrow-then-widen). The cache must reflect the last size SEEN, not the last
-        // size successfully DRAWN.
+        // Record the size up front, even for a sub-threshold pass that blanks the canvas; otherwise the RenderIfResized debounce would suppress a later restore to the prior size and leave the diagram blank.
         _lastRenderW = (int)Math.Round(ActualWidth);
         _lastRenderH = (int)Math.Round(ActualHeight);
         _canvas.Children.Clear();
@@ -171,8 +134,6 @@ public sealed class SankeyFlowControl : Control
 
         var moves = _plan.Moves;
 
-        // Group: source = top-level subfolder of the library root (or "(root)").
-        // Sink   = category from the engine's classifier.
         string SourceOf(RestructureMove m)
         {
             var rel = m.Source;
@@ -185,16 +146,9 @@ public sealed class SankeyFlowControl : Control
             return parts.Length > 1 ? parts[0] : "(root)";
         }
 
-        // Cap each column at MaxNodes; fold the long tail into a single "Other"
-        // node rather than silently dropping it (RESTRUCTURE.md §7).
         const int MaxNodes = 12;
         const string OtherKey = "Other";
 
-        // SourceOf does a Substring + String.Split per move; it used to run ~4x
-        // per move across the distinct-count, top-N, group and flow-matrix passes
-        // below, all on the UI thread on every plan arrival. Parse each move's
-        // source ONCE here and tally the raw source/category counts in the same
-        // pass; every pass after this reads the precomputed arrays.
         int n = moves.Count;
         var srcOf = new string[n];
         var srcRawCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -217,10 +171,6 @@ public sealed class SankeyFlowControl : Control
             .Take(MaxNodes - 1).Select(kv => kv.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         bool foldCats = catRawCounts.Count > MaxNodes;
 
-        // Second pass: per-move bucket keys (top-N fold → "Other") + the
-        // (source, category) flow matrix, all from the precomputed arrays — no
-        // re-parse. The barycentric sort + ribbon-draw loop then read FlowOf in
-        // O(1), so nothing below re-walks moves or re-splits a path.
         var srcBucketOf = new string[n];
         var catBucketOf = new string[n];
         var flow = new Dictionary<(string Src, string Cat), int>();
@@ -235,9 +185,7 @@ public sealed class SankeyFlowControl : Control
         }
         int FlowOf(string src, string cat) => flow.TryGetValue((src, cat), out var f) ? f : 0;
 
-        // Group by the precomputed bucket keys (over move indices — no re-parse,
-        // no per-move materialization); only each group's Key + Count is read
-        // downstream.
+        // Group over move indices with the precomputed bucket keys; only each group's Key and Count are used downstream.
         var rawSourceGroups = Enumerable.Range(0, n).GroupBy(i => srcBucketOf[i])
                                         .OrderByDescending(g => g.Count())
                                         .ToList();
@@ -248,7 +196,6 @@ public sealed class SankeyFlowControl : Control
         var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
         var categoryList = rawCategoryGroups.Select(g => g.Key).ToList();
 
-        // 2 iterations of barycentric sorting to minimize ribbon crossings
         for (int iter = 0; iter < 2; iter++)
         {
             var catWeights = new Dictionary<string, double>();
@@ -292,8 +239,6 @@ public sealed class SankeyFlowControl : Control
         var byCategory = categoryList.Select(cKey => rawCategoryGroups.First(g => g.Key == cKey)).ToList();
         if (bySource.Count == 0 || byCategory.Count == 0) return;
 
-        // Layout: left column of source rects, right column of category rects.
-        // Box height ∝ file count; ribbon thickness ∝ pair count.
         const double margin = 24;
         const double labelGutter = 8;
         const double boxWidth = 14;
@@ -304,7 +249,6 @@ public sealed class SankeyFlowControl : Control
         var availH = h - 2 * margin;
         if (availH <= 0) return;
 
-        // Compute per-source y/height + per-category y/height (left-aligned vertical stacks).
         var srcYs = new Dictionary<string, (double y, double height)>();
         double cursor = margin;
         const double gap = 6;
@@ -325,14 +269,8 @@ public sealed class SankeyFlowControl : Control
             cursor += height + gap;
         }
 
-        // Brushes are pre-allocated at ctor (see field declarations).
-        // Aliases here keep the rest of Render() readable.
         var sourceBrush = _sourceBrush;
 
-        // Draw ribbons first (so labels + boxes overlay them).
-        // Each pair (source, category) → one bezier path.
-        // Within each source/category we keep a running offset so multiple
-        // ribbons don't overlap on the box edge.
         var srcOffsets = bySource.ToDictionary(g => g.Key, _ => 0.0);
         var catOffsets = byCategory.ToDictionary(g => g.Key, _ => 0.0);
 
@@ -374,7 +312,6 @@ public sealed class SankeyFlowControl : Control
             }
         }
 
-        // Draw the source rectangles + labels.
         foreach (var g in bySource)
         {
             var pos = srcYs[g.Key];
@@ -398,7 +335,6 @@ public sealed class SankeyFlowControl : Control
             _canvas.Children.Add(label);
         }
 
-        // Draw the category rectangles + labels.
         for (int i = 0; i < byCategory.Count; i++)
         {
             var g = byCategory[i];
@@ -457,11 +393,6 @@ public sealed class SankeyFlowControl : Control
         };
         canvas.Children.Add(p);
 
-        // Sample the ribbon's CENTERLINE bezier at 24 points for the
-        // proximity hit-test. The centerline is the average of the
-        // top + bottom bezier control sets — visually equivalent to the
-        // ribbon's mid-curve. Done once at render time so PointerMoved is
-        // O(ribbons * 24) per move event (cheap).
         var midSrcY = srcY + srcH * 0.5;
         var midDstY = dstY + dstH * 0.5;
         var p0 = new Point(srcX, midSrcY);
@@ -490,9 +421,7 @@ public sealed class SankeyFlowControl : Control
             b0 * p0.Y + b1 * p1.Y + b2 * p2.Y + b3 * p3.Y);
     }
 
-    // Nearest ribbon within the proximity threshold of the canvas-space point,
-    // or null. Shared by hover (PointerMoved) and tap (OnTapped) so a touch/pen
-    // tap — which never produces a hover phase — still resolves a ribbon.
+    // Shared by hover and tap so a touch or pen tap, which has no hover phase, still resolves a ribbon.
     private Ribbon? HitTest(Point pos)
     {
         const double HitThreshold = 14.0;
@@ -525,9 +454,6 @@ public sealed class SankeyFlowControl : Control
     private void OnTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
         if (_canvas is null || _ribbons.Count == 0) return;
-        // Hit-test at the tap point rather than relying on _hovered: touch/pen
-        // taps have no preceding hover phase, so _hovered would be null and the
-        // tap was silently dropped.
         var hit = HitTest(e.GetPosition(_canvas));
         if (hit is { } h)
         {
@@ -537,15 +463,12 @@ public sealed class SankeyFlowControl : Control
 
     private void ApplyHover(Ribbon? hovered)
     {
-        // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;
         if (_hoverTooltip != null) { _canvas?.Children.Remove(_hoverTooltip); _hoverTooltip = null; }
         if (hovered is null) return;
 
-        // Highlight the hovered ribbon + its source/destination rects.
-        // White-highlight brush is pre-allocated to avoid per-hover
-        // DispatcherObject construction during pointer moves.
+        // The highlight brush is pre-allocated to avoid DispatcherObject construction on every pointer move.
         hovered.Path.Fill = hovered.HoverFill;
         if (_sourceRects.TryGetValue(hovered.Source, out var srcRect))
         {
@@ -555,7 +478,6 @@ public sealed class SankeyFlowControl : Control
         {
             catRect.Fill = _whiteHighlight;
         }
-        // Tooltip — first sample point as anchor.
         var anchor = hovered.Samples[hovered.Samples.Length / 2];
         _hoverTooltip = new TextBlock
         {
@@ -572,13 +494,9 @@ public sealed class SankeyFlowControl : Control
     private static string TrimLabel(string s, int max)
         => s.Length <= max ? s : string.Concat(s.AsSpan(0, max - 1), "…");
 
-    /// <summary>Keeps the end of a destination path (macOS: the dated folder
-    /// stays visible), e.g. "…/Photos/2024/06".</summary>
     internal static string TrimLabelStart(string s, int max)
         => s.Length <= max ? s : string.Concat("…", s.AsSpan(s.Length - (max - 1)));
 
-    /// <summary>Node name in text1 at 12 plus its count in text3 at 11.5;
-    /// the tooltip carries the full path.</summary>
     private static StackPanel NodeLabel(string name, int count, string fullPath)
     {
         var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };

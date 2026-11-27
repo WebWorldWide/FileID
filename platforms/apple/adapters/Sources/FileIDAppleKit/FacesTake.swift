@@ -1,8 +1,5 @@
-// Stage 6: Best Takes' face judgement for the Rust engine
-// (VisionTakeFaceAnalyzer and TakeMediaAnalysis.signals in the Swift engine).
-// The adapter decodes and draws the photo, and runs Vision's landmarks,
-// capture quality and human rectangles; the Rust engine keeps tiling, merging,
-// Face Mesh and scoring (take_scoring.rs, catalog_take_auto.rs).
+// Best Takes face judgement for the Rust engine: decode and draw the photo, run Vision landmarks, capture quality and human rectangles.
+// The Rust engine keeps tiling, merging, Face Mesh and scoring (take_scoring.rs, catalog_take_auto.rs).
 import CoreGraphics
 import FileIDImaging
 import Foundation
@@ -11,9 +8,9 @@ import Vision
 
 enum FacesTake {
     enum Decode: UInt32 {
-        /// `decodeBoundedImage` then `TakeMediaAnalysis.fit` (sRGB, scaled to fit).
+        /// `decodeBoundedImage`, then sRGB scaled to fit the long side.
         case analysis = 0
-        /// `decodeScanImage` drawn unscaled into sRGB (`FaceMesh.Pixels`).
+        /// `decodeScanImage` drawn unscaled into sRGB, the Face Mesh input.
         case detail = 1
         /// `decodeBoundedImage` drawn unscaled into sRGB (the tile source).
         case wide = 2
@@ -41,10 +38,8 @@ enum FacesTake {
         return (rgb, w, h, sourceLongSide(source))
     }
 
-    /// `TakeMediaAnalysis.signals`' tile source: the detail decode
-    /// (`decodeScanImage`) when its long side reaches the smaller of the
-    /// source's and `longSide`, else `decodeBoundedImage` at `longSide`. Vision
-    /// reads crops of this image as decoded, as in Swift.
+    /// Tile source for the take signals: the detail decode when its long side reaches min(source, longSide), else `decodeBoundedImage` at longSide.
+    /// Vision reads crops of this image as decoded.
     static func tileSource(path: String, longSide: Int) -> CGImage? {
         let url = URL(fileURLWithPath: path)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
@@ -56,7 +51,7 @@ enum FacesTake {
         return decodeBoundedImage(source, path: path, maxPixelSize: longSide)
     }
 
-    /// `FaceMesh.Pixels` of `image`: packed sRGB RGB8 drawn unscaled.
+    /// Packed sRGB RGB8 of `image` drawn unscaled, the Face Mesh input.
     static func meshPixels(_ image: CGImage) -> [UInt8]? {
         let (w, h) = (image.width, image.height)
         guard let rgbx = draw(image, width: w, height: h, interpolate: false) else { return nil }
@@ -74,7 +69,7 @@ enum FacesTake {
         return max(properties[kCGImagePropertyPixelWidth] as? Int ?? 0, properties[kCGImagePropertyPixelHeight] as? Int ?? 0)
     }
 
-    /// `TakeMediaAnalysis.fit` (high interpolation) or `FaceMesh.Pixels` (default).
+    /// Draws into sRGB RGBX, with high interpolation when `interpolate` is set.
     private static func draw(_ image: CGImage, width: Int, height: Int, interpolate: Bool) -> [UInt8]? {
         var buffer = [UInt8](repeating: 0, count: width * height * 4)
         let drawn = buffer.withUnsafeMutableBytes { raw -> Bool in
@@ -89,9 +84,7 @@ enum FacesTake {
         return drawn ? buffer : nil
     }
 
-    /// The sRGB image Vision reads, over packed RGB8, with the bitmap layout of
-    /// `TakeMediaAnalysis.fit`'s context: Vision's boxes and landmarks move by
-    /// up to 0.006 of the frame when the same bytes are tagged 32-bit big-endian.
+    /// sRGB image Vision reads, over packed RGB8 with the analysis decode's bitmap layout. Tagging the same bytes as 32-bit big-endian moves Vision's boxes by up to 0.006 of the frame.
     static func image(rgb: UnsafeBufferPointer<UInt8>, width: Int, height: Int) -> CGImage? {
         guard width > 0, height > 0, rgb.count == width * height * 3 else { return nil }
         var rgbx = [UInt8](repeating: 255, count: width * height * 4)
@@ -107,10 +100,7 @@ enum FacesTake {
         }
     }
 
-    /// A mesh input in top-left pixels of a `width` × `height` image: Vision's
-    /// box and the centres of its eye and nose regions (`meshDetection`).
-    /// Floats cross as bit patterns: x1, y1, x2, y2, eyeA, eyeB, nose; `boxOnly`
-    /// when the face has no landmarks.
+    /// Mesh input in top-left pixels: Vision's box and the eye and nose region centres. Floats cross as bit patterns (x1, y1, x2, y2, eyeA, eyeB, nose); `boxOnly` when the face has no landmarks.
     struct Mesh: Encodable {
         let bits: [UInt32]
         let boxOnly: Bool
@@ -139,7 +129,7 @@ enum FacesTake {
     static let closedRatio = 0.12
     static let openRatio = 0.26
 
-    /// `VisionTakeFaceAnalyzer.analyze` (with `people`) or `.faces(in:)`, and
+    /// Face landmarks and capture quality (plus human rectangles with `people`), and
     /// the kept face observations for Face Mesh inputs on a larger decode.
     static func analyze(_ image: CGImage, people withPeople: Bool) -> (Analysis, [VNFaceObservation]) {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
@@ -197,7 +187,7 @@ enum FacesTake {
         return Mesh(bits: [x1, y1, x2, y2, a.0, a.1, b.0, b.1, nose.0, nose.1].map(\.bitPattern), boxOnly: false)
     }
 
-    /// `VisionTakeFaceAnalyzer.eyesOpen`: eye contour height over width.
+    /// Eye contour height over width, scaled to 0...1 between the closed and open ratios.
     static func eyesOpen(_ face: VNFaceObservation) -> Double? {
         let ratios = [face.landmarks?.leftEye, face.landmarks?.rightEye].compactMap { region -> Double? in
             guard let points = region?.normalizedPoints, points.count >= 4 else { return nil }
@@ -271,13 +261,13 @@ final class FacesObservations: @unchecked Sendable {
 }
 
 /// Ferries non-Sendable Vision objects to the timeout queue; one thread
-/// touches them at a time (`_VisionUncheckedBox` in the Swift engine).
+/// touches them at a time.
 final class FacesVisionBox<T>: @unchecked Sendable {
     let value: T
     init(_ v: T) { self.value = v }
 }
 
-/// `runVisionWithTimeout`: 10 s, after which the call is abandoned and the
+/// Runs `body` with a 10 s limit, after which the call is abandoned and the
 /// result treated as not run.
 func facesRunVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
     let sem = DispatchSemaphore(value: 0)

@@ -13,12 +13,13 @@ struct CatalogWorkbench: View {
     @State private var hits: [CatalogHit] = []
     @State private var resultRows: [MomentResultRow] = []
     @State private var hitFileCount = 0
+    @State private var weakerLeftOut = ""
     @State private var chapters: [CatalogChapter] = []
     @State private var cast: [CatalogHit] = []
     @State private var selected: CatalogHit?
     @State private var selectedIndex: Int?
-    @State private var pendingID = ""
-    @State private var pendingAction = ""
+    @State private var pending = CatalogPendingRequests()
+    @State private var searchTask: Task<Void, Never>?
     @State private var message = ""
     @State private var title = ""
     @State private var summary = ""
@@ -64,7 +65,7 @@ struct CatalogWorkbench: View {
                         search()
                     }
                 VHairline()
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 16) {
                         if let selected {
                             playerCard(selected)
@@ -134,15 +135,19 @@ struct CatalogWorkbench: View {
 
     // MARK: - Results pane
 
+    private var libraryReadiness: LibraryReadiness? {
+        store.map { LibraryReadiness(catalogedFiles: $0.catalogedFileCount, scanPhase: engine.lastProgress?.phase) }
+    }
+
     private var resultsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
+                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", respondsToFind: true, onSubmit: search)
                 CaptureDateFilter(window: $captureWindow)
                     .onChange(of: captureWindow) { _, _ in search() }
                     .onChangeWhileActive(of: store?.scopeEpoch ?? 0) { search() }
                 HStack(spacing: 8) {
-                    if pendingAction == "search" {
+                    if pending.searching {
                         IndeterminateBar().frame(width: 80)
                     } else {
                         MetaText(resultsMeta, size: 12)
@@ -164,7 +169,23 @@ struct CatalogWorkbench: View {
             MomentResultsList(rows: resultRows, selectedIndex: selectedIndex, checked: checkedRows, textSize: ContentTextScale.shared.size, onSelect: clickRow)
             .equatable()
             .overlay {
-                if hits.isEmpty && pendingAction != "search" {
+                if hits.isEmpty && !pending.searching, let readiness = libraryReadiness, !readiness.hasFiles {
+                    VStack(spacing: 10) {
+                        MetaText(readiness == .reading
+                                 ? "FileID is reading your files. Search opens as soon as the first files are read."
+                                 : "Scan a folder first. Search looks through the files FileID has scanned.")
+                            .multilineTextAlignment(.center)
+                        if readiness == .needsScan {
+                            let folder = ChatHandoff.shared.libraryRoot
+                            Button(LibraryReadiness.scanButtonTitle(chosenFolder: folder?.lastPathComponent)) {
+                                if let folder { engine.startScan(rootURL: folder) }
+                                else { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                            }
+                                .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
+                        }
+                    }
+                    .padding(24)
+                } else if hits.isEmpty && !pending.searching {
                     MetaText(message.isEmpty ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : message)
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }
@@ -203,12 +224,13 @@ struct CatalogWorkbench: View {
         .fixedSize()
         .disabled(targets.isEmpty)
         .help(checkedRows.isEmpty ? "Open Chat with every result attached (⌘-click results to pick some)" : "Open Chat with the selected results attached")
-        .accessibilityLabel(checkedRows.isEmpty ? "Ask Chat about all \(targets.count) results" : "Ask Chat about the \(targets.count) selected results")
+        .accessibilityLabel(checkedRows.isEmpty ? "Ask Chat about all \(Plural.noun(targets.count, "result", "results"))" : "Ask Chat about the \(Plural.noun(targets.count, "selected result", "selected results"))")
     }
 
     private var resultsMeta: String {
         if hits.isEmpty { return query.isEmpty ? "Type and press Return" : (captureWindow.isActive ? "No results in these dates" : "No results") }
-        return "\(hits.count.formatted()) result\(hits.count == 1 ? "" : "s")"
+        let count = "\(hits.count.formatted()) result\(hits.count == 1 ? "" : "s")"
+        return weakerLeftOut.isEmpty ? count : "\(count) · \(weakerLeftOut) weaker look-alikes left out"
     }
 
     private func hitMeta(_ hit: CatalogHit) -> String { MomentResultRow.meta(for: hit) }
@@ -227,8 +249,7 @@ struct CatalogWorkbench: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(url.lastPathComponent).font(Theme.Font.mono(13, .medium)).foregroundStyle(Theme.text1)
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    Text(url.deletingLastPathComponent().path).font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
-                        .lineLimit(1).truncationMode(.head)
+                    PathLabel(path: url.deletingLastPathComponent().path, font: Theme.Font.mono(11), color: Theme.text3)
                 }
                 if let player {
                     NativeVideoPlayer(player: player)
@@ -242,13 +263,13 @@ struct CatalogWorkbench: View {
                 }
                 if unplayable {
                     HStack(spacing: 10) {
-                        MetaText("FileID can't play this format here. Open it in its default app instead.", color: Theme.text2)
+                        MetaText("FileID can’t play this format here. Open it in its default app instead.", color: Theme.text2)
                         Spacer(minLength: 8)
                         Button("Open") { NSWorkspace.shared.open(url) }
                             .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                     }
                     .padding(12)
-                    .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                    .background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 }
                 if video {
                     MomentTimeline(duration: timelineDuration, examined: tracks.examined, chapters: chapters,
@@ -306,8 +327,11 @@ struct CatalogWorkbench: View {
                     .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             }
             if chapters.isEmpty && !editorOpen {
-                MetaText("No chapters yet. Press Find moments for suggestions, or add your own at the current time.")
+                MetaText(Self.noChaptersMessage(sceneCount: tracks.scenes.count, analyzed: !tracks.examined.isEmpty))
                     .padding(.horizontal, 14).padding(.vertical, 12)
+                ForEach(tracks.scenes, id: \.self) { scene in
+                    sceneRow(scene)
+                }
             }
             ForEach(chapters, id: \.id) { chapter in
                 chapterRow(chapter, fileID: hit.fileID)
@@ -318,6 +342,29 @@ struct CatalogWorkbench: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    static func noChaptersMessage(sceneCount: Int, analyzed: Bool) -> String {
+        switch sceneCount {
+        case 0: analyzed
+            ? "FileID looked at this video and found nothing to split into chapters. Add your own at the current time."
+            : "No chapters yet. Press Find moments for suggestions, or add your own at the current time."
+        case 1: "FileID found one scene in this video, so it suggested no chapters."
+        default: "FileID found \(sceneCount) scenes but suggested no chapters."
+        }
+    }
+
+    private func sceneRow(_ scene: ReadStore.TimelineSpan) -> some View {
+        Button { seek(scene.start) } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(DurationText.clock(scene.start)).font(Theme.Font.mono(12)).foregroundStyle(Theme.text3)
+                Text(scene.text).font(Theme.Font.body(12)).foregroundStyle(Theme.text2).lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scene at \(DurationText.spoken(scene.start)): \(scene.text)")
     }
 
     private var draftNote: String? {
@@ -346,7 +393,7 @@ struct CatalogWorkbench: View {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(DurationText.clock(chapter.startSeconds))
                         .font(Theme.Font.mono(12, .medium)).foregroundStyle(current ? Theme.gold : Theme.text2)
-                        .frame(width: 56, alignment: .leading)
+                        .frame(width: Theme.Font.scaled(56), alignment: .leading)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(chapter.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
                         if !chapter.summary.isEmpty {
@@ -448,16 +495,18 @@ struct CatalogWorkbench: View {
 
     // MARK: - Analysis queue
 
+    private var timelineJobs: [CatalogJob] { engine.catalogJobs.filter { $0.kind == "timelineSample" } }
+
     private var queuePanel: some View {
         Panel {
             PanelHeader("Video analysis") {
-                MetaText(engine.catalogJobs.isEmpty ? "Nothing running" : "\(engine.catalogJobs.count) task\(engine.catalogJobs.count == 1 ? "" : "s")", size: 12)
+                MetaText(timelineJobs.isEmpty ? "Nothing running" : "\(timelineJobs.count) task\(timelineJobs.count == 1 ? "" : "s")", size: 12)
             }
-            if engine.catalogJobs.isEmpty {
+            if timelineJobs.isEmpty {
                 MetaText("Nothing waiting. Pick a video and press Find moments.")
                     .padding(.horizontal, 14).padding(.vertical, 12)
             }
-            ForEach(engine.catalogJobs, id: \.id) { job in
+            ForEach(timelineJobs, id: \.id) { job in
                 CatalogJobRow(job: job) { action in
                     switch action {
                     case "retryTimeline": send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: job.fileIDs))
@@ -553,31 +602,43 @@ struct CatalogWorkbench: View {
     }
 
     private func search() {
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        send(captureWindow.searchRequest(id: UUID().uuidString, query: query, rootID: store?.scope?.root.id))
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let id = UUID().uuidString, rootID = store?.scope?.root.id, window = captureWindow
+        pending.beginSearch(id)
+        message = ""
+        searchTask?.cancel()
+        searchTask = Task { @MainActor in
+            let vector = CLIPModelInstaller.shared.textEncoderReady ? await engine.embedTextQuery(text) : nil
+            guard !Task.isCancelled, pending.isCurrentSearch(id) else { return }
+            if !engine.send(.catalogRequest(request: window.searchRequest(id: id, query: text, rootID: rootID, vector: vector))) {
+                pending.cancelSearch()
+                message = HelperGate.unsentNote(engine)
+            }
+        }
     }
 
     private func send(_ request: CatalogRequest) {
-        pendingID = request.requestID
-        pendingAction = request.action
+        pending.beginOther(request.requestID, action: request.action)
         message = ""
         if !engine.send(.catalogRequest(request: request)) {
-            pendingID = ""
-            pendingAction = ""
-            message = "FileID is still getting ready. Try again in a moment."
+            pending.cancelOther()
+            message = HelperGate.unsentNote(engine)
         }
     }
 
     private func consume() {
-        guard !pendingID.isEmpty, let response = engine.catalogResponses[pendingID] else { return }
-        let action = pendingAction
-        pendingID = ""
-        pendingAction = ""
+        for settled in pending.settle(responses: engine.catalogResponses) {
+            handle(settled.response, action: settled.action)
+        }
+    }
+
+    private func handle(_ response: CatalogResponse, action: String) {
         let failed = response.status != "ok"
         let raw = response.message ?? ""
         // The helper's own wording is written for a log; show it only when it
         // reads like a sentence, and never for a request that worked.
-        message = failed ? (raw.isEmpty || Sidebar.looksTechnical(raw) ? "That didn't work. Try again in a moment." : raw) : ""
+        message = failed ? (raw.isEmpty || Sidebar.looksTechnical(raw) ? "That didn’t work. Try again in a moment." : raw) : ""
         if failed, action != "search" {
             if action == "enqueueTimeline", raw.localizedCaseInsensitiveContains("model") {
                 message = "Finding moments needs an AI model that describes files. Set one up on the Describe Files page, then try again."
@@ -590,18 +651,30 @@ struct CatalogWorkbench: View {
                 ToastCenter.shared.show(message)
             }
         }
+        if CatalogPendingRequests.dropsListedResults(action: action, status: response.status) {
+            hits = []
+            resultRows = []
+            checkedRows = []
+            hitFileCount = 0
+            weakerLeftOut = ""
+            selectedIndex = nil
+        }
         guard !failed else { return }
         switch action {
         case "search":
-            hits = response.hits
+            let strength = captureWindow.isActive ? nil : LibrarySearchOutcome.Strength(message: response.message)
+            hits = strength.map { Array(response.hits.prefix($0.good)) } ?? response.hits
             checkedRows = []
             resultRows = hits.enumerated().map { MomentResultRow(index: $0.offset, hit: $0.element) }
             hitFileCount = Set(hits.map(\.fileID)).count
+            weakerLeftOut = strength.flatMap { $0.weaker > 0 ? $0.weakerLabel : nil } ?? ""
             selectedIndex = nil
             if hits.isEmpty {
                 message = captureWindow.isActive
                     ? "No matches taken in these dates. Try a wider range, or clear the dates."
-                    : "No matches. Try another word, or describe more files so there is more to search."
+                    : (strength?.weaker ?? 0) > 0
+                        ? "No close matches. \(strength?.weaker ?? 0) weaker look-alikes left out; Library search can show them."
+                        : "No matches. Try another word, or describe more files so there is more to search."
             }
         case "jobs":
             engine.applyCatalogJobsSnapshot(response.jobs)
@@ -674,7 +747,7 @@ private struct MomentResultsList: View, Equatable {
     }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(rows) { row in
                     RailRow(selected: selectedIndex == row.id || checked.contains(row.id), action: { onSelect(row.id) }) {
@@ -859,7 +932,7 @@ struct CatalogJobRow: View {
         case "paused": return "Paused"
         case "completed": return "Done"
         case "cancelled", "canceled": return "Stopped"
-        default: return "Didn't finish"
+        default: return "Didn’t finish"
         }
     }
 
@@ -897,7 +970,7 @@ struct CatalogJobRow: View {
             }
             GrainProgressBar(progress: job.progress, tone: tone.1, height: 4)
             if let error = job.error, !error.isEmpty {
-                Text(Sidebar.looksTechnical(error) ? "This didn't finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+                Text(Sidebar.looksTechnical(error) ? "This didn’t finish. Try again." : error).font(Theme.Font.body(12)).foregroundStyle(job.state == "completed" ? Theme.text2 : Theme.danger).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
@@ -918,3 +991,35 @@ enum MediaPlayback {
     }
 }
 
+
+/// The one search and the one detail/chapter/job request a workbench can have in flight; they are tracked apart so starting one never drops the other.
+struct CatalogPendingRequests: Equatable {
+    private(set) var searchID = ""
+    private(set) var otherID = ""
+    private(set) var otherAction = ""
+
+    var searching: Bool { !searchID.isEmpty }
+
+    /// A search that failed must not leave the last query's results standing as if they answered this one.
+    static func dropsListedResults(action: String, status: String) -> Bool { action == "search" && status != "ok" }
+
+    mutating func beginSearch(_ id: String) { searchID = id }
+    mutating func beginOther(_ id: String, action: String) { otherID = id; otherAction = action }
+    mutating func cancelSearch() { searchID = "" }
+    mutating func cancelOther() { otherID = ""; otherAction = "" }
+    func isCurrentSearch(_ id: String) -> Bool { searchID == id }
+
+    mutating func settle(responses: [String: CatalogResponse]) -> [(action: String, response: CatalogResponse)] {
+        var settled: [(action: String, response: CatalogResponse)] = []
+        if !searchID.isEmpty, let response = responses[searchID] {
+            searchID = ""
+            settled.append(("search", response))
+        }
+        if !otherID.isEmpty, let response = responses[otherID] {
+            let action = otherAction
+            cancelOther()
+            settled.append((action, response))
+        }
+        return settled
+    }
+}

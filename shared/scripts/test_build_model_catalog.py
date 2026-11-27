@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_model_catalog as catalog  # noqa: E402
@@ -142,6 +145,66 @@ class LicenseReferenceTests(unittest.TestCase):
                      "openai/gpt-oss-20b", "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", "NousResearch/Hermes-2-Pro-Mistral-7B"]:
             with self.subTest(name=name):
                 self.assertIsNone(catalog.restricted_reason(name))
+
+
+class ReviewedBuildTests(unittest.TestCase):
+    INFO = {"id": "Qwen/Qwen3-VL-2B-Instruct-GGUF", "sha": "b" * 40}
+    BASE_INFO = {"pipeline_tag": "image-text-to-text", "createdAt": "2025-10-19T00:00:00.000Z"}
+
+    @staticmethod
+    def file(path: str) -> dict:
+        return {"path": path, "sha256": "a" * 64, "bytes": 10}
+
+    def build(self, files: list[dict], *options: str) -> dict | None:
+        with mock.patch.object(catalog, "gguf_files", return_value=files):
+            return catalog.build_gguf_entry(self.INFO, "Qwen/Qwen3-VL-2B-Instruct", self.BASE_INFO, "apache-2.0", *options)
+
+    def test_the_review_picks_the_quantization_and_the_projector(self) -> None:
+        files = [self.file(name) for name in ["m-Q8_0.gguf", "m-Q4_K_M.gguf", "mmproj-F16.gguf", "mmproj-Q8_0.gguf"]]
+        entry = self.build(files, "Q4_K_M", "Q8_0")
+        self.assertEqual([(f["role"], f["path"]) for f in entry["files"]], [("model", "m-Q4_K_M.gguf"), ("projector", "mmproj-Q8_0.gguf")])
+        self.assertEqual((entry["quantization"], entry["id"]), ("Q4_K_M", "qwen3_vl_2b_instruct_gguf_q4_k_m"))
+
+    def test_discovery_still_takes_the_preferred_quantization_and_projector(self) -> None:
+        files = [self.file(name) for name in ["m-Q8_0.gguf", "m-Q4_K_M.gguf", "mmproj-F16.gguf", "mmproj-Q8_0.gguf"]]
+        entry = self.build(files)
+        self.assertEqual([f["path"] for f in entry["files"]], ["m-Q4_K_M.gguf", "mmproj-F16.gguf"])
+
+    def test_a_split_model_is_never_built(self) -> None:
+        files = [self.file(name) for name in ["m-Q4_K_M-00001-of-00002.gguf", "m-Q4_K_M-00002-of-00002.gguf", "mmproj-Q8_0.gguf"]]
+        self.assertIsNone(self.build(files, "Q4_K_M", "Q8_0"))
+
+    def test_every_reviewed_build_is_a_publisher_repository_in_the_shipped_catalog(self) -> None:
+        shipped = json.loads((Path(__file__).resolve().parents[1] / "models/catalog.json").read_text())["entries"]
+        for spec in catalog.REVIEWED_BUILDS:
+            with self.subTest(repo=spec["repo"]):
+                self.assertIn(spec["repo"].split("/", 1)[0], catalog.PUBLISHERS)
+                self.assertIsNone(catalog.restricted_reason(spec["repo"]))
+                entries = [e for e in shipped if e["repo"] == spec["repo"] and e["quantization"] == spec["quantization"]]
+                self.assertEqual(len(entries), 1)
+                self.assertEqual([f["role"] for f in entries[0]["files"]], ["model", "projector"])
+                self.assertTrue(all(len(f["sha256"]) == 64 and f["url"].count(entries[0]["revision"]) == 1 for f in entries[0]["files"]))
+
+    def test_adding_reviewed_builds_leaves_every_other_entry_as_it_is(self) -> None:
+        shipped = Path(__file__).resolve().parents[1] / "models/catalog.json"
+        before = json.loads(shipped.read_text())
+        spec = catalog.REVIEWED_BUILDS[1]
+        files = [self.file(name) for name in ["Q-Q4_K_M.gguf", "mmproj-F16.gguf", "mmproj-Q8_0.gguf"]]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "catalog.json"
+            output.write_text(shipped.read_text())
+            vetted = ([], "Qwen/Qwen3-VL-2B-Instruct", self.BASE_INFO, "apache-2.0")
+            with mock.patch.object(catalog, "get", return_value={**self.INFO, "id": spec["repo"]}), \
+                    mock.patch.object(catalog, "vet", return_value=vetted), mock.patch.object(catalog, "gguf_files", return_value=files), \
+                    mock.patch.object(catalog, "REVIEWED_BUILDS", [spec]):
+                self.assertEqual(catalog.add_reviewed_builds(output, {}), 0)
+            after = json.loads(output.read_text())
+        by_id = {entry["id"]: entry for entry in before["entries"]}
+        for entry in after["entries"]:
+            if entry["id"] != "qwen3_vl_2b_instruct_gguf_q4_k_m":
+                self.assertEqual(entry, by_id[entry["id"]])
+        self.assertEqual(len(after["entries"]), len(before["entries"]))
+        self.assertEqual(after["entries"], sorted(after["entries"], key=catalog.sort_key))
 
 
 class LanguageModelTests(unittest.TestCase):

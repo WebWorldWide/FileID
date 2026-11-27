@@ -5,17 +5,9 @@ import CoreVideo
 import Foundation
 import VideoToolbox
 
-/// Decodes the primary image of an HEIF/HEIC file through VideoToolbox, bounded to
-/// `maxPixelSize` on the long side with `irot`/`imir` applied, matching ImageIO's
-/// thumbnail size and orientation.
-///
-/// ImageIO's HEIC path tops out at ~25-28 photos/s on an M1 Pro however many threads
-/// call it; decoding the same tiles straight through VideoToolbox's hardware HEVC
-/// decoder reaches ~120/s at ~30 ms CPU each (VideoToolbox falls back to its software
-/// decoder only when there is no hardware one). Only the layout iPhones and Macs write
-/// is handled: an `hvc1` image or a `grid` of `hvc1` tiles sharing one 8-bit 4:2:0
-/// configuration, sRGB or Display P3 colour, and no clean-aperture crop. Anything else
-/// returns nil and the caller uses ImageIO.
+/// Decodes the primary image of an HEIF/HEIC file through VideoToolbox's hardware HEVC decoder, bounded to `maxPixelSize` with `irot`/`imir` applied, matching ImageIO's thumbnail size and orientation.
+/// ImageIO's HEIC path tops out near 25-28 photos/s; VideoToolbox reaches ~120/s. Only the iPhone/Mac layouts are handled (an `hvc1` image or grid of `hvc1` tiles, 8-bit 4:2:0, sRGB or Display P3, no clean-aperture crop).
+/// Anything else returns nil and the caller uses ImageIO.
 package enum HEIFDecoder {
     package static func decode(path: String, maxPixelSize: Int) -> CGImage? {
         guard maxPixelSize > 0, let file = try? read(path) else { return nil }
@@ -45,9 +37,7 @@ package enum HEIFDecoder {
         return FileBytes(buffer: buffer, count: buffer.count)
     }
 
-    /// Anonymous memory straight from the kernel, unmapped when released. Large malloc
-    /// blocks freed after each photo stayed resident in the allocator's cache (+420 MB of
-    /// footprint during a 1,500-photo HEIC scan).
+    /// Anonymous kernel memory, unmapped on release: large malloc blocks freed per photo stayed resident (+420 MB over a 1,500-photo scan).
     package final class PageBuffer: @unchecked Sendable {
         package let base: UnsafeMutableRawPointer
         package let count: Int
@@ -64,9 +54,7 @@ package enum HEIFDecoder {
         package var bytes: UnsafeMutablePointer<UInt8> { base.assumingMemoryBound(to: UInt8.self) }
     }
 
-    /// Keeps up to `limit` bytes of released buffers for the next photo. Fresh pages cost a
-    /// zero-fill fault each (a HEIC scan ran 47 instead of 55 photos/s); the cap keeps the
-    /// cache from growing like malloc's.
+    /// Keeps up to `limit` bytes of released buffers. Fresh pages cost a zero-fill fault each, so the cap is kept small.
     package final class BufferPool: @unchecked Sendable {
         package static let shared = BufferPool(limitBytes: 128 << 20)
         private let lock = NSLock()
@@ -127,10 +115,7 @@ package enum HEIFDecoder {
 
     package struct Unsupported: Error {}
 
-    /// Caps the full-resolution planes held at once (1.5 bytes per pixel): a 48 MP photo
-    /// needs ~73 MB while its tiles are assembled, and a scan decodes up to 14 at a time.
-    /// 160 MB measured as fast as 320 MB on 12-24 MP iPhone photos (96 MB was 15% slower).
-    /// One file always proceeds, however large.
+    /// Caps full-resolution planes held at once (1.5 bytes per pixel). 160 MB was as fast as 320 MB on 12-24 MP photos. One file always proceeds, however large.
     package final class PlaneBudget: @unchecked Sendable {
         package static let shared = PlaneBudget(limitBytes: 160 << 20)
         private let condition = NSCondition()
@@ -365,8 +350,7 @@ package enum HEIFDecoder {
         if let icc = colour.icc { return CGColorSpace(iccData: icc as CFData) }
         switch (colour.primaries, colour.transfer) {
         case (12?, 13?), (12?, 1?), (12?, 6?): return CGColorSpace(name: CGColorSpace.displayP3)
-        // Unspecified primaries and transfer with no ICC profile (what ImageIO's own HEIC
-        // writer stores for sRGB input) read as sRGB, as ImageIO reads them.
+        // Unspecified primaries and transfer with no ICC profile read as sRGB, as ImageIO reads them.
         case (1?, 13?), (1?, 1?), (1?, 6?), (nil, nil): return CGColorSpace(name: CGColorSpace.sRGB)
         default: return nil
         }
@@ -574,8 +558,7 @@ package enum HEIFDecoder {
         // ImageIO rounds HEIC thumbnail sides to the nearest even number (708.55 → 708).
         var targetWidth = scale < 1 ? max(2, 2 * Int((Double(width) * scale / 2).rounded())) : width
         var targetHeight = scale < 1 ? max(2, 2 * Int((Double(height) * scale / 2).rounded())) : height
-        // The 4:2:0 conversion needs even sizes: scale into an even buffer whose extra
-        // column and row repeat the edge, then crop it off.
+        // 4:2:0 needs even sizes: scale into an even buffer whose extra row and column repeat the edge, then crop it off.
         let evenWidth = targetWidth + (targetWidth & 1), evenHeight = targetHeight + (targetHeight & 1)
 
         let scaledLuma = try BufferPool.shared.take(evenWidth * evenHeight)

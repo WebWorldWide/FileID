@@ -33,11 +33,15 @@ struct TakeWorkbench: View {
     @State private var autoGroups: [CatalogTakeAutoGroup] = []
     @State private var autoLoading = false
     @State private var autoLoaded = false
+    @State private var autoHasMore = false
+    @State private var autoLoadingMore = false
     @State private var selectedAutoKey: String?
     @State private var manual = false
     @State private var proposals: [CatalogTakeAutoGroup] = []
     @State private var proposalsLoaded = false
     @State private var proposalsLoading = false
+    @State private var proposalsHasMore = false
+    @State private var proposalsLoadingMore = false
     @State private var selectedProposalKey: String?
     @State private var groupingJob: CatalogJob?
     @State private var confirmDeleteGroup = false
@@ -94,7 +98,7 @@ struct TakeWorkbench: View {
                         TakeReview(engine: engine, group: group) { reloadAuto(after: group.groupKey) }
                             .id(group.groupKey)
                     } else if selectedEvent != nil || manual {
-                        ScrollView {
+                        ScrollView(.vertical) {
                             VStack(alignment: .leading, spacing: 16) {
                                 groupPanel
                                 if let job = goalJob { goalJobRow(job) }
@@ -152,22 +156,22 @@ struct TakeWorkbench: View {
 
     // MARK: - Groups pane
 
+    private static let showMoreID = "show-more-groups"
+
     private var groupsPane: some View {
         VStack(spacing: 0) {
-            ScrollView {
+            ScrollViewReader { proxy in
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
-                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, selectedKey: selectedProposalKey,
-                                        onFind: findRelated, onControl: controlGrouping, onOpen: openProposal)
-                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     HStack(spacing: 6) {
-                        SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)
+                        SectionLabel("Possible groups · \(TakeProposals.countLabel(open: autoGroups.filter { $0.status == "open" }.count, hasMore: autoHasMore))", color: Theme.ai)
                         Spacer(minLength: 4)
                         if autoLoading { IndeterminateBar().frame(width: 40) }
                         DSIconButton("Look again", systemImage: "arrow.clockwise", tint: Theme.text3) { reloadAuto(after: nil) }
                             .disabled(autoLoading)
                     }
                     .padding(.leading, Theme.Metrics.railInset).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
-                    MetaText("Photo bursts and repeated video takes from your scans. Biggest and newest first.", size: 11.5)
+                    MetaText(TakeProposals.possibleGroupsOrder, size: 11.5)
                         .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
                         .fixedSize(horizontal: false, vertical: true)
                     if autoLoaded && autoGroups.isEmpty {
@@ -177,27 +181,54 @@ struct TakeWorkbench: View {
                     }
                     ForEach(autoGroups) { group in
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
+                            .id(group.groupKey)
                     }
+                    if autoHasMore { ShowMoreGroupsButton(loading: autoLoadingMore, action: loadMoreAuto).id(Self.showMoreID) }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
                     ForEach(events, id: \.id) { event in
                         RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil && selectedProposalKey == nil, action: { open(event) }) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(event.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
-                                Text("\(event.fileIDs.count) takes · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
+                                Text("\(Plural.noun(event.fileIDs.count, "take", "takes")) · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
                             }
                             .padding(.vertical, 7)
                         }
-                        .accessibilityLabel("\(event.title), \(event.fileIDs.count) takes, goal: \(event.goal)")
+                        .accessibilityLabel("\(event.title), \(Plural.noun(event.fileIDs.count, "take", "takes")), goal: \(event.goal)")
                     }
                     if events.isEmpty {
                         MetaText("Groups you make by hand, with a goal, show up here.", size: 12).padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
+                    RelatedTriesSection(proposals: proposals, job: groupingJob, loaded: proposalsLoaded, hasMore: proposalsHasMore,
+                                        loadingMore: proposalsLoadingMore, selectedKey: selectedProposalKey,
+                                        onFind: findRelated, onShowMore: loadMoreProposals, onControl: controlGrouping, onOpen: openProposal)
+                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
                     manualSection
                 }
                 .padding(.bottom, 10)
+            }
+            .onChange(of: selectedAutoKey ?? selectedProposalKey) { _, key in
+                guard let key else { return }
+                withAnimation(Theme.springStandard) { proxy.scrollTo(key, anchor: .center) }
+            }
+            #if DEBUG
+            .onReceive(NotificationCenter.default.publisher(for: .selfShotAction)) { note in
+                guard pageActive, let action = note.object as? String else { return }
+                switch action {
+                case "more": proxy.scrollTo(Self.showMoreID, anchor: .center)
+                case "more-press":
+                    loadMoreAuto()
+                    Task {
+                        while autoLoadingMore { try? await Task.sleep(for: .milliseconds(200)) }
+                        proxy.scrollTo(Self.showMoreID, anchor: .center)
+                    }
+                case "top": if let first = autoGroups.first?.groupKey { proxy.scrollTo(first, anchor: .top) }
+                default: break
+                }
+            }
+            #endif
             }
             if !lastTrashBatch.isEmpty {
                 Hairline()
@@ -295,7 +326,7 @@ struct TakeWorkbench: View {
                 if pendingID.isEmpty == false { IndeterminateBar().frame(width: 60) }
                 if let event = selectedEvent {
                     Button("Undo last save") { send("undoEventEdit", eventID: event.id) }.buttonStyle(.dsGhost)
-                        .help("Puts this group's name, goal and takes back to how they were before you last saved it")
+                        .help("Puts this group’s name, goal and takes back to how they were before you last saved it")
                     Button("Delete group") { confirmDeleteGroup = true }
                         .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
                 }
@@ -355,7 +386,7 @@ struct TakeWorkbench: View {
     private func fieldRow<Field: View>(_ label: String, @ViewBuilder field: () -> Field) -> some View {
         HStack(spacing: 12) {
             Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: Theme.Font.scaled(44), alignment: .leading)
                 .accessibilityHidden(true)
             field()
         }
@@ -378,7 +409,7 @@ struct TakeWorkbench: View {
         }
         let verdict: String
         switch recommendation.status.lowercased() {
-        case "ranked": verdict = "FileID's pick"
+        case "ranked": verdict = "FileID’s pick"
         case "preferred": verdict = "Your pick"
         case "tie": verdict = "Too close to call"
         default: verdict = "Not enough to go on yet"
@@ -449,7 +480,7 @@ struct TakeWorkbench: View {
     private func findRelated() {
         Task {
             let response = await TakeRequests.send(engine, TakeProposals.enqueueRequest(id: UUID().uuidString), timeout: 30)
-            guard let response else { ToastCenter.shared.show("FileID is still getting ready. Try again in a moment."); return }
+            guard let response else { ToastCenter.shared.show(HelperGate.unsentNote(engine)); return }
             if let message = response.message, !message.isEmpty { ToastCenter.shared.show(message) }
             if response.status == "ok" { withAnimation(Theme.springStandard) { groupingJob = TakeProposals.job(response.jobs) } }
         }
@@ -460,7 +491,7 @@ struct TakeWorkbench: View {
         Task {
             let request = CatalogRequest(requestID: UUID().uuidString, action: action, jobID: job.id)
             guard let response = await TakeRequests.send(engine, request, timeout: 30), response.status == "ok" else {
-                ToastCenter.shared.show("That didn't work. Try again.")
+                ToastCenter.shared.show("That didn’t work. Try again.")
                 return
             }
             if let next = TakeProposals.job(response.jobs) { withAnimation(Theme.springStandard) { groupingJob = next } }
@@ -481,14 +512,17 @@ struct TakeWorkbench: View {
         proposalsLoading = true
         let position = resolved.flatMap { key in proposals.firstIndex { $0.groupKey == key } }
         Task {
-            let response = await TakeRequests.send(engine, TakeProposals.proposalsRequest(id: UUID().uuidString), timeout: 60)
+            let loaded = await TakeRequests.pages(engine, upTo: max(TakeProposals.pageSize, proposals.count)) {
+                TakeProposals.proposalsRequest(id: UUID().uuidString, offset: $0)
+            }
             proposalsLoading = false
             proposalsLoaded = true
-            guard let response, response.status == "ok" else { return }
-            let groups = response.takeGroups ?? []
+            guard let loaded else { return }
+            let groups = loaded.groups
             withAnimation(Theme.springStandard) {
                 proposals = groups
-                if let job = TakeProposals.job(response.jobs) { groupingJob = job }
+                proposalsHasMore = loaded.hasMore
+                if let job = TakeProposals.job(loaded.jobs) { groupingJob = job }
                 if let resolved, selectedProposalKey == resolved {
                     let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
                     selectedProposalKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey
@@ -497,6 +531,38 @@ struct TakeWorkbench: View {
                 }
             }
             if resolved != nil { reloadAuto(after: nil) }
+        }
+    }
+
+    private func loadMoreProposals() {
+        guard !proposalsLoading, !proposalsLoadingMore else { return }
+        proposalsLoadingMore = true
+        let offset = proposals.count
+        Task {
+            let response = await TakeRequests.send(engine, TakeProposals.proposalsRequest(id: UUID().uuidString, offset: offset), timeout: 60)
+            proposalsLoadingMore = false
+            guard let response, response.status == "ok", proposals.count == offset else { return }
+            let page = response.takeGroups ?? []
+            withAnimation(Theme.springStandard) {
+                proposals = TakeProposals.appending(page, to: proposals)
+                proposalsHasMore = TakeProposals.hasMore(afterPage: page.count)
+            }
+        }
+    }
+
+    private func loadMoreAuto() {
+        guard !autoLoading, !autoLoadingMore else { return }
+        autoLoadingMore = true
+        let offset = autoGroups.count
+        Task {
+            let response = await TakeRequests.send(engine, TakeProposals.autoRequest(id: UUID().uuidString, offset: offset), timeout: 60)
+            autoLoadingMore = false
+            guard let response, response.status == "ok", autoGroups.count == offset else { return }
+            let page = response.takeGroups ?? []
+            withAnimation(Theme.springStandard) {
+                autoGroups = TakeProposals.appending(page, to: autoGroups)
+                autoHasMore = TakeProposals.hasMore(afterPage: page.count)
+            }
         }
     }
 
@@ -517,13 +583,16 @@ struct TakeWorkbench: View {
         autoLoading = true
         let position = resolved.flatMap { key in autoGroups.firstIndex { $0.groupKey == key } }
         Task {
-            let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups", limit: 100), timeout: 60)
+            let loaded = await TakeRequests.pages(engine, upTo: max(TakeProposals.pageSize, autoGroups.count)) {
+                TakeProposals.autoRequest(id: UUID().uuidString, offset: $0)
+            }
             autoLoading = false
             autoLoaded = true
-            guard let response, response.status == "ok" else { return }
-            let groups = response.takeGroups ?? []
+            guard let loaded else { return }
+            let groups = loaded.groups
             withAnimation(Theme.springStandard) {
                 autoGroups = groups
+                autoHasMore = loaded.hasMore
                 if let resolved, selectedAutoKey == resolved || selectedAutoKey == nil {
                     let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
                     selectedAutoKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey
@@ -601,7 +670,7 @@ struct TakeWorkbench: View {
             goalJobID = nil
             load(eventID)
         } else if job.state == "failed" {
-            message = job.error ?? "Scoring didn't finish. Scores you already reviewed are kept."
+            message = job.error ?? "Scoring didn’t finish. Scores you already reviewed are kept."
         }
     }
 
@@ -622,7 +691,7 @@ struct TakeWorkbench: View {
         if !engine.send(.catalogRequest(request: request)) {
             pendingID = ""
             pendingAction = ""
-            ToastCenter.shared.show("FileID is still getting ready. Try again in a moment.")
+            ToastCenter.shared.show(HelperGate.unsentNote(engine))
         }
     }
 
@@ -695,7 +764,7 @@ private struct AutoGroupRow: View {
                     Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
                         .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
                     Text("\(media) · " + TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
-                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.vertical, 6)
@@ -715,7 +784,7 @@ private struct SuggestionRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(names.joined(separator: ", ")).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text1).lineLimit(2)
             HStack(spacing: 8) {
-                Text("\(names.count) takes · \(suggestion.similarity >= 0.9 ? "nearly identical" : (suggestion.similarity >= 0.75 ? "very alike" : "somewhat alike"))")
+                Text("\(Plural.noun(names.count, "take", "takes")) · \(suggestion.similarity >= 0.9 ? "nearly identical" : (suggestion.similarity >= 0.75 ? "very alike" : "somewhat alike"))")
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.ai)
                     .help("\(Int((suggestion.similarity * 100).rounded()))% alike")
                 Spacer(minLength: 4)
@@ -754,9 +823,9 @@ private struct TakeCard: View {
         if take.stale { return ("Needs review: the file changed", Theme.warning) }
         guard let score = take.outcomeScore else {
             if reviewedByUser { return ("Unclear", Theme.text2) }
-            return (isDraft ? "FileID couldn't tell" : "Not scored yet", Theme.text3)
+            return (isDraft ? "FileID couldn’t tell" : "Not scored yet", Theme.text3)
         }
-        let prefix = isDraft ? "FileID's guess · " : ""
+        let prefix = isDraft ? "FileID’s guess · " : ""
         return score >= 0.5 ? (prefix + "Goal met", Theme.delight) : (prefix + "Goal missed", Theme.danger)
     }
 
@@ -777,7 +846,7 @@ private struct TakeCard: View {
                 Spacer(minLength: 4)
                 Circle().fill(reviewedByUser ? Theme.gold : (isDraft ? Theme.ai : Theme.text3)).frame(width: 7, height: 7)
                     .help(reviewedByUser ? "Reviewed by you" : (isDraft ? "Suggested by FileID from a few frames" : "No score yet"))
-                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "FileID's guess" : "No score"))
+                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "FileID’s guess" : "No score"))
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
             .overlay(alignment: .bottom) { Hairline() }
@@ -811,9 +880,9 @@ private struct TakeCard: View {
                 }
                 if let quality = take.qualityScore {
                     HStack(spacing: 8) {
-                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
+                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(64), alignment: .leading)
                         GrainProgressBar(progress: quality, tone: .neutral, height: 4)
-                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 44, alignment: .trailing)
+                        Text(Self.sharpnessWord(quality)).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: Theme.Font.scaled(44), alignment: .trailing)
                     }
                     .help("Sharpness \(Int((quality * 100).rounded())) out of 100")
                     .accessibilityElement(children: .ignore)

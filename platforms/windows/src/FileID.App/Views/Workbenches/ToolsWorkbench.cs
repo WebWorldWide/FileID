@@ -218,7 +218,6 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         _ => "",
     };
 
-    /// <summary>Trim plays the first ticked file so its start and end can come from the playhead.</summary>
     private void SyncPlayer()
     {
         var path = MediaTool == "trim" && SelectedPaths is { Count: > 0 } paths ? paths[0] : null;
@@ -318,13 +317,18 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     protected override void OnClosed()
     {
         Engine.PropertyChanged -= OnEngineChanged;
-        _player?.Pause();
+        _playerRevision++;
+        _playerPath = null;
+        var previous = _player;
+        _player = null;
+        _playerView.SetMediaPlayer(null);
+        previous?.Dispose();
+        _playerView.Visibility = Visibility.Collapsed;
     }
 
     private void OnToolFilesRequested(object? sender, EventArgs e)
         => DebugLog.SafeRun("ToolsWorkbench.OnToolFilesRequested", () => DispatcherQueue.TryEnqueue(UseToolFiles));
 
-    /// <summary>Files Chat handed over: listed and ticked (up to the 100 an export takes).</summary>
     private void UseToolFiles()
     {
         if (AppViewModel.Instance.TakeToolFiles() is not { Count: > 0 } files) return;

@@ -1,9 +1,5 @@
-// Stage 5: the scan's working images. A decoded CGImage stays here behind a
-// handle so Vision, CLIP and RAM++ read the same pixels the Swift engine's
-// Tagging.processImage reads, with no copy through Rust. Decode, EXIF, dHash
-// and the video keyframe follow Tagging.swift and DeepAnalyze.swift line for
-// line; the shared scan conformance case pins the results against the Swift
-// engine.
+// The scan's working images. A decoded CGImage stays here behind a handle so Vision, CLIP and RAM++ read the same pixels.
+// Decode, EXIF, dHash and the video keyframe feed stored results; the shared scan conformance case pins them.
 import AVFoundation
 import CoreGraphics
 import Foundation
@@ -52,7 +48,7 @@ enum ScanDecode {
         var capturedAt: Date?
     }
 
-    /// `Tagging.loadImageAndEXIF`: files under 256 B are refused, the long edge
+    /// Files under 256 B are refused, the long edge
     /// is FILEID_SCAN_MAX_PIXELS (default 1536), EXIF comes from the same source.
     static func load(path: String, sizeBytes: Int64, maxPixels: Int?) -> (CGImage, EXIF)? {
         let url = URL(fileURLWithPath: path)
@@ -69,7 +65,7 @@ enum ScanDecode {
         return (image, readEXIF(from: src))
     }
 
-    /// `Tagging.computeDHash`: 9x8 grey through CoreGraphics, bit row*8+col set
+    /// 9x8 grey through CoreGraphics, bit row*8+col set
     /// when a pixel is brighter than its right neighbour.
     static func dHash(_ cgImage: CGImage) -> UInt64 {
         guard cgImage.width > 0, cgImage.height > 0 else { return 0 }
@@ -155,7 +151,7 @@ enum ScanDecode {
     }
 }
 
-/// `Tagging.boundedVideoKeyframe` over `DeepAnalyze.extractTimedVideoFrame`:
+/// The video keyframe:
 /// the frame at a quarter of the duration (1 s when unknown, then 0), at most
 /// `maxPixelSize` on the long edge, abandoned after `timeout`.
 enum ScanVideo {
@@ -290,9 +286,8 @@ public func fileid_apple_video_keyframe(
     }
 }
 
-/// The image's dHash. Call it after Vision and CLIP have read the image, as
-/// Tagging.processImage does: a JPEG-backed image keeps the decode its first
-/// draw needed, so a 9x8 draw first would leave CLIP a coarse decode.
+/// The image's dHash. Call it after Vision and CLIP have read the image: a JPEG-backed image keeps the decode its first draw needed,
+/// so a 9x8 draw first would leave CLIP a coarse decode.
 @_cdecl("fileid_apple_image_dhash")
 public func fileid_apple_image_dhash(_ image: UInt64) -> UInt64 {
     guard let cgImage = ScanImages.shared.image(image) else { return 0 }

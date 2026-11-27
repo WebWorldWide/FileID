@@ -1,11 +1,4 @@
-// Tagging — N parallel workers consume DiscoveredFile from Discovery,
-// run the per-file ML pipeline, and emit TaggedFile rows that DBWriter
-// batches into SQLite.
-//
-// Worker count: physical_cores * 1.7. Semaphores cap concurrent ORT
-// inferences to prevent VRAM thrash on the GPU EP — 4 for vision models,
-// 2 for CLIP. Missing models gracefully degrade (the pipeline emits a
-// TaggedFile with the missing fields = None).
+// Tagging workers run the per-file ML pipeline and emit TaggedFile rows for DBWriter; missing models degrade to None fields.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -16,10 +9,6 @@ use parking_lot::Mutex;
 use sha2::Digest;
 use tokio::sync::{mpsc, Semaphore};
 
-/// Opt-in per-stage tracing for perf investigations. Default off — toggle via
-/// `FILEID_PERF_TRACE=1`. When on, `process_file` emits a `[PERF]` debug line
-/// for each pipeline stage with `path` + `elapsed_ms` so a 100-file run can be
-/// distilled into a stage-cost table.
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     let digest = sha2::Sha256::digest(bytes);
     let mut out = [0u8; 32];
@@ -32,6 +21,7 @@ fn composite_hashes(file: &DiscoveredFile, legacy: bool) -> (Option<[u8; 32]>, O
         .map_or((None, None), |(hash, legacy)| (Some(hash), legacy))
 }
 
+/// Per-stage `[PERF]` tracing for perf investigations; off unless `FILEID_PERF_TRACE=1`.
 pub(crate) fn perf_trace_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| {
@@ -55,26 +45,20 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 }
 
 use crate::coordinator::ScanCoordinator;
-use crate::models::runtime::{active_provider, error_has_device_removed_marker, ExecutionProvider};
+use crate::models::runtime::error_has_device_removed_marker;
 use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::pipeline::scan_models::ModelSource;
 use crate::pipeline::twin_reuse::TwinClaim;
 
-/// The scan's twin registry; decoders park copies in it behind their owner.
 type TwinRegistry = crate::pipeline::twin_reuse::TwinRegistry<PreDecoded>;
 use crate::shell;
 use crate::util::content_hash::LegacyHashes;
 
-/// Per-file stage timings. Each worker adds its µs into these atomics;
-/// every STATS_PERIOD files an info-level [STATS] line summarises the
-/// average so optimization wins (or regressions) show up in engine.jsonl.
 static STATS_FILES: AtomicU64 = AtomicU64::new(0);
 static STATS_DECODE_US: AtomicU64 = AtomicU64::new(0);
-/// Files that actually had an image/video decode step (subset of STATS_FILES).
-/// Used as the denominator for decode_us so a mixed-media library with many
-/// non-image files doesn't understate the per-image decode cost.
+/// Files with an image/video decode step; the denominator for decode_us so non-image files don't understate per-image cost.
 static STATS_DECODED_FILES: AtomicU64 = AtomicU64::new(0);
 static STATS_EXIF_US: AtomicU64 = AtomicU64::new(0);
 static STATS_DHASH_US: AtomicU64 = AtomicU64::new(0);
@@ -83,17 +67,10 @@ static STATS_CLIP_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_RAN: AtomicU64 = AtomicU64::new(0);
 static STATS_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-// HW-4 diagnostics: RAM++ inference time (was unaccounted — folded into the
-// total_us gap) and the time spent WAITING to acquire `vision_sem` (both the
-// faces and RAM++ acquisitions). Together with vision_us/clip_us these explain
-// where per-file wall time actually goes, so the throughput bottleneck can be
-// fixed with data rather than guesses.
+/// Time RAM++ runs inside the scan itself; 0 while it is deferred to the catch-up pass.
 static STATS_RAMPLUS_US: AtomicU64 = AtomicU64::new(0);
 static STATS_VISION_WAIT_US: AtomicU64 = AtomicU64::new(0);
-/// Images that copied a byte-identical twin's analysis instead of running
-/// the models (see `twin_reuse`).
 pub static STATS_TWIN_REUSED: AtomicU64 = AtomicU64::new(0);
-/// JPEGs decoded from their embedded MPF preview instead of the full frame.
 pub static STATS_MPF_PREVIEWS: AtomicU64 = AtomicU64::new(0);
 const STATS_PERIOD: u64 = 100;
 
@@ -102,8 +79,6 @@ fn record_stage(stage: &AtomicU64, started: Instant) {
 }
 
 fn maybe_emit_stats() {
-    // fetch_add returns the PRIOR value; +1 lets the modulo land cleanly
-    // on every STATS_PERIOD-th file.
     let n = STATS_FILES.fetch_add(1, Ordering::Relaxed) + 1;
     if n % STATS_PERIOD != 0 {
         return;
@@ -148,55 +123,36 @@ fn maybe_emit_stats() {
     );
 }
 
-/// Bounded channel capacity, Tagging → DBWriter. One transaction worth
-/// + slack so workers don't stall on a slow flush.
+/// One transaction worth plus slack so workers don't stall on a slow flush.
 pub const TAGGING_CHANNEL_CAP: usize = 256;
 
-/// Cap concurrent ORT vision-model inferences. Higher values pressure the
-/// DirectML command queue past the 2 s TDR deadline and the GPU device
-/// gets removed — a full system hang. The ~10 % throughput cost of 4 vs
-/// 8 is the price of staying inside the TDR ceiling.
 const VISION_CONCURRENCY: usize = 4;
 
-/// Cap concurrent CLIP image embeds. Same TDR-pressure reason as
-/// VISION_CONCURRENCY.
 const CLIP_CONCURRENCY: usize = 2;
 
-/// Padding fraction added to the SCRFD bbox before cropping. Must match
-/// the macOS value (FaceClustering.swift = 0.15) so the same library
-/// produces the same ArcFace embeddings → same cluster IDs across
-/// platforms. Clustering parity is the biggest single regression guard.
+/// Must match the macOS value (0.15) so the same library yields the same embeddings and cluster IDs across platforms.
 const FACE_CROP_PAD: f32 = 0.15;
 
-/// One per file post-tagging. The DBWriter batches these into a single
-/// transaction. Embeddings are L2-normalized float32 vectors stored as
-/// raw little-endian bytes.
+/// Embeddings are L2-normalized float32 vectors stored as raw little-endian bytes.
 #[derive(Debug, Clone)]
 pub struct TaggedFile {
     pub path: PathBuf,
     pub kind: FileKind,
     pub size_bytes: u64,
     pub modified_unix: f64,
-    /// Creation timestamp as Unix seconds (propagated from
-    /// `DiscoveredFile.created_unix`). Persisted to `files.created_at`; a
-    /// rescan never clobbers the original (it's excluded from the INSERT's
-    /// ON CONFLICT DO UPDATE set). `None` when the platform has no birth time.
+    /// Unix seconds from `DiscoveredFile.created_unix`; excluded from the INSERT's ON CONFLICT DO UPDATE so a rescan never clobbers it.
     pub created_unix: Option<f64>,
-    /// `created_unix` holds the photo's EXIF capture time, so a rescan should
-    /// replace the stored value (a filesystem birth time never does).
+    /// `created_unix` is the EXIF capture time, so a rescan replaces the stored value (a filesystem birth time never does).
     pub captured_from_exif: bool,
     pub scanned_unix: f64,
 
     pub has_faces: bool,
     pub faces: Vec<DetectedFace>,
-    /// Faces as the Swift scan stores them (Vision boxes, no vectors yet);
-    /// `Some` only on the Mac adapters path, which leaves the file revision to
-    /// the Mac face pipeline as the Swift scan does.
+    /// Vision boxes without vectors; `Some` only on the Mac adapters path, which leaves the file revision to the Mac face pipeline.
     pub vision_faces: Option<Vec<VisionFace>>,
 
     pub has_text: bool,
     pub ocr_text: Option<String>,
-    /// The text read judged the text handwritten (Vision's accurate tier).
     pub ocr_handwritten: bool,
 
     pub phash: Option<i64>,
@@ -216,91 +172,42 @@ pub struct TaggedFile {
     pub failed: bool,
     pub error_message: Option<String>,
 
-    /// Volume-local file identity (propagated from `DiscoveredFile.file_ref`)
-    /// and SHA-256 content identity (computed here). Together they drive the
-    /// dbwriter's rename/move heal: a moved file with a matching `file_ref`
-    /// (same volume) or `content_hash` (cross-volume) re-binds to its
-    /// existing catalog row instead of orphaning its tags + embeddings +
-    /// faces. Both nullable — a row with neither just falls through to a
-    /// fresh INSERT.
+    /// Volume-local identity (`DiscoveredFile.file_ref`) and SHA-256 content identity. The dbwriter re-binds a moved file matching either to its existing row instead of orphaning its tags, embeddings and faces. Both nullable.
     pub file_ref: Option<u64>,
     pub content_hash: Option<[u8; 32]>,
-    /// Frozen pre-SHA-256 BLAKE3 digests, computed from the decoder's single
-    /// read only when the catalog may hold rows they could heal.
+    /// Frozen pre-SHA-256 BLAKE3 digests, computed only when the catalog may hold rows they could heal.
     pub legacy_hashes: Option<LegacyHashes>,
 
-    /// BGE-small text embedding — 384-d L2-normalized float vector
-    /// for the document's extracted text. Persisted by the dbwriter into
-    /// `text_embeddings` (parallel to `clip_embeddings`); enables semantic
-    /// search beyond the doc_fts keyword match. `None` when BGE isn't
-    /// installed or no doc text was extracted.
+    /// 384-d L2-normalized BGE-small vector of the doc text, persisted to `text_embeddings`; `None` when BGE isn't installed or no doc text.
     pub text_embedding: Option<Vec<f32>>,
 
-    /// Plain-text extraction of the file's content for Doc-kind
-    /// inputs (.txt / .md / .docx / .pptx / .xlsx; .pdf is a Phase-4b
-    /// follow-up). Persisted to `doc_text` + the `doc_fts` FTS5 index by
-    /// the dbwriter so the user can full-text-search their docs. Capped at
-    /// `pipeline::doc_extract::MAX_TEXT_BYTES` upstream.
+    /// Extracted doc text, persisted to `doc_text` + `doc_fts`; capped at `doc_extract::MAX_TEXT_BYTES` upstream.
     pub doc_text: Option<String>,
 
-    /// Semantic tags as `(label, score)` pairs, assembled from (a) CLIP
-    /// zero-shot scene labels (score = softmax probability) and (b)
-    /// enriched-extras derived from existing per-file signals (Year + camera
-    /// family), which carry `None` (no model confidence). Persisted into the
-    /// `tags` table by DBWriter with source = `"auto"` and the score in
-    /// `tags.score`; the Library UI reads them via ReadStore and renders the
-    /// top-by-score as TagChip rows. (Descriptive content tags come from the
-    /// optional Deep-Analyze VLM pass as `source='vlm'`, when the user installs
-    /// a Qwen / Gemma model.)
+    /// `(label, score)` pairs: CLIP scene labels (softmax probability) plus enriched extras (Year, camera family) with a `None` score. Persisted as `source='auto'`; VLM tags come from Deep Analyze.
     pub tags: Vec<(String, Option<f32>)>,
 
-    /// True iff the face detect/embed stage actually executed for this file
-    /// this scan (models present AND the GPU was alive). The dbwriter keys its
-    /// stale-`face_prints` DELETE on this flag, not on `faces.is_empty()`: an
-    /// edited/zero-face re-process must clear orphaned faces, but a
-    /// face-disabled or GPU-dead session must NOT wipe still-valid rows. See
-    /// dbwriter face-flush.
+    /// True iff face detect/embed actually ran this scan. The dbwriter's stale-`face_prints` DELETE keys on this, not `faces.is_empty()`: a zero-face re-process must clear orphaned faces, but a face-disabled or GPU-dead session must not wipe valid rows.
     pub faces_evaluated: bool,
 
-    /// True iff the OCR / doc-text extraction stages actually ran for this file
-    /// this scan. Same contract as `faces_evaluated`: the dbwriter
-    /// delete-then-reinserts `ocr_*` / `doc_*` (clearing now-empty text) ONLY
-    /// when the stage ran, never on the ambiguous default-skip path.
+    /// True iff OCR / doc-text extraction ran this scan; same contract as `faces_evaluated` for the `ocr_*` / `doc_*` delete-then-reinsert.
     pub ocr_stage_ran: bool,
     pub doc_stage_ran: bool,
-    /// The doc/pdf text-extraction stage ran this session (whether or not text was found).
-    /// Persisted to `files.text_stage_done` so the BGE backfill carve-out stops re-walking
-    /// a doc that yields no embeddable text (lockstep with macOS).
+    /// Doc/pdf extraction ran (whether or not text was found); persisted as `files.text_stage_done` so the BGE backfill stops re-walking docs with no embeddable text.
     pub text_stage_done: bool,
 
-    /// True iff the tagging stage(s) actually produced this file's tag set this
-    /// session (RAM++ / CLIP-scene / enriched extras for images; keyword / audio
-    /// extraction for docs / audio). Same contract as `faces_evaluated`: the
-    /// dbwriter delete-then-reinserts `source='auto'` tags ONLY when this is set,
-    /// so a per-file timeout row or a GPU-dead short-circuit — both of which emit
-    /// an empty `tags` vec — can never wipe a file's previously-persisted
-    /// auto-tags. Set just before the normal return (false if the GPU died), and
-    /// left false on the timeout / GPU-dead-bail rows.
+    /// True iff tagging actually produced this file's tag set; same contract as `faces_evaluated` for the `source='auto'` delete-then-reinsert, so timeout and GPU-dead rows (empty `tags`) never wipe prior auto-tags. Left false on those rows.
     pub tags_evaluated: bool,
-    /// A byte-identical image was already analyzed: the writer copies that
-    /// row's tags, embedding, faces and text instead of this row's (empty)
-    /// results. Stage flags stay false so nothing of a prior scan at this path
-    /// is deleted before the copy.
+    /// A byte-identical image was already analyzed: the writer copies that row's tags, embedding, faces and text. Stage flags stay false so nothing from a prior scan at this path is deleted before the copy.
     pub reuse_twin: bool,
-    /// The file is a known row that moved (same file id, size and date, old
-    /// path gone): nothing was read or analysed. The writer re-binds the row
-    /// to this path, or writes nothing when it no longer can.
+    /// Known row that moved (same id, size and date, old path gone): nothing was read; the writer re-binds the row to this path or writes nothing.
     pub heal_only: bool,
-    /// `failed` came from the machine's state (cancelled, admission refused,
-    /// graphics device lost), not from the file; it is not counted toward the
-    /// "stop retrying this file" memory.
+    /// `failed` came from machine state (cancelled, admission refused, GPU lost), not the file; not counted toward the stop-retrying memory.
     pub failure_is_transient: bool,
-    /// Work this scan defers to the catch-up pass, stored with the row.
     pub catch_up: Option<crate::pipeline::catch_up::Marker>,
 }
 
 impl TaggedFile {
-    /// The row for `file` before any stage has run.
     pub(crate) fn bare(file: &DiscoveredFile) -> Self {
         Self {
             path: file.path.clone(),
@@ -351,9 +258,7 @@ impl TaggedFile {
     }
 }
 
-/// A face from Apple Vision's primary pass, stored the way the Swift engine's
-/// scan stores it: normalized "x,y,w,h" box (lower-left origin), capture
-/// quality and the clustering hold; the vector comes later.
+/// A face from Apple Vision's primary pass: normalized "x,y,w,h" box (lower-left origin), capture quality and the clustering hold; the vector comes later.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisionFace {
     pub bbox: String,
@@ -370,78 +275,20 @@ pub struct DetectedFace {
     pub yaw: f32,
     pub pitch: f32,
     pub quality: f32,
-    /// True when the face should not anchor clustering (macOS parity:
-    /// DBWriter.swift isExcluded). The row + crop still persist so the
-    /// user can attach it to a person later; the clustering query
-    /// filters `excluded = 0`.
+    /// True when the face should not anchor clustering; the row + crop still persist so the user can attach it to a person later.
     pub excluded: bool,
-    /// Tightly-packed RGB8 of the 112×112 ArcFace crop. Written by the
-    /// dbwriter to face_crops/<face_id>.jpg so the People tab cards can
-    /// render real faces instead of gray circles. Cleared after persist
-    /// to avoid holding ~37 KB per face in memory.
+    /// Tightly-packed RGB8 112×112 ArcFace crop, written by the dbwriter to face_crops/<face_id>.jpg; cleared after persist to avoid holding ~37 KB per face.
     pub crop_rgb_112: Option<Vec<u8>>,
 }
 
-// Face-quality clustering filter. Pose/area constants mirror macOS
-// (DBWriter.swift minBBoxAreaFraction / maxYawRadians / maxPitchRadians);
-// pose is radians on both sides.
-//
-// FACE_QUALITY_FLOOR was a copy of macOS's DBWriter.qualityFloor, which
-// gates Apple Vision's genuinely-0..1 faceCaptureQuality. On Windows the
-// value reaching face_is_excluded is validate_face_geometry's
-// `det.score * geom_conf` (scrfd.rs), whose analytic minimum is
-// SCORE_THRESHOLD(0.6) * geom_conf_min(0.075) = 0.045 — strictly above
-// 0.02, so the floor can never fire. Measured on 183,230 real faces
-// (2026-07-29 Adlon catalog): min 0.115, mean 0.332, max 0.506. Deleted
-// rather than rescaled: face_quality already drives the per-file top-K
-// cap, cluster anchor selection, and the calibrated solo_quality_floor
-// (face_clustering.rs), so remapping its scale would silently reorder
-// all three.
-//
-// FACE_MIN_BBOX_AREA_FRACTION alone is anti-correlated with visibility:
-// it's relative to image size, so it keeps small-but-large-area-fraction
-// faces from a low-res video frame while dropping well-resolved faces on
-// a high-megapixel photo. Lowered to a degenerate-detection backstop only;
-// FACE_MIN_BBOX_MIN_DIM_PX is the real size gate now.
-//
-// The floor is measured in DECODE-space pixels, and decode resolution is
-// NOT uniform across sources: stills decode native or DCT-scaled to
-// [2048, 4096) (JPEG_SCALED_DECODE_FLOOR_EDGE below), while video keyframes
-// are capped at a 1280px long edge (shell/video.rs). So the same real-world
-// face lands ~3x smaller here when it came from a video. Measured on the
-// 2026-07-29 Adlon catalog (183,230 faces: 169,347 image / 13,883 video),
-// min-dimension p50 is 159px for image faces but only 52px for video faces.
-//
-// 40px is therefore the calibrated floor, chosen on a PER-KIND sweep rather
-// than the pooled one (the pooled sweep hid the split and initially argued
-// for 64px, which regressed video badly):
-//     floor   image faces      video faces     videos losing ALL faces
-//       40      +28,051           +134             136 / 4,311  (3%)
-//       48      +27,337         -1,774             503 / 4,311 (12%)
-//       64      +22,138         -4,120           1,287 / 4,311 (30%)
-// 40px keeps nearly all of the image-side recovery (+28,051 of the +30,693
-// theoretical max at no floor) while not regressing video at all, and wipes
-// only 29 persons entirely — every one holding <=8 faces, i.e. noise rather
-// than a real family member (real people here hold dozens to thousands).
-// Going below 40 buys ~3k more faces but keeps weakening the "drop faces
-// too small to identify" goal with no evidence it improves cluster quality,
-// which cannot be measured without labelled ground truth.
-//
-// A single kind-independent constant is deliberate: a per-kind floor would
-// be a second uncalibrated constant and would have to be mirrored exactly
-// in the Swift engine (which cannot be compiled in the Windows dev env).
-// The cleaner long-term fix is to raise the video decode ceiling for the
-// face pass so all sources share one scale; that needs hardware measurement.
+// Face-quality limits (pose in radians). No quality floor: `det.score * geom_conf` never drops below 0.045. FACE_MIN_BBOX_MIN_DIM_PX is the real size gate; the area fraction only backstops degenerate detections.
+// The floor is in decode-space pixels and video keyframes decode ~3x smaller than stills; one shared constant is deliberate.
 const FACE_MIN_BBOX_AREA_FRACTION: f32 = 0.0002;
 const FACE_MIN_BBOX_MIN_DIM_PX: f32 = 40.0;
 const FACE_MAX_YAW_RADIANS: f32 = 50.0 * std::f32::consts::PI / 180.0;
 const FACE_MAX_PITCH_RADIANS: f32 = 30.0 * std::f32::consts::PI / 180.0;
 
-/// True if the face should be excluded from clustering: tiny in absolute
-/// pixels (noisy embeddings — see FACE_MIN_BBOX_MIN_DIM_PX above), tiny
-/// relative to the image (degenerate detection), or heavy profile/pitch
-/// (the same identity at frontal vs 60° lands far apart in embedding
-/// space, polluting clusters).
+/// True if the face should be excluded from clustering: tiny in pixels or relative to the image, or heavy profile/pitch (noisy embeddings that pollute clusters).
 pub fn face_is_excluded(
     yaw: f32,
     pitch: f32,
@@ -454,144 +301,37 @@ pub fn face_is_excluded(
         || pitch.abs() > FACE_MAX_PITCH_RADIANS
 }
 
-/// Loaded ML weights shared across tagging workers. Each model is
-/// optional — missing weights cause the corresponding stage to no-op so
-/// a partial install doesn't fail the whole scan.
-///
-/// Each model is a POOL of independent Sessions; a worker checks out an idle
-/// one (`models::checkout`) so multiple inferences run in parallel
-/// against the GPU's command queue. Pool size capped at MODEL_POOL_SIZE
-/// to keep VRAM bounded.
+/// Loaded ML weights shared across tagging workers. Each model is optional: missing weights make that stage no-op. Each is a pool of Sessions a worker checks out (`models::checkout`), capped at MODEL_POOL_SIZE.
 pub struct ModelStack {
-    // Commercial-clean face models: YuNet (detect, MIT) + SFace (embed, Apache,
-    // 128-d). Field names are legacy (`scrfd`/`arcface`) to keep the pipeline
-    // call sites unchanged; the types are the new MIT/Apache models.
+    // YuNet (detect, MIT) + SFace (embed, Apache, 128-d); the `scrfd`/`arcface` field names are legacy.
     pub arcface: Option<Vec<Mutex<SFace>>>,
     pub scrfd: Option<Vec<Mutex<YuNet>>>,
-    /// MobileCLIP has two paths (the default is chosen in `load_default`):
-    /// - `mobileclip_batch` (DEFAULT) — single Session behind
-    ///   `ClipBatchCoordinator`, fed batched (N,3,224,224) tensors. On a 6 GB
-    ///   card the VRAM clamp drops the pool to ~1-3 sessions behind the
-    ///   `CLIP_CONCURRENCY=2` semaphore, so batching amortizes DirectML
-    ///   dispatch better. Opt OUT with `FILEID_CLIP_USE_BATCH=0`.
-    /// - `mobileclip_pool` — N-Session pool, VRAM-clamped via
-    ///   `resolve_pool_size`; the fallback (`FILEID_CLIP_USE_BATCH=0`), kept
-    ///   for CUDA-EP experiments. NOTE: the batch-vs-pool default is PENDING
-    ///   hardware confirmation (run the A/B and compare clip_p95_ms).
+    /// MobileCLIP has two paths chosen in `load_default`: `mobileclip_batch` (default, one Session behind `ClipBatchCoordinator`) and this pool, used when `FILEID_CLIP_USE_BATCH=0`.
     pub mobileclip_pool: Option<Vec<Mutex<MobileClipImage>>>,
     pub mobileclip_batch: Option<Arc<ClipBatchCoordinator>>,
-    /// CLIP zero-shot scene labeler — a label-embedding matrix built once
-    /// per launch from the (already-installed) CLIP text encoder. Scored
-    /// against the per-file MobileCLIP image embedding. Optional — when the
-    /// text model isn't installed the per-file `tags` Vec is populated only
-    /// from enriched extras.
+    /// CLIP zero-shot scene labeler, scored against the per-file MobileCLIP embedding; without the text model `tags` carries only enriched extras.
     pub scene_labeler: Option<Arc<SceneLabeler>>,
-    /// BGE-small text embedder — computes a 384-d vector for each
-    /// document's extracted text so the library can do semantic search beyond
-    /// FTS5 keyword match. Optional: missing model → no embedding emitted.
     pub bge_text: Option<Mutex<BgeText>>,
-    /// RAM++ multi-label image tagger pool (the PRIMARY in-scan tagger).
-    /// Optional: a missing ONNX (e.g. the self-hosted HF repo not yet
-    /// populated) → tagging falls back to the CLIP zero-shot `scene_labeler`,
-    /// so there is zero regression when RAM++ isn't installed.
+    /// RAM++ tagger pool, the primary in-scan tagger; when missing, tagging falls back to the CLIP `scene_labeler`.
     pub ram_plus: Option<Vec<Mutex<crate::models::ram_plus::RamPlusTagger>>>,
-    /// RAM++ batch-coordinator path (HW-4): one Session driven with batched
-    /// (N,3,384,384) tensors, filling the GPU kernels that a single 384² image
-    /// leaves <1% utilized. Spawned only when `FILEID_RAMPLUS_BATCH_SIZE > 1`
-    /// AND a dynamic-batch ONNX is installed; otherwise `ram_plus` (the
-    /// single-image pool) is used. When this is `Some`, `ram_plus` is `None`.
+    /// RAM++ batch-coordinator path (one Session driven with batched (N,3,384,384) tensors); spawned only when `FILEID_RAMPLUS_BATCH_SIZE > 1` AND a dynamic-batch ONNX is installed. When `Some`, `ram_plus` is `None`.
     pub ram_plus_batch: Option<Arc<crate::models::ram_plus_batch::RamPlusBatchCoordinator>>,
-    /// The pool size the Sessions above were actually loaded with. Concurrency
-    /// caps MUST derive from this, not from re-running `resolve_pool_size` at
-    /// scan time: the live memory-tier probe inside `resolve_pool_size` can
-    /// flip between model load and cap computation (loading N large sessions
-    /// itself drops available RAM), silently serializing a 4-session pool to
-    /// one permit (the 2026-07-20 overnight regression).
+    /// Pool size the Sessions were loaded with. Concurrency caps must derive from this, not a fresh `resolve_pool_size`: its live memory-tier probe can flip after loading and silently serialize a 4-session pool to one permit (an overnight regression).
     pub pool_size: usize,
-    /// The Mac adapters run this scan (Vision faces, MLX CLIP and RAM++):
-    /// unloaded face and RAM++ pools are expected, not load failures.
+    /// The Mac adapters run this scan: unloaded face and RAM++ pools are expected, not load failures.
     pub apple_scan: bool,
-    /// CLIP image embeddings come from the MLX adapter.
     pub apple_clip: bool,
-    /// The Mac adapter's CLIP and RAM++ stay loaded while any stack holds this;
-    /// the last drop frees them.
+    /// Keeps the Mac adapter's CLIP and RAM++ loaded; the last drop frees them.
     pub adapter_hold: Option<crate::pipeline::scan_models::AdapterHold>,
 }
 
-/// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
-/// computed in `resolve_pool_size`. The VRAM gate prevents a wedged DirectML
-/// driver: pool=4 on a 6 GB RTX 2060 exhausts VRAM and requires a hard reboot.
-/// On a 6 GB card the gate clamps to 2; on 12 GB cards it allows up to ~7.
-/// Tunable per-user via `FILEID_MODEL_POOL_SIZE` (also gated).
-const MODEL_POOL_SIZE: usize = 4;
+/// Sessions per pooled model. Sessions of one model share a compiled graph, so a pool costs scratch buffers (~1.5 GB for RAM++), not weights; two keep a second worker busy during a forward pass (DECISIONS 2026-11-18). `FILEID_MODEL_POOL_SIZE` overrides it.
+const MODEL_POOL_SIZE: usize = 2;
 
-/// Estimated VRAM headroom per pooled-Session of the SCALING model families —
-/// SFace (ArcFace) + YuNet (SCRFD) + RAM++ — each loaded `pool_size` times:
-/// weights + DirectML allocator + intermediate tensors. MobileCLIP is NOT part
-/// of this per-slot figure: it defaults to a SINGLE batch-coordinator session
-/// that does not scale with pool_size (fixed overhead, like the reserved
-/// headroom). Conservative upper bound — used to clamp pool size to fit
-/// available `DedicatedVideoMemory`. Real per-session residency varies by model
-/// and EP; treat this as a ceiling, not a measurement.
-///
-/// Measured on RTX 2060 6 GB during a scan against ~40 JPEGs in
-/// %USERPROFILE%\Pictures: total dedicated VRAM peaked at ~2.6 GB from a
-/// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Raised from
-/// 1500 to 2000 MB when RAM++ joined the per-slot model set (Swin-L @384 fp16
-/// adds ~882 MB resident weights + inference intermediates), preserving a
-/// safety margin for DirectML allocator
-/// fragmentation under longer-running scans. On a 6 GB card the gate now
-/// clamps the ArcFace/SCRFD/RAM++ pools to 2.
-const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
-
-/// CUDA-specific per-slot estimate. Measured on RTX 5080 16 GB (2026-07-21,
-/// CUDA 12.9 + cuDNN 9.8, 60-image Adlon sample): 4 pooled slots peaked at
-/// ~15.9 GB total dedicated VRAM ≈ 3.6 GB/slot including the shared
-/// MobileCLIP/face sessions and CUDA arenas — nearly double the DirectML
-/// allocator estimate above. Using the DirectML figure on CUDA would admit
-/// 4 slots on a 10 GB card (~15 GB demand) and wedge it.
-const VRAM_PER_POOL_INSTANCE_CUDA_MB: u64 = 3500;
-
-/// Measured CUDA session-parallelism ceiling — see the A/B table at the
-/// `resolve_pool_size` clamp site.
-const CUDA_MODEL_POOL_MAX: usize = 2;
-
-fn vram_per_pool_instance_mb(ep: crate::models::runtime::ExecutionProvider) -> u64 {
-    use crate::models::runtime::ExecutionProvider as Ep;
-    match ep {
-        Ep::Cuda | Ep::TensorRt => VRAM_PER_POOL_INSTANCE_CUDA_MB,
-        _ => VRAM_PER_POOL_INSTANCE_MB,
-    }
-}
-// HW-4 (RTX 2060, 2026-06-01): a CUDA-specific smaller estimate to fit pool=3
-// was TESTED on hardware and REGRESSED throughput (5.1→3.9 files/s, RAM++
-// 670→812 ms/file, peak RSS 5.7→7.6 GB) — 3 RAM++ Swin-L sessions over-subscribe
-// the single GPU and thrash rather than parallelize. RAM++ throughput is
-// GPU-COMPUTE-bound, not concurrency-bound; the only real win is BATCHED RAM++
-// inference (a dynamic-axis ONNX re-export, see NEXT.md) or a lighter tagger.
-// Do NOT raise the pool to "fix" throughput — it makes it worse.
-
-/// Always-reserved VRAM headroom (Windows desktop compositor + other
-/// apps). Subtracted from the dedicated total before dividing by
-/// VRAM_PER_POOL_INSTANCE_MB. On a 6 GB card this leaves ~4.5 GB usable, so
-/// `(4644 / 1500).max(1) = 3`; with `MODEL_POOL_SIZE = 4` the gate clamps the
-/// ArcFace/SCRFD pools to 3 sessions. (MobileCLIP defaults to the
-/// single-Session batch path, so this clamp mainly bounds the face models.)
-const VRAM_RESERVED_MB: u64 = 1500;
-
-/// ENG-71: ceiling on the pre-allocation HINT for the per-file read buffer.
-/// `file.size_bytes` comes from a filesystem stat; a bogus/huge value (sparse
-/// file, corrupt metadata, or a misclassified multi-GB blob) makes
-/// `Vec::with_capacity(size)` abort the whole process on the failed allocation
-/// — across all decoder threads. Clamping the hint prevents the abort;
-/// `read_to_end` still grows the Vec to the file's true length, so the
-/// hash/EXIF/decode of a normally-sized file is byte-for-byte unchanged.
+/// Ceiling on the read-buffer pre-allocation hint: a bogus `file.size_bytes` (sparse file, corrupt metadata) would make `Vec::with_capacity` abort the whole process. `read_to_end` still grows to the true length.
 const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
 
-/// Per-image ceiling on persisted faces (top-K by quality). 32 comfortably
-/// covers real family group shots; the cap exists for crowd/stadium photos
-/// whose 37 KB crops would otherwise amplify through the tagging channel and
-/// DBWriter batch. The environment override may lower, never raise, this bound.
+/// Per-image ceiling on persisted faces (top-K by quality); caps crowd photos whose 37 KB crops would amplify through the channel and DBWriter batch. The environment override may lower, never raise it.
 const FACE_MAX_PER_IMAGE: usize = 32;
 
 fn parse_face_max_per_image(raw: Option<&str>) -> usize {
@@ -629,154 +369,28 @@ fn resolve_pool_size(worker_count: usize) -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
     let mut cap = env_override.unwrap_or(MODEL_POOL_SIZE);
-    let active_ep = crate::models::runtime::active_provider();
-    // CUDA/TensorRT sessions parallelize poorly beyond two: measured on the
-    // RTX 5080 16 GB (2026-07-21, identical 3000-file Adlon A/B via
-    // FILEID_MODEL_POOL_SIZE): pool 1 → 20.4 f/s, 2 → 23.4, 3 → 17.2,
-    // 4 → 4.6 (VRAM saturation at 15.9 GB → WDDM thrash). Matches the
-    // RTX 2060 HW-4 finding that pool 3 regressed. The env override skips
-    // this so future A/Bs stay possible.
-    if env_override.is_none()
-        && matches!(
-            active_ep,
-            crate::models::runtime::ExecutionProvider::Cuda
-                | crate::models::runtime::ExecutionProvider::TensorRt
-        )
-    {
-        cap = cap.min(CUDA_MODEL_POOL_MAX);
-    }
-    match crate::platform::dedicated_vram_mb() {
-        Some(vram_mb) => {
-            let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
-            let vram_cap = ((usable / vram_per_pool_instance_mb(active_ep)).max(1)) as usize;
-            if cap > vram_cap {
-                tracing::warn!(
-                    requested = cap,
-                    vram_cap,
-                    vram_mb,
-                    "clamping ML pool to fit VRAM"
-                );
-                cap = vram_cap;
-            }
-        }
-        None => {
-            // No dedicated-VRAM reading. This is the EXPECTED, correct state on a
-            // CPU-only box (one all-cores ORT session is optimal for the
-            // compute-bound RAM++ — more pooled sessions just contend), and the
-            // fail-SAFE state on a GPU box whose VRAM probe failed (a single
-            // session beats MODEL_POOL_SIZE=4 wedging a small card). Same outcome
-            // either way, so log it neutrally rather than as a fault.
-            tracing::info!(
-                "no dedicated VRAM detected (CPU-only box, or a GPU present but the VRAM probe failed) — running a single all-cores ML session"
-            );
-            cap = cap.min(1);
-        }
-    }
-    // Additional Low-tier ceiling on a low-RAM box — but only for EPs whose
-    // session weights are RAM-resident (CPU, and conservatively DirectML's
-    // staging allocations). CUDA/TensorRT weights live in dedicated VRAM and
-    // are already bounded by the VRAM clamp above; keying their pool on a
-    // transient available-RAM dip (a parallel build, a browser) silently
-    // quartered GPU tagging throughput for the whole scan.
-    if crate::platform::memory_tier() == crate::platform::MemoryTier::Low
-        && !matches!(
-            active_ep,
-            crate::models::runtime::ExecutionProvider::Cuda
-                | crate::models::runtime::ExecutionProvider::TensorRt
-        )
-    {
-        cap = cap.min(1);
-    }
-    // A CPU-bound session set lives in system RAM, not VRAM, so the VRAM clamp
-    // above says nothing about it: N pooled RAM++ sessions on CPU are N copies
-    // of ~1 GB weights + arenas that contend for the same cores. One all-cores
-    // session is both faster and keeps available memory from cratering (the
-    // 2026-07-20 overnight run loaded 4 CPU-resident pools on a GPU box whose
-    // CUDA provider silently failed to bind, tipping the box into MemoryTier::Low).
-    if matches!(active_ep, crate::models::runtime::ExecutionProvider::Cpu) {
+    // Session activations live in system RAM: on a low-memory box one session is all that fits beside the scan's own buffers.
+    if env_override.is_none() && crate::platform::memory_tier() == crate::platform::MemoryTier::Low {
         cap = cap.min(1);
     }
     cap.max(1).min(worker_count.max(1))
 }
 
-/// EP-aware vision-inference concurrency. DirectML keeps the explicit TDR floor
-/// (`VISION_CONCURRENCY`): past the 2 s deadline Windows removes the GPU device.
-/// CUDA/TensorRT have no TDR ceiling, so concurrency rises to the (VRAM-clamped)
-/// pool size — every loaded Session can run at once instead of being artificially
-/// throttled below the pool. Other EPs stay at the conservative floor until
-/// measured. NOTE: on a small-VRAM card the pool itself clamps to ~2, so this is
-/// a no-op there; the win is on larger CUDA cards. Growing the pool on a 6 GB
-/// CUDA card needs a CUDA-specific `VRAM_PER_POOL_INSTANCE_MB` retune measured on
-/// hardware (DirectML's estimate is allocator-conservative) — tracked separately.
-fn ep_vision_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
-    use crate::models::runtime::ExecutionProvider as Ep;
-    match ep {
-        // Exactly one permit per loaded Session: extra permits beyond the pool
-        // just park workers on a session Mutex, and fewer would idle loaded
-        // slots. (The old `.max(VISION_CONCURRENCY)` handed a 2-slot CUDA pool
-        // 4 permits — two of them permanently mutex-blocked.)
-        Ep::Cuda | Ep::TensorRt => pool_size.max(1),
-        _ => VISION_CONCURRENCY,
-    }
-}
-
-/// EP-aware CLIP-embed concurrency (governs the opt-in `FILEID_CLIP_USE_BATCH=0`
-/// pool path; the default batch coordinator uses one Session and ignores this).
-/// Same EP rationale as [`ep_vision_concurrency`].
-fn ep_clip_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
-    use crate::models::runtime::ExecutionProvider as Ep;
-    match ep {
-        Ep::Cuda | Ep::TensorRt => pool_size.max(1),
-        _ => CLIP_CONCURRENCY,
-    }
-}
-
-fn default_clip_use_batch(ep: ExecutionProvider) -> bool {
-    !matches!(ep, ExecutionProvider::Cuda | ExecutionProvider::TensorRt)
-}
-
-fn resolve_clip_use_batch(ep: ExecutionProvider, env_override: Option<&str>) -> bool {
-    env_override
-        .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
-        .unwrap_or_else(|| default_clip_use_batch(ep))
-}
-
 impl ModelStack {
-    /// Load whatever model files are installed at the canonical paths.
-    /// Each present model gets loaded `pool_size` times so workers can
-    /// run inference in parallel without serializing on a single Mutex.
     pub fn load_default(worker_count: usize) -> Self {
         let pool_size = resolve_pool_size(worker_count);
         let arcface = load_pool("SFace", pool_size, crate::models::sface::default_weights_path(), SFace::load);
         let scrfd = load_pool("YuNet", pool_size, crate::models::yunet::default_weights_path(), YuNet::load);
 
-        // MobileCLIP has two viable dispatch modes:
-        // - DirectML keeps the batch-coordinator default; this was introduced
-        //   for small-NVIDIA/DirectML boxes where fewer ORT dispatches beat a
-        //   VRAM-clamped Session pool.
-        // - CUDA/TensorRT default to the pool path. The Adlon 1K A/B on RTX
-        //   5080 + CUDA measured 50.68s with batching vs 40.96s unbatched,
-        //   with identical DB assertions.
-        //
-        // FILEID_CLIP_USE_BATCH remains an explicit override: 0/false selects
-        // the pool path, any other non-empty value selects batching.
-        let clip_ep = active_provider();
-        let clip_batch_override = std::env::var("FILEID_CLIP_USE_BATCH").ok();
-        let use_batch = resolve_clip_use_batch(clip_ep, clip_batch_override.as_deref());
-        tracing::info!(
-            model = "MobileCLIP",
-            ep = %clip_ep.as_str(),
-            use_batch,
-            "dispatch mode selected"
-        );
+        // FILEID_CLIP_USE_BATCH=0/false selects the session pool; any other value the batch coordinator.
+        let use_batch = std::env::var("FILEID_CLIP_USE_BATCH")
+            .ok()
+            .is_none_or(|value| !(value == "0" || value.eq_ignore_ascii_case("false")));
+        tracing::info!(model = "MobileCLIP", use_batch, "dispatch mode selected");
 
-        // The scene labeler matrix is loaded from precomputed embeddings
-        // (scene_embeddings_precomputed.rs); the per-file CLIP embedding for
-        // semantic search uses the same image encoder.
         let scene_labeler = Some(crate::models::scene_vocab::shared_scene_labeler());
 
         let (mobileclip_pool, mobileclip_batch) = if use_batch {
-            // Batch-coordinator path (default for DirectML; opt in on CUDA/TensorRT with FILEID_CLIP_USE_BATCH=1).
             let coord = match crate::models::mobileclip::default_weights_path() {
                 Ok(p) if p.exists() => match MobileClipImage::load(p.clone()) {
                     Ok(model) => {
@@ -799,7 +413,6 @@ impl ModelStack {
             };
             (None, coord)
         } else {
-            // Pool path (default for CUDA/TensorRT; opt out on DirectML with FILEID_CLIP_USE_BATCH=0).
             let pool = load_pool(
                 "MobileCLIP",
                 pool_size,
@@ -809,15 +422,7 @@ impl ModelStack {
             (pool, None)
         };
 
-        // RAM++ multi-label tagger pool — the primary in-scan tagger. Loaded
-        // like the other pooled models; a missing ONNX (e.g. the HF repo not
-        // yet populated) yields None and tagging falls back to CLIP scene-tags
-        // (zero regression). The tag-list path is captured into the loader
-        // closure since `load_pool` passes only the resolved ONNX path.
-        // RAM++ default = single-image pool. When FILEID_RAMPLUS_BATCH_SIZE > 1
-        // AND a dynamic-batch ONNX is installed, use the batch coordinator
-        // instead (one Session, batched forward — the HW-4 throughput fix). The
-        // two paths are mutually exclusive.
+        // The tag list is captured into the loader closure: `load_pool` passes only the resolved ONNX path.
         let ram_batch_size =
             crate::models::ram_plus_batch::RamPlusBatchCoordinator::configured_batch_size();
         let load_ram_plus_pool = |
@@ -832,7 +437,18 @@ impl ModelStack {
                 seed,
             )
         };
+        let installed_gb = crate::platform::physical_memory_gb();
+        let ram_plus_fits = crate::platform::ram_plus_fits_in_memory(installed_gb);
         let (ram_plus, ram_plus_batch) = match crate::models::ram_plus::default_tags_path() {
+            Ok(_) if !ram_plus_fits => {
+                tracing::warn!(
+                    model = "RAM++",
+                    installed_gb = format!("{installed_gb:.1}"),
+                    min_gb = crate::platform::RAM_PLUS_MIN_TOTAL_GB,
+                    "not enough installed memory for RAM++; tagging falls back to CLIP scene-tags"
+                );
+                (None, None)
+            }
             Ok(tags_path) if ram_batch_size > 1 => {
                 match crate::models::ram_plus::default_onnx_path() {
                     Ok(p) if p.exists() => {
@@ -889,14 +505,12 @@ impl ModelStack {
         }
     }
 
-    /// The scan's models: the Mac adapters' set when the app hosts the engine,
-    /// else whatever is installed (nothing without ONNX Runtime).
-    pub fn load_for_scan(worker_count: usize, runtime_available: bool) -> Self {
+    pub fn load_for_scan(worker_count: usize) -> Self {
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         if mac::enabled() {
-            return mac::model_stack(worker_count, runtime_available);
+            return mac::model_stack(worker_count);
         }
-        if runtime_available { Self::load_default(worker_count) } else { Self::empty() }
+        Self::load_default(worker_count)
     }
 
     pub fn empty() -> Self {
@@ -917,7 +531,6 @@ impl ModelStack {
     }
 }
 
-/// BGE-small document embedder, when its weights and vocabulary are installed.
 fn load_bge_text() -> Option<Mutex<BgeText>> {
     match (
         crate::models::bge_text::default_weights_path(),
@@ -971,23 +584,9 @@ where
         pool.push(Mutex::new(model));
     }
     for idx in pool.len()..pool_size {
-        // Stagger each post-first Session allocation by 250 ms so a 6-session
-        // pool
-        // (2 × 3 models) doesn't burst DirectML's command queue at engine
-        // startup — the riskiest TDR window.
-        if idx > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
         match loader(p.clone()) {
             Ok(model) => pool.push(Mutex::new(model)),
             Err(err) => {
-                // If a slot's warmup hit device-removed, bail the whole
-                // stack rather than try further slots against the dead GPU.
-                use crate::models::runtime::error_has_device_removed_marker;
-                if error_has_device_removed_marker(&err) {
-                    tracing::error!(model = label, slot = idx, ?err, "[STARTUP-TDR] device-removed during warmup; aborting pool load");
-                    return None;
-                }
                 tracing::warn!(model = label, slot = idx, ?err, "model pool load failed; stage will skip if pool empty");
                 break;
             }
@@ -1030,13 +629,25 @@ pub struct Tagger {
     legacy_hashes: bool,
     scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
     twins: Arc<TwinRegistry>,
+    retrying_failures: bool,
 }
 
-/// The Mac adapters decode and analyse this process's scans.
 pub(crate) fn apple_scan_enabled() -> bool {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         mac::enabled()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    {
+        false
+    }
+}
+
+/// The Mac's careful text reader stopped answering and is paused; the fast read still ran.
+pub(crate) fn careful_reading_paused() -> bool {
+    #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+    {
+        crate::apple::scan::ocr_paused()
     }
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     {
@@ -1050,22 +661,36 @@ fn twin_reuse_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_TWIN_REUSE").map_or(true, |v| v.trim() != "0"))
 }
 
-/// One file's analysis may take this long before it is recorded as failed.
 const PER_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The first file through the models waits for their one-time compile on the accelerator, which can outlast a normal file's whole budget.
+const COLD_START_TIMEOUT: Duration = Duration::from_secs(300);
+/// Most a busy machine stretches the per-file budget: a read slows with the load, so a loaded machine gets more time, not failed files.
+const MAX_LOAD_STRETCH: f64 = 20.0;
+static STACK_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// How long a copy waits for the first copy's analysis before analyzing
-/// itself. Shorter than `PER_FILE_TIMEOUT`, and spent before that timer
-/// starts, so waiting can never fail the copy.
+/// How long one file may take once its analysis has started.
+fn file_time_limit(load_per_core: f64, stack_warm: bool) -> Duration {
+    let limit = PER_FILE_TIMEOUT.mul_f64(load_per_core.clamp(1.0, MAX_LOAD_STRETCH));
+    if stack_warm { limit } else { limit.max(COLD_START_TIMEOUT) }
+}
+/// What a row says when a read timed out: the file is fine, the machine was too busy, and the engine reads it again.
+pub(crate) const TIMED_OUT_MESSAGE: &str = "FileID ran out of time reading this file; it will try again";
+/// What a row says when the scheduler refused the file for lack of time or memory; the row is transient, so the next scan reads it again.
+pub(crate) const BUSY_MESSAGE: &str = "FileID was too busy or low on memory to read this file; it will try again";
+/// What a row says when a decoder rejected the image; the codec's own text goes to the log only.
+pub(crate) const UNDECODABLE_IMAGE_MESSAGE: &str = "FileID couldn't read this image; the file may be damaged or in a format it doesn't support";
+/// The wording earlier builds stored for the same failure; catalogs written by them still hold it.
+const LEGACY_TIMEOUT_MESSAGES: [&str; 2] = ["per-file timeout after 60s", "Vision pass timed out"];
+/// Stored `error_message` of a row that failed only because the machine was too busy, so a retry may succeed.
+pub(crate) const TIMEOUT_MESSAGES: [&str; 3] = [TIMED_OUT_MESSAGE, LEGACY_TIMEOUT_MESSAGES[0], LEGACY_TIMEOUT_MESSAGES[1]];
+
+/// Wait for the first copy's analysis before analyzing itself; shorter than `PER_FILE_TIMEOUT` and spent before that timer starts, so waiting never fails the copy.
 const TWIN_WAIT_PATIENCE: Duration = Duration::from_secs(45);
 
-/// A copy whose owner failed claims the hash again this many times (so the
-/// copies behind it wait on it) before it analyzes itself unshared.
+/// Times a copy re-claims the hash after its owner failed before analyzing unshared.
 const TWIN_RECLAIM_LIMIT: u32 = 2;
 
-/// How many workers may wait for a twin at once: one fewer than the pool. A
-/// copy can reach a worker before the owner it waits for (after an earlier
-/// owner failed, the next one may still be decoding); with every worker
-/// waiting, nothing would pick that owner up until the waits ran out.
+/// At most pool-1 workers may wait for a twin: a copy can reach a worker before its owner (still decoding), and with every worker waiting nothing would pick the owner up until the waits ran out.
 struct TwinWaiters {
     waiting: std::sync::atomic::AtomicUsize,
     limit: usize,
@@ -1093,13 +718,9 @@ impl Drop for TwinWaiting {
     }
 }
 
-/// How long one scan file may wait for CPU/memory admission before it is
-/// recorded as failed. Searches, residents and low free memory are transient;
-/// the wait ends at once when the scan is cancelled.
+/// Max wait for CPU/memory admission before a file is recorded as failed; the wait ends at once on cancel.
 const SCAN_ADMISSION_PATIENCE: Duration = Duration::from_secs(600);
 
-/// Working-set estimate for one file's analysis: four copies of the decoded
-/// frame plus a fixed floor.
 fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
     predecoded
         .decoded
@@ -1110,12 +731,34 @@ fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
         + 32
 }
 
+/// A USB or network volume gets 4 readers: on the owner's USB exFAT SSD, 1/2/4/10 threads read 101/136/151/135 files/s, so more than 4 only adds contention (and thrashes a spinning disk).
+fn decoder_count_for_storage(count: usize, storage: Option<crate::platform::StorageType>) -> usize {
+    match storage {
+        Some(
+            crate::platform::StorageType::Hdd
+            | crate::platform::StorageType::Removable
+            | crate::platform::StorageType::Network,
+        ) => count.min(4),
+        _ => count,
+    }
+}
+
+/// A solid-state USB volume has no seek penalty to thrash: 4 → 8 readers raised a JPEG-and-RAW scan of the owner's USB exFAT SSD from about 80 to 90 files/s on a 10-core Mac (4 JPEG-only decode threads read 55 files/s, 8 read 94).
+const SOLID_STATE_DECODERS: usize = 8;
+
+fn decoder_count_for_volume(count: usize, storage: Option<crate::platform::StorageType>, solid_state: impl FnOnce() -> bool) -> usize {
+    let narrowed = decoder_count_for_storage(count, storage);
+    if narrowed < count && matches!(storage, Some(crate::platform::StorageType::Removable)) && solid_state() {
+        return count.min(SOLID_STATE_DECODERS);
+    }
+    narrowed
+}
+
 impl Tagger {
     pub fn new(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelStack>) -> Self {
         Self::with_model_source(coordinator, worker_count, ModelSource::ready(models))
     }
 
-    /// A tagger whose models load when the first file that needs them arrives.
     pub fn with_model_source(coordinator: ScanCoordinator, worker_count: usize, models: Arc<ModelSource>) -> Self {
         Self {
             coordinator,
@@ -1125,11 +768,16 @@ impl Tagger {
             legacy_hashes: false,
             scheduler: crate::resource_scheduler::ResourceScheduler::shared(),
             twins: TwinRegistry::new(),
+            retrying_failures: false,
         }
     }
 
-    /// Content hashes of images an earlier scan analyzed; a byte-identical
-    /// copy found by this scan copies their rows instead of running the models.
+    /// The pass that retries what failed earlier in the same scan: a failure here is not remembered as another attempt, so one busy moment cannot use up a file's retries.
+    pub fn with_retrying_failures(mut self, retrying: bool) -> Self {
+        self.retrying_failures = retrying;
+        self
+    }
+
     pub fn with_known_twins(self, hashes: impl IntoIterator<Item = [u8; 32]>) -> Self {
         let seeded = self.twins.seed(hashes);
         if seeded > 0 {
@@ -1144,46 +792,24 @@ impl Tagger {
         self
     }
 
-    /// Have the decoders also compute the legacy BLAKE3 digests the
-    /// dbwriter's rename-heal probes (only useful on a non-empty catalog).
+    /// Also compute the legacy BLAKE3 digests for the dbwriter's rename-heal probes (only useful on a non-empty catalog).
     pub fn with_legacy_hashes(mut self, enabled: bool) -> Self {
         self.legacy_hashes = enabled;
         self
     }
 
-    /// Lets the decoder pool clamp to the scan root's storage type; without
-    /// it the pool sizes by CPU topology alone.
+    /// Lets the decoder pool clamp to the scan root's storage type.
     pub fn with_scan_root(mut self, root: std::path::PathBuf) -> Self {
         self.scan_root = Some(root);
         self
     }
 
-    /// Wire Discovery → decoder pool → N tagging workers → DBWriter.
-    ///
-    /// Two-stage pipeline:
-    ///   1. **Decoder pool**: M dedicated OS threads pull `DiscoveredFile`
-    ///      from the discovery channel and run blocking image decode (the
-    ///      CPU-bound part). Decoded `(rgb, w, h)` bytes are pushed into
-    ///      the pre-decoded channel.
-    ///   2. **Inference workers**: N async tokio tasks pull `PreDecoded`,
-    ///      run face/CLIP/OCR under semaphore-bounded inference, and ship
-    ///      `TaggedFile` rows to the DBWriter.
-    ///
-    /// Previously decode happened inline inside each worker, which meant
-    /// new files were only pulled from discovery once a worker freed up
-    /// from its prior ML wait. With `CLIP_CONCURRENCY=2` and `worker_count=14`
-    /// most workers were idle waiting on semaphores — the CPU only saw
-    /// ~12 % utilization. Splitting decode into its own pool lets the
-    /// decoder threads saturate available cores ahead of inference,
-    /// keeping a warm buffer of pre-decoded frames so workers never wait
-    /// on the CPU-bound path.
+    /// Wires Discovery → decoder pool (OS threads, blocking decode) → N inference workers (async tasks, semaphore-bounded face/CLIP/OCR) → DBWriter.
     pub fn spawn(
         self,
         mut input: mpsc::Receiver<DiscoveredFile>,
     ) -> (mpsc::Receiver<TaggedFile>, tokio::task::JoinHandle<()>) {
-        // Reset per-scan stats so each session's [STATS] log reflects only
-        // that session — not a running blend across multiple scans this process
-        // has performed. All STATS_* are process-global AtomicU64s.
+        // Reset per-scan so the [STATS] log reflects only this session; STATS_* are process-global.
         for counter in &[
             &STATS_FILES as &AtomicU64,
             &STATS_DECODE_US,
@@ -1205,8 +831,6 @@ impl Tagger {
 
         let (out_tx, out_rx) = mpsc::channel(TAGGING_CHANNEL_CAP);
 
-        // Stage 1a — bridge tokio mpsc<DiscoveredFile> into a
-        // multi-consumer async-channel so the decoder pool can fan out.
         let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(TAGGING_CHANNEL_CAP);
         let coordinator_pump = self.coordinator.clone();
         let models_for_pump = self.models.clone();
@@ -1220,9 +844,7 @@ impl Tagger {
                     },
                     _ = coordinator_pump.wait_cancelled() => break,
                 };
-                // The first file with work to do starts the model load, so it
-                // overlaps the walk and the first decodes. A scan with nothing
-                // to analyse never gets here.
+                // The first file with work starts the model load, overlapping the walk and first decodes.
                 if !models_requested && !file.moved_from_known_row {
                     models_requested = true;
                     let models = models_for_pump.clone();
@@ -1241,56 +863,28 @@ impl Tagger {
             }
         });
 
-        // Stage 1b — decoder pool: M sync OS threads. Sized by physical
-        // CPU topology (p+e cores), clamped to the [2, 12] range so we
-        // don't oversaturate the GPU side or starve the WinUI 3 app.
-        // Decode of large JPEGs is the measured pipeline ceiling on a GPU box
-        // (2026-07-21, RTX 5080 + 9900X, 3000-file 24-48 MP Adlon A/B:
-        // ~533 ms/file avg → 12/0.533 ≈ 22 f/s wall) and it is memory-
-        // bandwidth-bound, not thread-bound: raising to 18 SMT decoders
-        // inflated per-decode latency to ~786 ms for identical wall throughput
-        // (22.9 f/s). Do not chase this with thread count — the remaining
-        // lever is reduced-resolution decode for oversized images, which needs
-        // an accuracy-validated pass first (see NEXT.md).
+        // Decoder pool: sync OS threads sized by physical CPU topology, clamped to [2, 12] so the GPU side and the WinUI app aren't starved; more than 12 only adds per-decode latency (large-JPEG decode is memory-bandwidth-bound).
         let topo = crate::platform::cpu_topology();
         let decoder_count = ((topo.p_cores + topo.e_cores) as usize).clamp(2, 12);
-        // Low tier: each decoder blocked on a full byte budget still owns one
-        // decoded frame (up to ~150 MB at MAX_DECODED_PIXELS), so an unclamped
-        // [2,12] pool of blocked decoders could dwarf the budget itself on the
-        // 4 GB target. Cap the pool, not just the channel.
+        // Low tier: each blocked decoder still owns one decoded frame (~150 MB at MAX_DECODED_PIXELS), so cap the pool, not just the channel, on the 4 GB target.
         let decoder_count = match crate::platform::memory_tier() {
             crate::platform::MemoryTier::Low => decoder_count.min(4),
             _ => decoder_count,
         };
-        // Seek-penalty media (USB HDD, network share): a 12-deep read pool
-        // turns large-file reads into seek thrash and runs SLOWER than a
-        // shallow one. 4 keeps the drive busy while threads overlap CPU
-        // decode; discovery's stat walk uses 2 for the same volumes.
-        let decoder_count = match self
-            .scan_root
-            .as_deref()
-            .map(crate::platform::storage_type_for_path)
-        {
-            Some(
-                st @ (crate::platform::StorageType::Hdd
-                | crate::platform::StorageType::Removable
-                | crate::platform::StorageType::Network),
-            ) => {
-                let clamped = decoder_count.min(4);
+        // Seek-penalty media (USB HDD, network share): a 12-deep read pool thrashes and runs slower; 4 keeps the drive busy while threads overlap CPU decode (discovery's stat walk uses 2).
+        let decoder_count = {
+            let storage = self.scan_root.as_deref().map(crate::platform::storage_type_for_path);
+            let clamped = decoder_count_for_volume(decoder_count, storage, || self.scan_root.as_deref().is_some_and(crate::platform::volume_is_solid_state));
+            if clamped != decoder_count {
                 tracing::info!(
-                    storage = st.as_str(),
+                    storage = storage.map_or("unknown", crate::platform::StorageType::as_str),
                     decoders = clamped,
                     "decode pool clamped for seek-penalty storage"
                 );
-                clamped
             }
-            _ => decoder_count,
+            std::env::var("FILEID_DECODE_THREADS").ok().and_then(|value| value.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(clamped)
         };
-        // Channel cap: a SLOT bound only (floor = one frame ready per worker).
-        // The real memory bound is the byte-weighted budget below — a slot
-        // count alone priced every frame at TYPICAL_FRAME_MB while
-        // MAX_DECODED_PIXELS admits ~150 MB frames, a ~6x per-slot
-        // underestimate that let 45 MP libraries pin gigabytes of read-ahead.
+        // Slot bound only (floor = one frame per worker). The real memory bound is the byte-weighted budget below: MAX_DECODED_PIXELS admits ~150 MB frames, far above TYPICAL_FRAME_MB per slot.
         const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
         let predecode_budget_mb = match crate::platform::memory_tier() {
             crate::platform::MemoryTier::Low => 192,
@@ -1350,11 +944,10 @@ impl Tagger {
             let twins = self.twins.clone();
             let budget = byte_budget.clone();
             let legacy = self.legacy_hashes;
+            let retrying = self.retrying_failures;
 
             let worker = async move {
-                // After every YIELD_AFTER files, sleep briefly to give
-                // foreground apps + DWM breathing room. <1 % cost; keeps
-                // multi-hour scans friendly to an actively-used desktop.
+                // Sleep briefly every YIELD_AFTER files to give foreground apps and DWM breathing room (<1 % cost).
                 const YIELD_AFTER: u64 = 500;
                 let mut files_done: u64 = 0;
                 loop {
@@ -1375,9 +968,7 @@ impl Tagger {
                         }
                         continue;
                     }
-                    // The models load on the first file that needs them. If they
-                    // cannot, no file is written as analysed: the scan stops and
-                    // reports why.
+                    // Models load on the first file that needs them; if they can't, no file is written as analysed: the scan stops and reports why.
                     let loaded = worker_models_cell
                         .get_or_init(|| async { source.get().await.map(worker_models) })
                         .await
@@ -1386,8 +977,7 @@ impl Tagger {
                         coord.request_cancel();
                         break;
                     };
-                    // A copy of an image another worker is analyzing waits here,
-                    // holding no frame, no admission and no per-file timer.
+                    // A copy of an image another worker is analyzing waits here, holding no frame, admission or per-file timer.
                     let Some(predecoded) =
                         settle_twin(predecoded, &twins, &twin_waiters, &coord, &budget, legacy, TWIN_WAIT_PATIENCE)
                             .await
@@ -1399,9 +989,7 @@ impl Tagger {
                     let twin_hash = predecoded
                         .content_hash
                         .filter(|_| !matches!(predecoded.twin, TwinClaim::None));
-                    // Admission waits outside the per-file timeout: a busy
-                    // machine (a search, a resident model, low free memory)
-                    // delays a file but never fails it.
+                    // Admission waits outside the per-file timeout, so a busy machine delays a file but never fails it.
                     let demand = crate::resource_scheduler::Demand { memory_mb: scan_working_mb(&predecoded), cpu: 1, io: 0 };
                     let admission = scheduler.reserve_patient(
                         demand,
@@ -1412,12 +1000,12 @@ impl Tagger {
                     let (_lease, refused) = match admission {
                         Ok(lease) => (Some(lease), None),
                         Err(_) if coord.is_cancelled() => break,
-                        Err(error) => (None, Some(error.to_string())),
+                        Err(error) => {
+                            tracing::warn!(%error, "scan admission refused a file");
+                            (None, Some(BUSY_MESSAGE.to_string()))
+                        }
                     };
-                    // Bounds async inference after decoding; platform decoder
-                    // calls enforce their own limits where the OS permits. A
-                    // panic on one file becomes that file's failure so the
-                    // worker keeps draining the queue.
+                    // Bounds async inference after decoding (platform decoders enforce their own limits). A panic on one file becomes that file's failure so the worker keeps draining.
                     let transient = refused.is_some();
                     let outcome = if let Some(message) = refused {
                         Err((message, 0.0))
@@ -1425,8 +1013,15 @@ impl Tagger {
                         let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                             process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
                         ));
-                        match tokio::time::timeout(PER_FILE_TIMEOUT, fut).await {
-                            Ok(Ok(t)) => Ok(t),
+                        let limit = file_time_limit(crate::platform::load_per_core(), STACK_WARM.load(Ordering::Relaxed));
+                        match tokio::time::timeout(limit, fut).await {
+                            Ok(Ok(mut t)) => {
+                                if !t.failed {
+                                    STACK_WARM.store(true, Ordering::Relaxed);
+                                    use_takeout_capture_date(&mut t);
+                                }
+                                Ok(t)
+                            }
                             Ok(Err(_panic)) => {
                                 tracing::error!(
                                     path = %crate::platform::redact_path_for_log(path_for_timeout),
@@ -1437,9 +1032,10 @@ impl Tagger {
                             Err(_elapsed) => {
                                 tracing::warn!(
                                     path = %crate::platform::redact_path_for_log(path_for_timeout),
-                                    "per-file timeout after 60s; marking failed and continuing"
+                                    limit_seconds = limit.as_secs(),
+                                    "per-file timeout; marking failed and continuing"
                                 );
-                                Err(("per-file timeout after 60s".to_string(), 60000.0))
+                                Err((TIMED_OUT_MESSAGE.to_string(), limit.as_secs_f64() * 1000.0))
                             }
                         }
                     };
@@ -1462,6 +1058,7 @@ impl Tagger {
                     }
                     if tagged.failed && !tagged.failure_is_transient {
                         tagged.failure_is_transient = transient
+                            || retrying
                             || coord.is_cancelled()
                             || coord.is_gpu_dead()
                             || !crate::pipeline::catch_up::failure_is_about_the_file(&tagged.path);
@@ -1481,15 +1078,9 @@ impl Tagger {
                     }
                 }
             };
-            // Each worker runs on its own thread, driven by the runtime's timers
-            // and wakers: detection, embedding, resizing and tagging are
-            // synchronous CPU and GPU work, and on the runtime's own threads
-            // they stalled IPC, cancel and progress on low-core machines. The
-            // semaphores, per-file timeout, panic isolation and cancellation
-            // are the same future as before.
+            // Workers run on their own thread: CPU/GPU work on the runtime's threads stalled IPC, cancel and progress on low-core machines.
             let runtime = runtime.clone();
             let spawned = std::thread::Builder::new().name(format!("fileid-tag-{worker_idx}")).spawn(move || {
-                // LOWEST priority so foreground apps stay snappy during scans.
                 crate::platform::set_worker_background_priority();
                 runtime.block_on(worker);
             });
@@ -1508,7 +1099,6 @@ impl Tagger {
     }
 }
 
-/// The loaded stack with the inference limits that fit it.
 #[derive(Clone)]
 struct WorkerModels {
     models: Arc<ModelStack>,
@@ -1517,35 +1107,17 @@ struct WorkerModels {
 }
 
 fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
-    // Derive the GPU-inference concurrency caps from the active EP. On
-    // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
-    // to the VRAM-clamped pool size so the semaphore doesn't throttle below
-    // the number of loaded Sessions. Cap source is the pool size the models
-    // were ACTUALLY loaded with (ModelStack::pool_size) — never a fresh
-    // `resolve_pool_size` call, whose live memory-tier probe can flip
-    // between load and here (loading the sessions consumes the RAM the
-    // probe measures) and silently issue 1 permit against a 4-session pool.
-    let active_ep = crate::models::runtime::active_provider();
-    let ep_pool_size = models.pool_size.max(1);
-    // When the pool clamps to a SINGLE session, every vision permit-holder
-    // serializes on that one parking_lot Mutex across the GPU forward, so the
-    // extra permits just park OS threads instead of running. Issue exactly 1
-    // permit so excess workers await the ASYNC semaphore (yielding the tokio
-    // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
-    // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
-    // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
-    let vision_cap = if ep_pool_size == 1 {
-        1
-    } else {
-        ep_vision_concurrency(active_ep, ep_pool_size)
-    };
-    let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
+    // Caps come from the pool size the models were loaded with, never a fresh resolve_pool_size call: its live memory probe can flip after loading and silently issue 1 permit against a 4-session pool.
+    let pool_size = models.pool_size.max(1);
+    // One permit per session lets excess workers await the async semaphore instead of blocking on a session's mutex.
+    let vision_cap = pool_size.min(VISION_CONCURRENCY);
+    let clip_cap = CLIP_CONCURRENCY;
     tracing::info!(
-        ep = active_ep.as_str(),
-        pool_size = ep_pool_size,
+        backend = if models.apple_scan { "apple-adapters (MLX, Vision) with tract fallbacks" } else { crate::models::runtime::inference_backend() },
+        pool_size,
         vision_cap,
         clip_cap,
-        "[TAGGING] EP-aware inference concurrency caps"
+        "[TAGGING] inference concurrency caps"
     );
     WorkerModels {
         models,
@@ -1554,10 +1126,7 @@ fn worker_models(models: Arc<ModelStack>) -> WorkerModels {
     }
 }
 
-/// Settles a copy that is waiting on the first copy of its image. Returns the
-/// item as `Ready` when the owner's analysis can be copied; otherwise reads
-/// and decodes the copy now (the decoder skipped that) so it is analyzed
-/// itself. `None` means the scan was cancelled.
+/// Settles a copy waiting on its image's first copy: `Ready` when the owner's analysis can be copied, otherwise reads and decodes the copy now. `None` means the scan was cancelled.
 async fn settle_twin(
     mut predecoded: PreDecoded,
     twins: &Arc<TwinRegistry>,
@@ -1610,30 +1179,19 @@ async fn settle_twin(
     }
 }
 
-/// One unit of work between the decoder pool and the inference workers.
-/// `decoded` is `Ok((rgb, w, h))` on a successful image/video decode and
-/// `Err(_)` when the file couldn't be opened or decoded (the worker emits
-/// a failed `TaggedFile` row so the DB still records the file). `None` is
-/// returned for non-image, non-video kinds where the existing pipeline
-/// doesn't attempt a decode.
+/// One unit of work between the decoder pool and the workers. `decoded` is `Err(_)` when the file couldn't be opened or decoded (the worker emits a failed row so the DB records the file); `None` for kinds that are not decoded.
 pub struct PreDecoded {
     pub file: DiscoveredFile,
     pub decoded: Option<anyhow::Result<(Vec<u8>, u32, u32)>>,
-    /// Doc-kind text extraction (txt/md/docx/pptx/xlsx). `None` on
-    /// non-doc kinds, online-only files, and extraction failures.
+    /// `None` on non-doc kinds, online-only files and extraction failures.
     pub doc_text: Option<String>,
-    /// Audio-kind metadata tags (artist/album/title/genre/year).
-    /// Empty for non-audio kinds + online-only + extraction failures.
+    /// Empty for non-audio kinds, online-only files and extraction failures.
     pub audio_tags: Vec<(String, Option<f32>)>,
     pub content_hash: Option<[u8; 32]>,
     pub legacy_hashes: Option<LegacyHashes>,
     pub exif: Option<ExifFields>,
     pub twin: TwinClaim,
-    /// Reservation of this frame's decoded bytes in the predecode budget;
-    /// released when the worker drops the frame.
     budget: Option<PredecodeBudgetGuard>,
-    /// Set when the Mac adapters decoded the file; the worker then runs the
-    /// Mac per-file path.
     #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
     mac: Option<MacFrame>,
 }
@@ -1647,7 +1205,6 @@ type MacFrame = mac::Frame;
 enum MacFrame {}
 
 impl PreDecoded {
-    /// A file passed to the writer without being opened.
     fn unread(file: DiscoveredFile) -> Self {
         Self { decoded: None, ..Self::failed(file, "") }
     }
@@ -1668,9 +1225,7 @@ impl PreDecoded {
     }
 }
 
-/// Byte-weighted read-ahead budget for decoded frames. Decoders reserve their
-/// known heap peak, or the full capacity for an uncertain codec, before any
-/// full-frame allocation and shrink the guard to retained RGB bytes afterward.
+/// Byte-weighted read-ahead budget: decoders reserve their heap peak (the full capacity for an uncertain codec) before any full-frame allocation, then shrink to retained RGB bytes.
 struct PredecodeBudget {
     capacity: usize,
     used: Mutex<usize>,
@@ -1686,10 +1241,7 @@ impl PredecodeBudget {
         })
     }
 
-    /// Blocks the calling decoder thread until `bytes` fit. A frame larger
-    /// than the whole budget clamps to capacity so it can still be admitted
-    /// (alone) instead of deadlocking. Returns `None` when the scan is
-    /// cancelled while waiting.
+    /// Blocks the decoder thread until `bytes` fit; a frame larger than the budget clamps to capacity so it is admitted alone instead of deadlocking. `None` if the scan is cancelled.
     fn acquire(
         self: &Arc<Self>,
         bytes: usize,
@@ -1765,9 +1317,7 @@ fn decode_reserved<T>(
     Some((decode(), guard))
 }
 
-/// Runs `future` on the calling thread, parked between wake-ups, until it
-/// finishes or the scan is cancelled (`None`). Needs no runtime: channels and
-/// the coordinator's notifier wake the thread directly.
+/// Runs `future` on the calling thread until it finishes or the scan is cancelled (`None`); needs no runtime.
 fn wait_unless_cancelled<T>(coord: &ScanCoordinator, future: impl std::future::Future<Output = T>) -> Option<T> {
     struct Unpark(std::thread::Thread);
     impl std::task::Wake for Unpark {
@@ -1790,10 +1340,7 @@ fn wait_unless_cancelled<T>(coord: &ScanCoordinator, future: impl std::future::F
     }
 }
 
-/// Decoder-pool worker. Sync OS thread (not a tokio task) so the
-/// blocking JPEG/PNG decode doesn't tie up tokio's runtime threads.
-/// Blocks on the raw discovery channel and on the pre-decoded channel; a
-/// cancel wakes it from either.
+/// Decoder-pool worker: a sync OS thread so blocking decode doesn't tie up tokio's runtime threads.
 fn run_decoder_thread(
     rx: async_channel::Receiver<DiscoveredFile>,
     tx: async_channel::Sender<PreDecoded>,
@@ -1810,9 +1357,7 @@ fn run_decoder_thread(
         let Some(Ok(file)) = wait_unless_cancelled(&coord, rx.recv()) else {
             return;
         };
-        // Trace-gated forensics: a native crash never reaches the log as a
-        // Rust panic, so the last "decode start" lines name the in-flight
-        // victims.
+        // Trace-gated forensics: a native crash never reaches the log as a Rust panic, so the last "decode start" lines name the in-flight victims.
         tracing::trace!(
             path = %crate::platform::redact_path_for_log(&file.path),
             kind = ?file.kind,
@@ -1833,10 +1378,7 @@ fn run_decoder_thread(
                 PreDecoded::failed(fallback, "the file could not be read (decoder error)")
             }
         };
-        // A copy waits behind an owner that is still decoding on another
-        // thread; the owner brings its copies along once it is queued. An owner
-        // whose decode panicked (its item no longer says "owner") lets go, so
-        // its copies analyse themselves.
+        // A copy waits behind an owner still decoding on another thread; the owner brings its copies once queued. An owner whose decode panicked lets go, so its copies analyse themselves.
         let owned = OWNED_TWIN.take();
         if let Some(hash) = owned.filter(|_| !matches!(item.twin, TwinClaim::Owner)) {
             twins.publish(hash, false);
@@ -1850,7 +1392,6 @@ fn run_decoder_thread(
                 return;
             };
         }
-        // Only now, with the owner queued ahead of them.
         for follower in owned.map(|hash| twins.owner_queued(&hash)).unwrap_or_default() {
             let Some(Ok(())) = wait_unless_cancelled(&coord, tx.send(follower)) else {
                 return;
@@ -1860,12 +1401,10 @@ fn run_decoder_thread(
 }
 
 thread_local! {
-    /// The image this decoder thread claimed as owner for the file in hand.
     static OWNED_TWIN: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
 }
 
-/// Claims `hash` for the file being read. A decoder's owner collects its
-/// copies until it is queued; a worker's owner is already running.
+/// A decoder's owner collects its copies until queued; a worker's owner is already running.
 fn claim_twin(twins: &TwinRegistry, hash: [u8; 32], from_decoder: bool) -> TwinClaim {
     if !from_decoder {
         return twins.claim(hash);
@@ -1877,8 +1416,7 @@ fn claim_twin(twins: &TwinRegistry, hash: [u8; 32], from_decoder: bool) -> TwinC
     claim
 }
 
-/// Reads, hashes and decodes one file for `run_decoder_thread`. `None` means
-/// the scan was cancelled while waiting for decode budget.
+/// `None` means the scan was cancelled while waiting for decode budget.
 fn predecode_one(
     file: DiscoveredFile,
     coord: &ScanCoordinator,
@@ -1907,8 +1445,7 @@ fn predecode_one(
         let mut content_hash = None;
         let mut legacy_hashes = None;
         let mut exif_data = None;
-        // The file's EXIF block, read once here for the camera, place and date
-        // and handed to the decoder for the orientation and colour space.
+        // EXIF block read once here for camera, place and date, then handed to the decoder for orientation and colour space.
         let mut primary_exif = None;
 
         if !file.online_only {
@@ -1917,25 +1454,17 @@ fn predecode_one(
                     if file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
                 {
                     if let Ok(mut f) = open_image_file(&file.path) {
-                        // Bounded pre-read: capacity is capped at the 16 MB
-                        // full-hash window, and try_reserve_exact turns a rare
-                        // allocation failure into a recoverable per-file skip
-                        // instead of handle_alloc_error -> abort() that would
-                        // kill the whole engine (and the entire scan).
+                        // Bounded pre-read: capacity is capped at the 16 MB full-hash window and try_reserve_exact turns a rare allocation failure into a per-file skip instead of an abort() that would kill the whole engine.
                         let cap = (file.size_bytes as usize)
                             .min(crate::util::content_hash::FULL_HASH_MAX_BYTES as usize);
                         let mut bytes = Vec::new();
                         if bytes.try_reserve_exact(cap).is_ok()
                             && std::io::Read::read_to_end(&mut f, &mut bytes).is_ok()
                         {
-                            // Baseline: a successful read always produces Some(_)
-                            // so non-EXIF formats (PNG, GIF, screenshots) record
-                            // an explicit no-EXIF result instead of looking
-                            // unparsed downstream.
+                            // A successful read always yields Some(_), so non-EXIF formats record an explicit no-EXIF result.
                             let read = read_primary_exif(&bytes);
                             exif_data = Some(read.fields.clone().unwrap_or((None, None, None, None)));
                             primary_exif = Some(read);
-                            // ≤16 MB → full SHA-256 (cross-platform with Swift).
                             content_hash = Some(sha256_bytes(&bytes));
                             legacy_hashes = legacy.then(|| LegacyHashes::of_full_bytes(&bytes));
                             file_bytes = Some(bytes);
@@ -1943,27 +1472,11 @@ fn predecode_one(
                     }
                 }
                 FileKind::Image => {
-                    // Over-cap image (multi-hundred-MB RAW/TIFF/PSD, or a
-                    // crafted/sparse file with a huge logical length). Do NOT
-                    // read it into a Vec — with up to 12 decoder threads that
-                    // OOMs, and Vec::with_capacity on a bogus size aborts the
-                    // process. Hash via the bounded composite (head + interior
-                    // samples + tail + size) and leave file_bytes = None so
-                    // decode_image_sync mmaps the file (the OS pages it lazily
-                    // under the MAX_DECODED_PIXELS guard). EXIF parses from a
-                    // bounded head read — there is no later fallback, so
-                    // skipping it here would lose camera/GPS for every over-cap
-                    // image.
+                    // Over-cap image (huge RAW/TIFF/PSD or a crafted/sparse file): never read into a Vec (12 decoder threads would OOM, and a bogus size aborts). Hash via the bounded composite and leave file_bytes = None so decode_image_sync mmaps it. EXIF parses from a bounded head read since there is no later fallback.
                     (content_hash, legacy_hashes) = composite_hashes(&file, legacy);
                     exif_data = exif_from_head(&file.path);
                 }
-                // Doc / PDF / Audio share the image-style single-read pattern
-                // when the file fits in the full-hash window (16 MB). The
-                // buffer feeds both SHA-256 and the kind-specific extractor,
-                // skipping the worker's content_hash fallback re-open. Files
-                // above the cap fall through to the composite-hash + path-
-                // based extractor path (a head+tail+size read of 2 MB total),
-                // bounding decoder-thread peak memory at one file's bytes.
+                // Doc / PDF / Audio share the single-read pattern when the file fits the 16 MB full-hash window: one buffer feeds SHA-256 and the extractor. Larger files use the composite hash + path-based extractor, bounding peak memory at one file.
                 FileKind::Doc | FileKind::Pdf | FileKind::Audio
                     if file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
                 {
@@ -1976,25 +1489,19 @@ fn predecode_one(
                         }
                     }
                 }
-                // Video, over-cap Doc/Pdf/Audio, and Other: compute the
-                // rename-heal content_hash HERE on the decoder thread via the
-                // bounded composite (head + interior samples + tail + size — no
-                // full read), so the async worker's `or_else` fallback never
-                // re-opens the file as blocking IO on a tokio worker.
+                FileKind::Video => {
+                    (content_hash, legacy_hashes) = composite_hashes(&file, legacy);
+                    exif_data = video_capture_fields(&file.path);
+                }
+                // Over-cap Doc/Pdf/Audio and Other: compute the rename-heal hash here via the bounded composite so the async worker never re-opens the file as blocking IO.
                 _ => (content_hash, legacy_hashes) = composite_hashes(&file, legacy),
             }
         }
 
-        // Reserve before every full-frame allocation. Header-probeable images
-        // charge the decoder's source buffer plus final RGB bytes. Large/path-
-        // backed or unsupported images (including HEIC) and videos take the
-        // entire budget exclusively before entering their decoder, bounding the
-        // otherwise unaccounted BGRA/RGB peak to one decoder instead of one per
-        // worker. The guard shrinks to retained RGB bytes after success.
+        // Reserve before every full-frame allocation. Header-probeable images charge source buffer plus final RGB; large/path-backed or unsupported images (incl. HEIC) and videos take the whole budget exclusively, bounding the unaccounted BGRA/RGB peak to one decoder. The guard shrinks to retained RGB after success.
         let mut budget_guard = None;
 
-        // Only a full SHA-256 of an image is an identity worth sharing; a
-        // ready twin needs no frame at all.
+        // Only a full SHA-256 of an image is a shareable identity; a ready twin needs no frame.
         let twin = match (content_hash, file.kind, twins) {
             (Some(hash), FileKind::Image, Some(twins))
                 if twin_reuse_enabled()
@@ -2005,14 +1512,10 @@ fn predecode_one(
             }
             _ => TwinClaim::None,
         };
-        // A copy of an image that is being analyzed right now is not decoded
-        // either: the worker waits for the owner and decodes only if it fails.
+        // A copy of an image being analyzed right now isn't decoded either; the worker waits for the owner and decodes only on failure.
         let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
 
-        // Cloud placeholders: never read content (reading hydrates the file,
-        // a surprise network download). Emit a metadata-only row (decoded =
-        // None) just like an unsupported kind; a later scan after the user
-        // hydrates the file picks up its content.
+        // Cloud placeholders: never read content (reading hydrates the file, a surprise network download); emit a metadata-only row like an unsupported kind.
         let mut decoded = if file.online_only || awaits_twin {
             None
         } else {
@@ -2031,17 +1534,14 @@ fn predecode_one(
                     Some(result)
                 }
                 FileKind::Video => {
-                    // Media Foundation negotiates a <=1280px RGB32 working frame;
-                    // its bounded fallback rejects native BGRA + RGB peaks above
-                    // this shared reservation before allocating the retained RGB.
+                    // Media Foundation negotiates a <=1280px RGB32 working frame; the bounded fallback rejects native BGRA + RGB peaks above this shared reservation before allocating.
                     let (result, guard) = decode_reserved(
                         budget,
                         crate::shell::video::VIDEO_DECODE_RESERVATION_BYTES,
                         coord,
                         || decode_video_keyframe_sync(&file.path),
                     )?;
-                    // Without a frame decoder the video is still catalogued, like a
-                    // missing model; the skip-set video gate backfills it later.
+                    // Without a frame decoder the video is still catalogued; the skip-set video gate backfills it later.
                     if result.is_err() && !video_frames_available() {
                         None
                     } else {
@@ -2049,10 +1549,7 @@ fn predecode_one(
                         Some(result)
                     }
                 }
-                // 3D `.obj` → rendered-shape RGB for CLIP (lockstep with macOS processModel).
-                // A render failure is NOT a file failure (the model still groups under 3D
-                // Models/), so map Err→None rather than letting the Some(Err) path mark the
-                // row failed. Non-obj 3D formats produce no frame (grouped, not CLIP'd).
+                // A 3D `.obj` renders to RGB for CLIP. A render failure is not a file failure (the model still groups under 3D Models/), so Err maps to None; non-obj 3D formats produce no frame.
                 FileKind::Model => {
                     let is_obj = file
                         .path
@@ -2084,11 +1581,7 @@ fn predecode_one(
             STATS_DECODE_US.fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             STATS_DECODED_FILES.fetch_add(1, Ordering::Relaxed);
         }
-        // For Doc-kind files, extract text on the same decoder
-        // thread (cheap I/O; same online_only gate as content read). Re-uses
-        // the file_bytes buffer (≤ 16 MB) when the doc/pdf branch above
-        // pre-read it; otherwise the extractor falls back to opening the
-        // path itself.
+        // Doc text is extracted on the decoder thread (cheap I/O), reusing file_bytes (≤ 16 MB) when pre-read, else the extractor opens the path.
         let doc_text = if file.online_only {
             None
         } else {
@@ -2098,14 +1591,11 @@ fn predecode_one(
                         .ok()
                         .flatten()
                 }
-                // The names inside a zip, so searching for a file finds its archive.
                 FileKind::Other => crate::pipeline::archive_names::list(&file.path),
                 _ => None,
             }
         };
-        // For Audio-kind files, read container metadata via symphonia
-        // (artist/album/title/genre/year). Pure-Rust, no system ffmpeg.
-        // Reuses file_bytes when present (same 16 MB cap as docs).
+        // Audio container metadata via symphonia (pure Rust); reuses file_bytes when present.
         let audio_tags = if file.online_only {
             Vec::new()
         } else {
@@ -2139,8 +1629,7 @@ fn predecode_one(
                 budget_guard = None;
             }
         } else {
-            // Decode failed or produced no frame — release any pre-decode
-            // reservation immediately instead of riding the channel.
+            // Decode failed or produced no frame: release any pre-decode reservation immediately.
             budget_guard = None;
         }
         Some(PreDecoded {
@@ -2158,10 +1647,7 @@ fn predecode_one(
     }
 }
 
-/// Open a file for sequential read on Windows. `FILE_FLAG_SEQUENTIAL_SCAN`
-/// tells the cache manager we won't seek back (so it doesn't pollute the
-/// standby list) and is friendlier to real-time AV scanning. Plain open
-/// elsewhere.
+/// Sequential-read open on Windows: FILE_FLAG_SEQUENTIAL_SCAN keeps the cache manager from polluting the standby list and is friendlier to real-time AV scanning.
 #[cfg(windows)]
 fn open_read_sequential(p: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -2177,13 +1663,7 @@ fn open_read_sequential(p: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(p)
 }
 
-/// Open a file in the decoder thread for pre-reading (image bytes for
-/// decode + hash, doc/audio bytes for hash + extraction). Long-path support
-/// via `\\?\` prefix and short retry-with-backoff for transient sharing /
-/// lock violations (file still being written by another app, AV scanner
-/// holding a momentary lock). Genuine errors (not found, access denied)
-/// fail fast without burning retries. Named historically for the image
-/// path; reused for Doc/Pdf/Audio under the same hardening rationale.
+/// Opens a file for decoder-thread pre-reading with `\\?\` long-path support and a short backoff for transient sharing/lock violations (another app writing, AV scanner); genuine errors fail fast.
 pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let p = crate::util::path_safety::to_extended_length(path);
     let mut last_err: Option<std::io::Error> = None;
@@ -2191,8 +1671,7 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
         match open_read_sequential(&p) {
             Ok(f) => return Ok(f),
             Err(e) => {
-                // ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33)
-                // are the only transient cases worth retrying.
+                // ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33) are the only retryable cases.
                 let transient = matches!(e.raw_os_error(), Some(32 | 33));
                 last_err = Some(e);
                 if !transient || attempt == 2 {
@@ -2205,21 +1684,54 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
     Err(last_err.unwrap_or_else(|| std::io::Error::other("open failed")))
 }
 
-/// Decode an image off disk into RGB8 bytes + dimensions on the calling
-/// thread. mmap'd dimension peek + decode in one pass; rejects images
-/// over `MAX_DECODED_PIXELS` before commit. `catch_unwind` wraps a
-/// panicking codec (malformed JPEG) so it surfaces as Err instead of
-/// crashing the decoder thread.
-///
-/// On Windows, falls back to the WinRT BitmapDecoder when image-rs fails.
-/// This covers installed HEIF and camera-RAW codecs as well as the standard
-/// Windows bitmap codecs. The fallback is still per-file and bounded, so a
-/// missing codec only marks that file as undecodable.
+/// Largest file `read_image_bytes` will buffer; RAW and TIFF files above it are refused as an ordinary per-file error.
+const MAX_IMAGE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Reads an image file into memory. A mapped file raises SIGBUS (killing the engine) when the drive is pulled or the file is truncated mid-decode; a read turns the same event into an `Err` for that one file.
+pub(crate) fn read_image_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let file = open_image_file(path)?;
+    read_capped(file, MAX_IMAGE_FILE_BYTES)
+}
+
+/// First bytes of an image file, enough for a JPEG's headers (APP segments are 64 KB each); reading the whole file only to size a reservation would double the I/O of every large image.
+fn read_image_head(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    const HEAD_BYTES: u64 = 4 * 1024 * 1024;
+    let file = open_image_file(path)?;
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, HEAD_BYTES), &mut buf)?;
+    Ok(buf)
+}
+
+fn read_capped(mut file: impl std::io::Read + Len, cap: u64) -> std::io::Result<Vec<u8>> {
+    let len = file.len()?;
+    if len > cap {
+        return Err(std::io::Error::other(format!("image file is {len} bytes, over the {cap}-byte read cap")));
+    }
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len as usize).map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, cap + 1), &mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(std::io::Error::other("image file grew past the read cap while reading"));
+    }
+    Ok(buf)
+}
+
+trait Len {
+    fn len(&self) -> std::io::Result<u64>;
+}
+
+impl Len for std::fs::File {
+    fn len(&self) -> std::io::Result<u64> {
+        self.metadata().map(|m| m.len())
+    }
+}
+
+/// Decodes an image to RGB8 on the calling thread, rejecting images over `MAX_DECODED_PIXELS` before commit; `catch_unwind` turns a panicking codec into Err.
+/// On Windows it falls back to the WinRT BitmapDecoder (HEIF, camera RAW, system codecs) when image-rs fails; a missing codec only marks that file undecodable.
 pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     decode_image_sync_with(path, bytes, None)
 }
 
-/// [`decode_image_sync`] with the EXIF the caller already read from `bytes`.
 fn decode_image_sync_with(
     path: &std::path::Path,
     bytes: Option<&[u8]>,
@@ -2237,9 +1749,7 @@ fn decode_image_sync_with(
     if primary.is_ok() {
         return primary;
     }
-    // Windows Imaging Component may provide codecs image-rs does not (HEIF,
-    // camera RAW, vendor codecs). Let the system decoder inspect the content;
-    // decode_image_sync is only called for files already classified as images.
+    // WIC may provide codecs image-rs lacks (HEIF, camera RAW); decode_image_sync is only called for files already classified as images.
     #[cfg(windows)]
     {
         match shell::heic::decode(path) {
@@ -2249,10 +1759,7 @@ fn decode_image_sync_with(
             }
         }
     }
-    // Linux (libheif CLI tools) and macOS (sips): best-effort HEIC/HEIF (see
-    // shell::heic::decode). On success use it; if the tools are absent or fail,
-    // fall through to the original image-rs error so the file is just skipped —
-    // no hard error and no install nag for this optional path.
+    // Linux (libheif CLI tools) and macOS (sips): best-effort HEIC/HEIF via shell::heic::decode; if the tools are absent or fail, fall through to the image-rs error so the file is just skipped.
     #[cfg(not(windows))]
     {
         let ext = path
@@ -2268,15 +1775,12 @@ fn decode_image_sync_with(
     primary
 }
 
-/// Camera RAW: decode the largest embedded JPEG preview (≥ 1024 px) and apply
-/// the RAW container's orientation. None falls back to the full decoders.
+/// Camera RAW: largest embedded JPEG preview (≥ 1024 px) with the container's orientation; None falls back to the full decoders.
 fn decode_raw_preview(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<(Vec<u8>, u32, u32)> {
     decode_raw_preview_at_least(path, bytes, 1024, JPEG_SCALED_DECODE_FLOOR_EDGE)
 }
 
-/// Upright RGB of a RAW's largest embedded preview whose long edge is at least
-/// `min_edge`, DCT-scaled down to no less than `scale_floor` on the long edge.
-/// Thumbnails accept smaller previews than the scan does.
+/// Upright RGB of a RAW's largest embedded preview with long edge ≥ `min_edge`, DCT-scaled to no less than `scale_floor`; thumbnails accept smaller previews than the scan.
 pub(crate) fn decode_raw_preview_at_least(
     path: &std::path::Path,
     bytes: Option<&[u8]>,
@@ -2284,13 +1788,12 @@ pub(crate) fn decode_raw_preview_at_least(
     scale_floor: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mmap;
+        let owned;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
             pre_read
         } else {
-            let file = open_image_file(path).ok()?;
-            mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
-            &mmap
+            owned = read_image_bytes(path).ok()?;
+            &owned
         };
         let jpeg = super::raw_preview::largest_embedded_jpeg(bytes)?;
         let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg)
@@ -2311,10 +1814,7 @@ pub(crate) fn decode_raw_preview_at_least(
     .flatten()
 }
 
-/// Conservative reservation for an image decoded from immutable pre-read
-/// bytes: decoder output plus a possible RGB8 conversion. Decoder setup reads
-/// headers only; admission occurs before `decode()` allocates either full
-/// frame. Path-backed images use an exclusive reservation instead.
+/// Conservative reservation for an image decoded from pre-read bytes: decoder output plus a possible RGB8 conversion. Only headers are read, so admission precedes allocation.
 pub(crate) fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
     use image::ImageDecoder;
     use std::io::Cursor;
@@ -2333,14 +1833,7 @@ pub(crate) fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize
     usize::try_from(decoder.total_bytes().checked_add(final_rgb)?).ok()
 }
 
-/// Budget charge for a sequential JPEG that `decode_jpeg_scaled_to` will
-/// decode at a DCT-reduced scale: component planes plus the interleaved RGB
-/// frame plus an orientation copy, all at the scaled size, i.e. 3x the scaled
-/// RGB frame. Without this a 33 MP file that is too large to pre-read (> 16 MB)
-/// took the whole byte budget and decoded one at a time. Mirrors the
-/// eligibility checks of `decode_jpeg_scaled_to`; `None` keeps the
-/// conservative full-frame reservation (progressive JPEGs hold full-size
-/// coefficients, unusual pixel formats, small images, scaling disabled).
+/// Budget charge for a sequential JPEG that `decode_jpeg_scaled_to` decodes at a DCT-reduced scale: component planes + interleaved RGB + orientation copy at scaled size. Mirrors its eligibility checks; `None` keeps the full-frame reservation.
 fn scaled_jpeg_reservation(bytes: &[u8]) -> Option<usize> {
     if !jpeg_scaled_decode_enabled() || !bytes.starts_with(&[0xFF, 0xD8]) {
         return None;
@@ -2364,8 +1857,6 @@ fn scaled_jpeg_reservation(bytes: &[u8]) -> Option<usize> {
     (usize::from(ow)).checked_mul(usize::from(oh))?.checked_mul(9)
 }
 
-/// [`scaled_jpeg_reservation`] over pre-read bytes, or over a read-only map of
-/// the file when it was too large to pre-read (only the headers are touched).
 fn scaled_jpeg_reservation_for(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<usize> {
     if let Some(bytes) = bytes {
         return scaled_jpeg_reservation(bytes);
@@ -2373,10 +1864,8 @@ fn scaled_jpeg_reservation_for(path: &std::path::Path, bytes: Option<&[u8]>) -> 
     if !jpeg_scaled_decode_enabled() {
         return None;
     }
-    let file = open_image_file(path).ok()?;
-    // SAFETY: read-only map of a file opened for reading, dropped before returning.
-    let map = unsafe { memmap2::Mmap::map(&file).ok()? };
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&map))).ok().flatten()
+    let bytes = read_image_head(path).ok()?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&bytes))).ok().flatten()
 }
 
 fn jpeg_scaled_decode_enabled() -> bool {
@@ -2384,19 +1873,13 @@ fn jpeg_scaled_decode_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_SCALED_DECODE").map_or(true, |v| v.trim() != "0"))
 }
 
-/// A camera JPEG's MPF large preview, decoded in place of the full frame
-/// (the Mac engine's `JPEGPreview.decode` rules): the full image is at least
-/// a third larger than `floor`, the file is tagged sRGB, the preview is
-/// upright, shows the whole frame and is at least two thirds of `floor` on
-/// its long side; native size up to a third above `floor`, DCT-scaled above
-/// that. The caller applies the primary image's orientation. `None` keeps
-/// the existing decode paths. `FILEID_JPEG_MPF_PREVIEW=0` disables it.
+/// A camera JPEG's MPF large preview, decoded in place of the full frame: full image ≥ a third larger than `floor`, tagged sRGB, upright, whole frame, long side ≥ two thirds of `floor`.
+/// Native size up to a third above `floor`, DCT-scaled above. The caller applies the primary orientation; `None` keeps the existing paths. `FILEID_JPEG_MPF_PREVIEW=0` disables it.
 #[cfg(test)]
 pub(crate) fn decode_mpf_preview(bytes: &[u8], primary_w: u32, primary_h: u32, floor: u32) -> Option<(Vec<u8>, u32, u32)> {
     decode_mpf_preview_with(bytes, primary_w, primary_h, floor, None)
 }
 
-/// `srgb` is the file's colour-space tag when the caller already read it.
 fn decode_mpf_preview_with(
     bytes: &[u8],
     primary_w: u32,
@@ -2437,8 +1920,7 @@ fn decode_mpf_preview_with(
     Some(decoded)
 }
 
-/// EXIF ColorSpace == 1 (sRGB); false without EXIF or for Adobe RGB and
-/// uncalibrated files, whose embedded preview colour may not match.
+/// EXIF ColorSpace == 1 (sRGB); false for Adobe RGB, uncalibrated files or no EXIF, whose preview colour may not match.
 pub(crate) fn exif_is_srgb(bytes: &[u8]) -> bool {
     let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) else {
         return false;
@@ -2448,28 +1930,17 @@ pub(crate) fn exif_is_srgb(bytes: &[u8]) -> bool {
         == Some(1)
 }
 
-/// Keep at least this many pixels on the long edge when DCT-scaling a JPEG.
-/// Detection (640² letterbox), tagging (384²) and CLIP (224²) all downsample
-/// far below it; only SFace's 112² face crops read decode resolution, and a
-/// 2048 px floor keeps every face wider than ~5 % of the frame at full crop
-/// fidelity. Validated on-corpus 2026-07-21 (see DECISIONS): identical RAM++
-/// tags, identical face counts, embedding cosine ≥ 0.99 on affected files.
+/// Minimum long edge when DCT-scaling a JPEG. Detection, tagging and CLIP downsample far below it; only SFace's 112² crops read decode resolution, and 2048 px keeps faces wider than ~5 % of the frame at full crop fidelity (corpus-validated: identical RAM++ tags and face counts, embedding cosine ≥ 0.99).
 const JPEG_SCALED_DECODE_FLOOR_EDGE: u32 = 2048;
 
-/// DCT-scaled decode for oversized JPEGs via jpeg-decoder (image-rs's
-/// zune-jpeg backend has no scaling API). Returns None — meaning "use the
-/// full decoder" — for small images, non-RGB/L8 outputs (CMYK etc.), or any
-/// decode error, so behavior for every non-oversized or unusual file is
-/// byte-identical to before.
+/// DCT-scaled decode for oversized JPEGs via jpeg-decoder (zune-jpeg has no scaling API); None means use the full decoder (small images, non-RGB/L8 output, any error).
 fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     decode_jpeg_scaled_to(bytes, JPEG_SCALED_DECODE_FLOOR_EDGE)
 }
 
-/// [`decode_jpeg_scaled`] keeping at least `floor` pixels on the long edge.
 pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>, u32, u32)> {
     let floor = floor.max(1);
-    // Diagnostic / bail-out switch: FILEID_JPEG_SCALED_DECODE=0 restores
-    // full-resolution decode for every file (also the A/B control lever).
+    // FILEID_JPEG_SCALED_DECODE=0 restores full-resolution decode (also the A/B control).
     if !jpeg_scaled_decode_enabled() {
         return None;
     }
@@ -2522,17 +1993,12 @@ fn decode_image_sync_imagecrate(
 ) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
-        let mmap;
+        let owned;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
             pre_read
         } else {
-            let file = open_image_file(path)
-                .map_err(|e| anyhow::anyhow!("open: {e}"))?;
-            mmap = unsafe {
-                memmap2::Mmap::map(&file)
-                    .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
-            };
-            &mmap
+            owned = read_image_bytes(path).map_err(|e| anyhow::anyhow!("read: {e}"))?;
+            &owned
         };
 
         let peek = image::ImageReader::new(Cursor::new(bytes))
@@ -2551,14 +2017,8 @@ fn decode_image_sync_imagecrate(
         let reader = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
             .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
-        // Oversized JPEGs decode at a DCT-reduced scale: full-resolution decode
-        // of 24-48 MP frames was the measured pipeline ceiling (~533 ms/file,
-        // memory-bandwidth-bound — thread count and storage provably didn't
-        // move it), while every vision consumer downsamples far below the
-        // scaled floor anyway (YuNet 640² letterbox, RAM++ 384², CLIP 224²).
-        // Any scaled-decode failure falls through to the full decoder.
-        // Read the orientation once, from the same bytes both decode paths use.
-        // Neither the image crate nor the DCT-scaled path applies it for us.
+        // Oversized JPEGs decode at a DCT-reduced scale (full decode is memory-bandwidth-bound; every vision consumer downsamples far below the floor); any failure falls through to the full decoder.
+        // Orientation is read once from the same bytes both paths use; neither the image crate nor the scaled path applies it.
         let orientation = exif.map_or_else(|| exif_orientation(bytes), |exif| exif.orientation);
         if reader.format() == Some(image::ImageFormat::Jpeg) {
             let srgb = exif.map(|exif| exif.srgb);
@@ -2589,31 +2049,42 @@ fn decode_image_sync_imagecrate(
     }
 }
 
-/// macOS takes video frames from AVFoundation in the Mac app's engine and
-/// otherwise only from FileID's optional FFmpeg runtime; Windows (Media
-/// Foundation) and Linux (system ffmpeg fallback) always have a decoder.
+/// macOS gets video frames only from AVFoundation in the Mac app's engine or FileID's optional FFmpeg runtime; Windows (Media Foundation) always has a decoder.
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) fn video_frames_available() -> bool {
     cfg!(all(target_os = "macos", feature = "apple-adapters")) || crate::commands::ffmpeg_runtime_available()
 }
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(windows)]
 pub(crate) fn video_frames_available() -> bool {
     true
 }
+/// Linux decodes through the bundled FFmpeg runtime or a system `ffmpeg`; with neither, videos are catalogued without a frame instead of stored as failed rows.
+#[cfg(target_os = "linux")]
+pub(crate) fn video_frames_available() -> bool {
+    crate::commands::ffmpeg_runtime_available() || executable_on_path("ffmpeg")
+}
+#[cfg(target_os = "linux")]
+fn executable_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+}
 
-/// Sync video-keyframe decode. Used by the decoder pool.
 fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let frame = shell::video::keyframe_25pct(path)?;
     Ok((frame.rgb, frame.width, frame.height))
 }
 
-/// Per-file ML body. Receives a pre-decoded image (or video keyframe)
-/// from the decoder pool, runs face detect → embed, CLIP embed, dHash,
-/// EXIF — each gated on its semaphore + the model being installed.
-/// Failure of any single stage is non-fatal: the row gets emitted with
-/// that field = None and `failed=0` (only image decode failure marks
-/// the row failed). The decode itself happened on a sibling decoder
-/// thread so this function never blocks on filesystem I/O.
+/// A photo or video with no embedded capture date takes the one in its Google Takeout sidecar.
+fn use_takeout_capture_date(tagged: &mut TaggedFile) {
+    if tagged.captured_from_exif || !matches!(tagged.kind, FileKind::Image | FileKind::Video) {
+        return;
+    }
+    if let Some(captured) = crate::util::takeout_sidecar::capture_unix(&tagged.path) {
+        tagged.created_unix = Some(captured);
+        tagged.captured_from_exif = true;
+    }
+}
+
+/// Per-file ML body over a pre-decoded image or keyframe: face detect → embed, CLIP embed, dHash, EXIF, each gated on its semaphore and the model being installed. A failing stage is non-fatal (field = None, `failed=0`); only image decode failure marks the row failed.
 async fn process_file_predecoded(
     predecoded: PreDecoded,
     models: &Arc<ModelStack>,
@@ -2622,8 +2093,7 @@ async fn process_file_predecoded(
     worker_idx: usize,
     coord: &ScanCoordinator,
 ) -> TaggedFile {
-    // `_budget` keeps the byte-budget reservation alive while this worker
-    // holds the frame; it releases when the function returns.
+    // `_budget` keeps the byte-budget reservation alive until this function returns.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if predecoded.mac.is_some() {
         let _ = (vision_sem, clip_sem, worker_idx, coord);
@@ -2635,36 +2105,19 @@ async fn process_file_predecoded(
     let started = Instant::now();
     let mut tagged = TaggedFile::bare(file);
 
-    // Content identity for rename/move heal. The decoder thread already
-    // computed `content_hash` for every non-online kind (image/doc/pdf/audio
-    // via the single read; video/over-cap/other via the bounded composite),
-    // so this async worker NEVER re-opens the file — the previous `.or_else`
-    // fallback was blocking filesystem IO on a tokio worker. On a
-    // decoder-thread read error the row simply lacks a content_hash and the
-    // heal-by-file_ref path still applies; cloud placeholders stay None so we
-    // never hydrate a OneDrive online-only file.
+    // Content identity for rename/move heal comes from the decoder, so this async worker never re-opens the file; cloud placeholders stay None so an online-only file is never hydrated.
     if !file.online_only {
         tagged.content_hash = content_hash;
         tagged.legacy_hashes = legacy_hashes;
     }
 
-    // Document content: the decoder thread already pulled the text
-    // for FileKind::Doc. Run a cheap RAKE-style keyword extractor → tag chips
-    // (source='auto'), and stash the text on the row so the dbwriter can
-    // persist it into doc_text/doc_fts for full-text search.
-    //
-    // The doc-text stage "ran" iff extraction was attempted this session (a
-    // doc-kind input that isn't a cloud placeholder) — the dbwriter keys its
-    // stale doc_text/doc_fts DELETE on this so a re-process that now yields
-    // empty text clears phantom FTS hits (#11).
+    // Doc text was pulled on the decoder thread; a RAKE-style keyword extractor yields auto tag chips and the text is stashed for doc_text/doc_fts.
+    // The doc stage "ran" iff extraction was attempted (a non-placeholder doc-kind input); the dbwriter keys its stale doc_text/doc_fts DELETE on it so empty re-extractions clear phantom FTS hits.
     tagged.doc_stage_ran = (matches!(file.kind, FileKind::Doc | FileKind::Pdf)
         || (file.kind == FileKind::Other
             && file.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))))
         && !file.online_only;
-    // The content-derivation stage ran iff we attempted doc-text extraction OR a model
-    // render. Persisted to text_stage_done so BOTH the BGE doc carve-out and the model CLIP
-    // carve-out stop re-walking a file that can never produce its embedding (a text-less
-    // doc, an un-renderable .obj).
+    // The content-derivation stage ran iff doc-text extraction was attempted or a model render; persisted to text_stage_done so the BGE and model-CLIP carve-outs stop re-walking files that can never embed.
     tagged.text_stage_done =
         tagged.doc_stage_ran || (matches!(file.kind, FileKind::Model) && !file.online_only);
     if let Some(text) = doc_text
@@ -2673,11 +2126,7 @@ async fn process_file_predecoded(
             for (label, score) in keywords {
                 tagged.tags.push((label, Some(score)));
             }
-            // BGE-small semantic embedding for the doc text. Sync inference
-            // under a single-Session Mutex, so it runs on the blocking pool:
-            // on an async worker every waiting doc would pin a runtime thread
-            // and starve IPC. Skipped when BGE isn't installed — FTS5 still
-            // serves keyword search.
+            // BGE-small embedding is sync inference under a single-Session Mutex, so it runs on the blocking pool: on an async worker each waiting doc would pin a runtime thread and starve IPC. Skipped when BGE isn't installed.
             if !coord.is_gpu_dead() && models.bge_text.is_some() && file.kind != FileKind::Other {
                 let (embed_models, embed_text) = (models.clone(), text.clone());
                 let embedded = tokio::task::spawn_blocking(move || {
@@ -2703,15 +2152,17 @@ async fn process_file_predecoded(
             tagged.doc_text = Some(text);
         }
 
-    // Audio metadata: artist/album/title/genre/year, surfaced as
-    // tag chips so the user can filter their library by these facts. Each
-    // tag carries score=None — these are facts, not model probabilities.
+    // Audio metadata becomes tag chips; score=None since these are facts, not model probabilities.
     tagged.tags.extend(audio_tags);
 
-    // A byte-identical image already analyzed (earlier scan, or the copy
-    // ahead of this one in the queue): keep the file's own EXIF, year and
-    // camera chips, and let the writer copy the twin's rows.
-    // (A copy that was waiting on its owner has been settled by the worker.)
+    if file.kind == FileKind::Video
+        && let Some(captured) = exif.as_ref().and_then(|fields| fields.3)
+    {
+        tagged.created_unix = Some(captured);
+        tagged.captured_from_exif = true;
+    }
+
+    // A byte-identical image already analyzed: keep the file's own EXIF, year and camera chips and let the writer copy the twin's rows.
     let reuse = matches!(twin, TwinClaim::Ready);
     if reuse && matches!(file.kind, FileKind::Image) {
         if let Some((cam, lat, lon, captured)) = exif {
@@ -2732,28 +2183,10 @@ async fn process_file_predecoded(
         return tagged;
     }
 
-    // Once the GPU is marked dead (TDR or device-removed), skip the whole ML
-    // pipeline for the rest of this process lifetime. The latch is
-    // process-wide and never reset, so this also keeps the remaining
-    // Discovery queue from stacking up tens of thousands of doomed inference
-    // calls behind us.
-    //
-    // Mark the row failed=true (NOT false): this file never reached the ML
-    // stages, so it has no faces/tags/embeddings. The incremental skip-set
-    // only skips failed=0 rows, so failed=1 forces a re-process on the next
-    // scan after a restart. Emitting failed=false here would stamp the file
-    // scanned-and-fine-with-no-faces and the timestamp-only skip-set would
-    // skip it forever — stranding it face-less permanently (the row still
-    // exists either way, so the resume cursor advances regardless).
+    // Once the GPU is marked dead (TDR or device removed), the ML pipeline is skipped for the rest of the process.
+    // failed=true: the file never reached the ML stages and the skip-set only skips failed=0 rows, so the next scan re-processes it.
     if coord.is_gpu_dead() {
-        // Only files that NEED the now-skipped GPU ML stages should be marked
-        // failed for retry — images/videos (face detect + embed). A Doc/Pdf/Audio
-        // row already finished its CPU-only extraction above, so marking it
-        // failed would wrongly hide a fully-processed file from the Library until
-        // the next healthy scan. (Their optional BGE embedding is skipped, but
-        // FTS keyword search still works, so leaving them failed=false is correct.)
-        // Models need the GPU for the .obj render→CLIP step; a transient retry for a
-        // non-obj model after a (rare) GPU death self-corrects on the next healthy scan.
+        // Only files that need the skipped GPU stages (images, videos, .obj models) are marked failed for retry; Doc/Pdf/Audio already finished CPU-only extraction.
         let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video | FileKind::Model);
         tagged.failed = needed_gpu;
         if needed_gpu {
@@ -2761,28 +2194,21 @@ async fn process_file_predecoded(
                 "GPU device removed mid-scan; file not processed (will retry next scan)".into(),
             );
         } else {
-            // Doc/Audio finished their CPU-only tag extraction (audio metadata,
-            // doc keywords) before the GPU died. Mark the set authoritative so
-            // the dbwriter persists it — otherwise tags_evaluated stays false,
-            // the dbwriter drops the freshly-extracted tags, AND failed=false
-            // strands the row in the skip-set, losing them permanently.
+            // Doc/Audio finished CPU-only extraction before the GPU died: mark the set authoritative, else the dbwriter drops the tags and failed=false strands the row in the skip-set.
             tagged.tags_evaluated = true;
         }
         tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return tagged;
     }
 
-    // Decode already happened upstream on a decoder-pool thread; we just
-    // consume the result here. Image-decode failure → emit a failed row
-    // so the DB still records the file (resume cursor advances, the next
-    // scan re-tries it).
+    // Decode happened upstream; an image-decode failure emits a failed row so the DB records the file and the next scan retries it.
     perf_trace("image_decode_start", &file.path, 0.0);
     let image_source: Option<(Vec<u8>, u32, u32)> = match decoded {
         Some(Ok(t)) => Some(t),
         Some(Err(err)) => {
             tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
             tagged.failed = true;
-            tagged.error_message = Some(format!("image decode: {err:#}"));
+            tagged.error_message = Some(UNDECODABLE_IMAGE_MESSAGE.to_string());
             None
         }
         None => None,
@@ -2820,9 +2246,7 @@ async fn process_file_predecoded(
                 record_stage(&STATS_DHASH_US, dhash_started);
                 perf_trace("dhash_done", &file.path, dhash_started.elapsed().as_secs_f64() * 1000.0);
 
-                // Short-circuit GPU stages if a prior file already detected
-                // device-removed. Submitting new work against the dead GPU
-                // device wedges the system when TDR fires.
+                // Short-circuit GPU stages after a device-removed: new work against a dead GPU wedges the system when TDR fires.
                 let face_cap = face_max_per_image();
                 let gpu_alive = !coord.is_gpu_dead();
                 if gpu_alive
@@ -2869,9 +2293,7 @@ async fn process_file_predecoded(
                                         quality,
                                         ..
                                     } = candidate;
-                                    // Aligned 112×112 (5-pt similarity → ArcFace
-                                    // template) for SFace; fall back to a plain bbox
-                                    // crop if the landmark fit is degenerate.
+                                    // Aligned 112×112 (5-pt similarity to the ArcFace template) for SFace; plain bbox crop if the landmark fit is degenerate.
                                     let crop = face_align::align_112(
                                         &rgb,
                                         w,
@@ -2939,17 +2361,12 @@ async fn process_file_predecoded(
                     tagged.vision_ms = vision_started.elapsed().as_secs_f64() * 1000.0;
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
-                // The face stage truly ran this session iff the GPU was alive at
-                // entry, the face models were loaded, AND the GPU did not die
-                // mid-pass. The dbwriter keys its stale-face DELETE on this (not
-                // on `faces.is_empty()`) so a zero-face re-process clears orphans
-                // while a models-missing / GPU-dead session preserves valid rows.
+                // The face stage ran iff the GPU was alive at entry, the models were loaded and the GPU did not die mid-pass; the dbwriter's stale-face DELETE keys on it (see `faces_evaluated`).
                 tagged.faces_evaluated =
                     gpu_alive && models.scrfd.is_some() && models.arcface.is_some() && !coord.is_gpu_dead();
                 tagged.has_faces = !tagged.faces.is_empty();
 
                 if !coord.is_gpu_dead() {
-                // Pool path: locked Session, single-image inference.
                 if let Some(clip_pool) = &models.mobileclip_pool {
                     let permit = clip_sem.acquire().await;
                     let clip_started = Instant::now();
@@ -2976,8 +2393,6 @@ async fn process_file_predecoded(
                     STATS_CLIP_US.fetch_add(clip_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                     perf_trace("clip_done", &file.path, clip_started.elapsed().as_secs_f64() * 1000.0);
                 } else if let Some(clip_coord) = &models.mobileclip_batch {
-                    // Opt-in batch path: workers submit to coordinator,
-                    // get batched embedding back via oneshot.
                     let clip_started = Instant::now();
                     let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                     match clip_coord.embed(resized).await {
@@ -2998,26 +2413,15 @@ async fn process_file_predecoded(
                 }
                 }
 
-                // RAM++ multi-label tagging — the PRIMARY in-scan tagger. One
-                // Swin-L forward pass on the same GPU/NPU EP chain as faces;
-                // its 4585-tag vocabulary supersedes the CLIP zero-shot scene
-                // labeler (gated below on `!ram_plus_ran`). Runs AFTER the
-                // MobileCLIP embed so semantic-search embeddings are always
-                // computed regardless of which tagger is active. Shares the
+                // RAM++ is the primary in-scan tagger (4585-tag vocabulary); it supersedes the CLIP zero-shot labeler (gated on !ram_plus_ran) and runs after the MobileCLIP embed so semantic-search embeddings are always computed.
                 // `vision_sem` GPU budget; device-removed → cancel the scan.
                 ram_plus_ran = false;
-                // Deferred mode leaves RAM++ (and the text read its tags decide)
-                // to the catch-up pass: the row gets the scene labels now.
+                // Deferred mode leaves RAM++ (and the text read its tags decide) to the catch-up pass; the row gets the scene labels now.
                 defer_ram = matches!(file.kind, FileKind::Image)
                     && crate::pipeline::catch_up::ram_plus_deferred(false)
                     && (models.ram_plus.is_some() || models.ram_plus_batch.is_some());
                 if !coord.is_gpu_dead() && !defer_ram {
-                    // Tags come from EITHER the batch coordinator (one batched
-                    // Session — HW-4 throughput path; no vision_sem because the
-                    // coordinator owns the Session and serializes batches itself,
-                    // mirroring the CLIP batch path) OR the per-worker pool
-                    // (single-image, vision_sem-gated). Both yield the same
-                    // Result<Vec<(tag, score)>>, handled by the shared match.
+                    // The batch coordinator and the per-worker pool yield the same Result; the batch path needs no vision_sem since the coordinator serializes batches.
                     let ram_started = Instant::now();
                     let tag_result: Option<anyhow::Result<Vec<(String, f32)>>> =
                         if let Some(ram_coord) = &models.ram_plus_batch {
@@ -3027,11 +2431,7 @@ async fn process_file_predecoded(
                                 Err(e) => Some(Err(e)),
                             }
                         } else if let Some(ram_pool) = &models.ram_plus {
-                            // Run the CPU preprocess (resize + ImageNet-normalize)
-                            // BEFORE acquiring the GPU permit + session Mutex, so it
-                            // overlaps other workers' GPU forwards instead of
-                            // serializing under the scarce session lock; the lock +
-                            // permit now wrap only the GPU forward pass.
+                            // Run the CPU preprocess (resize + ImageNet-normalize) BEFORE acquiring the GPU permit and session Mutex so it overlaps other workers' forwards; the lock and permit wrap only the forward pass.
                             match crate::models::ram_plus::RamPlusTagger::preprocess_tensor(
                                 &rgb, w, h,
                             ) {
@@ -3060,8 +2460,6 @@ async fn process_file_predecoded(
                         match tag_result {
                             Ok(tags) => {
                                 let redacted = crate::platform::redact_path_for_log(&file.path);
-                                // Faces ran and saw nobody: generic people words are
-                                // the detector's say, as on the Mac (TagAgreement).
                                 let tags = without_people_words(tags, tagged.faces_evaluated && tagged.faces.is_empty());
                                 let ram_emit_count = tags.len();
                                 let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
@@ -3082,12 +2480,7 @@ async fn process_file_predecoded(
                                     max_score,
                                     "[TAGGING] ram_plus_summary"
                                 );
-                                // Treat RAM++ as "satisfied the tagger contract"
-                                // only when it actually emitted content tags. A
-                                // zero-tag success (hard/abstract image) must NOT
-                                // suppress the lower-threshold CLIP scene-tag
-                                // fallback below, else the file gets only Year/
-                                // camera chips (#7).
+                                // RAM++ counts as satisfying the tagger contract only if it emitted content tags: a zero-tag success must not suppress the CLIP scene-tag fallback, or the file gets only Year/camera chips.
                                 ram_plus_ran = ram_emit_count > 0;
                             }
                             Err(err) => {
@@ -3104,21 +2497,8 @@ async fn process_file_predecoded(
                     }
                 }
 
-                // Scene tags — CLIP zero-shot. Scores the MobileCLIP image
-                // embedding computed just above against the scene-label
-                // matrix: a tiny CPU mat-vec + softmax, NOT a GPU inference,
-                // so there's no semaphore and no GPU-dead guard (and it's
-                // cheaper than the MobileNetV3 ImageNet classifier this
-                // replaces — that classifier's object taxonomy produced the
-                // "horrible / nothing like macOS" tags). Each label carries
-                // its softmax probability so the Library can confidence-order
-                // chips and the threshold can be tuned against persisted
-                // scores. Skips silently when the labeler isn't built (CLIP
-                // text model not installed) or the embedding is missing.
-                // CLIP zero-shot scene tags are the FALLBACK tagger — only run
-                // when RAM++ didn't (not installed / device-dead / errored), so
-                // a RAM++-tagged file isn't double-tagged with noisier CLIP
-                // scene guesses.
+                // Scene tags: CLIP zero-shot (CPU mat-vec + softmax, so no semaphore or GPU-dead guard), each label keeping its softmax probability.
+                // Fallback only when RAM++ did not tag, so a RAM++-tagged file isn't double-tagged with noisier CLIP guesses.
                 if !ram_plus_ran {
                     let redacted = crate::platform::redact_path_for_log(&file.path);
                     if let (Some(labeler), Some(emb)) = (&models.scene_labeler, &tagged.clip_embedding) {
@@ -3141,10 +2521,7 @@ async fn process_file_predecoded(
                             );
                             tagged.tags.push((label.to_string(), Some(score)));
                         }
-                        // one-line per-file summary at info level so a user
-                        // who sees "only year" chips on images can grep the engine
-                        // log to confirm whether scene tags are being emitted vs
-                        // gated out.
+                        // One-line per-file summary at info level so "only year" chips can be traced to scene tags emitted vs gated out.
                         tracing::info!(
                             target: "FileIDEngine::tagging",
                             path = %redacted,
@@ -3154,9 +2531,7 @@ async fn process_file_predecoded(
                         );
                         perf_trace("scene_tags_done", &file.path, scene_started.elapsed().as_secs_f64() * 1000.0);
                     } else if matches!(file.kind, FileKind::Image | FileKind::Video) {
-                        // Embedding or labeler missing — log so the cause is visible
-                        // without attaching a debugger. Skipped for non-visual kinds
-                        // (audio / doc) which legitimately have no CLIP path.
+                        // Embedding or labeler missing: logged so the cause is visible; skipped for non-visual kinds that have no CLIP path.
                         tracing::info!(
                             target: "FileIDEngine::tagging",
                             path = %redacted,
@@ -3167,20 +2542,12 @@ async fn process_file_predecoded(
                     }
                 }
 
-                // OCR is the biggest CPU per file (~30-50 ms). For camera
-                // photos (EXIF camera_model present) it returns nothing
-                // useful, so skip. Documents/screenshots still run OCR.
-                // Also short-circuit when the GPU is already known dead, to
-                // avoid any recursive device-init after a TDR.
+                // OCR is the biggest CPU per file (~30-50 ms) and finds nothing useful on camera photos (EXIF camera_model present), so skip those; documents/screenshots still run it. Also skipped when the GPU is known dead to avoid device re-init after a TDR.
                 if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && !defer_ram && should_run_ocr(&file.path, &tagged, file.size_bytes) {
-                    // The OCR stage ran this session regardless of whether text
-                    // came back — lets the dbwriter clear stale ocr_text/ocr_fts
-                    // on a re-process that now yields nothing (#11).
+                    // Stage ran whether or not text came back, so the dbwriter can clear stale ocr_text/ocr_fts on a re-process that yields nothing.
                     tagged.ocr_stage_ran = true;
                     let ocr_started = Instant::now();
-                    // Move (not clone) the decoded frame into OCR: this is the
-                    // last use of `rgb` in the block, so the clone was a wasted
-                    // full-frame allocation + memcpy per OCR'd file.
+                    // Moved, not cloned: this is the last use of `rgb` in the block.
                     if let Ok(Some(text)) = run_ocr_blocking(rgb, w, h).await
                         && !text.trim().is_empty() {
                             tagged.has_text = true;
@@ -3192,13 +2559,7 @@ async fn process_file_predecoded(
                 }
     }
 
-    // Enriched extras — derive Year + camera family from the signals we
-    // already have. Cheap (no inference) and fills the chip row when CLIP
-    // scene tags didn't clear the threshold. (Aspect and the generic "Has
-    // Faces/Text/Location" capability tags were removed — see
-    // push_enriched_extras.) Mirrors macOS `Tagging.swift::extraTags`.
-    // Year and camera belong to images only, and every other kind starts with
-    // its kind tag, as `Tagging.swift` stores them.
+    // Enriched extras: Year + camera family from existing signals (no inference), filling the chip row when scene tags missed the threshold. Year and camera belong to images only; every other kind starts with its kind tag.
     let extras = if file.kind == FileKind::Image {
         enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref())
     } else {
@@ -3207,14 +2568,8 @@ async fn process_file_predecoded(
     if let Some(label) = kind_tag(file.kind) {
         tagged.tags.insert(0, (label.to_string(), None));
     }
-    // What the scan stored in RAM++'s place, for the catch-up pass.
     let stored_in_place: Vec<String> = tagged.tags.iter().map(|(tag, _)| tag.clone()).collect();
-    // Dedupe (case-insensitive) + cap. Keep first occurrence to preserve
-    // the classifier's confidence-ordered output; cap at 16 to avoid
-    // exploding the tags table on noisy classifier outputs. Case-insensitive
-    // matters because the classifier may emit "Dog" and a hypothetical
-    // synonym path may push "dog"; we want the first to win. The catch-up
-    // pass builds its list with the same function.
+    // Dedupe case-insensitively keeping the first occurrence (classifier confidence order) and cap at 16 so noisy output can't explode the tags table. The catch-up pass uses the same function.
     tagged.tags = crate::pipeline::catch_up::assemble_tags(
         Vec::new(),
         std::mem::take(&mut tagged.tags),
@@ -3238,20 +2593,8 @@ async fn process_file_predecoded(
         );
     }
     maybe_emit_stats();
-    // Mark the tag set authoritative for the dbwriter only if the GPU survived
-    // the full tagging pass AND a decode actually happened. If the GPU died
-    // mid-file, OR an image decode failed transiently (failed=true skips the
-    // whole tagging block leaving `tags` empty), the set is partial/empty and
-    // must NOT replace previously-persisted auto-tags. (The timeout and
-    // GPU-dead-bail rows are built with tags_evaluated=false and never reach
-    // here; the `!failed` term covers the no-decode path, mirroring
-    // faces_evaluated which is set only inside the successful-decode block.)
-    // If the GPU died DURING this file's ML stages — after the pre-flight
-    // gpu-dead bail above let it through — an image/video reached neither a
-    // complete face-detect nor embed. Mark it failed so the incremental
-    // skip-set re-processes it next scan instead of stranding it at
-    // failed=false (scanned-fine-but-face-less forever, same class as the
-    // pre-ML bail).
+    // Mark the tag set authoritative only if the GPU survived the pass AND a decode happened; otherwise `tags` is partial/empty and must not replace persisted auto-tags (timeout and GPU-dead-bail rows never reach here).
+    // If the GPU died during this file's ML stages, an image/video got neither complete face detect nor embed: mark it failed so the skip-set re-processes it next scan.
     if coord.is_gpu_dead()
         && matches!(file.kind, FileKind::Image | FileKind::Video)
         && !tagged.failed
@@ -3261,13 +2604,7 @@ async fn process_file_predecoded(
             "GPU device removed mid-scan; file not fully processed (will retry next scan)".into()
         });
     }
-    // Mirror faces_evaluated (~1598): a visual file's tag set is authoritative
-    // only when a tagger was actually available to evaluate it this session.
-    // With RAM++ absent (a supported fallback) AND no usable CLIP scene path
-    // (labeler missing, or this file's embed failed transiently), `tags` holds
-    // only the Year/camera enriched extras — not an authoritative empty — so
-    // setting tags_evaluated would make the dbwriter delete-then-reinsert wipe
-    // the file's previously-persisted content tags. (audit R3-19)
+    // A visual file's tag set is authoritative only when a tagger was available to evaluate it: with RAM++ absent and no usable CLIP scene path, `tags` holds only Year/camera extras, and tags_evaluated would make the dbwriter wipe persisted content tags.
     let visual_tagger_ran = ram_plus_ran
         || (models.scene_labeler.is_some() && tagged.clip_embedding.is_some());
     tagged.tags_evaluated = !coord.is_gpu_dead()
@@ -3275,8 +2612,7 @@ async fn process_file_predecoded(
         && !file.online_only
         && (!matches!(file.kind, FileKind::Image | FileKind::Video) || visual_tagger_ran);
     if defer_ram && !tagged.failed && !coord.is_gpu_dead() {
-        // RAM++ will supply the tags, so the set stored now (scene labels, or
-        // only the Year and camera tags) stands in for it and is authoritative.
+        // RAM++ will supply the tags, so the stored set stands in for it and is authoritative.
         tagged.tags_evaluated = true;
         tagged.catch_up = Some(crate::pipeline::catch_up::Marker {
             stages: crate::pipeline::catch_up::TAGS_OWED,
@@ -3294,8 +2630,6 @@ async fn process_file_predecoded(
     tagged
 }
 
-/// Faces ran and saw nobody: generic people words are the detector's say, as
-/// on the Mac (TagAgreement).
 fn without_people_words(tags: Vec<(String, f32)>, no_face_found: bool) -> Vec<(String, f32)> {
     if !no_face_found {
         return tags;
@@ -3305,7 +2639,6 @@ fn without_people_words(tags: Vec<(String, f32)>, no_face_found: bool) -> Vec<(S
         .collect()
 }
 
-/// The scan's decoder and RAM++ behind the catch-up pass (portable pipeline).
 struct PortableCatchUp {
     models: Arc<ModelStack>,
     runtime: tokio::runtime::Handle,
@@ -3333,7 +2666,6 @@ impl crate::pipeline::catch_up::Analyzer for PortableCatchUp {
     }
 
     fn parallelism(&self) -> usize {
-        // One file per pooled session; a batched session wants several at once.
         if self.models.ram_plus_batch.is_some() { 8 } else { self.models.pool_size.max(1) }
     }
 
@@ -3395,14 +2727,13 @@ pub(crate) fn mac_unload_adapters() {
     mac::unload_adapters();
 }
 
-/// The analyzer the catch-up pass runs after a scan with these models.
 pub(crate) fn catch_up_analyzer(
     models: Arc<ModelStack>,
     coord: ScanCoordinator,
 ) -> Box<dyn crate::pipeline::catch_up::Analyzer + Send> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if models.apple_scan {
-        return Box::new(mac::CatchUp { _models: models });
+        return Box::new(mac::CatchUp { models });
     }
     Box::new(PortableCatchUp { models, runtime: tokio::runtime::Handle::current(), coord })
 }
@@ -3420,14 +2751,12 @@ fn stored_tag_cap() -> usize {
     })
 }
 
-/// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
-/// is wasted CPU; skip in that case but keep running for documents/screenshots.
+/// Heuristic OCR gate: photo libraries are 99% camera snapshots where OCR is wasted CPU; documents/screenshots still run it.
 fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64) -> bool {
     let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
     ocr_gate(path, &tag_names, tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
 }
 
-/// [`should_run_ocr`] over the facts it reads, for the catch-up pass.
 fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32, has_camera: bool) -> bool {
     // Paper, whiteboard and handwriting tags read even on camera photos; the
     // OCR has no handwriting tier, so Deep Analyze's transcription picks up what
@@ -3440,7 +2769,6 @@ fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32,
     if has_camera {
         return false;
     }
-    // Filenames that strongly suggest documents/screenshots.
     let lower = path
         .file_name()
         .and_then(|f| f.to_str())
@@ -3460,31 +2788,17 @@ fn ocr_gate(path: &std::path::Path, tag_names: &[&str], width: u32, height: u32,
         && ext.eq_ignore_ascii_case("png") {
             return true;
         }
-    // Default: skip. Settings → "Always run OCR" could re-enable later
-    // when we wire a per-scan policy flag.
     false
 }
 
-/// Derive tag-like chips from per-file signals that are already on hand:
-/// EXIF camera model + creation date, face count, OCR result, EXIF GPS.
-/// Matches the surface of macOS `Tagging.swift::extraTags(...)`. Cheap —
-/// no inference, no I/O.
-///
-/// Format choices to align with the macOS Library tile `formatTag`:
-/// - `"Year_2024"` keeps the underscore form (the formatter strips it).
-/// - Camera family is the human-friendly brand (`"iPhone"`, `"Canon"`).
-/// - Orientation (`"Wide"`/`"Tall"`/`"Square"`) and the generic capability
-///   tags (`"Has Faces"`/`"Has Text"`/`"Has Location"`) are intentionally NOT
-///   emitted — they read as noise; descriptive content comes from CLIP scene
-///   tags (and, when installed, the optional Deep-Analyze VLM pass).
+/// Year + camera-family chips from signals already on hand (no inference, no I/O).
+/// `Year_2024` keeps the underscore (the Library formatter strips it). Orientation and capability tags (Has Faces/Text/Location) are deliberately not emitted: they read as noise.
 fn push_enriched_extras(tagged: &mut TaggedFile) {
     let extras = enriched_extras(tagged.created_unix, tagged.modified_unix, tagged.camera_model.as_deref());
     tagged.tags.extend(extras.into_iter().map(|tag| (tag, None)));
 }
 
-/// The tag every file that is not an image starts with, as the Swift engine
-/// stores it (`Tagging.swift`: `Doc`, `PDF`, `Audio`, `Video`, `3D Model`,
-/// `Other`).
+/// The tag every non-image file starts with (`Doc`, `PDF`, `Audio`, `Video`, `3D Model`, `Other`).
 fn kind_tag(kind: FileKind) -> Option<&'static str> {
     match kind {
         FileKind::Image => None,
@@ -3497,40 +2811,13 @@ fn kind_tag(kind: FileKind) -> Option<&'static str> {
     }
 }
 
-/// The Year and camera-family tags for a file with these dates and camera.
 fn enriched_extras(created_unix: Option<f64>, modified_unix: f64, camera_model: Option<&str>) -> Vec<String> {
     let mut extras = Vec::new();
-    // Order matters: the Library card's `TopTwoTags` slice takes the first
-    // two tags it sees. Classifier output (when installed) appears first
-    // in the vec; enriched-extras fill the remainder. We deliberately
-    // emit the most-informative signals first so that when the classifier
-    // is absent the user still sees something useful.
-    //
-    // Priority (highest first):
-    //   1. Year (creation date in local time; the single most useful
-    //      low-cost tag — pinned to the macOS `extraTags` rule)
-    //   2. Camera family (iPhone / Canon / etc. — useful for filtering)
-    //
-    // The generic capability tags (Has Faces / Has Text / Has Location) used to
-    // be emitted here too, but they read as content tags in the Library while
-    // describing a capability rather than the image — and "Has Location" in
-    // particular crowded out the descriptive scene tags. The underlying
-    // signals still live in their own DB columns / filter facets (has_faces,
-    // has_text, location_*); they're just no longer surfaced as tag chips.
-    //
-    // Aspect tags (Wide/Tall/Square) were previously emitted here and
-    // ended up dominating `TopTwoTags` on files without EXIF year/camera
-    // (e.g. screenshots, Windows Phone WP_*.jpg). Dropped because aspect
-    // is a UI concern — the tile's own rendering already conveys it —
-    // not a useful tag for search/filtering. Mirrors a macOS Tagging.swift
-    // refinement.
-    // Canonical Year_ rule (converged with macOS `Tagging.swift::extraTags`):
-    // creation date when present, else modification date; local timezone;
-    // year strictly inside (1990, 2100). macOS reads `creationDate` via the
-    // local `gregorianCalendar`; Windows mirrors that here (creation-time
-    // wins over modified-at — the latter only fills in when the platform
-    // reported no birth time).
-    let year_source = created_unix.filter(|&c| c > 0.0).unwrap_or(modified_unix);
+    // Order matters: the Library card's `TopTwoTags` takes the first two tags, so the most informative signals go first.
+    // Year_: creation date when present, else modification date; local timezone; strictly inside (1990, 2100). Camera family follows.
+    let now = crate::util::unix_now();
+    let year_source = created_unix.filter(|&c| c > 0.0).and_then(|c| crate::util::not_in_the_future(c, now));
+    let year_source = year_source.or_else(|| crate::util::not_in_the_future(modified_unix, now)).unwrap_or(0.0);
     if year_source > 0.0
         && let Some(year) = local_unix_seconds_to_year(year_source)
             && year > 1990 && year < 2100 {
@@ -3556,11 +2843,7 @@ fn enriched_extras(created_unix: Option<f64>, modified_unix: f64, camera_model: 
     extras
 }
 
-/// Unix-seconds → calendar year in the machine's **local** timezone. macOS
-/// derives the Year_ tag with the local `gregorianCalendar`, so a New
-/// Year's-Eve photo lands in the same year on both platforms (a UTC-based
-/// extraction would shift e.g. a 2023-12-31 23:00 local capture in a
-/// UTC-negative zone into 2024). chrono's `Local` is already a dependency.
+/// Unix seconds → calendar year in the machine's local timezone, matching macOS's local gregorianCalendar so a New Year's-Eve photo lands in the same year on both platforms.
 fn local_unix_seconds_to_year(unix: f64) -> Option<i32> {
     use chrono::{Datelike, Local, TimeZone};
     let secs = unix as i64;
@@ -3572,21 +2855,15 @@ fn local_unix_seconds_to_year(unix: f64) -> Option<i32> {
     }
 }
 
-/// Hard cap on image dimensions. A 100 KB JPEG can decode to a 4 GB raw
-/// buffer; reject before decode to avoid OOM-ing a worker. 50 MP =
-/// ~150 MB RGB8 — within budget for legitimate photo + scanner output.
+/// Hard cap on image dimensions: a 100 KB JPEG can decode to 4 GB, so reject before decode. 50 MP ≈ 150 MB RGB8.
 pub(crate) const MAX_DECODED_PIXELS: u64 = 50_000_000;
 
-/// Run OCR on an RGB buffer. Returns None if no text or OCR isn't
-/// available on this system.
 async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option<String>> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
         match shell::ocr::recognize(&rgb, w, h) {
             Ok(r) => Ok(Some(r)),
             Err(err) => {
-                // warn!, not debug!: a genuinely non-functional OCR engine
-                // (e.g. COM not initialized, missing language pack) should be
-                // visible rather than silently swallowed for every file.
+                // warn!, not debug!: a non-functional OCR engine (COM not initialized, missing language pack) must be visible.
                 tracing::warn!(?err, "OCR failed");
                 Ok(None)
             }
@@ -3595,15 +2872,7 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
     .await?
 }
 
-/// EXIF orientation (IFD0 tag 0x0112), or `None` when absent/unreadable.
-///
-/// Camera and phone JPEGs are overwhelmingly stored in sensor order with an
-/// orientation tag rather than physically rotated. macOS decodes through
-/// `kCGImageSourceCreateThumbnailWithTransform: true`, which honours the tag;
-/// the `image` crate does not, and neither does the DCT-scaled JPEG path. Left
-/// unapplied, every downstream consumer — phash, CLIP, RAM++, face detection —
-/// sees a sideways frame, which both breaks cross-platform parity and costs
-/// real face recall on portrait photos.
+/// EXIF orientation (IFD0 tag 0x0112) or `None`. Camera JPEGs are stored in sensor order with a tag; macOS honours it but the `image` crate and the DCT-scaled path do not, which would feed every consumer (phash, CLIP, RAM++, faces) sideways frames and cost face recall on portraits.
 pub(crate) fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
@@ -3615,9 +2884,7 @@ pub(crate) fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientat
     image::metadata::Orientation::from_exif(u8::try_from(raw).ok()?)
 }
 
-/// A RAW file's orientation: the container's IFD0 tag (ORF, RW2 and CR3 need
-/// the RAW-aware reader), then generic EXIF, then the embedded preview's own
-/// EXIF, which is the only record Fujifilm RAF keeps.
+/// A RAW's orientation: the container's IFD0 tag (ORF, RW2, CR3 need the RAW-aware reader), then generic EXIF, then the preview's own EXIF (the only record Fujifilm RAF keeps).
 pub(crate) fn raw_orientation(container: &[u8], jpeg: &[u8]) -> Option<image::metadata::Orientation> {
     super::raw_preview::orientation(container)
         .and_then(|v| image::metadata::Orientation::from_exif(u8::try_from(v).ok()?))
@@ -3625,10 +2892,7 @@ pub(crate) fn raw_orientation(container: &[u8], jpeg: &[u8]) -> Option<image::me
         .or_else(|| exif_orientation(jpeg))
 }
 
-/// Rotate/flip a decoded RGB frame into upright display order.
-///
-/// A missing tag and the identity orientation both return the buffer untouched,
-/// so the common case costs one tag lookup and no allocation.
+/// Rotates/flips a decoded RGB frame upright; a missing tag or the identity orientation returns the buffer untouched.
 fn apply_exif_orientation(
     buf: Vec<u8>,
     w: u32,
@@ -3657,8 +2921,6 @@ pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
     read_primary_exif(bytes).fields
 }
 
-/// Everything the scan takes from a file's EXIF block, from one parse:
-/// `parse_exif_fields`, `exif_orientation` and `exif_is_srgb` in one.
 struct PrimaryExif {
     fields: Option<ExifFields>,
     orientation: Option<image::metadata::Orientation>,
@@ -3679,9 +2941,7 @@ fn read_primary_exif(bytes: &[u8]) -> PrimaryExif {
     }
 }
 
-/// Camera RAWs the generic reader rejects (ORF, RW2, CR3, RAF), as ImageIO
-/// reads them on macOS: the container's own EXIF first, gaps filled from the
-/// embedded preview's EXIF.
+/// Camera RAWs the generic reader rejects (ORF, RW2, CR3, RAF), read as ImageIO does: the container's EXIF first, gaps filled from the preview's.
 fn raw_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
     use super::raw_preview::RawExif;
     let read = |block: Vec<u8>| {
@@ -3765,7 +3025,7 @@ pub(crate) fn exif_datetime_to_unix(text: &str, offset: Option<&str>, now_unix: 
     exif_datetime_in(text, offset, now_unix, &chrono::Local)
 }
 
-/// Like macOS `Tagging.exifCaptureDate`: a wall time that occurs twice when
+/// A wall time that occurs twice when
 /// clocks fall back reads as the later (standard-time) instant, and one that
 /// never occurs when they spring forward is rejected.
 fn exif_datetime_in<Tz: chrono::TimeZone>(text: &str, offset: Option<&str>, now_unix: f64, zone: &Tz) -> Option<f64> {
@@ -3779,7 +3039,7 @@ fn exif_datetime_in<Tz: chrono::TimeZone>(text: &str, offset: Option<&str>, now_
     (unix >= 631_152_000.0 && unix <= now_unix + 86_400.0).then_some(unix)
 }
 
-/// `±HH:MM`, the only OffsetTime* form macOS accepts.
+/// `±HH:MM`, the only OffsetTime* form accepted.
 fn exif_offset(text: &str) -> Option<chrono::FixedOffset> {
     let text = text.trim();
     let sign = match text.as_bytes() {
@@ -3792,11 +3052,7 @@ fn exif_offset(text: &str) -> Option<chrono::FixedOffset> {
     chrono::FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60))
 }
 
-/// EXIF for an image too large to read fully into memory: the APP1 segment
-/// (JPEG) / TIFF IFD chain (RAW/TIFF) sits at the front of the file, so a
-/// bounded 4 MB head read recovers camera/GPS without the full-file read the
-/// in-memory branch does. Returns `Some((None, None, None))` on a readable
-/// file with no parseable EXIF — same contract as that branch.
+/// EXIF for an image too large to read fully: the APP1/TIFF IFD chain sits at the front, so a bounded 4 MB head read recovers camera/GPS. Returns `Some((None, None, None))` for a readable file with no parseable EXIF.
 const EXIF_HEAD_BYTES: u64 = 4 * 1024 * 1024;
 
 /// EXIF capture time read from the front of the file only. JPEG, PNG, CR3,
@@ -3818,6 +3074,11 @@ pub(crate) fn capture_time_from_head(path: &std::path::Path) -> Option<f64> {
     }
     (&file).take(EXIF_HEAD_BYTES - FIRST).read_to_end(&mut head).ok()?;
     parse_exif_fields(&head)?.3
+}
+
+/// A video's container creation time shaped like an image's EXIF result, so both scan paths carry it the same way.
+pub(crate) fn video_capture_fields(path: &std::path::Path) -> Option<ExifFields> {
+    crate::util::video_creation_date::container_creation_unix(path).map(|captured| (None, None, None, Some(captured)))
 }
 
 fn exif_from_head(path: &std::path::Path) -> Option<ExifFields> {
@@ -3855,9 +3116,6 @@ fn read_gps_coord<'a>(
     Some(decimal)
 }
 
-/// Crop a face region from the source RGB image with `FACE_CROP_PAD`
-/// slack, then nearest-resize to 112×112. Returns None if the bbox is
-/// degenerate or outside the image.
 pub(crate) fn crop_and_resize_face(
     rgb: &[u8],
     img_w: u32,
@@ -3895,11 +3153,7 @@ pub(crate) fn crop_and_resize_face(
     Some(resize_rgb_nearest(&crop, crop_w, crop_h, 112, 112))
 }
 
-/// Nearest-neighbor resize for interleaved RGB. Fast, and acceptable for the
-/// dHash fingerprint (9×8) and the tight 112px face-crop, where the downscale
-/// ratio is small or the model is insensitive. NOT for CLIP — a multi-megapixel
-/// source decimated in one nearest step injects heavy aliasing that shifts the
-/// embedding; use [`resize_rgb_quality`] there.
+/// Nearest-neighbor resize: fine for the dHash (9×8) and the 112px face crop, NOT for CLIP, where one-step decimation of a multi-megapixel source aliases and shifts the embedding; use [`resize_rgb_quality`].
 pub fn resize_rgb_nearest(
     rgb: &[u8],
     src_w: usize,
@@ -3929,14 +3183,7 @@ pub fn resize_rgb_nearest(
     out
 }
 
-/// High-quality (bilinear) resize for interleaved RGB — the CLIP 224×224 image
-/// input. Nearest one-step decimation of a multi-megapixel photo injects
-/// aliasing that shifts the embedding and diverges from the macOS reference
-/// (which draws at `.high` interpolation after a 512px pre-shrink), degrading
-/// semantic search, zero-shot scene tags, and CLIP dedup. Triangle (bilinear)
-/// closely matches macOS at this downscale ratio and reuses the same filter
-/// RAM++ preprocessing already trusts. Falls back to nearest only if the raw
-/// buffer can't form an image (size mismatch).
+/// Bilinear resize for the CLIP 224×224 input. One-step nearest decimation aliases and diverges from the macOS reference (`.high` after a 512px pre-shrink); Triangle closely matches it and is the filter RAM++ preprocessing already trusts. Falls back to nearest if the buffer can't form an image.
 pub fn resize_rgb_quality(
     rgb: &[u8],
     src_w: usize,
@@ -3944,8 +3191,6 @@ pub fn resize_rgb_quality(
     dst_w: usize,
     dst_h: usize,
 ) -> Vec<u8> {
-    // Borrow the source buffer rather than cloning it; same Triangle filter,
-    // identical output. Falls back to nearest if the size doesn't form an image.
     let src = match image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
         src_w as u32,
         src_h as u32,
@@ -3983,8 +3228,7 @@ pub fn compute_dhash_for_path(path: &std::path::Path) -> anyhow::Result<i64> {
     ))
 }
 
-/// Difference-hash perceptual fingerprint. 9×8 grayscale → 64 bits, one
-/// bit per horizontal-adjacent-pixel comparison. Matches macOS dHash.
+/// Difference hash: 9×8 grayscale → 64 bits, one per horizontal-adjacent comparison.
 pub fn compute_dhash(rgb: &[u8], width: usize, height: usize) -> i64 {
     if width == 0 || height == 0 || rgb.len() < width * height * 3 {
         return 0;
@@ -4008,23 +3252,104 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
     let r = rgb[i] as u32;
     let g = rgb[i + 1] as u32;
     let b = rgb[i + 2] as u32;
-    // Rec. 601 luma — same coefficients macOS uses.
+    // Rec. 601 luma.
     ((299 * r + 587 * g + 114 * b) / 1000) as u8
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_busy_machine_gets_more_time_per_file_and_a_quiet_one_the_normal_budget() {
+        assert_eq!(file_time_limit(0.2, true), PER_FILE_TIMEOUT);
+        assert_eq!(file_time_limit(10.0, true), PER_FILE_TIMEOUT * 10);
+        assert_eq!(file_time_limit(500.0, true), PER_FILE_TIMEOUT.mul_f64(MAX_LOAD_STRETCH));
+    }
+
+    #[test]
+    fn the_first_files_through_the_models_get_the_cold_start_allowance() {
+        assert!(file_time_limit(0.0, false) >= COLD_START_TIMEOUT);
+        assert!(file_time_limit(0.0, false) > file_time_limit(0.0, true));
+        assert_eq!(file_time_limit(10.0, false), PER_FILE_TIMEOUT * 10);
+    }
+
+    #[test]
+    fn stored_failure_messages_never_carry_scheduler_or_codec_wording() {
+        let production = production_source();
+        assert!(!production.contains("Some(error.to_string())"), "a scheduler refusal is stored verbatim");
+        assert!(!production.contains("format!(\"image decode: {err"), "a codec error is stored verbatim");
+        for message in [BUSY_MESSAGE, UNDECODABLE_IMAGE_MESSAGE] {
+            assert!(!message.contains("Resource") && !message.contains("decode:"));
+        }
+    }
+
+    fn production_source() -> &'static str {
+        production_part(include_str!("tagging.rs"))
+    }
+
+    // Windows checks sources out with CRLF, so the test module marker is found in either form.
+    fn production_part(source: &str) -> &str {
+        let end = source
+            .find("#[cfg(test)]\nmod tests {")
+            .or_else(|| source.find("#[cfg(test)]\r\nmod tests {"))
+            .unwrap_or(source.len());
+        &source[..end]
+    }
+
+    #[test]
+    fn image_files_are_read_into_memory_never_mapped() {
+        for (name, source) in [
+            ("tagging.rs", include_str!("tagging.rs")),
+            ("shell/mod.rs", include_str!("../shell/mod.rs")),
+        ] {
+            let production = production_part(source);
+            assert!(!production.contains("Mmap::map"), "{name} maps a file; a pulled drive would SIGBUS the engine");
+        }
+    }
+
+    #[test]
+    fn reading_an_image_refuses_a_file_over_the_cap_and_a_missing_file_as_plain_errors() {
+        let dir = std::env::temp_dir().join(format!("fileid-read-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.tif");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        assert_eq!(read_capped(std::fs::File::open(&path).unwrap(), 8192).unwrap().len(), 4096);
+        assert!(read_capped(std::fs::File::open(&path).unwrap(), 1024).is_err());
+        assert!(read_image_bytes(&dir.join("gone.jpg")).is_err());
+        assert!(decode_image_sync(&dir.join("gone.jpg"), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_usb_or_network_volume_narrows_the_decode_pool_to_four() {
+        use crate::platform::StorageType::{Hdd, Network, Nvme, Removable, Unknown};
+        assert_eq!(decoder_count_for_storage(10, Some(Removable)), 4);
+        assert_eq!(decoder_count_for_storage(10, Some(Network)), 4);
+        assert_eq!(decoder_count_for_storage(10, Some(Hdd)), 4);
+        assert_eq!(decoder_count_for_storage(2, Some(Removable)), 2);
+        assert_eq!(decoder_count_for_storage(10, Some(Nvme)), 10);
+        assert_eq!(decoder_count_for_storage(10, Some(Unknown)), 10);
+        assert_eq!(decoder_count_for_storage(10, None), 10);
+    }
+
+    #[test]
+    fn a_solid_state_usb_volume_gets_eight_readers_and_a_spinning_one_four() {
+        use crate::platform::StorageType::{Hdd, Network, Removable, Unknown};
+        assert_eq!(decoder_count_for_volume(10, Some(Removable), || true), 8);
+        assert_eq!(decoder_count_for_volume(10, Some(Removable), || false), 4);
+        assert_eq!(decoder_count_for_volume(6, Some(Removable), || true), 6);
+        assert_eq!(decoder_count_for_volume(2, Some(Removable), || true), 2);
+        assert_eq!(decoder_count_for_volume(10, Some(Network), || panic!("a network share is never probed")), 4);
+        assert_eq!(decoder_count_for_volume(10, Some(Hdd), || panic!("a spinning disk is never probed")), 4);
+        assert_eq!(decoder_count_for_volume(10, Some(Unknown), || panic!("an unclassified volume is never probed")), 10);
+    }
+
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     #[test]
     fn face_is_excluded_gates_on_absolute_size_not_just_area_fraction() {
-        // A 30x36px face in a 1280x720 frame: its area fraction (~0.00117)
-        // clears BOTH the old 0.002-era intent and today's 0.0002 backstop,
-        // so only the absolute-pixel floor can reject it. This is the
-        // "too small to carry identity" case the relative-area gate alone
-        // could never catch.
+        // A 30x36px face in 1280x720: its area fraction (~0.00117) clears the backstop, so only the absolute-pixel floor can reject it.
         let area_fraction = (30.0_f32 * 36.0) / (1280.0 * 720.0);
         assert!(
             area_fraction > FACE_MIN_BBOX_AREA_FRACTION,
@@ -4035,20 +3360,13 @@ mod tests {
 
     #[test]
     fn face_is_excluded_keeps_typical_video_keyframe_faces() {
-        // Video keyframes decode at a 1280px long-edge cap, so a normal
-        // face from a video lands near 52px min-dimension (the measured p50
-        // on the Adlon catalog) — well above the still-image floor only
-        // because the floor was calibrated per-kind. Guards the regression
-        // where a 64px floor silently dropped every face in 30% of
-        // face-bearing videos.
+        // Video keyframes decode at a 1280px long-edge cap, so a normal video face is ~52px min-dimension (p50 on the Adlon catalog); guards the regression where a 64px floor dropped every face in 30% of face-bearing videos.
         let area_fraction = (52.0_f32 * 64.0) / (1280.0 * 720.0);
         assert!(!face_is_excluded(0.0, 0.0, area_fraction, 52.0));
     }
 
     #[test]
     fn face_is_excluded_keeps_well_resolved_faces() {
-        // A 400x400px face on a large photo has a tiny area fraction but
-        // is exactly the well-resolved face the old gate discarded.
         let area_fraction = (400.0_f32 * 400.0) / (8000.0 * 6000.0);
         assert!(!face_is_excluded(0.0, 0.0, area_fraction, 400.0));
     }
@@ -4057,6 +3375,40 @@ mod tests {
     fn face_is_excluded_still_gates_on_pose() {
         assert!(face_is_excluded(60.0_f32.to_radians(), 0.0, 1.0, 200.0));
         assert!(face_is_excluded(0.0, 40.0_f32.to_radians(), 1.0, 200.0));
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_photo_without_an_embedded_date_takes_its_takeout_sidecar_date() {
+        let dir = std::env::temp_dir().join(format!("fileid-takeout-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("IMG_1.png");
+        let bytes = tiny_png();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(dir.join("IMG_1.png.supplemental-metadata.json"), r#"{"photoTakenTime":{"timestamp":"1546300800"}}"#).unwrap();
+        let (tx, rx) = mpsc::channel(4);
+        let tagger = Tagger::new(ScanCoordinator::new(), 2, Arc::new(ModelStack::empty()));
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        tx.send(DiscoveredFile {
+            path,
+            kind: FileKind::Image,
+            size_bytes: bytes.len() as u64,
+            modified_unix: 1.0,
+            created_unix: Some(1_700_000_000.0),
+            online_only: false,
+            moved_from_known_row: false,
+            file_ref: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let tagged = tokio::time::timeout(Duration::from_secs(30), out.recv()).await.expect("the file is emitted").expect("channel open");
+        drop(out);
+        decoder_join.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!tagged.failed, "{:?}", tagged.error_message);
+        assert_eq!(tagged.created_unix, Some(1_546_300_800.0));
+        assert!(tagged.captured_from_exif);
     }
 
     /// A catalog search holds an interactive lease for the whole scan and free
@@ -4180,7 +3532,6 @@ mod tests {
         let patience = Duration::from_secs(30);
         let waiters = TwinWaiters::new(3);
 
-        // The owner finishes: the copy is ready and was never decoded.
         let twins = TwinRegistry::new();
         let owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let hash = owner.content_hash.unwrap();
@@ -4226,7 +3577,6 @@ mod tests {
         let settled = settle_twin(copy, &twins, &lone, &coord, &budget, false, patience).await.unwrap();
         assert!(matches!(settled.twin, TwinClaim::None));
         assert!(matches!(settled.decoded, Some(Ok(_))));
-        // A finished owner is read without taking a waiting place.
         let twins = TwinRegistry::new();
         let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
@@ -4235,12 +3585,12 @@ mod tests {
         assert!(matches!(settled.twin, TwinClaim::Ready));
         assert!(TwinWaiters::new(1).enter().is_none(), "a lone worker never waits");
 
-        // A cancelled scan stops waiting.
         let twins = TwinRegistry::new();
         let _owner = predecode_one(twin_image(&dir, "a.png", &png), &coord, &budget, false, Some(&twins), false).unwrap();
         let copy = pending(&twins, "b.png");
         coord.request_cancel();
-        assert!(settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience).await.is_none());
+        let cancelled = tokio::time::timeout(Duration::from_secs(5), settle_twin(copy, &twins, &waiters, &coord, &budget, false, patience));
+        assert!(cancelled.await.expect("a cancelled wait returns at once, not after its patience").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4254,12 +3604,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let png = tiny_png();
         let (coord, budget, twins) = (ScanCoordinator::new(), PredecodeBudget::new(64 << 20), TwinRegistry::new());
-        // The owner's decoder has claimed the image but not queued it yet.
         let owner = predecode_one(twin_image(&dir, "owner.png", &png), &coord, &budget, false, Some(&twins), true).unwrap();
         assert_eq!(OWNED_TWIN.take(), owner.content_hash);
         let hash = owner.content_hash.unwrap();
 
-        // Another decoder thread finishes two copies meanwhile.
         let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(4);
         let (predecoded_tx, predecoded_rx) = async_channel::bounded::<PreDecoded>(8);
         raw_tx.send_blocking(twin_image(&dir, "copy1.png", &png)).unwrap();
@@ -4268,7 +3616,6 @@ mod tests {
         run_decoder_thread(raw_rx, predecoded_tx.clone(), coord.clone(), budget.clone(), false, twins.clone());
         assert!(predecoded_rx.is_empty(), "the copies are held back");
 
-        // The owner is queued, then the copies it collected.
         predecoded_tx.send_blocking(owner).unwrap();
         for follower in twins.owner_queued(&hash) {
             predecoded_tx.send_blocking(follower).unwrap();
@@ -4422,7 +3769,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fileid-lazy-models-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Nothing to analyse (an unchanged library, or only moved files): no load.
         let loads = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel(8);
         let tagger = Tagger::with_model_source(ScanCoordinator::new(), 3, counting_source(loads.clone(), false));
@@ -4438,7 +3784,6 @@ mod tests {
         decoder_join.await.unwrap();
         assert_eq!(loads.load(Ordering::SeqCst), 0);
 
-        // Files to analyse: one load, shared by every worker.
         let (tx, rx) = mpsc::channel(8);
         let tagger = Tagger::with_model_source(ScanCoordinator::new(), 3, counting_source(loads.clone(), false));
         let (mut out, decoder_join) = tagger.spawn(rx);
@@ -4549,10 +3894,8 @@ mod tests {
             .await
             .expect("worker emitted")
             .expect("channel not closed");
-        // No models installed → image stage skipped, but row still flows.
         assert_eq!(got.size_bytes, 1024);
         assert_eq!(got.kind, FileKind::Image);
-        // File doesn't exist, decode failed → marked failed.
         assert!(got.failed);
         drop(out);
         decoder_join.await.unwrap();
@@ -4560,7 +3903,6 @@ mod tests {
 
     #[test]
     fn detected_face_has_crop_field() {
-        // Sanity: the field exists + defaults to None when constructed without it.
         let f = DetectedFace {
             bbox: [0.0; 4],
             embedding: vec![0.0; 512],
@@ -4576,25 +3918,9 @@ mod tests {
     }
 
     #[test]
-    fn clip_batch_default_is_provider_aware() {
-        use ExecutionProvider as Ep;
-
-        assert!(!default_clip_use_batch(Ep::Cuda));
-        assert!(!default_clip_use_batch(Ep::TensorRt));
-        assert!(default_clip_use_batch(Ep::DirectMl));
-        assert!(default_clip_use_batch(Ep::OpenVino));
-        assert!(default_clip_use_batch(Ep::Qnn));
-        assert!(default_clip_use_batch(Ep::Cpu));
-    }
-
-    #[test]
-    fn clip_batch_env_override_wins() {
-        use ExecutionProvider as Ep;
-
-        assert!(!resolve_clip_use_batch(Ep::DirectMl, Some("0")));
-        assert!(!resolve_clip_use_batch(Ep::DirectMl, Some("FALSE")));
-        assert!(resolve_clip_use_batch(Ep::Cuda, Some("1")));
-        assert!(resolve_clip_use_batch(Ep::Cuda, Some("true")));
+    fn model_pool_never_exceeds_the_default_or_the_worker_count() {
+        assert_eq!(resolve_pool_size(1), 1);
+        assert!((1..=MODEL_POOL_SIZE).contains(&resolve_pool_size(16)));
     }
 
     #[test]
@@ -4603,9 +3929,7 @@ mod tests {
         assert_eq!(compute_dhash(&rgb, 64, 64), 0);
     }
 
-    /// The predecode bound is byte-weighted by each frame's ACTUAL
-    /// decoded size — a third frame that would overflow the budget must wait
-    /// until an earlier reservation is dropped.
+    /// A third frame that would overflow the byte-weighted budget must wait until an earlier reservation drops.
     #[test]
     fn predecode_budget_weighs_frames_by_actual_bytes() {
         let coord = ScanCoordinator::new();
@@ -4862,11 +4186,6 @@ mod tests {
         assert!(budget.acquire(50, &coord).is_none());
     }
 
-    /// over-cap images get EXIF from `exif_from_head` (a bounded head
-    /// read) — there is no later fallback. A minimal JPEG whose APP1 segment
-    /// carries a TIFF IFD with a Model tag must yield the camera model.
-    /// Every downstream consumer (phash, CLIP, RAM++, faces) reads the buffer
-    /// this returns, so the transform has to land here rather than per-consumer.
     #[test]
     fn mpf_preview_replaces_the_full_decode_under_the_mac_rules() {
         use crate::pipeline::mpf_preview::test_support::{jpeg_with_mpf_preview, solid_jpeg};
@@ -4889,10 +4208,8 @@ mod tests {
     fn exif_orientation_transforms_the_decoded_frame() {
         use image::metadata::Orientation;
 
-        // 2x1: left red, right green.
         let buf = vec![255, 0, 0, 0, 255, 0];
 
-        // No tag and the identity orientation must both be zero-cost pass-throughs.
         let (out, w, h) = apply_exif_orientation(buf.clone(), 2, 1, None).unwrap();
         assert_eq!((out, w, h), (buf.clone(), 2, 1));
         let (out, w, h) =
@@ -4907,14 +4224,11 @@ mod tests {
             assert_eq!(out.len(), buf.len(), "{turn:?} must preserve pixel count");
         }
 
-        // A half turn keeps the shape and reverses pixel order.
         let (out, w, h) =
             apply_exif_orientation(buf.clone(), 2, 1, Some(Orientation::Rotate180)).unwrap();
         assert_eq!((w, h), (2, 1));
         assert_eq!(out, vec![0, 255, 0, 255, 0, 0]);
 
-        // A buffer that does not match the claimed dimensions must surface as an
-        // error, never a panic in the scan pipeline.
         assert!(apply_exif_orientation(vec![1, 2, 3], 9, 9, Some(Orientation::Rotate90)).is_err());
     }
 
@@ -4966,6 +4280,11 @@ mod tests {
         assert_eq!(scaled_jpeg_reservation_for(&path, None), Some(reserved));
         assert_eq!(scaled_jpeg_reservation_for(&path, Some(&big)), Some(reserved));
         std::fs::write(dir.join("not.jpg"), b"not a jpeg at all").unwrap();
+        let mut padded = big.clone();
+        padded.resize(40 * 1024 * 1024, 0);
+        std::fs::write(dir.join("padded.jpg"), &padded).unwrap();
+        assert_eq!(scaled_jpeg_reservation_for(&dir.join("padded.jpg"), None), Some(reserved), "only the head of a large file is needed");
+        assert!(production_source().contains("read_image_head(path).ok()?"), "the reservation must not read the whole file");
         assert_eq!(scaled_jpeg_reservation_for(&dir.join("not.jpg"), None), None);
         assert_eq!(scaled_jpeg_reservation_for(&dir.join("missing.jpg"), None), None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5060,7 +4379,7 @@ mod tests {
         }
     }
 
-    /// Values macOS `Tagging.exifCaptureDate` returns in America/Chicago: the
+    /// Values returned in America/Chicago: the
     /// repeated 01:30 on 2026-11-01 is the CST instant, the skipped 02:30 on
     /// 2026-03-08 is no date, and its neighbours are unchanged.
     #[test]
@@ -5102,8 +4421,7 @@ mod tests {
 
     #[test]
     fn dhash_changes_with_horizontal_gradient() {
-        // Decreasing gradient — left > right at every step, so every bit
-        // gets set. Result must be non-zero (and in fact -1 in i64 = all 1s).
+        // A decreasing gradient sets every bit: the result is -1 (all ones).
         let mut rgb = vec![0u8; 64 * 64 * 3];
         for y in 0..64 {
             for x in 0..64 {
@@ -5252,12 +4570,7 @@ mod tests {
         }
     }
 
-    // Aspect tags (Wide/Tall/Square) were intentionally dropped from
-    // enriched-extras — they dominated `TopTwoTags` on files
-    // without classifier output (every photo got Wide/Tall as a top chip,
-    // pushing the more useful Year/Camera/HasFaces tags out of the
-    // 2-chip slot). These four tests now assert the absence of those
-    // tags so a future re-add doesn't silently regress the change.
+    // Aspect tags are not emitted: they dominated `TopTwoTags` on files without classifier output.
     #[test]
     fn enriched_does_not_emit_wide() {
         let mut t = stub_tagged(1920, 1080, 5_000_000);
@@ -5284,9 +4597,6 @@ mod tests {
 
     #[test]
     fn enriched_does_not_emit_aspect_at_boundary() {
-        // The borderline case used to emit "Square" for 1.30 ratio
-        // (boundary not >1.30). After the drop, no aspect tag
-        // is emitted at any ratio.
         let mut t = stub_tagged(1300, 1000, 5_000_000);
         push_enriched_extras(&mut t);
         assert!(!t.tags.iter().any(|(s, _)| s == "Square"));
@@ -5294,19 +4604,11 @@ mod tests {
         assert!(!t.tags.iter().any(|(s, _)| s == "Tall"));
     }
 
-    // The Year_ tag is pinned to the macOS `extraTags` rule —
-    // creation date (when present) in local time, year strictly inside
-    // (1990, 2100). These vectors use mid-year noon-UTC timestamps so the
-    // resolved calendar year is identical in every real-world timezone
-    // (UTC-12 .. UTC+14), keeping the test deterministic across CI hosts.
+    // Year_ is pinned to the macOS `extraTags` rule; mid-year noon-UTC timestamps resolve to the same calendar year in every timezone, keeping the test deterministic across CI hosts.
 
-    // 2021-07-01 12:00:00 UTC.
     const TS_2021_MIDYEAR: f64 = 1_625_140_800.0;
-    // 2018-07-01 12:00:00 UTC.
     const TS_2018_MIDYEAR: f64 = 1_530_446_400.0;
-    // 1990-07-01 12:00:00 UTC — exactly ON the boundary. The canonical rule is
-    // strictly `> 1990` (macOS), so 1990 emits NO tag; the prior Windows
-    // `(1990..2100)` (`>= 1990`) would have emitted `Year_1990`.
+    // Exactly on the 1990 boundary: the rule is strictly `> 1990`, so no tag.
     const TS_1990_MIDYEAR: f64 = 646_833_600.0;
 
     fn year_tag(t: &TaggedFile) -> Option<i32> {
@@ -5318,8 +4620,7 @@ mod tests {
     #[test]
     fn year_tag_prefers_creation_date_over_modified() {
         let mut t = stub_tagged(800, 600, 1_000);
-        // Modified in 2021, created in 2018 — creation date must win
-        // (a file edited years after capture still tags by capture year).
+        // Creation date wins over a later modification date.
         t.modified_unix = TS_2021_MIDYEAR;
         t.created_unix = Some(TS_2018_MIDYEAR);
         push_enriched_extras(&mut t);
@@ -5339,9 +4640,6 @@ mod tests {
 
     #[test]
     fn year_tag_respects_strict_1990_lower_bound() {
-        // macOS uses `y > 1990` (strict). A capture in exactly 1990 emits no
-        // Year_ tag — this discriminates the boundary convergence (the prior
-        // Windows `>= 1990` would have emitted `Year_1990`).
         let mut t = stub_tagged(800, 600, 1_000);
         t.created_unix = Some(TS_1990_MIDYEAR);
         t.modified_unix = TS_1990_MIDYEAR;

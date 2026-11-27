@@ -1,8 +1,4 @@
-﻿// Tiny IValueConverter so XAML can bind a bool → Visibility without
-// needing a code-behind triggered each time. WinUI 3 doesn't ship one
-// out of the box; this is the smallest workable implementation.
-
-using System;
+﻿using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Data;
 

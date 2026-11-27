@@ -1,13 +1,4 @@
-//! DB read layer + a background loader that streams progress events.
-//!
-//! Every read goes through `fileid_engine::db::open_read`, the same read
-//! surface the CLI uses (`platforms/cli/src/*.rs`), so there is no contract
-//! drift: same schema, same column names, same FileKind / restructure logic.
-//!
-//! The loader runs on a worker thread and pushes [`LoadMsg`] values back to the
-//! UI thread over an `mpsc` channel. The status/progress line is driven off
-//! that stream — the architecture an engine-spawn-IPC event feed would slot
-//! into unchanged (see README "Stubbed").
+//! DB read layer and background loader. Reads go through `fileid_engine::db::open_read`, the same surface the CLI uses, so schema and classification cannot drift. The loader streams [`LoadMsg`] values to the UI thread over an `mpsc` channel.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -74,6 +65,7 @@ pub struct DupeReport {
 #[derive(Clone)]
 pub struct PlanRow {
     pub source: String,
+    /// Relative to the library root when it sits under it.
     pub destination: String,
     pub category: String,
     pub confidence: &'static str,
@@ -106,7 +98,6 @@ pub struct Snapshot {
     pub total_analyses: i64,
 }
 
-/// Messages streamed from the loader thread to the UI thread.
 pub enum LoadMsg {
     Versioned {
         generation: u64,
@@ -126,6 +117,11 @@ pub enum LoadMsg {
     /// the Library/People/Restructure tabs paint immediately instead of
     /// waiting out an up-to-64-GiB live full-file hash pass.
     Dupes(Box<DupeReport>),
+    /// Rows for the text typed so far in the Library search box, found with the same search a committed query uses.
+    LiveSearch {
+        query: String,
+        files: Vec<FileRow>,
+    },
     Error(String),
 }
 
@@ -182,6 +178,18 @@ pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>, generation: u
                 let _ =
                     send_versioned(&tx, generation, LoadMsg::Error(format!("load failed: {e}")));
             }
+        }
+    });
+}
+
+/// Searches on a worker thread so typing in the Library search box never waits on the database.
+pub fn spawn_live_search(db: PathBuf, query: String, tx: Sender<LoadMsg>) {
+    std::thread::spawn(move || {
+        let Ok(conn) = fileid_engine::db::open_read(&db) else {
+            return;
+        };
+        if let Ok((files, _)) = load_files(&conn, &query) {
+            let _ = tx.send(LoadMsg::LiveSearch { query, files });
         }
     });
 }
@@ -513,7 +521,8 @@ fn load_dupes_until(
         max_candidates: DUP_CANDIDATE_CAP as u64,
         max_bytes: DUP_READ_BUDGET_BYTES,
     };
-    let listing = dupes::exact_groups(conn, caps, should_cancel)?;
+    let mut listing = dupes::exact_groups(conn, caps, should_cancel)?;
+    dupes::put_originals_first(conn, &mut listing.groups)?;
     let candidate_count = (listing.admitted + listing.skipped_candidates) as i64;
     let partial = listing.is_partial() || listing.unreadable > 0;
     let mut groups: Vec<DupGroup> = listing
@@ -550,9 +559,15 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let plan = restructure::classify(&files, &root)
         .into_iter()
+        .filter(|m| !m.is_noop())
         .map(|m| PlanRow {
             source: m.source.to_string_lossy().into_owned(),
-            destination: m.destination.to_string_lossy().into_owned(),
+            destination: m
+                .destination
+                .strip_prefix(&root)
+                .unwrap_or(&m.destination)
+                .to_string_lossy()
+                .into_owned(),
             category: m.category,
             confidence: m.confidence.as_str(),
         })
@@ -766,6 +781,60 @@ mod tests {
     }
 
     #[test]
+    fn restructure_preview_shows_full_relative_destinations_and_skips_files_already_in_place() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        insert_file(&tx, "/library/a/x.txt", 1_700_000_000.0);
+        insert_file(&tx, "/library/b/y.txt", 1_700_000_000.0);
+        tx.commit().unwrap();
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        let destination = plan[0].destination.clone();
+        let relative = std::path::Path::new(&destination);
+        assert!(relative.is_relative(), "{destination}");
+        assert!(relative.components().count() >= 3, "{destination}");
+
+        let in_place = std::path::Path::new("/library")
+            .join(relative)
+            .to_string_lossy()
+            .into_owned();
+        insert_file(&conn, &in_place, 1_700_000_000.0);
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        assert!(
+            plan.iter().all(|row| row.source != in_place),
+            "a file already at its destination is not a move"
+        );
+    }
+
+    #[test]
+    fn restructure_preview_of_a_library_already_organized_under_its_scanned_folder_is_empty() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let organized = "/library/Photos/2026/November";
+        let november_2026 = 1_794_000_000.0;
+        for name in ["a.jpg", "b.jpg"] {
+            conn.execute(
+                "INSERT INTO files \
+                 (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension) \
+                 VALUES (?1, ?2, 1, ?3, ?3, 'image', 'jpg')",
+                params![format!("{organized}/{name}"), name.len(), november_2026],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO library_roots(path, display, added_at) VALUES ('/library', '/library', 1)",
+            [],
+        )
+        .unwrap();
+        let (plan, _, _) = compute_plan(&conn).unwrap();
+        assert!(
+            plan.is_empty(),
+            "{:?}",
+            plan.iter().map(|row| &row.source).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn duplicate_snapshot_caps_paths_but_keeps_the_real_copy_count() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
@@ -809,6 +878,38 @@ mod tests {
         assert_eq!(candidates, 2);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].copies, 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplicate_snapshot_lists_the_original_first_as_the_cli_keeps_it() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let dir = temp_dir("keeper-order");
+        for (name, modified) in [
+            ("newer.bin", 300.0),
+            ("copy-of-it.bin", 50.0),
+            ("oldest.bin", 100.0),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"same").unwrap();
+            let id = insert_file(&conn, &path.to_string_lossy(), modified);
+            conn.execute("UPDATE files SET size_bytes = 4 WHERE id = ?1", params![id])
+                .unwrap();
+        }
+        let (groups, _, _) = load_dupes(&conn).unwrap();
+        let names: Vec<&str> = groups[0]
+            .paths
+            .iter()
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(names, ["oldest.bin", "newer.bin", "copy-of-it.bin"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

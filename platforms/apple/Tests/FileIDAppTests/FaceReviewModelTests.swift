@@ -31,10 +31,12 @@ private func page(_ action: String, status: String = "ok", total: Int = 0, offse
 struct FaceReviewTextTests {
     @Test func reasonsUseTheSharedSentences() {
         #expect(FaceReviewText.reason(item(1)) == "This is very likely Alex.")
-        #expect(FaceReviewText.reason(item(1, score: 0.474, reason: "uncertain")) == "This might be Alex, but it's hard to tell.")
+        #expect(FaceReviewText.reason(item(1, name: nil)) == "This is very likely an unnamed person.")
+        #expect(FaceReviewText.reason(item(1, name: nil), personLabel: "Person 3") == "This is very likely Person 3.")
+        #expect(FaceReviewText.reason(item(1, score: 0.474, reason: "uncertain")) == "This might be Alex, but it’s hard to tell.")
         #expect(FaceReviewText.reason(item(1, reason: "ambiguous", runner: 2, runnerName: "Sam")) == "Could be Alex or Sam; both look about as close.")
         #expect(FaceReviewText.reason(item(1, reason: "ambiguous", runner: 2)) == "Could be Alex or an unnamed person; both look about as close.")
-        #expect(FaceReviewText.reason(item(1, name: nil, reason: "ambiguous")) == "Could be an unnamed person, but it's a close call.")
+        #expect(FaceReviewText.reason(item(1, name: nil, reason: "ambiguous")) == "Could be an unnamed person, but it’s a close call.")
     }
 
     @Test func labelsNameTheFileAndPerson() {
@@ -165,5 +167,14 @@ struct FaceQueueModelTests {
         await model.start()
         #expect(sent.first?.action == "enqueueFaceRefresh")
         #expect(model.line == "Install the face recognition model in Settings, then update faces again.")
+    }
+}
+
+@Suite struct FaceReviewCropCancellationTests {
+    @Test func aCancelledEarlierLoadNeverReplacesTheNewerCrop() throws {
+        let source = try appSource("Views/FaceReviewViews.swift")
+        let task = try #require(source.range(of: ".task(id: key) {"))
+        let end = try #require(source.range(of: ".accessibilityElement()", range: task.upperBound..<source.endIndex))
+        #expect(source[task.upperBound..<end.lowerBound].contains("if !Task.isCancelled { image = loaded }"))
     }
 }

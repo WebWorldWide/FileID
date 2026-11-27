@@ -10,9 +10,8 @@
 //     <Button x:Name="ApplyButton"
 //             motion:CompletionRipple.Trigger="{x:Bind ViewModel.AppliedCount, Mode=OneWay}" />
 //
-// The trigger is observed; whenever it changes, a fresh ring overlay is
-// inserted into the element's parent and animates out. The ring is sized
-// to fit the element's bounds.
+// Whenever the trigger changes, a ring sized to the element's bounds is
+// shown in a Popup over it and animates out.
 
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -44,18 +43,14 @@ public static class CompletionRipple
 
     private static void OnTriggerChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        // Hard try/catch. OnTriggerChanged is invoked by the dependency-
-        // property system OUTSIDE any subscriber's SafeRun scope — a throw
-        // here escapes into the dispatcher loop and (with the prior unrooted-
-        // Popup bug) caused a mid-scan native fast-fail.
+        // Invoked by the dependency-property system outside any SafeRun scope, so a throw would escape into the dispatcher loop.
         try
         {
             if (d is not FrameworkElement target)
             {
                 return;
             }
-            // First-time set during XAML load: don't fire (would ripple on every
-            // page load). Subsequent changes do fire.
+            // The first set during XAML load must not ripple.
             if (e.OldValue is null && e.NewValue is not null)
             {
                 return;
@@ -66,13 +61,9 @@ public static class CompletionRipple
             }
             if (ReducedMotion.Instance.IsReduced)
             {
-                // Honor the OS preference: completion event still happened,
-                // just no animated decoration.
                 return;
             }
-            // Never ripple if the target isn't laid out or rooted in a
-            // window. The popup logic below would either no-op silently or
-            // try to open an unrooted Popup and trigger a native fast-fail.
+            // An unrooted Popup is a native fast-fail, so require a rooted, laid-out target.
             if (target.XamlRoot is null) return;
             if (target.ActualWidth <= 0 || target.ActualHeight <= 0) return;
 
@@ -86,15 +77,7 @@ public static class CompletionRipple
 
     private static void FireRipple(FrameworkElement target)
     {
-        // We need a Canvas (or any panel) above `target` to place the ring.
-        // The simplest hostable surface is the visual root's Popup layer:
-        // construct an Ellipse, attach it to a Popup positioned over the
-        // target, animate, then dispose.
-        //
-        // Popup REQUIRES XamlRoot in WinUI 3 (unlike UWP) — opening an
-        // unrooted Popup is a native fast-fail. The OnTriggerChanged guard
-        // rejects null XamlRoot above; also set it on the new Popup so a
-        // future code path bypassing that check still gets a valid host.
+        // Popup requires XamlRoot in WinUI 3; opening an unrooted one is a native fast-fail.
         var popup = new Popup
         {
             IsHitTestVisible = false,
@@ -103,8 +86,6 @@ public static class CompletionRipple
 
         Color goldColor = ResolveGoldColor();
 
-        // Ring: empty ellipse with a 2px gold stroke. Scaling it from 0.4 to
-        // 2.6 sweeps a halo around the target.
         var ring = new Ellipse
         {
             Width = target.ActualWidth,
@@ -118,10 +99,7 @@ public static class CompletionRipple
         };
         popup.Child = ring;
 
-        // Position the popup so the ring is centered on the target.
-        // TransformToVisual(null) returns the transform relative to the
-        // visual root — the same coord space the Popup uses when XamlRoot
-        // is set, so the offsets line up.
+        // TransformToVisual(null) is relative to the visual root, the same space the Popup offsets use.
         var transform = target.TransformToVisual(null);
         var topLeft = transform.TransformPoint(new Point(0, 0));
         popup.HorizontalOffset = topLeft.X;

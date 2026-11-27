@@ -1,14 +1,4 @@
-//! `fileid restructure --plan [root]` — compute the proposed reorg; with
-//! `--apply`, execute it.
-//!
-//! `--plan` is READ-ONLY: it reuses the engine's exact rule-cascade classifier
-//! (`pipeline::restructure::classify`, a pure model-free function), so the
-//! plan matches what the desktop apps' Restructure tab would propose when no
-//! CLIP embeddings are present (the semantic "butler" boost degrades to the
-//! same cascade). `--apply` executes that plan in-process via the engine's
-//! `RestructureApply` (the same code path the `applyRestructure` IPC command
-//! runs: collision-uniquify, stale-plan + path-traversal guards, undo journal);
-//! it prompts unless `--yes`, and `--apply --dry-run` previews without moving.
+//! `fileid restructure`. `--plan` is read-only and uses the engine's rule-cascade classifier, so it matches the desktop Restructure tab when no CLIP embeddings exist. `--apply` runs the engine's `RestructureApply` in-process.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -27,13 +17,20 @@ use rusqlite::params;
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
 
-use fileid_engine::read::restructure::{PLAN_FILES_SQL, library_root, plan_row_to_file};
+use fileid_engine::read::restructure::{
+    PLAN_FILES_SQL, library_root, plan_root_bounds, plan_row_to_file,
+};
 use fileid_engine::util::path_safety::strip_extended_length;
+use fileid_engine::util::read_only::require_all_writable;
 
 use crate::context::{Ctx, display_path, print_json, terminal_text};
 
 const MAX_PRINTED_MOVES: usize = 200;
 const CLASSIFY_CHUNK: usize = 4_096;
+const PLAN_FILE_COUNT_SQL: &str = "SELECT COUNT(*) FROM files f
+ WHERE f.failed = 0
+   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+        OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))";
 
 #[derive(Debug)]
 struct PlanSpool {
@@ -52,9 +49,11 @@ impl PlanSpool {
             "fileid-restructure-{}-{nonce}-{seq}.ndjson",
             std::process::id()
         ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
             .open(&path)
             .with_context(|| format!("creating restructure spool {}", path.display()))?;
         Ok((Self { path }, BufWriter::new(file)))
@@ -143,6 +142,8 @@ struct DryRunReport<'a> {
     use_symlinks: bool,
     library_root: String,
     move_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apply_refused: Option<String>,
     moves: SpoolMoves<'a>,
 }
 
@@ -165,17 +166,16 @@ pub fn run(
     if plan && apply {
         anyhow::bail!("--plan and --apply are mutually exclusive; choose one");
     }
-    // Neither flag → the read-only plan (as `--help` documents): every branch
-    // below keys off `apply`, so an absent `--apply` already means "plan only".
+    // Neither flag is the read-only plan; every branch keys off `apply`.
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
-    let file_count = conn
+    let library_files = conn
         .query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |r| {
             r.get::<_, i64>(0)
         })?
         .max(0) as u64;
-    if file_count == 0 {
+    if library_files == 0 {
         if ctx.json {
             print_json(&serde_json::json!({
                 "command": "restructure", "plan": true, "fileCount": 0, "moves": [],
@@ -187,6 +187,20 @@ pub fn run(
     }
 
     let library_root = resolve_library_root(&conn, root)?;
+    let (root_text, root_prefix, root_upper) = plan_root_bounds(&library_root.to_string_lossy());
+    let file_count = conn
+        .query_row(
+            PLAN_FILE_COUNT_SQL,
+            params![root_text, root_prefix, root_upper],
+            |r| r.get::<_, i64>(0),
+        )?
+        .max(0) as u64;
+    if file_count == 0 {
+        anyhow::bail!(
+            "no scanned files are under {}. Run `fileid scan` on that folder first.",
+            library_root.display()
+        );
+    }
     let needs_spool = apply || ctx.json;
     let (spool, mut spool_writer) = if needs_spool {
         let (spool, writer) = PlanSpool::create()?;
@@ -199,7 +213,7 @@ pub fn run(
     let mut move_count = 0_u64;
     let mut chunk = Vec::with_capacity(CLASSIFY_CHUNK);
     let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
-    let mut rows = stmt.query(params!["", "", ""])?;
+    let mut rows = stmt.query(params![root_text, root_prefix, root_upper])?;
     while let Some(row) = rows.next()? {
         chunk.push(plan_row_to_file(row)?);
         if chunk.len() >= CLASSIFY_CHUNK {
@@ -274,6 +288,10 @@ pub fn run(
     );
     println!("  Files:        {file_count}");
     println!("  Moves:        {move_count}");
+    if move_count == 0 {
+        println!("  Nothing to move — the library is already organized.");
+        return Ok(());
+    }
     println!("  {}", ctx.bold("By category:"));
     for c in &counts {
         println!("    {:<22} {}", terminal_text(&c.category), c.count);
@@ -334,7 +352,10 @@ fn absorb_chunk(
                 .map(|identity| (file.file_id, identity))
         })
         .collect();
-    for proposed in classify(files, library_root) {
+    for proposed in classify(files, library_root)
+        .into_iter()
+        .filter(|proposed| !proposed.is_noop())
+    {
         *counts.entry(proposed.category.clone()).or_default() += 1;
         *move_count += 1;
         if sample.len() < MAX_PRINTED_MOVES {
@@ -386,14 +407,7 @@ fn rel_to(root: &Path, dest: &Path) -> String {
         .unwrap_or_else(|_| dest.to_string_lossy().into_owned())
 }
 
-// ---- apply -------------------------------------------------------------------
-
-/// Execute (or, with `dry_run`, preview) the proposed moves via the engine's
-/// exact `RestructureApply` — the same code path the `applyRestructure` IPC
-/// command runs (collision-uniquify, stale-plan + path-traversal guards, undo
-/// journal). In-process and cross-platform (MoveFileExW on Windows;
-/// `std::fs::rename` elsewhere). `--symlinks` previews the layout without
-/// relocating originals.
+/// Executes, or with `dry_run` previews, the moves via the engine's `RestructureApply` (the `applyRestructure` IPC path). `--symlinks` previews without relocating originals.
 fn apply_spooled(
     ctx: &Ctx,
     library_root: &Path,
@@ -422,6 +436,11 @@ fn apply_spooled(
     }
 
     let verb = if symlinks { "symlink" } else { "move" };
+    let refusal = read_only_refusal(spool)?;
+    if !dry_run && let Some(sentence) = &refusal {
+        anyhow::bail!("{sentence}");
+    }
+    let dry_run_notice = refusal.map(|sentence| format!("{sentence} Apply would be refused."));
 
     if ctx.json && dry_run {
         write_json(&DryRunReport {
@@ -431,20 +450,18 @@ fn apply_spooled(
             use_symlinks: symlinks,
             library_root: library_root.to_string_lossy().into_owned(),
             move_count,
+            apply_refused: dry_run_notice.clone(),
             moves: SpoolMoves(spool),
         })?;
         return Ok(());
     }
 
-    // Human preview only. In --json mode stdout must carry nothing but the
-    // final result object (the confirm prompt + progress lines already go to
-    // stderr); printing this header/loop there corrupts the JSON for the real
-    // `--apply --json` path, which falls through to the result print below.
+    // Human preview only: under `--json` stdout must carry just the result object.
     if !ctx.json {
         println!(
             "{} {} file(s) into {}:",
             if dry_run {
-                ctx.bold("DRY RUN — would")
+                ctx.bold(&format!("DRY RUN — would {verb}"))
             } else {
                 ctx.bold(&format!("Will {verb}"))
             },
@@ -477,6 +494,11 @@ fn apply_spooled(
     }
 
     if dry_run {
+        if let Some(sentence) = &dry_run_notice
+            && !ctx.json
+        {
+            println!("{}", ctx.bold(sentence));
+        }
         ctx.progress(&format!("  {}", ctx.dim("dry run — nothing was moved.")));
         return Ok(());
     }
@@ -521,6 +543,7 @@ fn apply_spooled(
         spool.iter()?,
         Some(usize::try_from(move_count).context("restructure plan is too large")?),
     )?;
+    let first_failure = applier.take_first_failure();
 
     if ctx.json {
         print_json(&serde_json::json!({
@@ -530,7 +553,7 @@ fn apply_spooled(
             "failed": result.failed,
             "privilegeError": result.privilege_error,
         }));
-        apply_outcome(&result)?;
+        apply_outcome(&result, first_failure.as_deref())?;
         return Ok(());
     }
     let headline = if result.failed > 0 || result.privilege_error.is_some() {
@@ -546,18 +569,26 @@ fn apply_spooled(
     if let Some(pe) = &result.privilege_error {
         println!("  {} {}", ctx.bold("Symlink privilege:"), terminal_text(pe));
     }
-    apply_outcome(&result)?;
+    if let Some(failure) = &first_failure {
+        println!("  First failure: {}", terminal_text(failure));
+    }
+    apply_outcome(&result, first_failure.as_deref())?;
     Ok(())
 }
 
-/// Turn an apply result into a process exit status.
-///
-/// A privilege refusal abandons the remaining moves without counting them in
-/// `failed`, so gating on `failed` alone reported success for a run that
-/// relocated nothing — `fileid restructure --apply --symlinks --json && next`
-/// would march straight on. Mirrors `dedupe`, which already treats its
-/// `unsupported` count as a failure.
-fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
+/// The sentence a real apply is refused with when planned sources sit on a read-only drive.
+fn read_only_refusal(spool: &PlanSpool) -> Result<Option<String>> {
+    let sources = spool.iter()?.flatten().map(|m| PathBuf::from(m.source));
+    Ok(require_all_writable(sources)
+        .err()
+        .map(|refusal| refusal.sentence()))
+}
+
+/// Maps an apply result to an exit status. Privilege refusals are not counted in `failed`, so `failed` alone would report success for a run that moved nothing.
+fn apply_outcome(
+    result: &RestructureApplyResult,
+    first_failure: Option<&str>,
+) -> anyhow::Result<()> {
     if let Some(pe) = &result.privilege_error {
         anyhow::bail!(
             "restructure: symlink mode was refused ({pe}); {} move(s) applied, the rest were abandoned",
@@ -565,7 +596,10 @@ fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
         );
     }
     if result.failed > 0 {
-        anyhow::bail!("restructure: {} move(s) failed", result.failed);
+        let reason = first_failure
+            .map(|f| format!(" (first: {f})"))
+            .unwrap_or_default();
+        anyhow::bail!("restructure: {} move(s) failed{reason}", result.failed);
     }
     Ok(())
 }
@@ -588,6 +622,16 @@ fn to_ipc_move(pm: &ProposedMove, identity: Option<&PlannedIdentity>) -> Restruc
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn plan_spool_is_private_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (spool, writer) = PlanSpool::create().unwrap();
+        drop(writer);
+        let mode = std::fs::metadata(&spool.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+    }
+
     use super::*;
     use fileid_engine::pipeline::discovery::FileKind;
     use fileid_engine::pipeline::restructure::Confidence;

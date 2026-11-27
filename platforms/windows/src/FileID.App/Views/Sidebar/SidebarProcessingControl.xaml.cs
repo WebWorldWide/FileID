@@ -1,10 +1,7 @@
-﻿// SidebarProcessingControl code-behind: the v3 scan card. Subscribes to
-// EngineClient state and re-paints title, bar, sub line, counters and
-// controls as the pipeline advances (macOS PipelineBlock).
+﻿// Scan card: re-paints title, bar, sub line, counters and controls from
+// EngineClient state as the pipeline advances.
 //
-// Stat color thresholds (matches macOS):
-//   memory  > 1200 MB -> orange
-//   failures > 0      -> red
+// Stat colors: memory > 1200 MB -> orange, failures > 0 -> red.
 
 using System.ComponentModel;
 using FileID.IpcSchema;
@@ -20,16 +17,10 @@ namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarProcessingControl : UserControl
 {
-    // Brushes are DispatcherObjects. The previous version allocated
-    // four fresh SolidColorBrushes per progress event (10 Hz during scan =
-    // 40 DispatcherObject allocations/sec). Per CLAUDE.md guidance, cache
-    // UI-thread-affined resources at ctor time. SidebarPipelineProgress
-    // uses the same pattern.
+    // Brushes are DispatcherObjects: cached at construction so progress events
+    // (~10 Hz during a scan) do not allocate them.
     private readonly SolidColorBrush _memoryWarnBrush;
     private readonly SolidColorBrush _statDefaultBrush;
-    // Idle-status default foreground. Resolved once at ctor instead of via a
-    // Resources traversal on every Sync() (~10 Hz during a scan, even with the
-    // IdlePanel collapsed).
     private readonly Brush _idleStatusDefaultBrush;
     private readonly Brush _gold;
     private readonly Brush _ai;
@@ -67,10 +58,7 @@ public sealed partial class SidebarProcessingControl : UserControl
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-        // SafeRun wrap + per-property tracing. A handler that throws
-        // would otherwise escape into the dispatcher loop. The trace line
-        // (logged only when we actually act on the property) names the
-        // last subscriber called before a native fast-fail.
+        // The trace line names the last subscriber called before a native fast-fail.
         => DebugLog.SafeRun("SidebarProcessingControl.OnEngineChanged", () =>
         {
             if (e.PropertyName is nameof(EngineClient.LastProgress)
@@ -93,8 +81,6 @@ public sealed partial class SidebarProcessingControl : UserControl
                 DebugLog.Info($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncWarningBanner);
             }
-            // No per-batch CompletionRipple: at ~5 Hz its 0.9 s rings stacked
-            // 4-5 deep and destabilized the sidebar; macOS has no such affordance.
         });
 
 
@@ -109,42 +95,17 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
-    /// <summary>Cached per-launch (NOT persisted) so the pre-scan
-    /// performance warning isn't shown twice in a single session. Reset
-    /// every app relaunch — gives the user a fresh chance to install
-    /// the recommended Performance Pack.</summary>
-    private bool _userAcceptedSuboptimalScan;
-
-    /// <summary>Re-entrancy guard for the pre-scan ContentDialog.
-    /// WinUI 3's ContentDialog throws if a second is shown while the
-    /// first is open — spam-clicking Start scan would crash. Set on
-    /// dialog open, cleared in finally.</summary>
-    private bool _prescanDialogShowing;
-
-    /// <summary>Click-to-engine-ack gate. Without this, spam-clicking
-    /// Start Scan was issuing N IPC `startScan` commands in parallel and
-    /// N optimistic `Phase = Discovering` flips, racing each other through
-    /// the state machine. Set true at the top of `OnStartScanClicked`,
-    /// cleared in the outermost `finally`. Sync() reads this to keep the
-    /// button disabled for the entire click-to-engine-ack window.</summary>
+    /// <summary>True from a Start Scan click until the IPC send returns, so repeated clicks cannot issue parallel startScan commands.</summary>
     private bool _startInFlight;
 
     private async void OnStartScanClicked(object sender, RoutedEventArgs e)
     {
-        // short-circuit spam-clicks. The button's IsEnabled
-        // binding (Sync()) already prevents this in the normal case,
-        // but a touch-screen double-tap can squeeze a second click in
-        // before Sync() runs.
+        // A touch double-tap can land a second click before Sync() disables the button.
         if (_startInFlight) return;
         _startInFlight = true;
-        Sync(); // pre-flip button + pill so visual feedback is immediate
+        Sync();
 
-        // wrap the whole async void body in a catch-all so a
-        // disposed XamlRoot / broken dialog / engine death between the prompt
-        // and the IPC send can't escape into App.UnhandledException and take
-        // down the process. The user reported "click Start scan, nothing
-        // happens, then the app crashes" — guarding here ensures the worst
-        // we ever do is log the failure and show a clean error sheet.
+        // Catch-all: a disposed XamlRoot, broken dialog or engine death must not escape this async void into App.UnhandledException.
         try
         {
             var vm = AppViewModel.Instance;
@@ -155,10 +116,7 @@ public sealed partial class SidebarProcessingControl : UserControl
                 return;
             }
 
-            // Engine not Ready yet: wait (up to 30 s) with inline feedback
-            // instead of silently no-op'ing ("Start Scan does nothing"). 30 s
-            // covers a cold DirectML probe + slow HDD, where the first Ready
-            // can land at 20-25 s, while still failing fast on a dead engine.
+            // 30 s covers a slow HDD, where the first Ready can land at 20-25 s, while still failing fast on a dead engine.
             if (EngineClient.Instance.State != EngineClient.LifecycleState.Ready)
             {
                 IdleStatusText.Text = "Getting ready…";
@@ -183,33 +141,6 @@ public sealed partial class SidebarProcessingControl : UserControl
                 }
             }
 
-            // Pre-scan EP gate: warn only when the engine will fall back to
-            // CPU. DirectML on every D3D12-capable GPU is now the canonical
-            // path; no Performance Pack prompts.
-            if (!_userAcceptedSuboptimalScan)
-            {
-                var hw = EngineClient.Instance.Info?.Hardware;
-                if (hw is not null)
-                {
-                    var prompt = BuildPerformancePrompt(hw);
-                    if (prompt is not null)
-                    {
-                        var result = await ShowPerformancePromptAsync(prompt);
-                        switch (result)
-                        {
-                            case PerformancePromptResult.OpenSettings:
-                                AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
-                                return;
-                            case PerformancePromptResult.Cancel:
-                                return;
-                            case PerformancePromptResult.Continue:
-                                _userAcceptedSuboptimalScan = true;
-                                break;
-                        }
-                    }
-                }
-            }
-
             try
             {
                 await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
@@ -228,99 +159,17 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
         finally
         {
-            // clear the in-flight gate AFTER the IPC send returns
-            // (success or failure). The engine's PhaseChanged events will
-            // then drive Sync() to the right state (Discovering / Failed /
-            // etc.). Re-run Sync() once so the button reflects the new
-            // state without waiting for the next PropertyChanged.
+            // Cleared only after the IPC send returns; Sync() then reflects the new state without waiting for the next PropertyChanged.
             _startInFlight = false;
             try { Sync(); } catch { /* swallow */ }
         }
     }
 
-    private enum PerformancePromptResult { Continue, OpenSettings, Cancel }
-
-    private sealed record PerformancePrompt(string Title, string Body, bool ShowOpenSettings);
-
-    /// <summary>Decide whether to warn the user before scanning. Returns
-    /// null when the active EP is already optimal for this hardware.</summary>
-    private static PerformancePrompt? BuildPerformancePrompt(HardwareInfo hw)
-    {
-        var ep = (hw.ExecutionProvider ?? string.Empty).ToLowerInvariant();
-        var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
-
-        // Optimal — best EP already active, scan freely.
-        if (ep is "cuda" or "qnn" or "openvino" or "directml") return null;
-
-        // CPU branch — the only state we still warn about. DirectML is the
-        // universal GPU path; non-CPU EPs are always acceptable.
-        if (ep == "cpu")
-        {
-            if (vendor is "" or "none")
-            {
-                return new PerformancePrompt(
-                    "Scan will run on CPU",
-                    "No GPU was detected on this PC. Scanning on CPU is roughly 10× slower than on GPU.\n\nContinue anyway?",
-                    ShowOpenSettings: false);
-            }
-            return new PerformancePrompt(
-                "GPU detected but inactive",
-                $"FileID detected a {hw.AdapterName ?? hw.GpuVendor} GPU but is currently running on CPU. Check Settings → Performance for the GPU execution-provider override.\n\nScanning now will use CPU (roughly 10× slower).",
-                ShowOpenSettings: true);
-        }
-
-        return null;
-    }
-
-    private async Task<PerformancePromptResult> ShowPerformancePromptAsync(PerformancePrompt p)
-    {
-        if (_prescanDialogShowing) return PerformancePromptResult.Cancel;
-        _prescanDialogShowing = true;
-        ContentDialogResult result;
-        try
-        {
-            var dialog = new ContentDialog
-            {
-                XamlRoot = XamlRoot,
-                Title = p.Title,
-                Content = p.Body,
-                PrimaryButtonText = p.ShowOpenSettings ? "Open Settings" : "Continue scan",
-                SecondaryButtonText = p.ShowOpenSettings ? "Continue scan" : "Cancel",
-                CloseButtonText = p.ShowOpenSettings ? "Cancel" : null,
-                DefaultButton = ContentDialogButton.Primary,
-            };
-            result = await dialog.ShowAsync();
-        }
-        finally
-        {
-            _prescanDialogShowing = false;
-        }
-        if (p.ShowOpenSettings)
-        {
-            return result switch
-            {
-                ContentDialogResult.Primary => PerformancePromptResult.OpenSettings,
-                ContentDialogResult.Secondary => PerformancePromptResult.Continue,
-                _ => PerformancePromptResult.Cancel,
-            };
-        }
-        // No "Open Settings" affordance: Primary == Continue, Secondary == Cancel.
-        return result switch
-        {
-            ContentDialogResult.Primary => PerformancePromptResult.Continue,
-            _ => PerformancePromptResult.Cancel,
-        };
-    }
-
-
     private async void OnPauseResumeClicked(object sender, RoutedEventArgs e)
     {
         try
         {
-            // FEAT-1: drive the toggle off EngineClient.IsPaused (set by
-            // PauseScanAsync/ResumeScanAsync optimistically) instead of
-            // reading the visible Text -- which desyncs if the engine
-            // emits an unrelated phase update between click + IPC reply.
+            // IsPaused, not the visible text, which desyncs if the engine emits an unrelated phase update before the IPC reply.
             if (EngineClient.Instance.IsPaused)
             {
                 await EngineClient.Instance.ResumeScanAsync();
@@ -372,9 +221,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         EngineClient.Instance.LastWarning = null;
     }
 
-    /// <summary>Latched true once a scan's file Total is known, reset when no
-    /// scan is in flight. Keeps a momentary Total==0 mid-scan from bouncing
-    /// ScanProgressBar back to the indeterminate sweep (scan-bar flicker).</summary>
+    /// <summary>Latched once a scan's file Total is known so a momentary Total==0 does not flip the bar back to indeterminate.</summary>
     private bool _scanTotalKnown;
     private double _lastScanFraction;
     private bool _detailsOpen;
@@ -403,14 +250,9 @@ public sealed partial class SidebarProcessingControl : UserControl
         bool facesRunning = engine.QueueState?.Running?.Category == JobCategory.FaceCluster;
         var captionsDone = engine.DeepAnalyzeComplete;
 
-        // Reset the latch between scans so the next scan starts indeterminate
-        // until its file count lands.
         if (!isInFlight) _scanTotalKnown = false;
 
-        // Start Scan is enabled on HasFolder alone; the click handler waits
-        // for Ready with visible feedback. A Crashed engine or a removed GPU
-        // can't recover from a click, and `!_startInFlight` stops a
-        // touch-double-tap from issuing a second startScan (macOS parity).
+        // Enabled on HasFolder alone; the click handler waits for Ready with visible feedback.
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
                                   && !EngineClient.Instance.GpuDeviceRemoved
@@ -456,8 +298,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             }
             else
             {
-                // Total not yet known (still discovering) — sweep; a transient
-                // Total==0 after the count was known keeps the determinate bar.
+                // Still discovering: sweep. A transient Total==0 keeps the determinate bar.
                 fraction = _scanTotalKnown ? _lastScanFraction : null;
             }
 
@@ -539,9 +380,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
         else if (isCompleted)
         {
-            // FEAT-2: real duration from EngineClient.LastScanDuration and the
-            // engine's authoritative ScanComplete count (LastProgress can be
-            // throttle-stale by up to one batch on a fast scan).
+            // LastProgress can be throttle-stale by up to one batch, so prefer the engine's ScanComplete count.
             var done = Math.Max(engine.LastScanProcessedFiles, prog?.Processed ?? 0);
             title = "Scan complete";
             sub = $"{done:N0} files ready to browse";
@@ -612,7 +451,6 @@ public sealed partial class SidebarProcessingControl : UserControl
             ? "Wait for the current work to finish, then rescan."
             : $"Look for new or changed files in {vm.FolderDisplay}. Files already read are skipped. (Ctrl+R)");
 
-        // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = engine.IsPaused ? "Resume" : "Pause";
         PauseResumeGlyph.Glyph = engine.IsPaused ? "\uE768" : "\uE769";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
@@ -642,14 +480,12 @@ public sealed partial class SidebarProcessingControl : UserControl
         StatFailures.Foreground = prog.Failed > 0 ? FailedTextBrush : _statDefaultBrush;
         FailuresStatBorder.Visibility = prog.Failed > 0 ? Visibility.Visible : Visibility.Collapsed;
 
-        // During discovery the total is unknowable (counting the files IS the
-        // work), so never fabricate an ETA there.
+        // No ETA during discovery: counting the files is the work.
         EtaText.Text = isInFlight && phase != ScanPhase.Discovering && prog.EtaSeconds is { } eta && eta > 0
             ? $"{FormatDuration(eta)} left"
             : string.Empty;
 
-        // Screen-reader names combine label + value so each stat row
-        // announces e.g. "Discovered: 1,240" rather than a bare label.
+        // Screen-reader names combine label and value.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             DiscoveredStatBorder, $"Discovered: {StatDiscovered.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
@@ -716,47 +552,39 @@ public sealed partial class SidebarProcessingControl : UserControl
         if (seconds < 60) return $"{seconds:F0}s";
         if (seconds < 3600) return $"{seconds / 60:F0}m";
         var hours = seconds / 3600;
-        // cap pathological/garbage durations so the UI never
-        // shows a four-digit hour count. Engine never legitimately
-        // produces > 99h scans on supported hardware.
+        // Cap garbage durations so the UI never shows a four-digit hour count.
         if (hours > 99) return "99+ h";
         return $"{hours:F1}h";
     }
 
-    /// <summary>open the engine's daily-rolled JSON log in the
-    /// user's default .jsonl handler. Lets the user diagnose a stuck scan
-    /// or surface a tagging failure without having to navigate AppData
-    /// by hand.</summary>
     private void OnOpenLogClicked(object sender, RoutedEventArgs e)
     {
         try
         {
-            // engine.jsonl uses tracing_appender's daily rolling pattern —
-            // the actual file is named "engine.jsonl.YYYY-MM-DD". Pick the
-            // newest one in the logs dir as a heuristic; fall back to the
-            // logs folder itself when no logs exist.
-            var logsDir = System.IO.Path.Combine(
-                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-                "FileID", "logs");
-            string target = logsDir;
+            // The daily log "engine.jsonl.YYYY-MM-DD" has no registered handler, so reveal the newest one in Explorer instead of launching it.
+            var logsDir = AppPaths.LogsDir;
+            string? newest = null;
             try
             {
                 if (System.IO.Directory.Exists(logsDir))
                 {
-                    var newest = new System.IO.DirectoryInfo(logsDir)
+                    newest = new System.IO.DirectoryInfo(logsDir)
                         .EnumerateFiles("engine.jsonl*")
                         .OrderByDescending(f => f.LastWriteTimeUtc)
-                        .FirstOrDefault();
-                    if (newest is not null) target = newest.FullName;
+                        .FirstOrDefault()?.FullName;
                 }
             }
-            catch { /* swallow — fall through to opening the directory */ }
-            var psi = new System.Diagnostics.ProcessStartInfo
+            catch { /* fall through to opening the folder */ }
+            if (newest is not null)
             {
-                FileName = target,
+                SafeOpen.Reveal(newest);
+                return;
+            }
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = logsDir,
                 UseShellExecute = true,
-            };
-            System.Diagnostics.Process.Start(psi);
+            });
         }
         catch (Exception ex)
         {
@@ -764,17 +592,9 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
-    // OnAutoPilotClicked removed along with the AutoPilot button —
-    // see XAML comment near the deleted button. Auto-advance is now built
-    // into Start Scan via EngineClient.Apply's ScanCompleteEvent handler,
-    // matching the macOS "engine auto-enqueues face clustering after scan"
-    // pattern.
-
     private async Task ShowAlertAsync(string title, string body)
     {
-        // ContentDialog.ShowAsync can throw on a broken
-        // XamlRoot (mid-shutdown, tab re-host). Catch + log so a failed
-        // alert never escalates to App.UnhandledException.
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot (mid-shutdown, tab re-host).
         try
         {
             if (XamlRoot is null)

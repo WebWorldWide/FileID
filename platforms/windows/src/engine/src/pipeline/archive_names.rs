@@ -1,7 +1,4 @@
-//! The names of the files inside a zip, so a search for a file finds the
-//! archive that holds it. Reads only the zip's central directory (its table of
-//! contents at the end of the file); nothing is extracted or decompressed.
-//! Mirrors the Swift engine's `ArchiveNames`.
+//! Zip entry names read from the central directory only; nothing is extracted or decompressed.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

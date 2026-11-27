@@ -1,16 +1,5 @@
-// Persistent llama.cpp server for VLM inference.
-//
-// Spawns `llama-server.exe` ONCE (loading the multi-GB model + mmproj a single
-// time) and serves many images over its OpenAI-compatible
-// `/v1/chat/completions` multimodal endpoint. This is the bulk path: the
-// per-file `llama-mtmd-cli.exe` subprocess (`vlm::caption`) reloads the model
-// on every call, so a whole-library Deep Analyze pass through the CLI is many
-// hours; through the server it is ~1–3 s/file because the model stays resident.
-//
-// The CLI path remains as a fallback (single-file Deep Analyze, or when the
-// server can't start). Binaries come from the same Vulkan runtime dir
-// (`%LOCALAPPDATA%\FileID\Models\llama.cpp\`) that `VlmRunner` probes; the
-// runtime bump to b9254 ships both `llama-mtmd-cli.exe` and `llama-server.exe`.
+// Persistent llama.cpp server for bulk VLM inference.
+// `llama-server.exe` is spawned once and serves many images over `/v1/chat/completions`, so the model stays resident (~1–3 s/file; the per-file `llama-mtmd-cli.exe` path, `vlm::caption`, reloads it every call). The CLI remains the fallback for single-file Deep Analyze or when the server can't start.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -26,7 +15,6 @@ use futures_util::StreamExt;
 use tokio::process::Command;
 use super::native_process::{OwnedProcess, ProcessTracker};
 
-/// llama-server's own per-request measurements (`timings` in its reply).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Timings {
     pub prompt_tokens: u64,
@@ -46,14 +34,20 @@ pub struct VlmServer {
     request_gate: tokio::sync::Mutex<()>,
 }
 
-/// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
-/// bare elsewhere.
 #[cfg(windows)]
 const BIN_EXT: &str = ".exe";
 #[cfg(not(windows))]
 const BIN_EXT: &str = "";
 const MAX_VLM_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_VLM_RESPONSE_BYTES: usize = 1024 * 1024;
+
+fn early_exit_hint() -> &'static str {
+    if cfg!(windows) {
+        "missing GPU runtime DLLs"
+    } else {
+        "missing shared libraries (check the llama.cpp runtime install)"
+    }
+}
 
 impl VlmServer {
     /// Candidate `llama-server` paths in preference order: the CUDA runtime
@@ -72,10 +66,7 @@ impl VlmServer {
         super::native_runtime::candidates("llama-server", "FILEID_LLAMA_SERVER", cancel.clone()).await
     }
 
-    /// Start the server with the given model + mmproj and wait for `/health`.
-    /// The model load happens here (once); `complete()` calls are then cheap.
-    /// Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime
-    /// never blocks the working Vulkan one.
+    /// Starts the server and waits for `/health`. Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime never blocks the working Vulkan one.
     pub async fn start(gguf: &Path, mmproj: &Path, cancel: &Arc<AtomicBool>) -> Result<Self> {
         Self::start_with_arguments(gguf, mmproj, cancel, None).await
     }
@@ -132,8 +123,7 @@ impl VlmServer {
         crate::models::runtime::ensure_gpu_inference_alive()?;
         let port = pick_free_port()?;
         let api_key = new_api_key();
-        // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
-        // the GPU for Deep Analyze too (not just the ORT scan path).
+        // When the user forced CPU, evacuate the GPU for Deep Analyze too.
         let forced_cpu = crate::models::runtime::user_forced_cpu();
         // Flags kept by `fileid-bench --tune` for this model on this machine.
         // Forced CPU always wins over a tuned GPU offload.
@@ -188,7 +178,7 @@ impl VlmServer {
                 bail!("VLM server startup cancelled");
             }
             if let Some(status) = child.poll_exit()? {
-                bail!("llama-server exited early ({status}) — likely missing GPU runtime DLLs");
+                bail!("llama-server exited early ({status}) — likely {}", early_exit_hint());
             }
             // Short per-request timeout so a server that accepts the connection
             // but stalls the /health response can't defeat the 120s deadline by
@@ -244,8 +234,6 @@ impl VlmServer {
         validate_sequence(image_paths, prompt, max_tokens)?;
         self.dispatch(image_paths, prompt, max_tokens, cancel).await
     }
-    /// Text-only completion (document analysis): same admission, cancellation
-    /// and cleanup as image requests.
     pub async fn complete_text_with_cancel(&self, prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
         validate_prompt(prompt, max_tokens)?;
         self.dispatch(&[], prompt, max_tokens, cancel).await
@@ -272,7 +260,6 @@ impl VlmServer {
         result
     }
 
-    /// Timings from the most recent completed request, when the server sent them.
     pub fn last_timings(&self) -> Option<Timings> {
         *self.last_timings.lock()
     }
@@ -464,10 +451,7 @@ fn pick_free_port() -> Result<u16> {
     Ok(port)
 }
 
-/// Sniff the image MIME type from the leading bytes so the data URI declares
-/// the real format. `rasterize_for_vlm` passes image files through untouched
-/// (PNG/WebP/etc.), so hard-coding image/jpeg was wrong; llama-server's loader
-/// sniffs content, but declaring the truth is correct and not fragile.
+/// Sniffs the MIME type so the data URI declares the real format; `rasterize_for_vlm` passes PNG/WebP through untouched.
 fn image_mime(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         "image/png"

@@ -1,7 +1,4 @@
-﻿// LibraryRootRecovery.PickRecoveredRoot — the startup rule that heals a
-// LastFolderPath pointing at a deleted directory by falling back to the
-// engine DB's most recent scan root that still exists on disk. Filesystem
-// access is injected so these run headlessly.
+﻿// LibraryRootRecovery.PickRecoveredRoot — the startup rule that heals a LastFolderPath pointing at a deleted directory by falling back to the engine DB's most recent scan root that still exists on disk. Filesystem access is injected so these run headlessly.
 
 using System;
 using System.Collections.Generic;
@@ -42,8 +39,7 @@ public class LibraryRootRecoveryTests
             Exists(@"C:\Users\me\Pictures", @"F:\Adlon Drive\Family Shared")));
     }
 
-    [Fact] // the real-machine repro: settings point at a deleted test corpus,
-           // the DB holds a scan of an attached external drive → fall back
+    [Fact] // the real-machine repro: settings point at a deleted test corpus and the DB holds a scan of an attached external drive → fall back
     public void MissingLastFolder_FallsBackToNewestExistingDbRoot()
     {
         var recovered = LibraryRootRecovery.PickRecoveredRoot(
@@ -63,8 +59,7 @@ public class LibraryRootRecoveryTests
         Assert.Equal(@"C:\StillHere", recovered);
     }
 
-    [Fact] // no reachable root anywhere (external drive unplugged) → change
-           // NOTHING: the saved path may come back when the drive returns
+    [Fact] // no reachable root anywhere (external drive unplugged) → change NOTHING: the saved path may come back when the drive returns
     public void NothingReachable_LeavesStateAlone()
     {
         Assert.Null(LibraryRootRecovery.PickRecoveredRoot(
@@ -73,14 +68,13 @@ public class LibraryRootRecoveryTests
             Exists()));
     }
 
-    [Fact] // the DB root IS the dead saved folder (case/trailing-slash variants
-           // included) → not a recovery candidate
+    [Fact] // the DB root IS the dead saved folder (case/trailing-slash variants included) → not a recovery candidate
     public void DbRootEqualToDeadLastFolder_IsSkipped()
     {
         Assert.Null(LibraryRootRecovery.PickRecoveredRoot(
             @"C:\Library",
             s_deadLibraryVariants,
-            // equal roots must be skipped before probing at all
+            // equal roots must be skipped before probing at all.
             Exists()));
     }
 

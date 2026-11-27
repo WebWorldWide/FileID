@@ -38,3 +38,18 @@ struct ModelInfoTests {
         #expect(!text.contains("Bundle.module"))
     }
 }
+
+@Suite("Face model install detection")
+struct FaceModelInstallDetectionTests {
+    @Test("the engine's sface/ layout counts as installed, the same as the top level")
+    func engineLayoutCountsAsInstalled() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("face-layout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sface"), withIntermediateDirectories: true)
+        #expect(!FaceEmbedderKind.sface.isInstalled(in: root))
+        let file = root.appendingPathComponent("sface/face_recognition_sface_2021dec.onnx")
+        try Data("m".utf8).write(to: file)
+        #expect(FaceEmbedderKind.sface.isInstalled(in: root))
+        #expect(FaceEmbedderKind.sface.installedFile(in: root)?.path == file.path)
+    }
+}

@@ -1,15 +1,10 @@
-// macOS Trash and Finder tags for the engine the Mac app hosts (`fileidd`,
-// `--features apple-adapters`). FileManager.trashItem and Finder tag names run
-// in the Swift FileIDAppleKit library (`crate::apple`); identity checks, the
-// write-ahead journal and inode recovery stay here, as in the Swift engine's
-// `trashFiles` and `TrashJournal`.
+// macOS Trash and Finder tags for the Mac-hosted engine (`apple-adapters`): FileManager.trashItem and Finder tag names
+// run in FileIDAppleKit (`crate::apple`); identity checks, the write-ahead journal and inode recovery stay here.
 //
-// Test-only Trash root: builds with the `test-trash-root` feature (never
-// shipped; `assemble_app.sh` refuses such a binary), and unit tests, move
-// items into `$FILEID_TEST_TRASH_ROOT` instead of the user's Trash, and only
-// when the catalog is an explicit scratch one (`FILEID_DATABASE_PATH` or
-// `FILEID_DB`). Without that they refuse: a test build never reaches the
-// real Trash.
+// Test-only Trash root: with the `test-trash-root` feature (never shipped; `assemble_app.sh` refuses such a binary) and
+// in unit tests, items move to `$FILEID_TEST_TRASH_ROOT` instead of the user's Trash, and only when the catalog is an
+// explicit scratch one (`FILEID_DATABASE_PATH` or `FILEID_DB`); otherwise they refuse, so a test build never reaches
+// the real Trash.
 
 pub mod trash {
     use anyhow::{Context, Result};
@@ -18,10 +13,8 @@ pub mod trash {
     use crate::platform::FileIdentity;
 
     enum Backend {
-        /// FileManager.trashItem through FileIDAppleKit.
         #[cfg_attr(any(test, feature = "test-trash-root"), allow(dead_code))]
         Finder,
-        /// A plain folder standing in for the Trash (test builds only).
         #[cfg_attr(not(any(test, feature = "test-trash-root")), allow(dead_code))]
         Folder(PathBuf),
     }
@@ -46,8 +39,6 @@ pub mod trash {
         Ok(Backend::Folder(root))
     }
 
-    /// Folders an item trashed from `original` can be in: the user's Trash and,
-    /// for another volume, its `.Trashes/<uid>` (as `TrashJournal.trashFolders`).
     pub(crate) fn trash_folders(original: &Path) -> Vec<PathBuf> {
         match backend() {
             Ok(Backend::Folder(root)) => vec![root],
@@ -70,7 +61,7 @@ pub mod trash {
         }
     }
 
-    /// The real home folder: inside the App Sandbox `HOME` is the container.
+    /// Inside the App Sandbox `HOME` is the container.
     fn user_home() -> Option<PathBuf> {
         if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty())
             && !home.to_string_lossy().contains("/Library/Containers/")
@@ -105,7 +96,6 @@ pub mod trash {
         Some(PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes())))
     }
 
-    /// Batch wrapper for the CLI's `dedupe`: one bool per input, true = trashed.
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         paths
             .iter()
@@ -116,9 +106,7 @@ pub mod trash {
             .collect()
     }
 
-    /// Moves `path` to the Trash if it is still the file with `expected`
-    /// identity, and returns where it landed. An item that turns out to be
-    /// another file is moved back and the call fails.
+    /// An item that turns out to be another file is moved back and the call fails.
     pub(crate) fn trash_in_place(path: &Path, expected: FileIdentity) -> Result<PathBuf> {
         crate::util::read_only::require_source_mutation(path)?;
         anyhow::ensure!(
@@ -145,7 +133,7 @@ pub mod trash {
         Ok(landed)
     }
 
-    /// Finder's naming for a taken Trash name: "photo.jpg", then "photo 2.jpg".
+    /// Finder's naming for a taken name: "photo.jpg", then "photo 2.jpg".
     fn move_into_folder(path: &Path, root: &Path) -> Result<PathBuf> {
         let name = path.file_name().context("Trash source has no file name")?;
         let stem = Path::new(name).file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
@@ -165,8 +153,6 @@ pub mod trash {
         anyhow::bail!("no free name in the test Trash root for {}", path.display())
     }
 
-    /// The Trash entry with `inode`, looking only at names that start with the
-    /// original's stem (Finder keeps the name or appends to it).
     fn locate_inode(folders: &[PathBuf], original: &Path, inode: u64) -> Option<PathBuf> {
         let stem = original.file_stem()?.to_string_lossy().into_owned();
         folders.iter().find_map(|folder| {
@@ -179,8 +165,6 @@ pub mod trash {
         })
     }
 
-    /// Where a journaled item is in the Trash now: its recorded location while
-    /// it still holds the same file, else the entry with its inode.
     pub(crate) fn locate(item: &crate::commands::trash_log::TrashLogItem) -> Option<PathBuf> {
         let inode = item.expected_inode()?;
         let original = Path::new(&item.original_path);
@@ -196,9 +180,7 @@ pub mod trash {
         locate_inode(&trash_folders(original), original, inode).filter(|path| matches(path))
     }
 
-    /// Moves a journaled item from the Trash back to `original`, never
-    /// replacing what is there. The caller has checked `original` is inside an
-    /// authorized library root. Returns the restored file's identity.
+    /// Never replaces what is there; the caller has checked `original` is inside an authorized library root.
     pub(crate) fn restore(item: &crate::commands::trash_log::TrashLogItem, original: &Path) -> Result<FileIdentity> {
         crate::util::read_only::require_source_mutation(original)?;
         let trashed = locate(item).context("the file is no longer in the Trash")?;
@@ -226,7 +208,6 @@ pub mod trash {
 
         #[test]
         fn unit_tests_never_reach_the_real_trash() {
-            // No test sets FILEID_TEST_TRASH_ROOT: every Trash call refuses.
             let dir = scratch("refuse");
             let file = dir.join("keep.txt");
             std::fs::write(&file, b"keep").unwrap();
@@ -263,7 +244,6 @@ pub mod trash {
         #[test]
         fn mount_point_of_a_temporary_folder_is_a_volume_root() {
             let dir = scratch("mount");
-            // The Data volume's mount point, reached through firmlinks: compare devices.
             let mount = mount_point(&dir).unwrap();
             assert_eq!(
                 crate::platform::file_identity(&mount).map(|id| id.volume),
@@ -278,8 +258,7 @@ pub mod tags {
     use anyhow::Result;
     use std::path::Path;
 
-    /// Adds `tags` to the file's Finder tags and never removes one: Finder tags
-    /// are the user's, and the app's own tag undo removes only what it added
+    /// Never removes a tag: Finder tags are the user's, and the app's tag undo removes only what it added
     /// (`TagWriter`). Case-insensitive; existing spelling wins.
     pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
         crate::util::read_only::require_source_mutation(path)?;
@@ -295,10 +274,9 @@ pub mod tags {
         crate::apple::finder_tags(path)
     }
 
-    /// Finder tags are extended attributes; they move with the file.
+    /// Finder tags are extended attributes and move with the file.
     pub fn move_sidecar(_old: &Path, _new: &Path) {}
 
-    /// `TagWriter.mergeTags`: keep `existing` in order, append new trimmed tags.
     pub(crate) fn merge_tags(existing: &[String], adding: &[String]) -> Vec<String> {
         let mut out = existing.to_vec();
         let mut seen: std::collections::HashSet<String> = existing.iter().map(|tag| tag.to_lowercase()).collect();

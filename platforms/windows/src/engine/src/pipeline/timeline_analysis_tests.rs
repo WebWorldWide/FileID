@@ -77,6 +77,15 @@ fn parse_moments_accepts_wrapped_json_and_rejects_bad_ranges() {
     assert!(parse_moments(reversed, &four).is_err());
 }
 
+#[test]
+fn a_moment_reply_over_sixteen_kilobytes_is_refused() {
+    let four = [0.0, 0.5, 1.0, 1.5];
+    let reply = "{\"moments\":[{\"title\":\"Kid swings bat\",\"summary\":\"\",\"firstFrame\":1,\"lastFrame\":3}]}";
+    let at_limit = format!("{reply}{}", " ".repeat(16_384 - reply.len()));
+    assert_eq!(parse_moments(&at_limit, &four).unwrap().len(), 1);
+    assert!(parse_moments(&format!("{at_limit} "), &four).is_err());
+}
+
 fn spans(moments: &[Moment]) -> Vec<(usize, usize)> {
     moments.iter().map(|m| (m.first_frame, m.last_frame)).collect()
 }
@@ -160,6 +169,26 @@ fn chapter_suggestions_split_at_confirmed_transitions() {
 }
 
 #[test]
+fn scene_captions_each_start_a_chapter_where_the_picture_changes() {
+    let captions = [
+        Caption { seconds: 0.0, text: "A child wearing a yellow helmet rides a red scooter on a concrete driveway".into() },
+        Caption { seconds: 15.0, text: "A child in a green top sits on concrete beside grass".into() },
+        Caption { seconds: 33.0, text: "Three children play basketball on a suburban driveway".into() },
+        Caption { seconds: 51.0, text: "A person in a blue shirt stands in front of a residential street".into() },
+    ];
+    let scene_version = format!("{SCENE_VERSION_PREFIX}model@rev");
+    let chapters = chapter_suggestions(1, "rev", &scene_version, 83.0, &captions);
+    assert_eq!(chapters.iter().map(|chapter| chapter.start_seconds).collect::<Vec<_>>(), [0.0, 15.0, 33.0, 51.0]);
+    assert!(close(chapters[3].end_seconds, 83.0) && (chapters[0].end_seconds - 14.999).abs() < 1e-9);
+    assert!(chapter_suggestions(1, "rev", "frame-v", 83.0, &captions).is_empty());
+    let same = [
+        Caption { seconds: 0.0, text: "A child rides a scooter on a driveway".into() },
+        Caption { seconds: 10.0, text: "A child rides a scooter on the driveway".into() },
+    ];
+    assert!(chapter_suggestions(1, "rev", &scene_version, 20.0, &same).is_empty());
+}
+
+#[test]
 fn concise_titles_cut_at_sentence_and_word_boundaries() {
     assert_eq!(concise_title("A dog runs. Then it sits."), "A dog runs");
     let long = "word ".repeat(30);
@@ -200,4 +229,30 @@ fn transcripts_strip_model_framing() {
     assert_eq!(transcript_text("language None<asr_text>"), "");
     assert_eq!(transcript_text("[SILENCE]"), "");
     assert_eq!(transcript_text("<asr_text>Hi</asr_text>"), "Hi");
+}
+
+#[test]
+fn similar_captions_confirm_no_chapter_change() {
+    let captions: Vec<Caption> = (0..5)
+        .map(|i| Caption { seconds: f64::from(i) * 10.0, text: "A birthday cake with candles on a table".into() })
+        .collect();
+    assert!(chapter_suggestions(1, "rev", "v", 50.0, &captions).is_empty());
+}
+
+#[test]
+fn moment_chapters_need_finite_increasing_frame_times_inside_the_window() {
+    let window = Window { start: 0.0, end: 10.0, times: vec![] };
+    let moments = vec![Moment { title: "Jump".into(), summary: String::new(), first_frame: 0, last_frame: 1 }];
+    assert_eq!(moment_chapters(&moments, &[0.0, 1.0, 2.0], &window, 1, "r", "v").len(), 1, "positive control");
+    for times in [
+        vec![0.0, f64::NAN, 2.0],
+        vec![0.0, f64::INFINITY, 2.0],
+        vec![2.0, 1.0, 0.0],
+        vec![0.0, 1.0, 1.0],
+        vec![0.0, 1.0, 11.0],
+        vec![-1.0, 1.0, 2.0],
+        vec![0.0],
+    ] {
+        assert!(moment_chapters(&moments, &times, &window, 1, "r", "v").is_empty(), "{times:?}");
+    }
 }

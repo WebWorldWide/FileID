@@ -31,12 +31,12 @@ struct BulkRenameSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Hairline()
             if nameable.isEmpty {
                 emptyState
             } else {
                 actionsBar
-                Divider()
+                Hairline()
                 renameList
             }
         }
@@ -125,6 +125,7 @@ struct BulkRenameSheet: View {
                       systemImage: "wand.and.rays")
             }
             .buttonStyle(DSPrimaryButtonStyle(height: 30))
+            .keyboardShortcut(.defaultAction)
             .disabled(ready.isEmpty || inFlight || loading)
             .confirmationDialog(
                 "Rename \(ready.count.formatted()) file\(ready.count == 1 ? "" : "s")?",
@@ -141,7 +142,7 @@ struct BulkRenameSheet: View {
     }
 
     private var renameList: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             LazyVStack(spacing: 4) {
                 ForEach(nameable) { row in
                     BulkRenameRow(
@@ -273,13 +274,7 @@ struct BulkRenameSheet: View {
     }
 
     // MARK: - Person tag history
-    //
-    // Track which Finder tag we last applied per person so that when
-    // the user renames a cluster ("Alex" → "Alex Doe") we can offer
-    // to retag previously-tagged photos. Stored as a tiny JSON dict in
-    // UserDefaults — `[Int64-as-string : last-tag]`. Engineering-wise
-    // this lives next to the rename journal because both are "remembering
-    // something about an irreversible mutation we just made."
+    // Last Finder tag applied per person (UserDefaults `[person id: tag]`), so renaming a cluster can offer to retag its photos.
 
     nonisolated static let personTagHistoryKey = "personTagHistory.v1"
 
@@ -320,7 +315,7 @@ private struct BulkRenameRow: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .fill(Color.secondary.opacity(0.10))
+                    .fill(Color.white.opacity(0.05))
                     .frame(width: 64, height: 64)
                 AsyncThumbnail(url: url, size: 96) {
                     Image(systemName: kind.map(FileKind.symbolName(forKind:)) ?? FileTypes.symbolName(forExtension: url.pathExtension))
@@ -332,7 +327,7 @@ private struct BulkRenameRow: View {
             }
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
+                    .stroke(Theme.hairline, lineWidth: 1)
             )
 
             VStack(alignment: .leading, spacing: 4) {

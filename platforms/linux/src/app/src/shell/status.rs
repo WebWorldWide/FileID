@@ -1,6 +1,4 @@
-// What the shell knows about running work, and everything derived from it:
-// the scan card (macOS `PipelineBlock`), the title-bar activity button and
-// popover, sidebar badges and page meta. Pure, so it is unit-tested headless.
+// Running-work status and everything derived from it. Pure, so it is unit-tested headless.
 
 use fileid_engine::ipc::{DeepAnalyzeProgress, ScanPhase, ScanProgress};
 
@@ -545,6 +543,9 @@ mod tests {
             eta_seconds: Some(125.0),
             resident_mb: 640,
             available_mb: 8000,
+            post_scan_owed: None,
+            post_scan_done: None,
+            post_scan_step: None,
         }
     }
 

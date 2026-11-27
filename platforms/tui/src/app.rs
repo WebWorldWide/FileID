@@ -1,12 +1,4 @@
-//! Backend-agnostic application state + key handling.
-//!
-//! This module owns no terminal types—it is a state machine over
-//! [`crossterm::event::KeyCode`], which makes it unit-testable headlessly
-//! (navigation clamps, tab cycling, search filtering, the load-event reducer).
-//! `ui.rs` renders a `&App`; `main.rs` feeds it key codes + load messages.
-//!
-//! Filesystem access is limited to the bounded folder browser and typed-path
-//! validation. Errors stay inline rather than escaping into the render loop.
+//! Backend-agnostic app state and key handling: a state machine over [`crossterm::event::KeyCode`], unit-testable without a terminal. `ui.rs` renders a `&App`; `main.rs` feeds it keys and load messages. Errors stay inline and never escape into the render loop.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -71,6 +63,10 @@ pub struct App {
     pub selected: [usize; 6],
     pub search: String,
     pub search_active: bool,
+    /// Set as the search text changes; `main` consumes it and starts a content search for `search`.
+    pub live_search_requested: bool,
+    /// Rows found for the text typed so far, for the query they answer.
+    live_matches: Option<(String, Vec<FileRow>)>,
     pub status: String,
     pending_scan_warning: Option<String>,
     pub loading: bool,
@@ -81,32 +77,26 @@ pub struct App {
     /// the loader, then clears it.
     pub reload_requested: bool,
     pub db_label: String,
-    /// True when running against the default SCRATCH library (no `--db`): the
-    /// TUI opens EMPTY and only accumulates what the user scans here, never the
-    /// desktop app's library. Drives the friendly empty-screen + Settings copy.
+    /// Running against the default scratch library (no `--db`): the TUI opens
+    /// empty and only holds what the user scans here, never the desktop app's library.
     pub scratch: bool,
 
-    // Folder picker and scan state.
     /// The single-line path-input prompt is open (typing a folder to scan).
     pub input_active: bool,
-    /// The text typed so far in the path prompt.
     pub input: String,
     /// Inline validation error shown in the prompt (bad/!dir path). The prompt
     /// stays open so the user can fix it — never a panic.
     pub input_error: Option<String>,
-    /// The folder the user chose to scan (shown in the Library header / status).
+    /// The folder being scanned, shown in the Library header and status.
     pub scan_root: Option<String>,
-    /// A scan is in flight (drives the header + blocks a second concurrent scan).
+    /// A scan is in flight; blocks a second one.
     pub scanning: bool,
     /// Set when a scan is confirmed; `main` consumes it, spawns the engine-driven
     /// scan thread, and clears it (mirrors `reload_requested`).
     pub scan_requested: Option<PathBuf>,
-    /// The folder-browser overlay opened by `s`.
     pub browser: Option<Browser>,
 
-    // ── AI-model download (Settings `D`) ────────────────────────────────────
-    /// An AI-model download is in flight (drives the status line +
-    /// blocks a second concurrent download).
+    /// An AI-model download is in flight; blocks a second one.
     pub downloading: bool,
     /// Set when the user presses `D`; `main` consumes it, spawns the download
     /// worker thread, and clears it (mirrors `scan_requested`).
@@ -116,7 +106,6 @@ pub struct App {
     /// `DownloadProgress`, cleared on the worker's terminal `Done`/`Error`.
     pub download: Option<DownloadState>,
 
-    // ── Persistent model-state banner + error feedback ──────────────────────
     /// Display names of the required AI models that aren't installed yet (empty
     /// ⇒ all present). Drives the standing "models missing" banner shown above
     /// EVERY tab. `main` sets it at startup and re-checks whenever a load/scan/
@@ -136,6 +125,8 @@ impl App {
             selected: [0; 6],
             search: String::new(),
             search_active: false,
+            live_search_requested: false,
+            live_matches: None,
             status: "Starting…".to_string(),
             pending_scan_warning: None,
             loading: true,
@@ -171,6 +162,8 @@ impl App {
     pub fn visible_files(&self) -> Vec<&FileRow> {
         if !self.search_active || self.search == self.data.query {
             self.data.files.iter().collect()
+        } else if let Some((_, files)) = self.live_matches_for_search() {
+            files.iter().collect()
         } else {
             let q = self.search.to_lowercase();
             self.data
@@ -181,6 +174,21 @@ impl App {
                 })
                 .collect()
         }
+    }
+
+    fn live_matches_for_search(&self) -> Option<&(String, Vec<FileRow>)> {
+        let typed = self.search.trim();
+        self.live_matches
+            .as_ref()
+            .filter(|(query, _)| query == typed)
+    }
+
+    /// Typed text whose content search has not answered yet, so "no matches" cannot be claimed.
+    pub fn search_pending(&self) -> bool {
+        self.search_active
+            && !self.search.trim().is_empty()
+            && self.search != self.data.query
+            && self.live_matches_for_search().is_none()
     }
 
     /// Length of the list backing the active tab.
@@ -256,7 +264,6 @@ impl App {
         self.tab = tab;
     }
 
-    /// Fold a loader message into state.
     pub fn apply_load(&mut self, msg: LoadMsg) {
         match msg {
             LoadMsg::Versioned {
@@ -289,12 +296,12 @@ impl App {
             }
             LoadMsg::Done(snap) => {
                 self.data = *snap;
+                self.live_matches = None;
                 self.loading = false;
                 self.scanning = false;
                 self.downloading = false;
                 self.download = None;
                 self.status_error = false;
-                // Re-clamp every cursor against the freshly loaded lengths.
                 self.clamp_all();
             }
             LoadMsg::Dupes(report) => {
@@ -308,6 +315,12 @@ impl App {
                 if let Some(warning) = self.pending_scan_warning.take() {
                     self.status = warning;
                     self.status_error = true;
+                }
+            }
+            LoadMsg::LiveSearch { query, files } => {
+                if self.search.trim() == query {
+                    self.live_matches = Some((query, files));
+                    self.set_cursor(0);
                 }
             }
             LoadMsg::Error(e) => {
@@ -332,8 +345,7 @@ impl App {
         self.tab = tab;
     }
 
-    /// Handle one key press. Returns nothing; mutates state (incl. `should_quit`
-    /// and `reload_requested`, which `main` acts on).
+    /// Handles one key press. `main` acts on `should_quit` and `reload_requested`.
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         // Control chords are resolved BEFORE the modal handlers below, which
         // dispatch on `code` alone. Without this, a chord reached their
@@ -412,17 +424,7 @@ impl App {
         }
     }
 
-    /// Arm a library reload (the `r` key): `main` consumes `reload_requested`
-    /// next tick and re-spawns the DB loader. Guarded against a live download AND
-    /// a live scan — both share the loader channel, and `data::load`'s terminal
-    /// `Done` (which `apply_load` folds in) clears `downloading`/`scanning`
-    /// wholesale. A reload racing a download would clear the install gauge
-    /// mid-install (inviting a second `D` that double-spawns the same download); a
-    /// reload racing a scan lands its quick DB-read `Done` first, clearing
-    /// `scanning` while the engine subprocess is still writing the DB — ending the
-    /// scan in the UI and re-enabling `s`/`D`, which could arm a SECOND engine on
-    /// the same SQLite file (violating the single-writer invariant). Ignored while
-    /// either runs.
+    /// Arms a library reload (`r`). Ignored while a download or scan runs: both share the loader channel, and the reload's terminal `Done` would clear their state, letting a second engine open the same SQLite file.
     fn request_reload(&mut self) {
         if self.loading {
             self.status = "A library load is already running…".to_string();
@@ -443,11 +445,7 @@ impl App {
         self.reload_requested = true;
     }
 
-    /// Arm an AI-model download (the global `D` key): `main`
-    /// consumes `download_requested` next tick and spawns the worker thread.
-    /// Guarded so a second download — or a download racing a live scan — can't
-    /// start. Never blocks: the spawned thread streams progress to the status
-    /// line and `q` keeps quitting.
+    /// Arms an AI-model download (global `D`). Refused while another download or a scan runs.
     fn request_download(&mut self) {
         if self.downloading {
             self.status = "A model download is already running…".to_string();
@@ -471,10 +469,7 @@ impl App {
         self.show_help = false;
     }
 
-    /// Open the folder browser at `$HOME`
-    /// (falling back to the cwd, then `/`), so the user navigates with arrows +
-    /// Enter instead of typing a raw path. Ignored mid-scan so two scans can't
-    /// race the engine.
+    /// Opens the folder browser at `$HOME` (then cwd, then `/`). Ignored mid-scan so two scans can't race the engine.
     fn open_browser(&mut self) {
         if self.scanning {
             self.status = "A scan is already in progress…".to_string();
@@ -492,10 +487,7 @@ impl App {
         self.show_help = false;
     }
 
-    /// Drive the folder-browser overlay. ↑↓/jk move; Enter (or →/l) opens the
-    /// highlighted subfolder; Backspace (or ←/h) goes up; `s`/`S` scans the
-    /// CURRENT folder; `t` falls back to typing a path; Esc cancels. Filesystem
-    /// errors surface as an in-overlay notice — never a panic.
+    /// Drives the folder-browser overlay: ↑↓/jk move, Enter/→/l descend, Backspace/←/h go up, `s`/`S` scan the current folder, `t` types a path, Esc cancels. Filesystem errors surface as a notice, never a panic.
     fn on_key_browser(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => self.browser = None,
@@ -535,19 +527,16 @@ impl App {
                     self.arm_scan(browser.cwd);
                 }
             }
-            // Jump to external/removable-drive roots.
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if let Some(b) = self.browser.as_mut() {
                     b.go_to_drives();
                 }
             }
-            // Toggle dot-prefixed entries, hidden by default.
             KeyCode::Char('.') => {
                 if let Some(b) = self.browser.as_mut() {
                     b.toggle_hidden();
                 }
             }
-            // Typed-path fallback (kept trivial; the browser is primary).
             KeyCode::Char('t') => {
                 self.browser = None;
                 self.open_input();
@@ -556,9 +545,7 @@ impl App {
         }
     }
 
-    /// Open the single-line folder-path prompt — the typed-path fallback reached
-    /// with `t` from the browser. Ignored while a scan is already running so two
-    /// scans can't race the engine.
+    /// Opens the typed-path prompt (`t` in the browser). Ignored while a scan runs.
     fn open_input(&mut self) {
         if self.scanning {
             self.status = "A scan is already in progress…".to_string();
@@ -574,10 +561,7 @@ impl App {
         self.show_help = false;
     }
 
-    /// Arm an engine scan of `path`: `main` consumes `scan_requested` next tick
-    /// and spawns the engine-driven scan thread. Shared by the folder browser
-    /// (`s`) and the typed-path fallback (`confirm_input`) so both routes behave
-    /// identically.
+    /// Arms an engine scan of `path`. Shared by the folder browser and the typed-path prompt so both behave identically.
     fn arm_scan(&mut self, path: PathBuf) {
         let display = path.to_string_lossy().into_owned();
         self.status = format!("Starting scan of {display}…");
@@ -595,7 +579,6 @@ impl App {
                 self.input.clear();
                 self.input_error = None;
             }
-            // Tab and Enter both confirm.
             KeyCode::Enter | KeyCode::Tab => self.confirm_input(),
             KeyCode::Backspace => {
                 self.input.pop();
@@ -609,9 +592,7 @@ impl App {
         }
     }
 
-    /// Validate the typed path (with `~` expansion) and, if it's a real folder,
-    /// arm a scan that `main` will drive through the engine. A bad path sets an
-    /// inline error and keeps the prompt open — it never panics or wedges.
+    /// Validates the typed path (with `~` expansion) and arms a scan. A bad path sets an inline error and keeps the prompt open.
     fn confirm_input(&mut self) {
         let raw = self.input.trim().to_string();
         if raw.is_empty() {
@@ -652,10 +633,12 @@ impl App {
             KeyCode::Backspace => {
                 self.search.pop();
                 self.set_cursor(0);
+                self.live_search_requested = true;
             }
             KeyCode::Char(c) => {
                 self.search.push(c);
                 self.set_cursor(0);
+                self.live_search_requested = true;
             }
             _ => {}
         }
@@ -669,12 +652,7 @@ const COUNT_CAP: usize = 500;
 /// Max files listed in the browser's dimmed "files here" preview; the rest
 /// collapse into a `+N more` line.
 const FILE_LIST_CAP: usize = 64;
-/// Hard ceiling on entries a single `refresh` examines. The per-kind budgets are
-/// independent (so a file-heavy folder keeps its subdirs navigable), which means
-/// the "both budgets full" break never fires in a flat folder of only files (the
-/// dir budget never fills) — this ceiling bounds that walk so hundreds of
-/// thousands of files (or hidden dot-entries) can't freeze the UI. Comfortably
-/// above `COUNT_CAP` so merely file-heavy folders still surface their subdirs.
+/// Hard ceiling on entries one `refresh` examines. Per-kind budgets never stop a flat folder of files, so this bounds the walk. Kept above `COUNT_CAP` so file-heavy folders still show their subdirs.
 const WALK_CAP: usize = COUNT_CAP * 10;
 
 /// A cheap, shallow tally of a directory's immediate contents: how many
@@ -706,13 +684,7 @@ pub enum BrowseRow {
     Dir(PathBuf),
 }
 
-/// Folder-navigator state opened by `s`. Replaces raw path-typing as the
-/// primary "what do I scan?" UX: start at `$HOME`, list this folder's
-/// subdirectories, walk in with Enter, up with Backspace, and scan the *current*
-/// folder with `s`.
-///
-/// Reads the filesystem but is panic-free: an unreadable / missing directory
-/// yields an empty list plus a `notice`, never a crash.
+/// Folder-navigator state opened by `s`. Panic-free: an unreadable or missing directory yields an empty list plus a `notice`.
 pub struct Browser {
     /// The directory currently shown.
     pub cwd: PathBuf,
@@ -767,17 +739,7 @@ impl Browser {
         b
     }
 
-    /// Re-read `cwd` in one shallow pass: split it into subdirectories
-    /// (→ `rows`, sorted case-insensitively, prefixed by `..`), a dimmed file
-    /// preview (→ `files`, capped), and `cwd`'s own [`DirCounts`] (→ `here`,
-    /// for the title). File and directory work have independent [`COUNT_CAP`]
-    /// bounds, so a file-heavy folder keeps its subdirs navigable; a separate
-    /// [`WALK_CAP`] ceiling bounds the total entries examined so a huge flat
-    /// folder can never be walked to the end (which would freeze the UI).
-    /// An unreadable directory yields empty lists + a `notice`;
-    /// never panics. `file_type()` is preferred so symlink loops aren't
-    /// followed; unreadable individual entries are simply skipped. Clears the
-    /// per-subdir count cache since we've navigated to a new `cwd`.
+    /// Re-reads `cwd` in one bounded pass: subdirectories (→ `rows`), a capped file preview (→ `files`), and `cwd`'s counts (→ `here`). Unreadable directories yield empty lists plus a `notice`. `file_type()` avoids following symlink loops.
     fn refresh(&mut self) {
         self.virtual_drives = false;
         self.counts.borrow_mut().clear();
@@ -788,12 +750,7 @@ impl Browser {
             Ok(entries) => {
                 let mut examined = 0usize;
                 for entry in entries.flatten() {
-                    // Hard ceiling FIRST (before any per-entry work): a flat
-                    // folder of hundreds of thousands of files — or hidden
-                    // dot-entries — where the dir budget never fills would
-                    // otherwise be walked to the very end on every refresh,
-                    // freezing the UI (`q` included). Counting every entry, even
-                    // ones skipped below, is what bounds the dotfile case.
+                    // Hard ceiling first: otherwise a flat folder where the dir budget never fills is walked to the end on every refresh.
                     examined += 1;
                     if examined > WALK_CAP {
                         here.capped = true;
@@ -807,10 +764,7 @@ impl Browser {
                     if !self.show_hidden && name.starts_with('.') {
                         continue;
                     }
-                    // Both display budgets full: every further entry can only
-                    // re-set `capped`. The budgets are independent, so this fires
-                    // only when the folder has ≥COUNT_CAP of BOTH kinds — a
-                    // file-heavy folder keeps looking for subdirs (up to WALK_CAP).
+                    // Both budgets full: further entries can only re-set `capped`; a file-heavy folder keeps looking for subdirs up to WALK_CAP.
                     if here.dirs >= COUNT_CAP && here.files >= COUNT_CAP {
                         here.capped = true;
                         break;
@@ -1039,9 +993,9 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(input)
 }
 
-/// Where external / removable drives mount, for the browser's `d` jump (FEATURE
-/// 1): macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that
-/// exists); else the filesystem root `/`. Never panics.
+/// Where external / removable drives mount, for the browser's `d` jump: macOS
+/// `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that exists);
+/// else the filesystem root `/`. Never panics.
 fn drive_roots() -> Vec<PathBuf> {
     existing_drive_roots(&drives_candidates(), |path| path.is_dir())
 }
@@ -1056,8 +1010,13 @@ fn drives_candidates() -> Vec<PathBuf> {
             .map(|letter| PathBuf::from(format!("{letter}:\\")))
             .collect()
     } else {
-        let mut v = Vec::with_capacity(3);
-        if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
+        let mut v = Vec::with_capacity(5);
+        let user = std::env::var_os("USER").filter(|u| !u.is_empty());
+        if let Some(user) = &user {
+            v.push(Path::new("/run/media").join(user));
+        }
+        v.push(PathBuf::from("/run/media"));
+        if let Some(user) = &user {
             v.push(Path::new("/media").join(user));
         }
         v.push(PathBuf::from("/media"));
@@ -1091,6 +1050,15 @@ fn existing_drive_roots(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_drive_candidates_include_udisks_run_media() {
+        let candidates = drives_candidates();
+        let run_media = candidates.iter().position(|p| p == Path::new("/run/media"));
+        let media = candidates.iter().position(|p| p == Path::new("/media"));
+        assert!(run_media.is_some() && run_media < media);
+    }
+
     use super::*;
     use crate::data::FileRow;
 
@@ -1135,10 +1103,8 @@ mod tests {
     #[test]
     fn selection_clamps_at_both_ends() {
         let mut app = app_with_files(3);
-        // up at the top stays at 0
         app.select_prev();
         assert_eq!(app.cursor(), 0);
-        // down past the end clamps at len-1
         for _ in 0..10 {
             app.select_next();
         }
@@ -1198,7 +1164,6 @@ mod tests {
         app.select_last();
         assert_eq!(app.cursor(), 2);
 
-        // enter search mode and type "cat"
         app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
         assert!(app.search_active);
         for ch in "cat".chars() {
@@ -1206,17 +1171,14 @@ mod tests {
         }
         let visible = app.visible_files();
         assert_eq!(visible.len(), 2);
-        assert_eq!(app.cursor(), 0); // reset on each keystroke
+        assert_eq!(app.cursor(), 0);
 
-        // escape clears the filter
         app.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.search_active);
         assert_eq!(app.visible_files().len(), 3);
     }
 
-    /// Ctrl+C is the terminal's universal abort, so it must work from the modal
-    /// overlays too — they dispatch on `KeyCode` alone, so it used to be
-    /// swallowed there and typed in as a bare "c".
+    /// Ctrl+C is the terminal's universal abort, so it must work from the modal overlays too; they dispatch on `KeyCode` alone.
     #[test]
     fn ctrl_c_quits_from_every_context() {
         for enter_context in [
@@ -1238,9 +1200,7 @@ mod tests {
         }
     }
 
-    /// The empty-results panel advertises `Esc  clear the search`; before the
-    /// guarded arm that honours it, Esc fell through to the quit arm and closed
-    /// the app instead of doing what the screen said.
+    /// The empty-results panel advertises `Esc  clear the search`, so Esc must clear a committed search rather than quit.
     #[test]
     fn esc_clears_a_committed_search_before_it_quits() {
         let mut app = app_with_files(3);
@@ -1262,13 +1222,11 @@ mod tests {
             "Esc must not quit while a search is showing"
         );
 
-        // With nothing left to clear, Esc reverts to quitting.
         app.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.should_quit);
     }
 
     /// A control chord must never land in a text field as its bare letter.
-    /// Ctrl+U previously appended "u" to the query.
     #[test]
     fn control_chords_are_not_typed_into_the_search_box() {
         let mut app = app_with_files(3);
@@ -1306,6 +1264,49 @@ mod tests {
     }
 
     #[test]
+    fn typing_a_search_shows_files_whose_text_matches_not_only_their_names() {
+        let mut app = app_with_files(0);
+        app.data.files = vec![
+            file(1, "/x/notes.txt", "doc"),
+            file(2, "/x/photo.jpg", "image"),
+        ];
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "invoice".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        assert!(app.live_search_requested);
+        assert!(app.visible_files().is_empty());
+        assert!(
+            app.search_pending(),
+            "no match may be claimed before the search answers"
+        );
+
+        app.apply_load(LoadMsg::LiveSearch {
+            query: "invoice".into(),
+            files: vec![file(1, "/x/notes.txt", "doc")],
+        });
+        let visible = app.visible_files();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].path, "/x/notes.txt");
+        assert!(!app.search_pending());
+    }
+
+    #[test]
+    fn a_late_answer_for_older_typing_is_ignored() {
+        let mut app = app_with_files(0);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "invoice".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        app.apply_load(LoadMsg::LiveSearch {
+            query: "inv".into(),
+            files: vec![file(1, "/x/notes.txt", "doc")],
+        });
+        assert!(app.visible_files().is_empty());
+        assert!(app.search_pending());
+    }
+
+    #[test]
     fn committed_search_requests_a_database_reload() {
         let mut app = app_with_files(3);
         app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
@@ -1338,11 +1339,7 @@ mod tests {
         assert!(app.loading);
     }
 
-    /// A reload, scan-browser, or typed-path request must be IGNORED while a model
-    /// download is in flight. Otherwise `data::load` would send a terminal `Done`
-    /// that `apply_load` folds in — clearing the `downloading` gauge mid-install
-    /// and inviting a second `D` that double-spawns the same download (writing the
-    /// same model files concurrently).
+    /// Reload, scan-browser and typed-path requests are ignored while a model download is in flight: the terminal `Done` would clear the download gauge and invite a second `D`.
     #[test]
     fn reload_and_scan_are_ignored_while_downloading() {
         let mut app = app_with_files(0);
@@ -1363,7 +1360,6 @@ mod tests {
             "typed-path prompt must not open mid-download"
         );
 
-        // The download is left intact for the worker to finish.
         assert!(app.downloading);
     }
 
@@ -1391,7 +1387,6 @@ mod tests {
         app.on_key(KeyCode::Char('?'), KeyModifiers::NONE);
         assert!(!app.show_help, "? closes the help it opened");
 
-        // With help closed, q quits as normal.
         app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(app.should_quit);
     }
@@ -1401,7 +1396,6 @@ mod tests {
         let mut app = app_with_files(0);
         app.switch_tab(Tab::People);
         app.selected[Tab::People.index()] = 99;
-        // empty people -> cursor must clamp to 0
         let snap = Snapshot {
             db_exists: true,
             people: vec![],
@@ -1465,11 +1459,9 @@ mod tests {
             expand_tilde_with("~/Pictures", Some(home)),
             PathBuf::from("/home/u/Pictures")
         );
-        // No home → left verbatim (no panic).
         assert_eq!(expand_tilde_with("~/x", None), PathBuf::from("~/x"));
         // A literal `~foo` (not `~/`) is not tilde-expansion; left as-is.
         assert_eq!(expand_tilde_with("~foo", Some(home)), PathBuf::from("~foo"));
-        // Absolute paths pass through untouched.
         assert_eq!(
             expand_tilde_with("/var/data", Some(home)),
             PathBuf::from("/var/data")
@@ -1497,7 +1489,6 @@ mod tests {
         app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
         assert!(app.browser.is_some(), "s must open the folder browser");
         assert!(!app.input_active, "s must NOT open the raw text prompt");
-        // Esc cancels without arming a scan.
         app.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.browser.is_none());
         assert!(app.scan_requested.is_none());
@@ -1508,9 +1499,7 @@ mod tests {
     fn browser_lists_only_subdirs_sorted_with_parent_row() {
         let base = temp_tree("browse-list");
         let b = Browser::open(base.clone());
-        // First row is the `..` affordance (base has a parent).
         assert_eq!(b.rows.first(), Some(&BrowseRow::Parent));
-        // Then the two subdirs, sorted, and crucially NOT the file.
         let dirs: Vec<String> = b
             .rows
             .iter()
@@ -1528,11 +1517,9 @@ mod tests {
         let base = temp_tree("browse-nav");
         let mut app = app_with_files(0);
         app.browser = Some(Browser::open(base.clone()));
-        // Row 0 is `..`; row 1 is the first subdir (alpha). Highlight it + Enter.
         app.on_key(KeyCode::Down, KeyModifiers::NONE);
         app.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.browser.as_ref().unwrap().cwd, base.join("alpha"));
-        // Backspace walks back up to base.
         app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
         assert_eq!(app.browser.as_ref().unwrap().cwd, base);
         let _ = std::fs::remove_dir_all(&base);
@@ -1549,7 +1536,6 @@ mod tests {
         assert!(app.loading);
         assert_eq!(app.scan_requested.as_deref(), Some(base.as_path()));
         assert!(app.scan_root.is_some());
-        // A terminal load message clears `scanning` (post-scan reload).
         app.apply_load(LoadMsg::Done(Box::new(Snapshot {
             db_exists: true,
             ..Snapshot::default()
@@ -1571,8 +1557,8 @@ mod tests {
     fn browser_t_falls_back_to_typed_prompt_then_confirms() {
         let mut app = app_with_files(0);
         let dir = std::env::current_dir().expect("cwd");
-        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE); // open browser
-        app.on_key(KeyCode::Char('t'), KeyModifiers::NONE); // typed fallback
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('t'), KeyModifiers::NONE);
         assert!(app.browser.is_none());
         assert!(app.input_active, "t opens the typed-path prompt");
         for ch in dir.to_string_lossy().chars() {
@@ -1610,7 +1596,7 @@ mod tests {
         assert!(!app.input_active);
     }
 
-    /// A throwaway tree with KNOWN contents so the FIX-2 counts are exact:
+    /// A throwaway tree with KNOWN contents so the counts are exact:
     /// `base/{photo.jpg, notes.txt, docs/, sub/{a.jpg,b.png,c.txt,nested/}}`.
     fn count_tree(tag: &str) -> PathBuf {
         let mut base = std::env::temp_dir();
@@ -1634,7 +1620,6 @@ mod tests {
         let base = count_tree("counts");
         let b = Browser::open(base.clone());
 
-        // cwd's own counts (browser title): 1 image, 2 files, 2 dirs.
         assert_eq!(
             b.here,
             DirCounts {
@@ -1646,8 +1631,6 @@ mod tests {
         );
         assert_eq!(b.files_total, 2);
 
-        // The dimmed file preview lists the actual files a scan would pick up,
-        // sorted, with the image flagged.
         let names: Vec<&str> = b.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["notes.txt", "photo.jpg"]);
         let photo = b.files.iter().find(|f| f.name == "photo.jpg").unwrap();
@@ -1660,7 +1643,6 @@ mod tests {
                 .is_image
         );
 
-        // Lazy per-subdir count: sub/ has 2 images, 3 files, 1 subfolder.
         let sub = base.join("sub");
         assert_eq!(
             b.count_for(&sub),
@@ -1671,7 +1653,6 @@ mod tests {
                 capped: false
             })
         );
-        // docs/ is empty.
         assert_eq!(b.count_for(&base.join("docs")), Some(DirCounts::default()));
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1754,13 +1735,11 @@ mod tests {
         let base = dotfile_tree("dot-default");
         let b = Browser::open(base.clone());
         assert!(!b.show_hidden, "hidden entries are off by default");
-        // No dot-prefixed subdir in the rows.
         let has_hidden_dir = b
             .rows
             .iter()
             .any(|r| matches!(r, BrowseRow::Dir(p) if dir_label(p).starts_with('.')));
         assert!(!has_hidden_dir, "hidden subdir must be filtered by default");
-        // No dot-prefixed file in the preview.
         assert!(
             b.files.iter().all(|f| !f.name.starts_with('.')),
             "hidden file must be filtered"
@@ -1784,7 +1763,6 @@ mod tests {
         let base = dotfile_tree("dot-toggle");
         let mut app = app_with_files(0);
         app.browser = Some(Browser::open(base.clone()));
-        // Press `.` to reveal hidden entries.
         app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
         let b = app.browser.as_ref().unwrap();
         assert!(b.show_hidden, ". must toggle hidden on");
@@ -1797,7 +1775,6 @@ mod tests {
             b.files.iter().any(|f| f.name == ".secret"),
             "hidden file appears once toggled on"
         );
-        // Counts now include the hidden pair: 2 files, 2 dirs.
         assert_eq!(
             b.here,
             DirCounts {
@@ -1808,7 +1785,6 @@ mod tests {
             }
         );
         assert_eq!(b.files_total, 2);
-        // Press `.` again to hide them — counts revert.
         app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
         let b = app.browser.as_ref().unwrap();
         assert!(!b.show_hidden);
@@ -1917,7 +1893,6 @@ mod tests {
         );
         assert!(app.downloading);
         assert!(app.loading);
-        // The gauge is armed at 0% the same frame, before any PROGRESS line.
         assert_eq!(app.download.as_ref().map(|d| d.percent), Some(0));
         // A terminal load message (e.g. a `fileid`-not-found error) clears
         // `downloading` AND the gauge — no panic, q still quits.
@@ -1940,7 +1915,7 @@ mod tests {
     #[test]
     fn download_progress_drives_and_clears_the_gauge() {
         let mut app = app_with_files(0);
-        app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT); // arm at 0%
+        app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
         assert_eq!(app.download.as_ref().unwrap().percent, 0);
 
         let label = "arcface · 182/271 MB · 3.4 MB/s · model 2/9";
@@ -1953,7 +1928,6 @@ mod tests {
         assert_eq!(d.label, label);
         assert!(!d.done, "62% is not done");
 
-        // The final PROGRESS line flips the gauge into its brief success state.
         app.apply_load(LoadMsg::DownloadProgress {
             percent: 100,
             label: "done".to_string(),
@@ -1963,7 +1937,6 @@ mod tests {
             "100% marks the gauge done"
         );
 
-        // The worker's terminal Done clears the gauge entirely.
         app.apply_load(LoadMsg::Done(Box::new(Snapshot {
             db_exists: true,
             ..Snapshot::default()
@@ -2012,7 +1985,7 @@ mod tests {
     /// is always reachable by tabbing.
     #[test]
     fn tab_key_cycles_through_settings_and_wraps() {
-        let mut app = app_with_files(0); // starts on Library
+        let mut app = app_with_files(0);
         let order = [
             Tab::People,
             Tab::Cleanup,
@@ -2025,14 +1998,12 @@ mod tests {
             app.on_key(KeyCode::Tab, KeyModifiers::NONE);
             assert_eq!(app.tab, expected, "Tab must advance to {expected:?}");
         }
-        // From Library, BackTab wraps backwards straight to Settings.
         app.on_key(KeyCode::BackTab, KeyModifiers::NONE);
         assert_eq!(
             app.tab,
             Tab::Settings,
             "BackTab from the first tab must wrap to Settings"
         );
-        // The number key jumps straight to Settings (index 5 → '6').
         app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
         assert_eq!(app.tab, Tab::Library);
         app.on_key(KeyCode::Char('6'), KeyModifiers::NONE);

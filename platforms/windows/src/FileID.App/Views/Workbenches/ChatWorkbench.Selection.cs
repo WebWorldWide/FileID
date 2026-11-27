@@ -10,10 +10,6 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Questions scoped to selected files (macOS <c>ChatScopeChip</c> and
-/// <c>SelectionResultsStrip</c>): the scope chip above the composer, and the
-/// matches / not-sure tiles under the latest answer, which can be chosen again
-/// for the next question, opened, or saved as a Best Takes group.</summary>
 internal sealed partial class ChatWorkbench
 {
     private readonly StackPanel _scopeRow = new() { Orientation = Orientation.Horizontal, Spacing = 6, Visibility = Visibility.Collapsed };
@@ -69,6 +65,7 @@ internal sealed partial class ChatWorkbench
     {
         _scopedRequestID = request.ScopeFileIDs is null ? null : request.RequestID;
         _lastQuestion = request.Text ?? "";
+        foreach (var tile in _selectionTiles) tile.IsChecked = false;
         _chosen.Clear();
         _selectionNote.Text = "";
     }

@@ -1,13 +1,6 @@
-// VisionWorker — wraps Vision request objects (classify, OCR, face rects,
-// face feature prints). Reusing one worker per scan task amortizes the
-// VNRequest allocation cost; the pool guarantees one owning task at a time.
-//
-// Same structural concept as v1's VisionWorker, rewritten cleanly:
-//  - One bundled "primary pass" handler runs classify + face rects + face
-//    prints + saliency in a single VNImageRequestHandler invocation.
-//  - OCR runs on demand (only when classify suggests it's a document).
-//  - The pool stays an `actor` (the v1 lock-guarded class regression we
-//    did in Batch 12 broke perf; reverting to actor was the right call).
+// VisionWorker wraps the Vision requests (classify, OCR, face rects, quality). One worker per scan task amortizes VNRequest allocation.
+// The primary pass runs classify + face rects + quality in one VNImageRequestHandler invocation; OCR runs on demand.
+// The pool is an `actor`: a lock-guarded class measured slower.
 import Foundation
 import Vision
 import CoreImage
@@ -15,21 +8,11 @@ import CoreText
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Global concurrency cap for `VNImageRequestHandler.perform`. Tied to the
-/// full worker count (`Hardware.workerCap`) so the Vision/ANE stage scales
-/// with the machine: throughput-first, with the per-call timeout below as the
-/// safety net for deadlock. (Earlier runs at gate=6 halved throughput from
-/// 150 → 75 files/s; the watchdog already handles the stuck-call case the gate
-/// was previously protecting against.) Was hardcoded 14 (= M1 Pro's workerCap);
-/// hardcoding silently throttled Vision/ANE on higher-core Macs (M-Ultra
-/// workerCap 32) — feeding the bigger ANE only 14-wide. Now it scales.
+/// Global concurrency cap for `VNImageRequestHandler.perform`, tied to `Hardware.workerCap` so the Vision/ANE stage scales with the machine.
+/// The per-call timeout below is the deadlock safety net.
 package let visionConcurrencyGate = DispatchSemaphore(value: Hardware.workerCap)
 
-/// Per-call hard wall-clock timeout for any `handler.perform` invocation.
-/// If Vision hasn't returned by `visionPerformTimeoutSeconds`, we abandon
-/// the call and free the worker. The orphaned background thread keeps
-/// running until Vision's internal queue eventually unblocks (or the
-/// engine exits). Bounded leak, unbounded responsiveness.
+/// Per-call hard wall-clock timeout for `handler.perform`. Past it the call is abandoned and the worker freed; the orphaned thread runs until Vision unblocks or the engine exits.
 package let visionPerformTimeoutSeconds: Double = {
     #if DEBUG
     if let raw = ProcessInfo.processInfo.environment["FILEID_TEST_VISION_TIMEOUT"], let value = Double(raw), value > 0 { return value }
@@ -37,68 +20,37 @@ package let visionPerformTimeoutSeconds: Double = {
     return 10.0
 }()
 
-/// At most four accurate text reads in flight. Fourteen cold concurrent reads
-/// each loaded the model and took 70 s wall (M1 Pro, every one past the 10 s
-/// timeout). Through `RecognizeTextRequest` a warm scan finishes accurate reads
-/// at about the same rate with four, six or eight in flight.
+/// At most four accurate text reads in flight: more concurrent reads each reloaded the model and blew the 10 s timeout.
 package let accurateOCRGate = DispatchSemaphore(value: 4)
 
-/// Run `body` on a background queue with a wall-clock timeout. Returns
-/// true if body completed before the deadline, false on timeout. On
-/// timeout, the body keeps running on its own thread — caller must NOT
-/// rely on shared state being settled.
-///
-/// Box wrapper exists because Vision request types (`VNImageRequestHandler`,
-/// `VNRequest` subclasses) are non-Sendable but we need to ferry them to a
-/// background dispatch queue. Each Vision call is single-threaded by
-/// construction (one box per call, only one thread touches it at a time
-/// — the dispatcher OR the caller, never both), so the unchecked-Sendable
-/// hop is safe in practice even though the compiler can't prove it.
+/// Runs `body` on a background queue with a wall-clock timeout. Returns false on timeout; the body keeps running, so callers must not rely on shared state being settled.
+/// The Vision request types are non-Sendable; the box is safe because only one thread touches a given call at a time.
 package final class _VisionUncheckedBox<T>: @unchecked Sendable {
     package let value: T
     package init(_ v: T) { self.value = v }
 }
 
+/// The accurate text tier compiles a recognizer for the Neural Engine the first time it meets a script or a concurrent
+/// read, 30 to 60 s on a busy Mac. A read that waits for that compile has not failed, so it gets far longer than a classify call.
+package let accurateReadTimeoutSeconds: Double = 180
+
 @inline(__always)
-package func runVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
+package func runVisionWithTimeout(seconds: Double = visionPerformTimeoutSeconds, _ body: @escaping () -> Void) -> Bool {
     let sem = DispatchSemaphore(value: 0)
     let box = _VisionUncheckedBox(body)
     DispatchQueue.global(qos: .userInitiated).async {
-        // Drain this perform's Vision/CoreImage intermediates here: the global
-        // concurrent queue's root-queue threads never drain a top-level
-        // autorelease pool, and the per-file Tagging pool runs on the caller's
-        // visionQueue thread — a different thread — so without this the
-        // autoreleased intermediates accumulate for the engine's lifetime.
+        // Drain Vision/CoreImage intermediates here: the global queue's threads never drain a top-level autorelease pool.
         autoreleasepool { box.value() }
         sem.signal()
     }
-    return sem.wait(timeout: .now() + visionPerformTimeoutSeconds) == .success
+    return sem.wait(timeout: .now() + seconds) == .success
 }
 
-/// One reusable bundle of VNRequest objects. Not Sendable across concurrent
-/// tasks — the pool guarantees exactly one owning task at a time.
+/// One reusable bundle of VNRequest objects. The pool guarantees exactly one owning task at a time.
 public final class VisionWorker: @unchecked Sendable {
 
-    // Reusable requests — created once per worker, reused per file.
-    //
-    // Iteration 7 trim: removed VNGenerateImageFeaturePrintRequest and
-    // VNGenerateAttentionBasedSaliencyImageRequest from the per-file bundle.
-    //   - The former generates a SCENE feature print for the whole image (NOT
-    //     per-face), which we mislabeled as `facePrints` and don't actually use
-    //     downstream. People clustering needs PER-FACE prints, which require a
-    //     separate cropped-image pass per face — that lands when we wire the
-    //     People tab. For now: drop, save ~25-30 ms ANE per file.
-    //   - Saliency was only setting a `hasSalientObject` flag we never read.
-    //     Drop entirely.
-    // Result: Vision pass shrinks from 4 requests to 2, expected ~50 % cut on
-    // the ANE-bound stage.
-    // VNRequest objects are allocated PER CALL (see runPrimaryPass), not
-    // cached on the worker. Caching them was a data race: the 10s timeout
-    // abandons a still-running `handler.perform` on a background thread, the
-    // worker is recycled to the next file, and the next perform on the SAME
-    // request instances raced the orphaned one — crashing inside Vision or
-    // bleeding one image's faces/labels into another file. Allocation cost is
-    // trivial next to perform (ocrFast already allocates per call).
+    // VNRequest objects are allocated per call (see runPrimaryPass), never cached on the worker: after a timeout a
+    // still-running perform could race the next file's perform on the same instances, crashing or bleeding faces into another file.
     public init() {}
 
     // Result of the bundled primary pass.
@@ -113,22 +65,12 @@ public final class VisionWorker: @unchecked Sendable {
         public var facePitches: [Double?]      // radians, parallel to faceBBoxes; nil if missing
         public var faceMinDimPx: [Double]      // min(w,h) in absolute source pixels, parallel to faceBBoxes
         public var facePrints: [Data]          // EMPTY here — extracted lazily in Stage D
-        /// False iff `handler.perform` exceeded the wall-clock timeout and was
-        /// abandoned (empty result). The tagging stage keys its stage-ran gates
-        /// (tagsEvaluated / facesEvaluated) on this so a timed-out pass never
-        /// wipes previously-persisted auto-tags or faces (incl. manual
-        /// person_id) on a rescan, and marks the file for retry.
+        /// False iff `handler.perform` timed out or failed. Tagging keys its stage-ran gates on this so a failed pass never wipes persisted tags or faces.
         public var didComplete: Bool
     }
 
-    /// Bundled face/scene/saliency Vision pass over `cgImage`.
-    ///
-    /// Face feature prints are NOT extracted here — running per-face
-    /// `VNGenerateImageFeaturePrintRequest` inline causes ANE thrash
-    /// when many workers are in flight. We persist only the bbox; the
-    /// FaceClustering job extracts prints lazily, one file at a time.
-    /// Measurement switch: `FILEID_VISION_CLASSIFY_DEVICE=gpu` (or `cpu`) moves the
-    /// classifier off the Neural Engine, which bounds camera-photo scans.
+    /// Bundled face/scene Vision pass over `cgImage`. Face feature prints are NOT extracted here: per-face prints inline cause ANE thrash.
+    /// `FILEID_VISION_CLASSIFY_DEVICE=gpu` (or `cpu`) moves the classifier off the Neural Engine.
     private static let classifyDevice = ProcessInfo.processInfo.environment["FILEID_VISION_CLASSIFY_DEVICE"]?.lowercased()
 
     private static func applyClassifyDevice(_ request: VNClassifyImageRequest) {
@@ -153,18 +95,14 @@ public final class VisionWorker: @unchecked Sendable {
                                facePrints: [], didComplete: false)
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        // Per-call request objects — never shared across files (see init note).
+        // Per-call request objects, never shared across files.
         let cReq = VNClassifyImageRequest()
         Self.applyClassifyDevice(cReq)
         let fReq = VNDetectFaceRectanglesRequest()
-        // Quality + landmark request — runs after fReq in the same perform call.
+        // Quality + landmark request, run in the same perform call as the face rects.
         let qReq = VNDetectFaceCaptureQualityRequest()
         visionConcurrencyGate.wait()
-        // Run Vision with a hard wall-clock timeout so a single bad input
-        // can't permanently park this worker. Signal the concurrency gate from
-        // INSIDE the worker thread (after perform) so a timed-out, orphaned
-        // perform keeps its ANE slot accounted until it actually finishes —
-        // the cap stays honest instead of over-admitting while threads stall.
+        // Hard wall-clock timeout so one bad input can't park this worker. The gate is signalled from inside the worker thread, so an orphaned perform keeps its slot until it really finishes.
         let didReturn = runVisionWithTimeout { [handler] in
             defer { visionConcurrencyGate.signal() }
             do { try handler.perform([cReq, fReq, qReq]) } catch { }
@@ -172,20 +110,13 @@ public final class VisionWorker: @unchecked Sendable {
         if !didReturn {
             return pass   // timed out — didComplete stays false; file marked for retry downstream
         }
-        // If perform() threw a non-timeout error, results remain nil — treat
-        // identically to a timeout so a rescan retries rather than marking this
-        // file evaluated with zero results and silently clearing prior tags.
+        // A non-timeout error leaves results nil, handled like a timeout so a rescan retries instead of clearing prior tags.
         guard cReq.results != nil else { return pass }
         pass.didComplete = true
 
         if let results = cReq.results {
-            // 0.30 confidence floor: VNClassifyImageRequest emits ~1300
-            // hierarchical labels; at 0.5 most photos cleared 0-2 tags
-            // (the user complaint was "tagging seems pointless"). 0.30
-            // is the typical recall sweet spot — surfaces multiple
-            // useful labels per image without the noise floor of 0.20.
-            // Cap at top 8 to keep the per-file payload bounded; results
-            // are pre-sorted by confidence descending.
+            // 0.30 is the recall sweet spot for VNClassifyImageRequest's ~1300 labels: 0.5 left most photos with 0-2 tags.
+            // Cap at the top 8; results are sorted by confidence descending.
             pass.classifyTags = Array(
                 results
                     .filter { $0.confidence >= 0.30 }
@@ -196,16 +127,13 @@ public final class VisionWorker: @unchecked Sendable {
                 pass.classifyConfidences[observation.identifier] = observation.confidence
             }
         }
-        // Index quality observations by bbox so we can align them with the
-        // face-rects observations after sorting (the two requests detect
-        // independently and may differ in observation order; bbox proximity
-        // is the most reliable join key).
+        // Index quality observations by bbox to align them with the face rects (the two requests can return observations in different order).
         let qualityByBBox: [(CGRect, Double)] = (qReq.results ?? []).map { obs in
             (obs.boundingBox, Double(obs.faceCaptureQuality ?? 0))
         }
         if let faces = fReq.results {
             pass.faceCount = faces.count
-            // Sort by area descending so the largest faces come first.
+            // Largest faces first.
             let sortedFaces = faces.sorted {
                 let aArea = $0.boundingBox.width * $0.boundingBox.height
                 let bArea = $1.boundingBox.width * $1.boundingBox.height
@@ -216,13 +144,7 @@ public final class VisionWorker: @unchecked Sendable {
             pass.faceYaws.reserveCapacity(sortedFaces.count)
             pass.facePitches.reserveCapacity(sortedFaces.count)
             pass.faceMinDimPx.reserveCapacity(sortedFaces.count)
-            // Vision's boundingBox is normalized to THIS cgImage, which is
-            // already the decoded image (see loadImageAndEXIF's
-            // FILEID_SCAN_MAX_PIXELS cap, default 1536px long edge — a
-            // different downscale regime than the Windows decoder's, see the
-            // caveat on DBWriter.isExcluded.minBBoxMinDimPx). cgImage.width/
-            // height convert the normalized bbox to that decoded image's
-            // pixels for the absolute-size clustering gate.
+            // Vision's boundingBox is normalized to the decoded cgImage (long edge capped by FILEID_SCAN_MAX_PIXELS; a different downscale regime than the Windows decoder's, see FACE_MIN_BBOX_MIN_DIM_PX in tagging.rs), so cgImage.width/height give absolute pixels.
             let imgWidthPx = Double(cgImage.width)
             let imgHeightPx = Double(cgImage.height)
             for obs in sortedFaces {
@@ -238,11 +160,7 @@ public final class VisionWorker: @unchecked Sendable {
         return pass
     }
 
-    /// Find the quality observation whose bbox center is closest to the
-    /// rects-request observation. Quality and detection requests run as
-    /// independent detections inside the same perform call; their result
-    /// order isn't guaranteed to match. Returns -1 if no quality result
-    /// exists (caller treats -1 as "unmeasured", not "low quality").
+    /// Finds the quality observation whose bbox center is closest to the rects observation. Returns -1 when none exists: unmeasured, not low quality.
     private func closestQuality(for box: CGRect, in qualities: [(CGRect, Double)]) -> Double {
         guard !qualities.isEmpty else { return -1 }
         let cx = box.midX; let cy = box.midY
@@ -256,27 +174,21 @@ public final class VisionWorker: @unchecked Sendable {
                 bestQ = q
             }
         }
-        // Demand reasonable proximity (centers within ~10 % of frame).
-        // Beyond that, the quality observation is for a different face.
+        // Demand centers within ~10 % of the frame; beyond that the quality observation is for a different face.
         return bestDist < 0.01 ? bestQ : -1
     }
 
-    /// Fast OCR — `recognitionLevel = .fast`, no language correction. Cheap
-    /// enough to run inline on every text-bearing image; it reads character by
-    /// character, so it mangles handwriting.
+    /// Fast OCR: `recognitionLevel = .fast`, no language correction. Mangles handwriting.
     public func ocrFast(_ cgImage: CGImage) -> String {
         recognizeText(cgImage, level: .fast)
     }
 
-    /// Accurate OCR — line-level model with language correction and automatic
-    /// language detection. Reads handwriting the fast tier can't; several times
-    /// slower, so the tagging stage runs it only when `TextReading` asks.
+    /// Accurate OCR: line-level model with language correction and language detection. Several times slower, so only run when `TextReading` asks.
     public func ocrAccurate(_ cgImage: CGImage) -> String {
         ocrAccurateIfAvailable(cgImage) ?? ""
     }
 
-    /// nil when the accurate tier is still warming up or paused by its breaker:
-    /// the read never ran, so the caller records it as owed (ScanCatchUp).
+    /// nil when the accurate tier is warming up or paused by its breaker; the read never ran, so the caller records it as owed.
     package func ocrAccurateIfAvailable(_ cgImage: CGImage) -> String? {
         guard AccurateOCRWarmup.shared.isReady, AccurateOCRBreaker.shared.allowed else { return nil }
         var completed = false
@@ -297,9 +209,7 @@ public final class VisionWorker: @unchecked Sendable {
         req.usesLanguageCorrection = false
         req.recognitionLanguages = ["en-US"]
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        // Same gate + timeout as runPrimaryPass — OCR also goes through ANE.
-        // The gate is released inside the worker thread so a timed-out perform
-        // holds its slot until it actually finishes.
+        // Same gate and timeout as runPrimaryPass.
         visionConcurrencyGate.wait()
         let didReturn = runVisionWithTimeout { [handler] in
             defer { visionConcurrencyGate.signal() }
@@ -312,17 +222,13 @@ public final class VisionWorker: @unchecked Sendable {
             .joined(separator: "\n")
     }
 
-    /// The accurate tier goes through Vision's Swift `RecognizeTextRequest`: the
-    /// `VNRecognizeTextRequest` path serialises accurate reads inside one process
-    /// (9.5 images/s at any concurrency on an M1 Pro), the Swift request runs them
-    /// in parallel (25/s at four), with the same revision and the same text on
-    /// printed pages. The fast tier stays on `VNRecognizeTextRequest`, whose Swift
-    /// counterpart reads far less.
+    /// The accurate tier uses Vision's Swift `RecognizeTextRequest`: the `VNRecognizeTextRequest` path serialises accurate reads in one process (9.5/s vs 25/s at four in parallel).
+    /// The fast tier stays on `VNRecognizeTextRequest`.
     package static func recognizeAccurately(_ cgImage: CGImage, completed: inout Bool) -> String {
         accurateOCRGate.wait()
         visionConcurrencyGate.wait()
         let box = ScanSideResult<String?>()
-        let didReturn = runVisionWithTimeout {
+        let didReturn = runVisionWithTimeout(seconds: accurateReadTimeoutSeconds) {
             defer {
                 visionConcurrencyGate.signal()
                 accurateOCRGate.signal()
@@ -348,10 +254,7 @@ public final class VisionWorker: @unchecked Sendable {
     }
 }
 
-/// The first accurate read by a newly installed engine binary compiles Vision's
-/// model for the Neural Engine: 92 s measured on an M1 Pro (later processes:
-/// ~0.4 s cold, ~0.23 s warm). Run that once at engine launch, off the scan path
-/// and with no timeout; until it finishes the scan keeps its fast reads.
+/// The first accurate read by a new engine binary compiles Vision's model for the Neural Engine (92 s measured on M1 Pro). Run it once at launch, off the scan path, with no timeout.
 package final class AccurateOCRWarmup: @unchecked Sendable {
     package static let shared = AccurateOCRWarmup()
     private let lock = NSLock()
@@ -365,10 +268,7 @@ package final class AccurateOCRWarmup: @unchecked Sendable {
 
     package static let isEnabled = ProcessInfo.processInfo.environment["FILEID_OCR_WARMUP"] != "0"
 
-    /// The compile shares the Neural Engine with the scan's own model loads: on a cold engine an
-    /// audio-only scan of 323 files took 115 s with the warmup running and 3.2 s without it.
-    /// So wait a moment, and keep waiting while a scan is queued or running; a scan that starts
-    /// first simply keeps its fast reads, and the warmup runs when the engine is idle.
+    /// The compile shares the Neural Engine with scan model loads, so it waits while a scan is queued or running.
     package func startWhenIdle(after delay: Duration = .seconds(3), busy: @escaping @Sendable () async -> Bool) {
         Task.detached(priority: .utility) {
             try? await Task.sleep(for: delay)
@@ -387,9 +287,7 @@ package final class AccurateOCRWarmup: @unchecked Sendable {
         if !Self.isEnabled { return }
         DispatchQueue.global(qos: .utility).async {
             let began = CFAbsoluteTimeGetCurrent()
-            // Real text, so the recognizers compile too, not just the detector
-            // (a blank image never reaches them). Both tiers: the fast one also
-            // compiles on first use.
+            // Real text, so the recognizers compile too (a blank image never reaches them).
             if let sample = Self.sampleText() {
                 _ = VisionWorker.performAccurateRead(sample)
                 let req = VNRecognizeTextRequest()
@@ -420,11 +318,7 @@ package final class AccurateOCRWarmup: @unchecked Sendable {
     }
 }
 
-/// Pauses the accurate tier for ten minutes after three failures in a row. Seen
-/// on macOS 27 while the Neural Engine reported no resources (e5rt error 13):
-/// every candidate image would otherwise pay a failed model load or a 10 s
-/// timeout. The fast read still stands, and Describe Files can transcribe what
-/// it missed. After the pause one more attempt runs; another failure re-trips.
+/// Pauses the accurate tier for ten minutes after three failures in a row (seen on macOS 27 when the Neural Engine reported no resources). The fast read still stands.
 package final class AccurateOCRBreaker: @unchecked Sendable {
     package static let shared = AccurateOCRBreaker()
     package static let failureLimit = 3
@@ -432,6 +326,13 @@ package final class AccurateOCRBreaker: @unchecked Sendable {
     private let lock = NSLock()
     private var consecutiveFailures = 0
     private var trippedAt: CFAbsoluteTime = 0
+    private var tripHandler: (@Sendable () -> Void)?
+
+    /// Called each time the breaker trips, so the host can tell the user the accurate tier is off.
+    package func onTrip(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        tripHandler = handler
+    }
 
     package var allowed: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -441,82 +342,23 @@ package final class AccurateOCRBreaker: @unchecked Sendable {
         return true
     }
 
+    /// Whether the pause is in force now, without ending it the way `allowed` does once the pause is over.
+    package var paused: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return consecutiveFailures >= Self.failureLimit && CFAbsoluteTimeGetCurrent() - trippedAt < Self.pauseSeconds
+    }
+
     package func record(success: Bool) {
         lock.lock()
         consecutiveFailures = success ? 0 : consecutiveFailures + 1
         let tripped = consecutiveFailures == Self.failureLimit
         if tripped { trippedAt = CFAbsoluteTimeGetCurrent() }
+        let handler = tripped ? tripHandler : nil
         lock.unlock()
         if tripped {
+            handler?()
             ImagingLog.warn("ocr_accurate_disabled",
                             error: "accurate text recognition failed \(Self.failureLimit) times in a row")
-        }
-    }
-}
-
-// MARK: - Pool
-
-public actor VisionWorkerPool {
-    private var available: [VisionWorker]
-    private struct Waiter { let id: Int; let cont: CheckedContinuation<VisionWorker?, Never> }
-    private var waiters: [Waiter] = []
-    private var nextWaiterID = 0
-
-    public init(count: Int) {
-        self.available = (0..<max(1, count)).map { _ in VisionWorker() }
-    }
-
-    /// Returns nil when the awaiting task is cancelled while parked. Previously
-    /// a cancelled waiter parked forever — `withCheckedContinuation` ignores
-    /// cancellation, so the continuation was never resumed and never removed,
-    /// growing `waiters` (and stranding the awaiting task) across every
-    /// cancelled scan. Now the cancellation handler removes the waiter and
-    /// resumes it with nil, so each continuation resumes exactly once and a
-    /// cancelled acquirer frees its slot cleanly.
-    public func acquire() async -> VisionWorker? {
-        if let worker = available.popLast() { return worker }
-        let id = nextWaiterID
-        nextWaiterID &+= 1
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<VisionWorker?, Never>) in
-                if Task.isCancelled {
-                    cont.resume(returning: nil)
-                } else {
-                    waiters.append(Waiter(id: id, cont: cont))
-                }
-            }
-        } onCancel: {
-            Task { await self.cancelWaiter(id) }
-        }
-    }
-
-    private func cancelWaiter(_ id: Int) {
-        if let idx = waiters.firstIndex(where: { $0.id == id }) {
-            let w = waiters.remove(at: idx)
-            w.cont.resume(returning: nil)
-        }
-    }
-
-    public func release(_ worker: VisionWorker) {
-        if !waiters.isEmpty {
-            let waiter = waiters.removeFirst()
-            waiter.cont.resume(returning: worker)
-        } else {
-            available.append(worker)
-        }
-    }
-
-    /// Returns nil if no worker could be acquired because the caller was
-    /// cancelled — the body is then skipped and no worker is consumed.
-    public func with<T: Sendable>(_ body: @Sendable (VisionWorker) async throws -> T) async rethrows -> T? {
-        guard let worker = await acquire() else { return nil }
-        do {
-            let result = try await body(worker)
-            release(worker)
-            return result
-        } catch {
-            release(worker)
-            throw error
         }
     }
 }

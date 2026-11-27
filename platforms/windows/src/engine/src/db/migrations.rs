@@ -1,20 +1,8 @@
-//! SQLite migration stack.
+//! SQLite migration stack, tracked in `grdb_migrations` (same table + identifier format as GRDB) so catalogs written by
+//! the Swift engine still open.
 //!
-//! Tracks applied migrations in `grdb_migrations` (same table name + format
-//! as GRDB) so a database built by either engine can be opened by the
-//! other. Identifiers MUST match the canonical strings byte-for-byte:
-//!
-//!   v1_core_tables, v2_clip_embeddings, v3_deep_analyze,
-//!   v4_face_verifications, v5_person_naming_structured,
-//!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
-//!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
-//!   v13_face_verification_anchors, v14_files_kind_scanned_index,
-//!   v15_fts_sync_triggers, v16_path_search,
-//!   v17_face_verification_stable_keys, v18_restructure_feedback,
-//!   v19_files_text_stage_done
-//!
-//! Migrations are append-only. NEVER edit a registered migration once
-//! committed; add a new vN+1 migration instead.
+//! Registered identifiers must match the canonical list byte-for-byte, and migrations are append-only: never edit one
+//! once committed, add vN+1.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -25,8 +13,6 @@ const MIGRATION_TABLE_DDL: &str = r#"
     )
 "#;
 
-/// (identifier, sql) pairs in registration order. Identifiers must match
-/// the Swift `m.registerMigration(...)` strings exactly.
 fn registry() -> Vec<(&'static str, &'static str)> {
     vec![
         ("v1_core_tables",              V1_CORE_TABLES),
@@ -65,60 +51,36 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v34_scan_catchup", include_str!("../../../../../../shared/catalog/v34.sql")),
         ("v35_foreign_key_indexes", include_str!("../../../../../../shared/catalog/v35.sql")),
         ("v36_scan_failures", include_str!("../../../../../../shared/catalog/v36.sql")),
+        ("v37_files_size_index", include_str!("../../../../../../shared/catalog/v37.sql")),
+        ("v38_files_name_sort", include_str!("../../../../../../shared/catalog/v38.sql")),
+        ("v39_files_search_fts", include_str!("../../../../../../shared/catalog/v39.sql")),
+        ("v40_library_roots_capture_dates", include_str!("../../../../../../shared/catalog/v40.sql")),
+        ("v41_scan_session_skipped", include_str!("../../../../../../shared/catalog/v41.sql")),
     ]
 }
 
-/// v12: commercial-clean face-model swap (ArcFace 512-d → SFace 128-d). The
-/// stored face embeddings are a different model AND dimension, so mixing them in
-/// a clustering run is invalid. The user chose a clean reset over name-preserving
-/// re-attach: wipe the face graph (verifications + prints + persons); the next
-/// scan re-detects (YuNet), re-embeds (SFace), and re-clusters from scratch.
-/// File/image rows are untouched. Children deleted before parents (FK-safe).
-/// NOTE: macOS must register an identical `v12_face_model_reset` identifier with
-/// equivalent SQL for cross-platform DB parity.
+/// v12: face-model swap (ArcFace 512-d → SFace 128-d). The two models' embeddings are incompatible, so the face graph
+/// is wiped (children before parents); file and image rows are untouched.
 const V12_FACE_MODEL_RESET: &str = "
 DELETE FROM face_verifications;
 DELETE FROM face_prints;
 DELETE FROM persons;
 ";
 
-/// v13: stable face-anchor keys for user "different people" verdicts. The
-/// face_verifications PK (person_a, person_b) churns on every re-cluster
-/// (persons are dropped + re-inserted with fresh rowids), so a person-keyed
-/// verdict silently stops suppressing a pair after the next clustering pass.
-/// Add nullable face_a/face_b columns holding the (min,max) anchor face_print
-/// ids — face_prints.id is stable across re-clustering — so
-/// findMergeSuggestions can filter on a key that survives. Existing rows keep
-/// NULL face ids and fall back to the legacy person-pair filter.
-/// NOTE: macOS must register an identical `v13_face_verification_anchors`
-/// identifier with equivalent SQL for cross-platform DB parity.
+/// v13: face_a/face_b hold stable face_print ids for "different people" verdicts; person rowids churn on every
+/// re-cluster.
 const V13_FACE_VERIFICATION_ANCHORS: &str = "
 ALTER TABLE face_verifications ADD COLUMN face_a INTEGER;
 ALTER TABLE face_verifications ADD COLUMN face_b INTEGER;
 ";
 
-/// v14: composite index on (kind, scanned_at). The default Library grid and
-/// any saved kind filter run `WHERE kind = ? ORDER BY scanned_at`, which the
-/// single-column `index_files_on_kind` (v1) can satisfy for the filter but
-/// not the order, so SQLite materialises a TEMP B-TREE to sort each refresh
-/// (~55 ms at 50K rows). A composite key lets the planner walk the index in
-/// scanned_at order within the kind partition, eliminating the sort.
-/// NOTE: macOS must register an identical `v14_files_kind_scanned_index`
-/// identifier with equivalent SQL for cross-platform DB parity.
+/// v14: composite (kind, scanned_at) index so kind-filtered Library queries avoid a TEMP B-TREE sort.
 const V14_FILES_KIND_SCANNED_INDEX: &str = "
 CREATE INDEX IF NOT EXISTS idx_files_kind_scanned ON files(kind, scanned_at);
 ";
 
-/// v15: keep the external-content FTS5 indexes in sync via triggers. Byte-
-/// faithful mirror of the macOS "v15_fts_sync_triggers" migration
-/// (Database.swift) — triggers are schema objects stored IN the DB file, so
-/// a macOS-touched library brings them along and the Windows writer must
-/// follow the same contract: the dbwriter no longer writes ocr_fts/doc_fts
-/// directly (the AFTER INSERT/DELETE/UPDATE triggers own the index), and
-/// content-table writes are explicit DELETE + INSERT (REPLACE's implicit
-/// delete fires AFTER DELETE triggers only when recursive_triggers is on,
-/// which would strand the old text's postings). The rebuilds also repair any
-/// stale/dangling postings left by the manual-maintenance era.
+/// v15: external-content FTS5 sync triggers. Writers use explicit DELETE + INSERT: REPLACE's implicit delete skips
+/// AFTER DELETE triggers unless recursive_triggers is on.
 const V15_FTS_SYNC_TRIGGERS: &str = "
 INSERT INTO ocr_fts(ocr_fts) VALUES('rebuild');
 INSERT INTO doc_fts(doc_fts) VALUES('rebuild');
@@ -144,35 +106,15 @@ CREATE TRIGGER IF NOT EXISTS doc_text_au AFTER UPDATE ON doc_text BEGIN
 END;
 ";
 
-/// v16: normalization-insensitive filename search. SQLite LIKE compares
-/// bytes, so an NFC query can never match an NFD-stored name (Mac/NAS/Dropbox-
-/// synced files). `path_search` holds the NFC form of `path_text`; the app
-/// NFC-normalizes the query and LIKEs against it. Both the Windows dbwriter
-/// (`nfc_path_search`) and macOS (`precomposedStringWithCanonicalMapping`)
-/// apply real NFC at their writers so the contract is symmetric across
-/// platforms (the prior verbatim `path_search = path_text`
-/// asymmetry left NFD filenames unsearchable on Windows only). This migration
-/// itself is append-only and unchanged: the bulk `UPDATE` backfills the
-/// identity case (ASCII / already-NFC rows are correct verbatim) and any
-/// not-yet-NFC row heals to the composed form on its next rescan. NOTE: macOS
-/// must register an identical `v16_path_search` identifier for cross-platform
-/// DB parity.
+/// v16: LIKE compares bytes, so NFD-stored names never match an NFC query; `path_search` holds the NFC form of
+/// `path_text`.
 const V16_PATH_SEARCH: &str = "
 ALTER TABLE files ADD COLUMN path_search TEXT;
 UPDATE files SET path_search = path_text;
 ";
 
-/// v17: churn-stable face-verification keys. v13's face_a/face_b are
-/// face_print ids, which a faces_evaluated re-scan DELETE+re-INSERTs with fresh
-/// ids — after which a stored "different people" verdict's faces no longer
-/// resolve and the anti-merge guard silently no-ops (data loss). Add (file_id,
-/// bbox) keys, which survive re-clustering: a face at a given (file, bbox) is the
-/// same physical face across re-scans. Backfill from face_a/face_b where they
-/// still resolve; the write path populates these going forward and the apply path
-/// re-resolves (file,bbox)→current face id, falling back to the legacy face id for
-/// pre-v17 / unresolvable rows.
-/// NOTE: macOS must register an identical `v17_face_verification_stable_keys`
-/// identifier with equivalent SQL for cross-platform DB parity.
+/// v17: face_print ids are re-inserted on every faces_evaluated re-scan; (file_id, bbox) identifies the same physical
+/// face.
 const V17_FACE_VERIFICATION_STABLE_KEYS: &str = "
 ALTER TABLE face_verifications ADD COLUMN file_a INTEGER;
 ALTER TABLE face_verifications ADD COLUMN bbox_a TEXT;
@@ -186,13 +128,8 @@ UPDATE face_verifications SET
 WHERE face_a IS NOT NULL AND face_b IS NOT NULL;
 ";
 
-/// v18: learn-from-corrections — a token→folder co-occurrence memory. Every move a
-/// user APPLIES in a restructure is, by definition, approved; each moved file's
-/// filename tokens are credited toward its destination folder's basename. The next
-/// plan reads these weights as an additive routing/confidence hint, so the butler
-/// learns the user's filing habits over time (instance-based, no model retraining —
-/// the SOTA pattern). Identifier + SQL must match the Swift `v18_restructure_feedback`
-/// migration exactly for cross-platform DB parity. (RESTRUCTURE.md P3 / deep-research)
+/// v18: token→folder co-occurrence memory for restructure learning; applied moves credit each filename token toward the
+/// destination folder.
 const V18_RESTRUCTURE_FEEDBACK: &str = "
 CREATE TABLE IF NOT EXISTS restructure_feedback (
     token      TEXT    NOT NULL,
@@ -204,10 +141,7 @@ CREATE TABLE IF NOT EXISTS restructure_feedback (
 CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token);
 ";
 
-// v19: records that a doc/pdf's text-extraction stage has run, so the BGE backfill
-// carve-out stops re-walking a doc that yields no embeddable text (an image-only PDF,
-// an iWork package, an empty file) on every rescan. Byte-faithful with the macOS
-// v19_files_text_stage_done migration.
+// v19: marks a doc/pdf text-extraction stage as run, so the BGE backfill stops re-walking docs with no embeddable text.
 const V19_FILES_TEXT_STAGE_DONE: &str = "
 ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;
 ";
@@ -216,8 +150,6 @@ const V20_VLM_FULL_MODEL: &str = "
 ALTER TABLE files ADD COLUMN vlm_full_model TEXT;
 ";
 
-/// The database carries migration identifiers this engine does not know: a
-/// newer FileID wrote it. Opening refuses before any migration runs.
 #[derive(Debug)]
 pub struct NewerThanEngine {
     pub unknown: Vec<String>,
@@ -236,15 +168,12 @@ impl std::fmt::Display for NewerThanEngine {
 
 impl std::error::Error for NewerThanEngine {}
 
-/// Apply every registered migration that hasn't been applied yet, in
-/// registration order, each in its own transaction.
+/// Applies every registered migration not yet applied, in registration order, each in its own transaction.
 pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_TABLE_DDL).context("creating grdb_migrations")?;
 
-    // A DB stamped by a NEWER engine carries identifiers this
-    // registry doesn't know; writing to it could silently break the
-    // newer schema's invariants. Refuse to open instead. macOS mirror:
-    // Database.swift DatabaseOpenError.newerThanEngine.
+    // A DB stamped by a NEWER engine carries unknown identifiers; writing could silently break its schema invariants.
+    // Refuse to open.
     let known: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
     let applied: Vec<String> = conn
         .prepare("SELECT identifier FROM grdb_migrations")?
@@ -274,22 +203,11 @@ pub fn apply(conn: &Connection) -> Result<()> {
         )?;
         tx.commit().with_context(|| format!("committing migration {id}"))?;
     }
+    super::name_sort::fill_missing(conn).context("keying file names for sorting")?;
     Ok(())
 }
 
-// ─── Migration SQL ──────────────────────────────────────────────────────────
-//
-// Each constant below mirrors the SQL the corresponding GRDB Swift
-// migration produces. GRDB's `Database.ColumnType` enum holds UPPERCASE
-// affinity strings (`INTEGER`, `TEXT`, `BLOB`, `DOUBLE`), and its
-// `TableDefinition` DSL emits them verbatim — so we keep UPPERCASE here
-// to match what `sqlite_master.sql` reads back as on a macOS-created DB.
-// SQLite affinity matching is case-insensitive (column INTEGER and
-// integer produce the same storage class) but the literal text in
-// sqlite_master MUST agree across platforms so an ORM doing
-// schema-text comparisons doesn't see drift.
-//
-// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v19.
+// Uppercase affinity names: sqlite_master text must match the GRDB-created schema byte-for-byte across platforms.
 
 const V1_CORE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -428,10 +346,7 @@ ALTER TABLE persons ADD COLUMN anchor_radius      DOUBLE;
 ALTER TABLE persons ADD COLUMN last_clustered_at  DOUBLE;
 "#;
 
-// v11: BGE-small (or future) text embeddings for documents — parallel to
-// `clip_embeddings` (image space). Distinct table because the vector dim +
-// model are different; the `model` column lets multiple text-embedding
-// families coexist if we add another later.
+// Own table: the text vector dim and model differ from clip_embeddings; `model` lets several text families coexist.
 const V11_TEXT_EMBEDDINGS: &str = r#"
 CREATE TABLE IF NOT EXISTS text_embeddings (
     file_id   INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
@@ -440,10 +355,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 );
 "#;
 
-// v10: document text extracted by `pipeline::doc_extract` for txt/md/docx/
-// pptx/xlsx. Mirrors the `ocr_text` /
-// `ocr_fts` shape so the dbwriter inserts are near copy-paste and the
-// existing search ranker can search `doc_fts` with the same query syntax.
+// v10: doc text shares the ocr_text/ocr_fts shape so dbwriter inserts and the search ranker reuse the same query syntax.
 const V10_DOC_TEXT: &str = r#"
 CREATE TABLE IF NOT EXISTS doc_text (
     file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
@@ -469,15 +381,7 @@ CREATE TABLE IF NOT EXISTS usn_state (
 );
 "#;
 
-// v8: rename / move identity. `content_hash` is the cross-platform SHA-256
-// recipe (full for ≤16 MB; head+interior-samples+tail+size composite above) — see util::content_hash.
-// The rename-heal also matches the recipe-v1 head+tail+size digest stamped by
-// pre-interior-sample builds, then re-stamps the current recipe). `file_ref`
-// is the platform's volume-local file id (NTFS MFT reference on Windows via
-// GetFileInformationByHandle; inode on macOS). Both are nullable so a row
-// missing them (e.g. an online-only OneDrive placeholder, or a permission
-// error during the metadata pass) still inserts. The partial indexes keep the
-// rename-heal lookup O(log n) without paying index cost on the NULL rows.
+// v8: rename/move identity. content_hash is the cross-platform recipe in util::content_hash; the rename-heal also matches the pre-interior-sample recipe-v1 digest and re-stamps it. file_ref is the volume-local file id; both nullable, partial indexes skip NULL rows.
 const V8_CONTENT_IDENTITY: &str = r#"
 ALTER TABLE files ADD COLUMN content_hash BLOB;
 ALTER TABLE files ADD COLUMN file_ref     INTEGER;
@@ -512,6 +416,102 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_written_before_the_name_sort_key_opens_and_every_row_gets_one() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
+        for (id, sql) in registry().into_iter().take_while(|(id, _)| *id != "v38_files_name_sort") {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO grdb_migrations (identifier) VALUES (?1)", [id]).unwrap();
+        }
+        for id in 1..=12_000_i64 {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1,0,'image','jpg')",
+                rusqlite::params![id, format!("/Photos/IMG_{id}.jpg")],
+            )
+            .unwrap();
+        }
+        apply(&conn).unwrap();
+        let unkeyed: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE name_sort = ''", [], |r| r.get(0)).unwrap();
+        assert_eq!(unkeyed, 0, "the migration keys every existing row");
+        let first: i64 = conn
+            .query_row("SELECT id FROM files ORDER BY name_sort, id LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(first, 1, "IMG_1 sorts before IMG_2 and IMG_10 sorts after IMG_9");
+        let plan: String = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT id FROM files WHERE failed = 0 ORDER BY name_sort, id LIMIT 200")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" | ");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn the_file_search_index_finds_substrings_and_follows_inserts_renames_and_deletes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
+        for (id, sql) in registry().into_iter().take_while(|(id, _)| *id != "v39_files_search_fts") {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO grdb_migrations (identifier) VALUES (?1)", [id]).unwrap();
+        }
+        let add = |id: i64, path: &str, description: Option<&str>| {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_search,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?2,?1,1,0,'image','jpg',?3)",
+                rusqlite::params![id, path, description],
+            )
+            .unwrap();
+        };
+        add(1, "/lib/SunsetBeach.jpg", None);
+        add(2, "/lib/other.jpg", Some("two dogs on the beach at dusk"));
+        apply(&conn).unwrap();
+        let hits = |needle: &str| -> Vec<i64> {
+            conn.prepare("SELECT rowid FROM files_search_fts WHERE files_search_fts MATCH ?1 ORDER BY rowid")
+                .unwrap()
+                .query_map([format!("\"{needle}\"")], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(hits("beach"), vec![1, 2], "a partial name and a description both match, whatever the case");
+        add(3, "/lib/Beachball.png", None);
+        assert_eq!(hits("each"), vec![1, 2, 3]);
+        conn.execute("UPDATE files SET path_search = '/lib/harbor.jpg', path_text = '/lib/harbor.jpg' WHERE id = 1", []).unwrap();
+        assert_eq!(hits("beach"), vec![2, 3]);
+        conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
+        assert_eq!(hits("beach"), vec![3]);
+    }
+
+    #[test]
+    fn faces_already_in_a_catalog_are_marked_baseline_so_they_never_come_back_as_new() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_TABLE_DDL).unwrap();
+        for (id, sql) in registry().into_iter().take_while(|(id, _)| *id != "v32_face_review") {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO grdb_migrations (identifier) VALUES (?1)", [id]).unwrap();
+        }
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/a.jpg',1,1,0,'image','jpg')", []).unwrap();
+        conn.execute(
+            "INSERT INTO face_prints(id,file_id,print_data,bbox,embedding_model,processing_version) VALUES(1,1,X'00','0,0,1,1','sface','macos-v3'),(2,1,X'00','0,0,.5,.5',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        apply(&conn).unwrap();
+        let rows: Vec<(i64, String, String)> = conn
+            .prepare("SELECT face_id,namespace,outcome FROM face_assignment_assessed ORDER BY face_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![(1, "sface|macos-v3".into(), "baseline".into()), (2, "|".into(), "baseline".into())]);
+        conn.execute("INSERT INTO face_prints(id,file_id,print_data,bbox) VALUES(3,1,X'00','0,0,.2,.2')", []).unwrap();
+        let assessed: i64 = conn.query_row("SELECT COUNT(*) FROM face_assignment_assessed WHERE face_id=3", [], |r| r.get(0)).unwrap();
+        assert_eq!(assessed, 0, "a face found after the migration is new");
+    }
+
+    #[test]
     fn fresh_database_applies_all_migrations() {
         let conn = Connection::open_in_memory().unwrap();
         for pragma in crate::db::SETUP_PRAGMAS {
@@ -523,7 +523,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 36, "expected 36 applied migrations");
+        assert_eq!(n, 41, "expected 41 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -535,7 +535,6 @@ mod tests {
             .unwrap();
         assert_eq!(full_model_column, ("TEXT".into(), 0, None));
 
-        // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('face_verifications') WHERE name IN ('face_a', 'face_b')",
@@ -545,7 +544,6 @@ mod tests {
             .unwrap();
         assert_eq!(verify_cols, 2, "v13 must add face_a + face_b columns");
 
-        // v17 added the churn-stable (file_id, bbox) keys.
         let stable_cols: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('face_verifications') \
@@ -556,9 +554,6 @@ mod tests {
             .unwrap();
         assert_eq!(stable_cols, 4, "v17 must add file_a/bbox_a/file_b/bbox_b columns");
 
-        // Spot-check schema cardinals: files has 23 columns including v3
-        // additions (vlm_*) and v8 additions (content_hash, file_ref);
-        // persons has 11 columns including v5 + v7 additions.
         let files_cols: i64 = conn
             .query_row("SELECT COUNT(*) FROM pragma_table_info('files')", [], |r| r.get(0))
             .unwrap();
@@ -569,8 +564,6 @@ mod tests {
             .unwrap();
         assert!(persons_cols >= 11, "persons expected >= 11 columns, got {persons_cols}");
 
-        // FTS5 virtual table is reachable (insert + query); the v15 AFTER
-        // INSERT trigger indexes the ocr_text row — no manual ocr_fts write.
         conn.execute_batch(r#"
             INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
               VALUES ('/test/a.png', 1, 100, 1.0, 'image', 'png');
@@ -583,13 +576,11 @@ mod tests {
             .query_row("SELECT id FROM files WHERE path_text = '/test/a.png'", [], |r| r.get(0))
             .unwrap();
 
-        // Hit: matching word returns the file's rowid (== file_id).
         let matched_rowid: i64 = conn
             .query_row("SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH 'fox'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(matched_rowid, file_id, "FTS rowid must match files.id");
 
-        // Miss: a word that isn't in the indexed text returns zero hits.
         let misses: i64 = conn
             .query_row("SELECT COUNT(*) FROM ocr_fts WHERE ocr_fts MATCH 'aardvark'", [], |r| r.get(0))
             .unwrap();
@@ -600,15 +591,13 @@ mod tests {
     fn migrations_are_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         apply(&conn).unwrap();
-        apply(&conn).unwrap(); // second run is a no-op
+        apply(&conn).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 36);
+        assert_eq!(n, 41);
     }
 
-    /// A "different people" verdict's churn-stable (file_id, bbox)
-    /// key must still resolve to the CURRENT face after a faces_evaluated re-scan
-    /// DELETE+re-INSERTs face_prints with fresh ids (the legacy face_a/face_b id is
-    /// then dangling). macOS mirror: MigrationParityTests.verdictSurvivesFaceChurn.
+    /// A "different people" verdict's churn-stable (file_id, bbox) key must still resolve to the current face after a
+    /// faces_evaluated re-scan DELETE+re-INSERTs face_prints with fresh ids (the face_a/face_b id is then dangling).
     #[test]
     fn verdict_stable_key_survives_face_print_churn() {
         let conn = Connection::open_in_memory().unwrap();
@@ -619,14 +608,11 @@ mod tests {
              (2, '/b.jpg', 2, 100, 0, 'image', 'jpg')",
             [],
         ).unwrap();
-        // Two faces (one per file) — the verdict says they are different people.
         conn.execute(
             "INSERT INTO face_prints (id, file_id, print_data, bbox) VALUES \
              (10, 1, x'00', '0.1,0.1,0.2,0.2'), (20, 2, x'00', '0.3,0.3,0.2,0.2')",
             [],
         ).unwrap();
-        // Verdict written with both the legacy face ids AND the stable keys (the
-        // write path populates both).
         conn.execute(
             "INSERT INTO face_verifications \
                 (person_a, person_b, same_person, confidence, vlm_model, verified_at, \
@@ -634,19 +620,16 @@ mod tests {
              VALUES (1, 2, 0, 1.0, 'user-verified', 0, 10, 20, 1, '0.1,0.1,0.2,0.2', 2, '0.3,0.3,0.2,0.2')",
             [],
         ).unwrap();
-        // CHURN: re-scan drops + re-inserts the faces with FRESH ids (same file+bbox).
         conn.execute("DELETE FROM face_prints", []).unwrap();
         conn.execute(
             "INSERT INTO face_prints (id, file_id, print_data, bbox) VALUES \
              (101, 1, x'00', '0.1,0.1,0.2,0.2'), (202, 2, x'00', '0.3,0.3,0.2,0.2')",
             [],
         ).unwrap();
-        // The legacy face id is now dangling (the earlier failure mode)…
         let legacy_resolves: i64 = conn
             .query_row("SELECT COUNT(*) FROM face_prints WHERE id IN (10, 20)", [], |r| r.get(0))
             .unwrap();
         assert_eq!(legacy_resolves, 0, "churn must invalidate the legacy face ids");
-        // …but the stable (file_id, bbox) key resolves to the NEW face ids (the fix).
         let new_a: i64 = conn
             .query_row(
                 "SELECT id FROM face_prints WHERE file_id = \
@@ -669,9 +652,8 @@ mod tests {
         assert_eq!(new_b, 202, "stable key B must resolve to the re-scanned face");
     }
 
-    /// A DB stamped by a newer engine must refuse to open
-    /// rather than silently write into a schema this build doesn't know.
-    /// macOS mirror: MigrationParityTests.newerDatabaseRefusesToOpen.
+    /// A DB stamped by a newer engine must refuse to open rather than silently write into a schema this build doesn't
+    /// know.
     #[test]
     fn newer_db_with_unknown_migration_is_refused() {
         let conn = Connection::open_in_memory().unwrap();
@@ -687,16 +669,12 @@ mod tests {
         assert!(err.downcast_ref::<NewerThanEngine>().is_some());
     }
 
-    /// The migration chains forked at v14 (macOS registered
-    /// "v14_fts_sync_triggers" while this engine registered
-    /// "v14_files_kind_scanned_index"), which made a macOS-touched library
-    /// fail every Windows scan with SQLITE_CORRUPT. Both platforms pin the
-    /// same canonical identifier list — the macOS mirror lives in
-    /// platforms/apple/Tests/EngineTests/MigrationParityTests.swift. Update
-    /// BOTH or the chains fork again.
+    /// The migration chains once forked at v14 ("v14_fts_sync_triggers" vs "v14_files_kind_scanned_index"), which made a
+    /// library touched on macOS fail every Windows scan with SQLITE_CORRUPT. The canonical list is pinned here and
+    /// against a catalog the Swift engine wrote (see `catalog_the_swift_engine_wrote_matches_the_migrations`).
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 36] = [
+        const CANONICAL: [&str; 41] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -733,14 +711,62 @@ mod tests {
             "v34_scan_catchup",
             "v35_foreign_key_indexes",
             "v36_scan_failures",
+            "v37_files_size_index",
+            "v38_files_name_sort",
+            "v39_files_search_fts",
+            "v40_library_roots_capture_dates",
+            "v41_scan_session_skipped",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
     }
 
-    /// V15 installed the six FTS sync triggers (same DDL macOS applies).
-    /// Verify they exist and that the FTS index survives a macOS-shaped
-    /// content-table churn without corruption.
+    /// A catalog the retired Swift engine wrote (GRDB, its 36 migrations) names
+    /// the first migrations registered here and holds the same tables and
+    /// indexes (index names differ for `files_on_kind`/`files_on_path_hash`).
+    #[test]
+    fn catalog_the_swift_engine_wrote_matches_the_migrations() {
+        let swift = crate::db::test_support::swift_catalog("swift-written-chat-history");
+        let names = |conn: &Connection, sql: &str| -> Vec<String> {
+            let mut statement = conn.prepare(sql).unwrap();
+            statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let swift_migrations = names(&swift.conn, "SELECT identifier FROM grdb_migrations ORDER BY rowid");
+        let ids: Vec<String> = registry().iter().map(|(id, _)| (*id).to_string()).collect();
+        assert_eq!(swift_migrations, ids[..swift_migrations.len()]);
+
+        let fresh = Connection::open_in_memory().unwrap();
+        apply(&fresh).unwrap();
+        let tables = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
+        assert_eq!(names(&swift.conn, tables), names(&fresh, tables));
+    }
+
+    #[test]
+    fn library_size_sort_and_duplicate_size_classes_walk_an_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let details: Vec<String> =
+                statement.query_map([], |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            details.join(" | ")
+        };
+        let sorted = plan("SELECT id FROM files WHERE failed = 0 ORDER BY size_bytes DESC, id DESC LIMIT 200");
+        assert!(sorted.contains("files_on_size") && !sorted.contains("TEMP B-TREE"), "{sorted}");
+        let added = plan("SELECT id FROM files WHERE failed = 0 ORDER BY scanned_at DESC, id DESC LIMIT 200");
+        assert!(added.contains("idx_files_scanned") && !added.contains("TEMP B-TREE"), "{added}");
+        for (direction, index) in [("DESC", "files_on_taken_newest"), ("ASC", "files_on_taken_oldest")] {
+            let taken = plan(&format!(
+                "SELECT id FROM files WHERE failed = 0 ORDER BY (COALESCE(created_at, modified_at) IS NULL), \
+                 COALESCE(created_at, modified_at) {direction}, id {direction} LIMIT 200"
+            ));
+            assert!(taken.contains(index) && !taken.contains("TEMP B-TREE"), "{taken}");
+        }
+        let classes =
+            plan("SELECT size_bytes, COUNT(*) FROM files WHERE failed = 0 AND size_bytes >= 0 GROUP BY size_bytes HAVING COUNT(*) > 1");
+        assert!(classes.contains("INDEX files_on_size"), "{classes}");
+    }
+
     #[test]
     fn v15_installs_fts_sync_triggers() {
         let conn = Connection::open_in_memory().unwrap();
@@ -758,12 +784,9 @@ mod tests {
         assert_eq!(triggers, 6, "all six v15 sync triggers must exist");
     }
 
-    /// V16 added the nullable `path_search` shadow column for normalization-
-    /// insensitive filename search, backfilled from `path_text`.
     #[test]
     fn v16_adds_and_backfills_path_search() {
         let conn = Connection::open_in_memory().unwrap();
-        // Run v1–v15, insert a pre-v16 row, then let v16 backfill it.
         for (id, sql) in registry() {
             if id == "v16_path_search" {
                 break;
@@ -788,9 +811,6 @@ mod tests {
         assert_eq!(backfilled, "C:\\test\\legacy.png", "v16 must backfill path_search from path_text");
     }
 
-    /// V10 added the `doc_text` + `doc_fts` (FTS5) pair, mirroring `ocr_text`
-    /// /`ocr_fts`. Verify the table + virtual table both exist and the FTS5
-    /// content_rowid is wired correctly (insert → match).
     #[test]
     fn v10_doc_text_and_fts_are_searchable() {
         let conn = Connection::open_in_memory().unwrap();
@@ -823,8 +843,6 @@ mod tests {
         assert_eq!(miss, 0);
     }
 
-    /// V9 provisioned the per-volume USN cursor table (foundation; reader
-    /// integration is a follow-up). Verify the table + the key column exist.
     #[test]
     fn v9_usn_state_table_exists() {
         let conn = Connection::open_in_memory().unwrap();
@@ -851,8 +869,6 @@ mod tests {
         }
     }
 
-    /// V8 added `content_hash` (BLOB) + `file_ref` (INTEGER) on `files` for
-    /// rename/move identity. Verify the columns + their partial indexes exist.
     #[test]
     fn v8_adds_content_identity_columns_and_indexes() {
         let conn = Connection::open_in_memory().unwrap();
@@ -879,9 +895,6 @@ mod tests {
         assert_eq!(idx, 2, "both v8 partial indexes must exist");
     }
 
-    /// V14 added the composite `(kind, scanned_at)` index so the kind-filtered
-    /// Library grid avoids a TEMP B-TREE sort. Verify the index exists and that
-    /// the planner uses it (no SCAN / TEMP B-TREE) for the grid query shape.
     #[test]
     fn v14_adds_kind_scanned_composite_index() {
         let conn = Connection::open_in_memory().unwrap();

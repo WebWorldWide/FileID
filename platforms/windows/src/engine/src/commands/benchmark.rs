@@ -1,6 +1,3 @@
-//! `benchmarkModel` / `cancelBenchmark`: run the on-device benchmark for one
-//! installed model and report progress and the result over IPC.
-
 use crate::ipc::sink::Sink;
 use crate::ipc::{BenchmarkModelPayload, BenchmarkProgress, BenchmarkResult, EventPayload, IpcEvent, Wrap};
 use parking_lot::Mutex;
@@ -18,7 +15,6 @@ async fn finish(sink: &Sink, payload: &BenchmarkModelPayload, status: &str, mess
 }
 
 pub async fn handle(sink: Sink, payload: BenchmarkModelPayload) {
-    // The Mac app's engine benchmarks only the kinds `AIModelKind(rawValue:)` knows, as Swift.
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     let known = crate::models::mlx::repo(&payload.model_kind).is_some();
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
@@ -63,5 +59,41 @@ pub async fn handle(sink: Sink, payload: BenchmarkModelPayload) {
 pub fn cancel() {
     if let Some(flag) = running().lock().as_ref() {
         flag.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(test, not(all(target_os = "macos", feature = "apple-adapters"))))]
+mod tests {
+    use super::*;
+
+    // A benchmark of a model that is not on disk refuses with the reason and
+    // writes nothing under the models folder: it never starts a download.
+    #[test]
+    fn a_model_that_is_not_installed_is_refused_without_a_download() {
+        let _env = crate::paths::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let models = std::env::temp_dir().join(format!("fileid-bench-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&models).unwrap();
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &models) };
+        let (sink, mut events) = Sink::channel_for_test(64);
+        let payload = BenchmarkModelPayload { request_id: "bench-1".into(), model_kind: "qwen2_5_vl_7b".into(), tune: false };
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(handle(sink, payload));
+        let written: Vec<_> = walkdir::WalkDir::new(&models).min_depth(1).into_iter().filter_map(Result::ok).map(|e| e.into_path()).collect();
+        std::fs::remove_dir_all(&models).ok();
+        match saved {
+            Some(value) => unsafe { std::env::set_var("FILEID_MODELS_DIR", value) },
+            None => unsafe { std::env::remove_var("FILEID_MODELS_DIR") },
+        }
+        let mut results = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let EventPayload::BenchmarkResult(result) = event.payload {
+                results.push(result.inner);
+            }
+        }
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, "error");
+        let message = results[0].message.clone().unwrap_or_default();
+        assert!(message.contains("not installed") && message.contains("no download was started"), "{message}");
+        assert!(written.is_empty(), "nothing is written under the models folder: {written:?}");
     }
 }

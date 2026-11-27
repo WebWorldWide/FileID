@@ -70,7 +70,6 @@ enum MediaFrames {
         return rgb
     }
 
-    // MARK: Frame pool (the Swift engine's `VideoFramePool`)
 
     struct PoolFrame: Sendable {
         let seconds: Double
@@ -87,7 +86,7 @@ enum MediaFrames {
 
     /// Decodes every `interval` frame no larger than `maxPixel` into `directory` as
     /// JPEGs plus `manifest.json` ({duration, size, modifiedAt, frames: [{seconds,
-    /// file, signature}]}), the contract of the Swift engine's `--sample-video-pool`.
+    /// file, signature}]}), the output of the Rust engine's `--sample-video-pool`.
     static func pool(source: URL, interval: Double, maxPixel: Int, directory: URL, cancel: CancelFlag) async -> PoolOutcome {
         guard interval.isFinite, interval >= 0.1, interval <= 10, (32...1024).contains(maxPixel) else { return .invalid }
         do {
@@ -205,7 +204,7 @@ enum MediaFrames {
         try (data as Data).write(to: url, options: .withoutOverwriting)
     }
 
-    /// 32x18 grayscale, the activity signature both engines compare.
+    /// 32x18 grayscale, the activity signature the timeline compares.
     static func signature(_ image: CGImage) throws -> [UInt8] {
         let width = 32, height = 18
         var pixels = [UInt8](repeating: 0, count: width * height)

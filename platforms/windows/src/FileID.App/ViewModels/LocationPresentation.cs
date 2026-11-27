@@ -4,7 +4,6 @@ using FileID.Services;
 
 namespace FileID.ViewModels;
 
-/// <summary>Text for Settings ▸ Locations rows (macOS LocationsCard / LocationText).</summary>
 internal static class LocationPresentation
 {
     public const string Empty = "No locations yet. Scan a folder or drive and it appears here.";
@@ -35,11 +34,12 @@ internal static class LocationPresentation
         string.Create(CultureInfo.CurrentCulture, $"{Math.Max(1, count):N0} {unit}{(Math.Max(1, count) == 1 ? "" : "s")} ago");
 
     public static string Spoken(LibraryRoot root, DateTimeOffset now) =>
-        $"{root.Display}, {(root.Online ? "online" : "offline")}, {Summary(root, now)}";
+        $"{root.Display}, {(root.Online ? "online" : "offline")}{(root.ReadOnly == true ? ", read-only" : string.Empty)}, {Summary(root, now)}";
+
+    public const string ReadOnlyTooltip = "FileID can show and search these files but can\u2019t change them.";
 
     public static string RescanTooltip(LibraryRoot root) => root.Online ? "Scan this location again" : "Reconnect the drive to rescan";
 
-    /// <summary>Segoe Fluent glyph: network share, external drive, or folder.</summary>
     public static string Glyph(string kind) => kind switch
     {
         "network" => "\uE968",

@@ -20,13 +20,13 @@
   },
   {
     "name": "app-hosted-refusals-without-models-match-the-swift-engine",
-    "description": "With no local model installed: an idle chat cancel and video analysis answer with the Swift engine's words; Deep Analyze of a file that isn't in the catalog, an empty folder or an empty library says \"Queued\" and \"Finding files to analyze…\" and finishes with nothing to do (no model load); an unknown model kind is refused with unknown_model and one failure for every Deep Analyze command; a benchmark of a model that isn't downloaded, or of an unknown kind, answers with Swift's messages and never downloads.",
+    "description": "With no local model installed: an idle chat cancel and video analysis answer with the Swift engine's words; Deep Analyze of an empty folder or an empty library says \"Queued\" and \"Finding files to analyze…\" and finishes with nothing to do (no model load), while a single file that isn't in the catalog ends as one failure; an unknown model kind is refused with unknown_model and one failure for every Deep Analyze command; a benchmark of a model that isn't downloaded, or of an unknown kind, answers with Swift's messages and never downloads.",
     "appHosted": true,
     "env": {"FILEID_HF_CACHE_ROOT": "{state}/hf"},
     "steps": [
       {"label": "idle chat cancel", "chat": {"action": "cancel"}, "expect": {"status": "cancelled", "message": "Model response stopped.", "messages": [], "hits": []}},
       {"label": "video analysis without a visual model", "catalog": {"action": "enqueueTimeline", "fileIDs": [1]}, "expect": {"status": "error", "message": "Pick and load an AI model in Describe Files first. FileID won't download one by itself.", "jobs": []}},
-      {"label": "Deep Analyze a missing file", "command": {"deepAnalyzeFile": {"fileID": 41, "modelKind": "qwen3_vl_2b"}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 0, "cancelled": false, "modelKind": "qwen3_vl_2b"}, "collect": {"error": {"$tol": "count", "value": 0}, "deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}}},
+      {"label": "Deep Analyze a missing file", "command": {"deepAnalyzeFile": {"fileID": 41, "modelKind": "qwen3_vl_2b"}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 1, "cancelled": false, "modelKind": "qwen3_vl_2b"}, "collect": {"error": {"$tol": "exact", "value": [{"kind": "deep_analyze_failed", "message": "FileID can’t describe this file. It may have moved, or its type isn’t supported."}]}, "deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}}},
       {"label": "Deep Analyze an empty folder", "command": {"deepAnalyzeFolder": {"pathPrefix": "{root}/nothing-here", "modelKind": "qwen3_vl_2b"}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 0, "cancelled": false}, "collect": {"deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}, "error": {"$tol": "count", "value": 0}}},
       {"label": "Deep Analyze an empty library", "command": {"deepAnalyzeAll": {"modelKind": "qwen3_vl_2b", "skipExisting": true}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 0, "cancelled": false}, "collect": {"deepAnalyzeStarting": {"$tol": "exact", "value": [{"modelKind": "qwen3_vl_2b", "phase": "queued", "message": "Queued"}, {"modelKind": "qwen3_vl_2b", "phase": "resolvingTargets", "message": "Finding files to analyze…"}]}, "error": {"$tol": "count", "value": 0}}},
       {"label": "unknown kind, all", "command": {"deepAnalyzeAll": {"modelKind": "not_a_model", "skipExisting": true}}, "await": "deepAnalyzeComplete", "expect": {"processed": 0, "failed": 1, "totalSeconds": 0, "cancelled": false}, "collect": {"error": {"$tol": "exact", "value": [{"kind": "unknown_model", "message": "This copy of FileID doesn't have that AI model. Pick another one in Settings.", "modelKind": "not_a_model"}]}, "deepAnalyzeStarting": {"$tol": "count", "value": 0}}},
@@ -56,47 +56,39 @@
     ]
   },
   {
-    "name": "cross-tools-swift-previews-chapters-rust-executes",
-    "description": "A chapter-marker export (VTT) previewed by swift is executed by rust and undone by swift, with the same outputs, names and states in both engines; the video is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["swift"],
-    "start": "swift",
+    "name": "swift-written-tools-chapters-preview",
+    "description": "A chapter-marker export (VTT) previewed by the Swift engine, its operation record in the catalog it wrote, is executed and undone by this engine; the video is never modified.",
+    "fixture": "swift-written-tools-chapters-preview",
+    "os": ["darwin"],
     "tree": [
-      {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
-      {"path": "out/keep.txt", "content": "keep\n"}
+        {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
+        {"path": "out/keep.txt", "content": "keep\n"}
     ],
     "steps": [
-      {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
-      {"label": "swift previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "vtt", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.vtt}", "sourcePath": "{path:Clip.mov}"}]}},
-      {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.vtt"]}},
-      {"restart": "rust"},
-      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.vtt}"}]}},
-      {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
-      {"restart": "swift"},
-      {"label": "swift undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.vtt}"}]}},
+        {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
+        {"restart": true},
+        {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.vtt"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
     ]
   },
   {
-    "name": "cross-tools-rust-previews-chapters-swift-executes",
-    "description": "A chapter-marker export (JSON) previewed by rust is executed by swift and undone by rust, with the same outputs, names and states in both engines; the video is never modified.",
-    "requires": ["swift", "rust"],
-    "engines": ["rust"],
-    "start": "rust",
+    "name": "tools-chapters-json-preview-execute-undo-across-restarts",
+    "description": "A chapter-marker export (JSON) previewed, executed and undone across engine restarts, with the same outputs, names and states; the video is never modified.",
     "tree": [
-      {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
-      {"path": "out/keep.txt", "content": "keep\n"}
+        {"path": "Clip.mov", "copy": "shared/test-corpus/conformance-media/clip-rotated.mov", "row": {"id": 1, "kind": "video"}},
+        {"path": "out/keep.txt", "content": "keep\n"}
     ],
     "steps": [
-      {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
-      {"label": "rust previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "json", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.json}", "sourcePath": "{path:Clip.mov}"}]}},
-      {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.json"]}},
-      {"restart": "swift"},
-      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.json}"}]}},
-      {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
-      {"restart": "rust"},
-      {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
-      {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
+        {"label": "chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "c1", "fileID": 1, "startSeconds": 0.0, "endSeconds": 1.0, "title": "Opening", "summary": "The first second", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": true, "stale": false}}, "expect": {"status": "ok"}},
+        {"label": "rust previews", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}/out", "recipe": {"kind": "chapters", "format": "json", "maxDimension": 1}}, "save": [{"name": "op", "path": "operationID"}], "expect": {"status": "ok", "outputs": [{"fileID": 1, "state": "pending", "outputPath": "{std_path:out/Clip - Chapters.json}", "sourcePath": "{path:Clip.mov}"}]}},
+        {"label": "preview writes nothing", "fs": {"absent": ["out/Clip - Chapters.json"]}},
+        {"restart": true},
+        {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": "{std_path:out/Clip - Chapters.json}"}]}},
+        {"label": "exported", "fs": {"exists": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}},
+        {"restart": true},
+        {"label": "rust undoes", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}/out"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+        {"label": "output removed, video intact", "fs": {"absent": ["out/Clip - Chapters.json"], "sha256": {"Clip.mov": "{sha256:Clip.mov}"}}}
     ]
   }
 ]

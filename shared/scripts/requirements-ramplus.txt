@@ -7,7 +7,7 @@
 # (setup-dev creates `.venv-ramplus/`) before the model can be exported.
 #
 # CPU torch is fine — export is a one-time, seconds-long forward pass.
-# If an import STILL fails, the export script now prints the real error; adjust
+# If an import still fails, the export script prints the real error; adjust
 # the offending pin here and re-run.
 
 torch==2.13.0

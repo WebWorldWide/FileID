@@ -7,17 +7,27 @@
 //   FILEID_SELF_SHOT_PAGES=a,b     page names or slugs (default: every page)
 //   FILEID_SELF_SHOT_SETTLE=2      seconds to wait after each navigation
 //   FILEID_SELF_SHOT_FOLDER=<dir>  library folder to open (and scan when the catalog is empty)
+//   FILEID_SELF_SHOT_NO_SCAN=1     open FILEID_SELF_SHOT_FOLDER without scanning it (a folder chosen but not yet read)
+//   FILEID_SELF_SHOT_SCAN_SETTLE=1 seconds into a scan before the "-scanning" capture (at most SETTLE)
+//   FILEID_SELF_SHOT_MORE_FOLDERS=<dir>:<dir>  after that scan, scan each of these too (a library with several locations)
 //   FILEID_SELF_SHOT_QUERY=<text>  searches Search & Moments (the Chat hand-off path) before its capture
-//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>];...   extra captures after the pages
+//   FILEID_SELF_SHOT_VIEWS=<name>=<page>[?kind=doc&query=x&scroll=bottom|<points>&preview=<file name>&focus=<n key-view steps>&act=<action>[:<argument>]];...   extra captures after the pages
+//        actions: end (Library jumps to its last row, as the End key does), select:<file name> (Library pane), checks:<n> (Library select mode), person:<n> (People detail), suggested (Suggest merges sheet), review[:faces|merges|splits] (People review sheet on that tab),
+//        models (Chat/Describe model sheets), welcome, welcome-download (Welcome with the description model mid-download); each is closed again after the capture
 //   FILEID_SELF_SHOT_CLUSTER=1     after the scan, run People's "Group faces" (the button's own call) and wait for it, so faces are embedded and grouped before the captures
-//   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded (the Engine choice and the engine that is running)
+//   FILEID_SELF_SHOT_ADVANCED=1    Settings opens with its Advanced card expanded
 //   FILEID_SELF_SHOT_DESCRIBE=<n>  after the pages, describe the first n photos with the active model (the Library selection button's call) and capture the Describe Files page and the status pill while it runs and when it ends
 //   FILEID_SELF_SHOT_MODEL=<kind>  makes this the active description model before the Describe, Chat and Moments steps (for example qwen3_vl_2b)
 //   FILEID_SELF_SHOT_CHAT=<q>|<q>  after that, ask each question in Chat (the composer's send) and capture the answer
 //   FILEID_SELF_SHOT_CHAT_SCOPED=<q>  one more question attached to the first FILEID_SELF_SHOT_CHAT_SCOPE_N (default 6) photos, the selection check
 //   FILEID_SELF_SHOT_MOMENTS_VIDEO=<name>  in Search & Moments, search for the name, open its first video and press Find moments (Quick); capture when the job ends
-//   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder>
+//   FILEID_SELF_SHOT_TOOLS=<query>  in File Tools, search, select the first FILEID_SELF_SHOT_TOOLS_N (default 2) results and press Preview; FILEID_SELF_SHOT_TOOLS_KIND=photo|video, FILEID_SELF_SHOT_TOOLS_DEST=<scratch folder that exists>
+//                                  a query that finds nothing is logged and retried with the first library photo's name (an exact name: the search matches whole words, so "IMG_41" finds nothing)
+//   FILEID_SELF_SHOT_TOOLS_VIDEO=<query>  one more pass with the first video found, the Trim tool from 0 to 1 second, previewed (needs FILEID_SELF_SHOT_TOOLS)
+//   FILEID_SELF_SHOT_DRAWER=1      opens Chat beside the page before the captures
+//   FILEID_SELF_SHOT_FACTORY_RESET=<Application Support/FileID path>  runs Settings' factory reset at the end, only when the value is exactly the folder it would erase
 //   FILEID_WIN_SIZE=WxH            content size of the window
+// Not captured: an AVPlayerView's picture and inline controls (a video preview reads black here, as it does for any H.264 clip).
 import AppKit
 import SwiftUI
 import FileIDShared
@@ -32,6 +42,7 @@ struct SelfShotView: Equatable {
     var scrollOffset: Double?
     var preview: String?
     var focusSteps = 0
+    var action: String?
 
     /// "docs=Library?kind=doc;found=Library?query=invoice%20total;lower=Settings?scroll=bottom"
     static func parse(_ raw: String?, available: [String]) -> [SelfShotView] {
@@ -52,6 +63,7 @@ struct SelfShotView: Equatable {
                     case "query": view.query = value.isEmpty ? nil : value
                     case "focus": view.focusSteps = max(0, min(20, Int(value) ?? 0))
                     case "preview": view.preview = value.isEmpty ? nil : value
+                    case "act": view.action = value.isEmpty ? nil : value
                     case "scroll": view.scrollToBottom = value == "bottom"; view.scrollOffset = Double(value)
                     default: break
                     }
@@ -66,7 +78,10 @@ struct SelfShotPlan: Equatable {
     var dir: URL
     var pages: [String]
     var folder: URL?
+    var moreFolders: [URL] = []
+    var openOnly = false
     var settle: Double
+    var scanSettle: Double = 1
     var windowSize: CGSize?
     var query: String?
     var clusterFaces = false
@@ -80,7 +95,11 @@ struct SelfShotPlan: Equatable {
         let folder = environment["FILEID_SELF_SHOT_FOLDER"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
         return SelfShotPlan(dir: URL(fileURLWithPath: dir, isDirectory: true),
                             pages: parsePages(environment["FILEID_SELF_SHOT_PAGES"], available: available),
-                            folder: folder, settle: settle,
+                            folder: folder,
+                            moreFolders: (environment["FILEID_SELF_SHOT_MORE_FOLDERS"] ?? "").split(separator: ":").map { URL(fileURLWithPath: String($0), isDirectory: true) },
+                            openOnly: environment["FILEID_SELF_SHOT_NO_SCAN"] == "1",
+                            settle: settle,
+                            scanSettle: environment["FILEID_SELF_SHOT_SCAN_SETTLE"].flatMap(Double.init).map { max(0, $0) } ?? 1,
                             windowSize: parseSize(environment["FILEID_WIN_SIZE"]),
                             query: environment["FILEID_SELF_SHOT_QUERY"].flatMap { $0.isEmpty ? nil : $0 },
                             clusterFaces: environment["FILEID_SELF_SHOT_CLUSTER"] == "1",
@@ -117,8 +136,10 @@ struct SelfShotPlan: Equatable {
 
 extension Notification.Name {
     static let selfShotOpenPreview = Notification.Name("FileID.selfShotOpenPreview")
+    static let selfShotClosePreview = Notification.Name("FileID.selfShotClosePreview")
     static let selfShotSendChat = Notification.Name("FileID.selfShotSendChat")
     static let selfShotFindMoments = Notification.Name("FileID.selfShotFindMoments")
+    static let selfShotAction = Notification.Name("FileID.selfShotAction")
 }
 
 @MainActor
@@ -127,9 +148,14 @@ enum SelfShot {
         environment: ProcessInfo.processInfo.environment,
         available: MainWindow.Tab.allCases.map(\.rawValue))
     static var isActive: Bool { plan != nil }
+    static let opensChatDrawer = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_DRAWER"] == "1" && plan != nil
     static let expandAdvanced = ProcessInfo.processInfo.environment["FILEID_SELF_SHOT_ADVANCED"] == "1" && plan != nil
+    /// Makes the Welcome sheet open with the description model downloading, so that state can be captured without a download.
+    static var welcomeDemoDownload = false
     private static weak var engineRef: EngineClient?
     private static var started = false
+    /// Set by the Library when a jump to the end of its listing has loaded every row and scrolled there.
+    static var jumpFinished = false
 
     static func run(engine: EngineClient, store: ReadStore, navigate: @escaping (String) -> Void,
                     openFolder: @escaping (URL, Bool) -> Void) {
@@ -140,21 +166,32 @@ enum SelfShot {
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: plan.dir, withIntermediateDirectories: true)
             if let size = plan.windowSize { window()?.setContentSize(size) }
+            noteMenuShortcuts()
             await waitUntil(timeout: 90) { if case .ready = engine.state { return true } else { return false } }
+            note("engine ready \(launchAgeMs()) ms after launch")
             if let folder = plan.folder {
                 await waitUntil(timeout: 3) { store.totalFiles > 0 }
-                let needsScan = store.totalFiles == 0
+                note("files counter \(store.totalFiles) \(launchAgeMs()) ms after launch")
+                let needsScan = store.totalFiles == 0 && !plan.openOnly
                 openFolder(folder, needsScan)
                 if needsScan {
                     await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }
                     navigate(plan.pages.first ?? MainWindow.Tab.library.rawValue)
-                    try? await Task.sleep(for: .seconds(min(plan.settle, 1.0)))
+                    try? await Task.sleep(for: .seconds(min(plan.settle, plan.scanSettle)))
                     let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
                     write(name: "\(SelfShotPlan.slug(plan.pages.first ?? "library"))-scanning\(scanning ? "" : "-finished")", plan: plan)
                     await waitUntil(timeout: 600) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }
                     let done = Date()
                     await waitUntil(timeout: 10) { store.totalFiles >= (engine.lastProgress?.processed ?? 0) }
                     FileHandle.standardError.write(Data("self-shot: files counter \(store.totalFiles) \(Int(Date().timeIntervalSince(done) * 1000)) ms after the scan completed\n".utf8))
+                    for more in plan.moreFolders {
+                        let before = store.totalFiles
+                        openFolder(more, true)
+                        await waitUntil(timeout: 60) { engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false }
+                        await waitUntil(timeout: 900) { engine.lastProgress.map { [.completed, .failed, .cancelled].contains($0.phase) } ?? false }
+                        await waitUntil(timeout: 10) { store.totalFiles > before }
+                        note("scanned \(more.lastPathComponent): files counter \(before) -> \(store.totalFiles)")
+                    }
                 }
             }
             if plan.clusterFaces {
@@ -176,16 +213,44 @@ enum SelfShot {
             for view in plan.views {
                 let defaults = UserDefaults.standard
                 defaults.set(view.kind ?? "", forKey: "library.kindFilter")
-                if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
                 navigate(view.page)
+                try? await Task.sleep(for: .seconds(0.4))
+                NotificationCenter.default.post(name: .selfShotAction, object: "reset")
+                try? await Task.sleep(for: .seconds(0.4))
+                if let query = view.query { defaults.set(query, forKey: LibraryView.queryHandoffKey) }
                 try? await Task.sleep(for: .seconds(plan.settle))
-                if view.scrollToBottom || view.scrollOffset != nil { scrollContent(to: view.scrollOffset); try? await Task.sleep(for: .seconds(0.6)) }
+                if view.scrollToBottom || view.scrollOffset != nil {
+                    scrollContent(to: view.scrollOffset)
+                    try? await Task.sleep(for: .seconds(0.6))
+                    if view.page == MainWindow.Tab.library.rawValue {
+                        await waitForLibraryThumbnails()
+                    } else {
+                        try? await Task.sleep(for: .seconds(plan.settle))
+                    }
+                }
                 if let name = view.preview {
                     NotificationCenter.default.post(name: .selfShotOpenPreview, object: name)
                     try? await Task.sleep(for: .seconds(plan.settle))
                     if view.focusSteps > 0 { focusControl(steps: view.focusSteps, in: window()?.attachedSheet ?? window()); try? await Task.sleep(for: .seconds(0.6)) }
                     write(name: view.name, plan: plan, sheet: true)
+                    NotificationCenter.default.post(name: .selfShotClosePreview, object: nil)
+                    try? await Task.sleep(for: .seconds(0.8))
                     if let main = window(), let sheet = main.attachedSheet { main.endSheet(sheet) }
+                    try? await Task.sleep(for: .seconds(0.5))
+                } else if let action = view.action {
+                    jumpFinished = false
+                    NotificationCenter.default.post(name: .selfShotAction, object: action)
+                    if action == "end" || action == "reload" {
+                        await waitUntil(timeout: 180) { jumpFinished }
+                        try? await Task.sleep(for: .seconds(0.6))
+                        await waitForLibraryThumbnails()
+                    }
+                    try? await Task.sleep(for: .seconds(plan.settle))
+                    let sheet = window()?.attachedSheet != nil
+                    write(name: view.name, plan: plan, sheet: sheet)
+                    NotificationCenter.default.post(name: .selfShotAction, object: "close")
+                    try? await Task.sleep(for: .seconds(0.8))
+                    if let main = window(), let attached = main.attachedSheet { main.endSheet(attached) }
                     try? await Task.sleep(for: .seconds(0.5))
                 } else {
                     if view.focusSteps > 0 { focusControl(steps: view.focusSteps, in: window()); try? await Task.sleep(for: .seconds(0.6)) }
@@ -193,14 +258,43 @@ enum SelfShot {
                 }
             }
             await runExtras(engine: engine, store: store, navigate: navigate, plan: plan)
+            if env("FILEID_SELF_SHOT_FACTORY_RESET") == AppSupportPath.fileID.path {
+                note("factory reset of \(AppSupportPath.fileID.path)")
+                engine.factoryResetAndQuit()
+            }
             NSApp.terminate(nil)
             try? await Task.sleep(for: .seconds(3))
             exit(0)
         }
     }
 
+    /// Writes every main-menu item that carries a key equivalent, so the menu bar's shortcut list is on record.
+    private static func noteMenuShortcuts() {
+        func visit(_ menu: NSMenu, path: String) {
+            for item in menu.items where !item.isSeparatorItem {
+                let name = path.isEmpty ? item.title : path + " > " + item.title
+                if let submenu = item.submenu { visit(submenu, path: name); continue }
+                guard !item.keyEquivalent.isEmpty else { continue }
+                let flags = item.keyEquivalentModifierMask
+                let keys = (flags.contains(.control) ? "⌃" : "") + (flags.contains(.option) ? "⌥" : "")
+                    + (flags.contains(.shift) ? "⇧" : "") + (flags.contains(.command) ? "⌘" : "") + item.keyEquivalent.uppercased()
+                note("menu: \(name) \(keys)")
+            }
+        }
+        if let main = NSApp.mainMenu { visit(main, path: "") }
+    }
+
     private static func env(_ key: String) -> String? {
         ProcessInfo.processInfo.environment[key].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func launchAgeMs() -> Int {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return -1 }
+        let started = info.kp_proc.p_un.__p_starttime
+        return Int((Date().timeIntervalSince1970 - (Double(started.tv_sec) + Double(started.tv_usec) / 1e6)) * 1000)
     }
 
     private static func note(_ text: String) {
@@ -218,7 +312,7 @@ enum SelfShot {
             let kind = DeepAnalyzeSettings.shared.activeKind.rawValue
             let ids = photos.prefix(n).map(\.id)
             let started = engine.deepAnalyzeSelection(fileIDs: Array(ids), modelKind: kind)
-            note("describe started \(started) for \(ids.count) files with \(kind)")
+            note("describe started \(started) for \(Plural.noun(ids.count, "file", "files")) with \(kind)")
             await waitUntil(timeout: 300) { engine.deepAnalyzeProgress != nil || !engine.deepAnalyzeInFlight }
             try? await Task.sleep(for: .seconds(1))
             write(name: "describe-running", plan: plan)
@@ -258,7 +352,10 @@ enum SelfShot {
             NotificationCenter.default.post(name: .selfShotFindMoments, object: nil)
             try? await Task.sleep(for: .seconds(2))
             write(name: "moments-queued", plan: plan)
-            await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            await waitUntil(timeout: 10) { engine.catalogJobs.contains { $0.kind == "timelineSample" } }
+            if engine.catalogJobs.contains(where: { $0.kind == "timelineSample" }) {
+                await waitUntil(timeout: 420) { engine.catalogJobs.contains { $0.kind == "timelineSample" && ["completed", "failed", "cancelled"].contains($0.state) } }
+            }
             note("timeline jobs: \(engine.catalogJobs.map { "\($0.kind) \($0.state)" }.joined(separator: ", "))")
             try? await Task.sleep(for: .seconds(3))
             write(name: "moments-timeline", plan: plan)
@@ -267,26 +364,17 @@ enum SelfShot {
             navigate(MainWindow.Tab.tools.rawValue)
             try? await Task.sleep(for: .seconds(plan.settle))
             write(name: "tools-empty", plan: plan)
-            session.kind = env("FILEID_SELF_SHOT_TOOLS_KIND") ?? "photo"
-            session.query = query
-            session.searchID = UUID().uuidString
-            _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: query)))
-            await waitUntil(timeout: 30) { !session.allHits.isEmpty }
-            try? await Task.sleep(for: .seconds(1))
             let n = env("FILEID_SELF_SHOT_TOOLS_N").flatMap(Int.init) ?? 2
-            session.selection = Set(session.hits.prefix(n).map(\.fileID))
-            session.destination = env("FILEID_SELF_SHOT_TOOLS_DEST") ?? ""
-            try? await Task.sleep(for: .seconds(1))
-            write(name: "tools-selected", plan: plan)
-            let request = ToolRequest(requestID: UUID().uuidString, action: "preview", fileIDs: session.selection.sorted(),
-                                      destination: session.destination, recipe: session.recipe, destinationBookmark: nil)
-            session.pending = request.requestID; session.pendingAction = request.action
-            session.pendingEngineGeneration = engine.engineResetSignal
-            _ = engine.send(.toolRequest(request: request))
-            await waitUntil(timeout: 60) { session.pending.isEmpty }
-            try? await Task.sleep(for: .seconds(2))
-            note("tools preview: \(session.message) outputs \(session.outputs.count)")
-            write(name: "tools-preview", plan: plan)
+            let dest = env("FILEID_SELF_SHOT_TOOLS_DEST") ?? ""
+            let photoFallback = photos.first.map { URL(fileURLWithPath: $0.pathText).deletingPathExtension().lastPathComponent }
+            await toolsPass(session: session, engine: engine, plan: plan, name: "tools", kind: env("FILEID_SELF_SHOT_TOOLS_KIND") ?? "photo",
+                            query: query, fallbackQuery: photoFallback, count: n, destination: dest, trim: false)
+            if let videoQuery = env("FILEID_SELF_SHOT_TOOLS_VIDEO") {
+                let videos = store.files(limit: 2000).filter { FileTypes.videos.contains(URL(fileURLWithPath: $0.pathText).pathExtension.lowercased()) }
+                let videoFallback = videos.first.map { URL(fileURLWithPath: $0.pathText).deletingPathExtension().lastPathComponent }
+                await toolsPass(session: session, engine: engine, plan: plan, name: "tools-video", kind: "video",
+                                query: videoQuery, fallbackQuery: videoFallback, count: 1, destination: dest, trim: true)
+            }
         }
         await waitUntil(timeout: 120) {
             !engine.deepAnalyzeInFlight && !engine.faceClusteringInFlight && !engine.catalogJobs.contains { $0.state == "running" || $0.state == "queued" }
@@ -294,6 +382,44 @@ enum SelfShot {
         navigate(MainWindow.Tab.library.rawValue)
         try? await Task.sleep(for: .seconds(plan.settle + 3))
         write(name: "final-idle", plan: plan)
+    }
+
+    /// File Tools: search, select, and press Preview, each through the call the page makes. A search that finds
+    /// nothing is logged and retried once with a file name taken from the library, so a bad query cannot leave the page empty.
+    private static func toolsPass(session: ToolsSession, engine: EngineClient, plan: SelfShotPlan, name: String, kind: String, query: String,
+                                  fallbackQuery: String?, count: Int, destination: String, trim: Bool) async {
+        session.kind = kind
+        session.format = kind == "video" ? "mp4" : "png"
+        session.maxDimension = kind == "video" ? 1920 : 4096
+        for text in [query] + (fallbackQuery.map { [$0] } ?? []) {
+            session.query = text
+            session.searchID = UUID().uuidString
+            _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: text)))
+            await waitUntil(timeout: 30) { session.searchID.isEmpty && !session.hits.isEmpty }
+            session.applyKindFilter()
+            note("\(name) search for “\(text)”: \(Plural.noun(session.allHits.count, "result", "results")), \(session.hits.count) \(kind)")
+            if !session.hits.isEmpty { break }
+        }
+        try? await Task.sleep(for: .seconds(1))
+        session.selection = Set(session.hits.prefix(count).map(\.fileID))
+        session.destination = destination
+        if trim {
+            session.media.adopt(tool: "trim", sources: session.selectedPaths)
+            session.media.trimStart = 0
+            session.media.trimEnd = 1
+        }
+        try? await Task.sleep(for: .seconds(1))
+        write(name: "\(name)-selected", plan: plan)
+        guard !session.selection.isEmpty else { note("\(name): nothing selected, no preview sent"); return }
+        let request = ToolRequest(requestID: UUID().uuidString, action: "preview", fileIDs: session.selection.sorted(),
+                                  destination: session.destination, recipe: session.recipe, destinationBookmark: nil)
+        session.pending = request.requestID; session.pendingAction = request.action
+        session.pendingEngineGeneration = engine.engineResetSignal
+        _ = engine.send(.toolRequest(request: request))
+        await waitUntil(timeout: 60) { session.pending.isEmpty }
+        try? await Task.sleep(for: .seconds(2))
+        note("\(name) preview: \(session.message) outputs \(session.outputs.count)")
+        write(name: "\(name)-preview", plan: plan)
     }
 
     private static func askChat(_ question: String, name: String, engine: EngineClient, plan: SelfShotPlan) async {
@@ -317,6 +443,7 @@ enum SelfShot {
         func visit(_ view: NSView) {
             if view.isHidden || view.alphaValue == 0 || view.layer?.opacity == 0 { return }
             if let scroll = view as? NSScrollView, let document = scroll.documentView, !scroll.isHiddenOrHasHiddenAncestor,
+               isOnScreen(scroll, in: root),
                document.frame.height > scroll.contentView.bounds.height + 1, scroll.convert(scroll.bounds, to: nil).minX > 200,
                scroll.bounds.width * scroll.bounds.height > (best.map { $0.bounds.width * $0.bounds.height } ?? 0) { best = scroll }
             view.subviews.forEach(visit)
@@ -330,6 +457,35 @@ enum SelfShot {
         let y = document.isFlipped ? min(end, offset ?? end) : max(0, end - (offset ?? end))
         scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    /// A grid scrolled to cold rows loads about one screenful of thumbnails per second; capture once the tiles on screen have theirs (at most 8 s), and say how long that took.
+    private static func waitForLibraryThumbnails() async {
+        guard let root = window()?.contentView, let collection = firstCollectionView(in: root) else { return }
+        let started = Date()
+        let limit = env("FILEID_SELF_SHOT_THUMB_WAIT").flatMap(Double.init) ?? 8
+        while Date().timeIntervalSince(started) < limit {
+            let tiles = collection.visibleItems().compactMap { $0 as? LibraryTileItem }
+            if !tiles.isEmpty, tiles.allSatisfy(\.isFinishedLoading) {
+                FileHandle.standardError.write(Data("self-shot: \(tiles.count) tiles on screen showed their thumbnails \(Int(Date().timeIntervalSince(started) * 1000)) ms after the scroll settled\n".utf8))
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        FileHandle.standardError.write(Data("self-shot: thumbnails still loading after \(Int(limit)) s\n".utf8))
+    }
+
+    private static func firstCollectionView(in view: NSView) -> NSCollectionView? {
+        if let collection = view as? NSCollectionView { return collection }
+        for sub in view.subviews { if let found = firstCollectionView(in: sub) { return found } }
+        return nil
+    }
+
+    /// A kept-alive page that is faded out is still in the view tree; only the page on screen answers a hit test at its centre.
+    private static func isOnScreen(_ scroll: NSScrollView, in root: NSView) -> Bool {
+        guard let superview = root.superview else { return true }
+        let centre = superview.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), from: scroll)
+        return root.hitTest(centre)?.isDescendant(of: scroll) ?? false
     }
 
     /// Moves AppKit's key view loop forward `steps` times, the way Tab would, without sending an event.

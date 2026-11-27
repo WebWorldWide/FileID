@@ -1,12 +1,4 @@
-//! Largest embedded JPEG preview in a camera RAW file.
-//!
-//! Sony ARW, Nikon NEF, Canon CR2, Olympus ORF, Panasonic RW2, Pentax PEF and
-//! DNG are TIFF containers that carry a camera-rendered JPEG (often full size);
-//! Fujifilm RAF points at one from its header and Canon CR3 keeps one in an
-//! ISO-BMFF `PRVW` box. Decoding that JPEG is an order of magnitude cheaper
-//! than demosaicing the sensor data, and on Linux it is the only way the scan
-//! can read these files at all. Mirrors the macOS scan, which takes ImageIO's
-//! embedded preview when it is large enough.
+//! Largest embedded JPEG preview in a camera RAW. Decoding it is far cheaper than demosaicing, and on Linux it is the only way to read these files.
 
 const RAW_EXTENSIONS: &[&str] = &[
     "arw", "srf", "sr2", "nef", "nrw", "cr2", "cr3", "orf", "pef", "dng", "raf", "rw2", "rwl", "raw", "3fr", "erf",
@@ -17,7 +9,6 @@ pub fn is_raw_extension(ext: &str) -> bool {
     RAW_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
-/// Byte range of the largest JPEG the file embeds, or None.
 pub fn largest_embedded_jpeg(bytes: &[u8]) -> Option<&[u8]> {
     candidates(bytes)
         .into_iter()
@@ -71,13 +62,9 @@ pub fn orientation(bytes: &[u8]) -> Option<u16> {
     u16::try_from(value).ok().filter(|v| (1..=8).contains(v))
 }
 
-/// EXIF the generic reader cannot see, as standard TIFF blocks.
 pub enum RawExif<'a> {
-    /// ORF / RW2: the file's IFD0, with its Exif and GPS children, re-headed
-    /// as standard TIFF.
     Tiff(Vec<u8>),
-    /// CR3: IFD0 (`CMT1`), the Exif IFD (`CMT2`) and the GPS IFD (`CMT4`),
-    /// each stored as its own TIFF whose first IFD holds the tags.
+    /// CR3: IFD0 (`CMT1`), Exif IFD (`CMT2`) and GPS IFD (`CMT4`), each its own TIFF whose first IFD holds the tags.
     Cr3 { ifd0: Option<&'a [u8]>, exif: Option<&'a [u8]>, gps: Option<&'a [u8]> },
 }
 
@@ -119,7 +106,6 @@ impl Bmff<'_> {
         Some(u32::from_be_bytes(self.bytes.get(at..at + 4)?.try_into().ok()?) as usize)
     }
 
-    /// Boxes in `[start, end)` as (payload start, box end, fourcc).
     fn boxes(&self, start: usize, end: usize) -> Vec<(usize, usize, [u8; 4])> {
         let mut out = Vec::new();
         let mut at = start;
@@ -173,9 +159,7 @@ impl Bmff<'_> {
     }
 }
 
-/// Baseline or progressive JPEG. Raw sensor data is often stored as lossless
-/// JPEG (SOF3), which starts with the same marker but is not a picture an
-/// ordinary decoder can show.
+/// Baseline or progressive JPEG. Raw sensor data is often lossless JPEG (SOF3), which starts with the same marker but isn't a picture an ordinary decoder can show.
 fn is_viewable_jpeg(jpeg: &[u8]) -> bool {
     if jpeg.get(0..2) != Some(&[0xFF, 0xD8]) {
         return false;
@@ -215,7 +199,6 @@ impl<'a> Tiff<'a> {
         };
         let tiff = Self { bytes, little };
         let magic = tiff.u16(2)?;
-        // 42 = TIFF; ORF uses 0x4F52 / 0x5352 and RW2 0x55 with TIFF-style IFDs.
         matches!(magic, 42 | 0x4F52 | 0x5352 | 0x55).then_some(tiff)
     }
 
@@ -331,8 +314,6 @@ mod tests {
         out.into_inner()
     }
 
-    /// Little-endian TIFF: IFD0 with a small JPEG thumbnail, a SubIFD with a
-    /// larger JPEG preview, like Sony/Nikon files.
     fn fake_raw(small: &[u8], large: &[u8]) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(b"II");
@@ -393,8 +374,6 @@ mod tests {
         b.extend_from_slice(&value.to_le_bytes());
     }
 
-    /// Little-endian TIFF-style header with `magic`, IFD0 holding orientation 6
-    /// and, when given, a JpgFromRaw (0x002E, UNDEFINED) preview like Panasonic.
     fn tiff_with(magic: u16, jpg_from_raw: Option<&[u8]>) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(b"II");
@@ -424,8 +403,6 @@ mod tests {
         b
     }
 
-    /// Canon CR3 layout: moov → Canon uuid (CMT1 TIFF + THMB thumbnail), then
-    /// the preview uuid holding PRVW, then mdat.
     fn fake_cr3(thumb: &[u8], preview: &[u8]) -> Vec<u8> {
         let mut canon = vec![0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b, 0x6a, 0x48];
         canon.extend(bmff_box(b"CMT1", &tiff_with(42, None)));
@@ -477,8 +454,6 @@ mod tests {
 
     type Entry = (u16, (u16, u32, Vec<u8>));
 
-    /// Little-endian TIFF with `magic`: IFD0 holds `ifd0` and links to `next`,
-    /// plus an Exif child IFD (0x8769) holding `exif` when given.
     fn tiff_block(magic: u16, ifd0: &[Entry], exif: &[Entry], next: u32) -> Vec<u8> {
         fn ifd(out: &mut Vec<u8>, entries: &[Entry], next: u32) {
             let data_start = out.len() + 2 + entries.len() * 12 + 4;
@@ -528,7 +503,6 @@ mod tests {
         assert!(taken.is_some());
         let date = || [(0x9003, ascii("2026:09:19 18:30:00")), (0x9011, ascii("-05:00"))];
         for magic in [0x4F52, 0x55] {
-            // IFD0 links to a sensor IFD past the end, as in a head read.
             let raw = tiff_block(magic, &[(0x0110, ascii("E-M1MarkIII")), (0x0112, (3, 1, vec![6, 0]))], &date(), 0x00FF_FFF0);
             assert!(
                 exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&raw)).is_err(),
@@ -595,7 +569,6 @@ mod tests {
         assert_eq!(orientation(&fake_raw(&jpeg(8, 8), &jpeg(16, 16))), None);
     }
 
-    /// `FILEID_RAW_SAMPLE=/path/to/file.ARW cargo test raw_preview -- --ignored`
     #[test]
     #[ignore = "needs a real camera RAW file in FILEID_RAW_SAMPLE"]
     fn real_raw_sample() {

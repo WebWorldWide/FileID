@@ -1,9 +1,6 @@
-//! Portable timeline worker: the Linux/Windows counterpart of the macOS
-//! `TimelineAnalysis` actor. Decodes with the vetted FFmpeg runtime, captions
-//! sampled frames and moment windows with the resident VLM, and persists
-//! evidence, coverage and draft chapters to the shared catalog tables.
-//! Unexamined footage stays explicitly incomplete; nothing here claims an
-//! event did not happen.
+//! Portable timeline worker (the Linux/Windows counterpart of macOS `TimelineAnalysis`): decodes with the vetted FFmpeg
+//! runtime, captions sampled frames and moment windows with the resident VLM, persists evidence, coverage and draft
+//! chapters. Unexamined footage stays explicitly incomplete; nothing here claims an event did not happen.
 
 use super::{timeline_media, video_export};
 use crate::ipc::sink::Sink;
@@ -20,6 +17,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 pub(crate) const JOB_KIND: &str = "timelineSample";
 const INTERVAL_SECONDS: f64 = 10.0;
@@ -36,7 +34,7 @@ const VLM_PREFERENCE: [&str; 5] = [
     "mistral_small_3_2",
 ];
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Recipe {
     model_kind: String,
@@ -55,8 +53,7 @@ impl std::fmt::Display for Interrupted {
 }
 impl std::error::Error for Interrupted {}
 
-/// The visual model the worker consults. The resident VLM lease is the real
-/// implementation; tests substitute a scripted model to exercise the worker.
+/// Tests substitute a scripted model to exercise the worker.
 pub(crate) trait FrameModel: Sync {
     fn caption(
         &self,
@@ -72,8 +69,7 @@ pub(crate) trait FrameModel: Sync {
         tokens: u32,
         cancel: Arc<AtomicBool>,
     ) -> impl Future<Output = Result<String>> + Send;
-    /// A moment window: `sequence` with the frames' times, which the Swift
-    /// engine's MLX path needs to label the frames itself.
+    /// `sequence` plus the frames' times, which the MLX path needs to label frames itself.
     fn moment(
         &self,
         images: &[&Path],
@@ -86,9 +82,7 @@ pub(crate) trait FrameModel: Sync {
     }
 }
 
-/// The Mac app's engine: the Swift engine's MLX scene captions
-/// (`DeepAnalyze.analyze(sceneCaption:)`) and moment sequences
-/// (`analyzeMomentSequence`), which build their own prompts.
+/// MLX scene captions and moment sequences, which build their own prompts.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 pub(crate) struct MlxFrames(tokio::sync::Mutex<crate::apple::vlm::MlxLease>);
 
@@ -171,9 +165,8 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
-/// Frames in flight for this engine's catalog. Scoped by the state root so an
-/// engine opening another catalog (the app's engine beside a CLI run, or two
-/// test engines) sweeps only its own frames at start, never a running job's.
+/// Scoped by the state root so an engine opening another catalog (the app's engine beside a CLI run, or two test
+/// engines) sweeps only its own frames at start, never a running job's.
 fn frames_root() -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -181,8 +174,6 @@ fn frames_root() -> PathBuf {
     std::env::temp_dir().join("fileid-timeline-frames").join(format!("{:016x}", hasher.finish()))
 }
 
-/// The visual model for timelines: a curated model when installed, otherwise
-/// the smallest installed catalog vision model.
 pub(crate) fn installed_model() -> Option<&'static str> {
     VLM_PREFERENCE
         .into_iter()
@@ -207,7 +198,6 @@ pub(crate) fn installed_model() -> Option<&'static str> {
 
 const SPEECH_PREFERENCE: [&str; 2] = ["qwen3_asr_0_6b_gguf_q8_0", "qwen3_asr_1_7b_gguf_q8_0"];
 
-/// An installed speech model, preferring the evaluated Qwen3-ASR sizes.
 pub(crate) fn installed_speech_model() -> Option<&'static str> {
     let installed = |id: &str| {
         crate::models::catalog::runnable_speech(id).is_some() && crate::models::vlm::find_weights(id).is_some()
@@ -220,8 +210,6 @@ pub(crate) fn installed_speech_model() -> Option<&'static str> {
     })
 }
 
-/// Marks interrupted timeline jobs paused and removes abandoned frames.
-/// Called once when the catalog database opens.
 pub fn recover(conn: &Connection) -> Result<()> {
     let _ = std::fs::remove_dir_all(frames_root());
     conn.execute(
@@ -231,21 +219,9 @@ pub fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_timeline_job(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()?
-        .is_some_and(|kind| kind == JOB_KIND))
-}
-
-/// Validates and records a new timeline job; returns its id for scheduling.
-/// The Mac app's engine runs the Swift engine's scene-pool timeline (one
-/// caption per CLIP scene, versioned with the pinned model revision), so either
-/// engine resumes the other's coverage; other builds sample a frame every
-/// interval.
-const SCENE_PREFIX: &str = "timeline-scene-v1/";
+/// The Mac-hosted engine runs a scene-pool timeline (one caption per CLIP scene, versioned with the pinned model
+/// revision); other builds sample a frame every interval.
+const SCENE_PREFIX: &str = analysis::SCENE_VERSION_PREFIX;
 
 fn frame_model_version(model: &str) -> String {
     if timeline_media::FRAME_POOL {
@@ -259,7 +235,6 @@ fn frame_model_version(model: &str) -> String {
     format!("timeline-frame-v2/{model}@portable")
 }
 
-/// The Mac app's engine refuses as the Swift engine does, which asks for a loaded model.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 const NO_VISUAL_MODEL: &str =
     "Pick and load an AI model in Describe Files first. FileID won't download one by itself.";
@@ -320,7 +295,6 @@ pub(crate) fn enqueue(
         None => " To make what people say searchable, install a speech model.",
     };
     let message = if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        // The Swift engine's wording: Apple Speech needs no model install.
         if mode == Some("moments") {
             "FileID will look through these videos for the moments that matter, using the picture and any speech. Check each suggestion: quick actions can be missed.".to_owned()
         } else {
@@ -336,7 +310,6 @@ pub(crate) fn enqueue(
     Ok((job_id, response))
 }
 
-/// Stops the running job's decoder/model call promptly after pause or cancel.
 pub(crate) fn interrupt(job_id: &str) {
     if let Some((id, cancel)) = worker().running.lock().as_ref()
         && id == job_id {
@@ -359,9 +332,13 @@ pub(crate) fn schedule(job_id: String, sink: Sink, database: Arc<Mutex<Connectio
 }
 
 async fn publish(job_id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) {
+    publish_with_note(job_id, sink, database, None).await;
+}
+
+async fn publish_with_note(job_id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>, note: Option<String>) {
     let jobs = with_db(database, |conn| super::catalog::jobs(conn)).await;
     if let Ok(jobs) = jobs {
-        let mut response = super::catalog::response(job_id, "ok", None);
+        let mut response = super::catalog::response(job_id, "ok", note);
         response.jobs = jobs;
         sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response))))
             .await;
@@ -372,6 +349,57 @@ struct Job {
     ids: Vec<i64>,
     recipe: Recipe,
     index: usize,
+}
+
+impl Job {
+    fn model_candidates(&self) -> Vec<String> {
+        let mut candidates = vec![self.recipe.model_kind.clone()];
+        candidates.extend(crate::models::resident_model::smaller_installed(&self.recipe.model_kind));
+        candidates
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "apple-adapters"))]
+fn model_label(kind: &str) -> String {
+    super::deep_analyze_mlx::display_name(kind)
+}
+
+#[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
+fn model_label(kind: &str) -> String {
+    kind.to_owned()
+}
+
+/// A model refused for memory gives way to a smaller installed one; the job keeps the model that actually ran so
+/// evidence is versioned by it and a resume stays on it. Returns the sentence that says so.
+fn adopt_smaller_model(conn: &Connection, id: &str, recipe: &mut Recipe, used: &str) -> Result<String> {
+    let requested = std::mem::replace(&mut recipe.model_kind, used.to_owned());
+    recipe.model_version = frame_model_version(used);
+    conn.execute(
+        "UPDATE catalog_jobs SET recipe_json=?1,updated_at=?2 WHERE id=?3",
+        params![serde_json::to_string(recipe)?, now(), id],
+    )?;
+    Ok(format!(
+        "Not enough memory is free for {}, so FileID is looking for moments with {} instead.",
+        model_label(&requested),
+        model_label(used)
+    ))
+}
+
+async fn use_loaded_model_if_smaller(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>, job: &mut Job, candidates: &[String], loaded: usize) -> Result<()> {
+    if loaded == 0 {
+        return Ok(());
+    }
+    let used = candidates[loaded].clone();
+    let (owned, mut recipe) = (id.to_owned(), job.recipe.clone());
+    let (note, recipe) = with_db(database, move |conn| {
+        let note = adopt_smaller_model(conn, &owned, &mut recipe, &used)?;
+        Ok((note, recipe))
+    })
+    .await?;
+    job.recipe = recipe;
+    tracing::warn!(%note, "timeline model refused for memory; running a smaller installed one");
+    publish_with_note(id, sink, database, Some(note)).await;
+    Ok(())
 }
 
 fn start(conn: &Connection, id: &str) -> Result<Option<Job>> {
@@ -404,49 +432,69 @@ fn start(conn: &Connection, id: &str) -> Result<Option<Job>> {
     }))
 }
 
-/// Runs one job to a terminal or paused state. Returns true when the job was
-/// re-queued (resumed) while it was finishing and must run again.
+/// True when the job was re-queued (resumed) while finishing and must run again.
 async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     let cancel = Arc::new(AtomicBool::new(false));
     *worker().running.lock() = Some((id.to_owned(), cancel.clone()));
     let frames = frames_root().join(id);
+    let mut skipped_videos = 0usize;
+    let mut speech_note = None;
     let outcome = async {
         let owned = id.to_owned();
-        let Some(job) = with_db(database, move |conn| start(conn, &owned)).await? else {
+        let Some(mut job) = with_db(database, move |conn| start(conn, &owned)).await? else {
             return Ok(());
         };
         publish(id, sink, database).await;
         #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
         if crate::apple::vlm::model_spec(&job.recipe.model_kind).is_ok() {
-            // Speech on the Mac is Apple Speech (Stage 8), not the GGUF ASR model.
-            // The visual pass then the speech pass, as in the Swift engine; the
-            // lease is released before speech so other model users can run.
+            // Speech on the Mac is Apple Speech, not the GGUF ASR model: visual pass then speech pass, with
+            // the lease released before speech so other model users can run.
             let apple_speech = apple_speech::enabled();
             let visual_share = if apple_speech { 0.8 } else { 1.0 };
-            let lease = crate::apple::vlm::Resident::shared().acquire(&job.recipe.model_kind, &cancel, |_| {}).await?;
+            let candidates = job.model_candidates();
+            let (loaded, lease) = crate::models::resident_model::load_until_one_fits(
+                &candidates,
+                |kind| {
+                    let cancel = cancel.clone();
+                    async move { crate::apple::vlm::Resident::shared().acquire(&kind, &cancel, |_| {}).await }
+                },
+                |refused, next| async move { tracing::warn!(%refused, %next, "timeline model refused for memory; trying a smaller installed one") },
+            )
+            .await;
+            let lease = lease?;
+            use_loaded_model_if_smaller(id, sink, database, &mut job, &candidates, loaded).await?;
             let model = MlxFrames(tokio::sync::Mutex::new(lease));
-            process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
+            skipped_videos = process(id, &job, &model, &frames, &cancel, sink, database, visual_share).await?;
             drop(model);
             if apple_speech {
-                apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
+                speech_note = apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
             }
             return Ok(());
         }
         let speech = installed_speech_model();
         let apple_speech = apple_speech::enabled();
         let visual_share = if speech.is_some() || apple_speech { 0.8 } else { 1.0 };
-        let lease = ResidentService::shared()
-            .acquire(&job.recipe.model_kind, cancel.clone())
-            .await?;
+        let candidates = job.model_candidates();
+        let (loaded, lease) = crate::models::resident_model::load_until_one_fits(
+            &candidates,
+            |kind| {
+                let cancel = cancel.clone();
+                async move { ResidentService::shared().acquire(&kind, cancel).await }
+            },
+            |refused, next| async move { tracing::warn!(%refused, %next, "timeline model refused for memory; trying a smaller installed one") },
+        )
+        .await;
+        let lease = lease?;
+        use_loaded_model_if_smaller(id, sink, database, &mut job, &candidates, loaded).await?;
         let result = process(id, &job, &lease, &frames, &cancel, sink, database, visual_share).await;
         let cleanup = lease.finish(result.is_ok()).await;
-        result.and(cleanup)?;
+        skipped_videos = result?;
+        cleanup?;
         if apple_speech {
-            apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
+            speech_note = apple_speech::transcribe(id, &job, &cancel, sink, database, visual_share).await?;
             return Ok(());
         }
-        // The speech model loads only after the visual model is released, so
-        // the two never need to be resident together.
+        // Speech loads only after the visual model is released, so the two are never resident together.
         if let Some(speech) = speech {
             let lease = ResidentService::shared().acquire(speech, cancel.clone()).await?;
             let result = transcribe(id, &job, speech, &lease, &frames, &cancel, sink, database, visual_share).await;
@@ -461,13 +509,16 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     let terminal = match outcome {
         Ok(()) => Some(None),
         Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => None,
-        Err(error) => Some(Some(format!("{error:#}").chars().take(2_000).collect::<String>())),
+        Err(error) => Some(Some(crate::util::user_message::job_failure_text(&error))),
     };
     let owned = id.to_owned();
     let _ = with_db(database, move |conn| {
         match terminal {
             Some(None) => {
-                conn.execute("UPDATE catalog_jobs SET state='completed',progress=1,updated_at=?1 WHERE id=?2 AND state='running'", params![now(), owned])?;
+                conn.execute(
+                    "UPDATE catalog_jobs SET state='completed',progress=1,error=?1,updated_at=?2 WHERE id=?3 AND state='running'",
+                    params![speech_note, now(), owned],
+                )?;
             }
             Some(Some(error)) => {
                 conn.execute(
@@ -480,7 +531,15 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
         Ok(())
     })
     .await;
-    publish(id, sink, database).await;
+    let skipped_note = (skipped_videos > 0).then(|| {
+        let plural = if skipped_videos == 1 { "video" } else { "videos" };
+        format!("{skipped_videos} {plural} couldn’t be read, so they stay incomplete. The rest were analysed.")
+    });
+    let note = match (skipped_note, speech_note) {
+        (Some(skipped), Some(speech)) => Some(format!("{skipped} {speech}")),
+        (skipped, speech) => skipped.or_else(|| speech.map(str::to_owned)),
+    };
+    publish_with_note(id, sink, database, note).await;
     let owned = id.to_owned();
     with_db(database, move |conn| {
         Ok(conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [owned], |r| r.get::<_, String>(0))?)
@@ -489,7 +548,6 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     .is_ok_and(|state| state == "queued")
 }
 
-/// Confirms the job is still running, then loads and re-verifies its source.
 async fn running_source(database: &Arc<Mutex<Connection>>, id: &str, file_id: i64) -> Result<Source> {
     let id = id.to_owned();
     with_db(database, move |conn| {
@@ -501,7 +559,6 @@ async fn running_source(database: &Arc<Mutex<Connection>>, id: &str, file_id: i6
     .await
 }
 
-/// Confirms the job is still running and runs `query` in the same lock turn.
 async fn while_running<T: Send + 'static>(
     database: &Arc<Mutex<Connection>>,
     id: &str,
@@ -539,7 +596,6 @@ pub(crate) fn revision(conn: &Connection, file_id: i64) -> Result<String> {
     ))
 }
 
-/// True when the file on disk still matches the catalogued size and mtime.
 fn on_disk_matches(path: &Path, size: i64, modified: Option<f64>) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
@@ -585,9 +641,8 @@ impl Source {
     }
 }
 
-/// Runs `work` against the writer on the blocking pool. A scan flush or face
-/// clustering can hold the writer for seconds; locking it on an async worker
-/// would park a runtime thread, and enough of those stall every command.
+/// A scan flush or face clustering can hold the writer for seconds; locking it on an async worker would park a runtime
+/// thread, and enough of those stall every command.
 pub(crate) async fn with_db<T: Send + 'static>(
     database: &Arc<Mutex<Connection>>,
     work: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
@@ -680,6 +735,75 @@ async fn decode_jpeg(
     .map_err(|error| interrupted_or(cancel, error))
 }
 
+/// A caption the model could not produce, as opposed to a video that could not be read.
+#[derive(Debug)]
+struct ModelFailed;
+impl std::fmt::Display for ModelFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The description model could not caption a frame")
+    }
+}
+impl std::error::Error for ModelFailed {}
+
+/// Consecutive videos that fail on the model before the job stops instead of grinding through the rest.
+const MODEL_FAILURE_LIMIT: usize = 3;
+
+fn model_stopped(error: &anyhow::Error) -> anyhow::Error {
+    tracing::warn!(error = %format!("{error:#}"), "timeline stopped: the description model kept failing");
+    anyhow!("The description model failed on {MODEL_FAILURE_LIMIT} videos in a row, so the job stopped. Check the model in Deep Analyze, then resume.")
+}
+
+fn model_keeps_failing(streak: &mut usize, error: &anyhow::Error) -> bool {
+    *streak = if error.is::<ModelFailed>() { *streak + 1 } else { 0 };
+    *streak >= MODEL_FAILURE_LIMIT
+}
+
+/// An empty caption is a valid answer only for a dark or flat frame, where there is nothing to describe: the result is then an empty string and the scene gets no passage. On any other frame it means the model failed.
+async fn caption_frame<M: FrameModel>(model: &M, frame: &Path, prompt: &str, cancel: &Arc<AtomicBool>) -> Result<String> {
+    let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
+    let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable()).context(ModelFailed)))?;
+    let caption = caption.trim();
+    if caption.is_empty() && !frame_is_blank(frame) {
+        return Err(unreadable().context(ModelFailed));
+    }
+    Ok(caption.to_owned())
+}
+
+/// Mean brightness at or below this (of 255) is a black frame; a spread below `BLANK_SPREAD` is a flat one.
+const BLANK_MEAN: f64 = 16.0;
+const BLANK_SPREAD: f64 = 6.0;
+
+fn frame_is_blank(frame: &Path) -> bool {
+    let Ok(image) = image::open(frame) else {
+        return false;
+    };
+    let luma = image.to_luma8();
+    let count = f64::from(luma.width()) * f64::from(luma.height());
+    if count == 0.0 {
+        return false;
+    }
+    let mean = luma.pixels().map(|p| f64::from(p.0[0])).sum::<f64>() / count;
+    let variance = luma.pixels().map(|p| (f64::from(p.0[0]) - mean).powi(2)).sum::<f64>() / count;
+    mean <= BLANK_MEAN || variance.sqrt() < BLANK_SPREAD
+}
+
+enum Failure {
+    Stop(anyhow::Error),
+    Interrupted(anyhow::Error),
+    Skip(anyhow::Error),
+}
+
+/// What the job does with a video's failure: interruptions pass through, a streak of model failures stops the job, anything else skips the video.
+fn judge_failure(error: anyhow::Error, cancelled: bool, streak: &mut usize) -> Failure {
+    if error.is::<Interrupted>() || cancelled {
+        return Failure::Interrupted(error);
+    }
+    if model_keeps_failing(streak, &error) {
+        return Failure::Stop(model_stopped(&error));
+    }
+    Failure::Skip(error)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process<M: FrameModel>(
     id: &str,
@@ -690,164 +814,207 @@ async fn process<M: FrameModel>(
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
     share: f64,
-) -> Result<()> {
+) -> Result<usize> {
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
     let mut next_pool: Option<(i64, PoolTask)> = None;
+    let (mut attempted, mut skipped, mut last_error, mut model_failures) = (0usize, 0usize, None, 0usize);
     for (index, &file_id) in job.ids.iter().enumerate().skip(job.index) {
-        let source = running_source(database, id, file_id).await?;
-        let probe = {
-            let (path, flag) = (source.path.clone(), cancel.clone());
-            blocking(move || timeline_media::probe(&path, &flag))
-                .await
-                .map_err(|error| interrupted_or(cancel, error))?
-        };
-        let duration = probe.duration;
-        let version = job.recipe.model_version.as_str();
-        {
-            let (coverage, revision, model_version) = (format!("{id}-{file_id}-coverage"), source.revision.clone(), version.to_owned());
-            with_db(database, move |conn| {
-                upsert_coverage(conn, &coverage, file_id, 0.0, duration, "incomplete", &revision, &model_version)
-            })
-            .await?;
+        attempted += 1;
+        match process_video(id, job, model, frames, cancel, sink, database, share, (index, file_id, total), &mut next_pool).await {
+            Ok(()) => model_failures = 0,
+            Err(error) => {
+                let error = match judge_failure(error, cancel.load(Ordering::Acquire), &mut model_failures) {
+                    Failure::Interrupted(error) | Failure::Stop(error) => return Err(error),
+                    Failure::Skip(error) => error,
+                };
+                tracing::warn!(file_id, error = %format!("{error:#}"), "timeline skipped a video it could not analyse");
+                let _ = std::fs::remove_dir_all(frames.join(format!("pool-{file_id}")));
+                skipped += 1;
+                last_error = Some(error);
+                let job_id = id.to_owned();
+                while_running(database, id, move |conn| {
+                    conn.execute(
+                        "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
+                        params![(index + 1).to_string(), share * (index + 1) as f64 / total as f64, now(), job_id],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+                publish(id, sink, database).await;
+            }
         }
+    }
+    match last_error {
+        Some(error) if skipped == attempted => Err(error),
+        _ => Ok(skipped),
+    }
+}
 
-        let pool_folder = frames.join(format!("pool-{file_id}"));
-        let scan = if timeline_media::FRAME_POOL {
-            let prefetched = match next_pool.take() {
-                Some((next, task)) if next == file_id => Some(task),
-                Some((_, stale)) => {
-                    stale.abort();
-                    None
-                }
-                None => None,
-            };
-            let scan = pool_signals(id, file_id, &source, duration, &pool_folder, prefetched, cancel, database).await?;
-            if let Some(&next) = job.ids.get(index + 1)
-                && let Ok(next_source) = running_source(database, id, next).await
-            {
-                next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
-            }
-            scan
-        } else {
-            scan_signals(id, file_id, &source, duration, cancel, database).await?
-        };
-        let signals = scan.signals;
-        let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
-        let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
-        let scene_pool = scan.pool.clone().filter(|_| version.starts_with(SCENE_PREFIX));
-        if let Some(pool) = &scene_pool {
-            scene_captions(id, file_id, &source, duration, pool, version, model, &caption_prompt, cancel, database).await?;
-        }
-        let frame_times = if scene_pool.is_some() {
-            Vec::new()
-        } else {
-            analysis::sample_times(duration, job.recipe.interval_seconds, &signals)
-        };
-        for seconds in frame_times {
-            let evidence = format!(
-                "frame:{file_id}:{}:{version}:{}",
-                source.revision,
-                analysis::millis(seconds)
-            );
-            let (lookup, revision) = (evidence.clone(), source.revision.clone());
-            let exists: bool = while_running(database, id, move |conn| {
-                Ok(conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
-                    params![lookup, revision],
-                    |r| r.get(0),
-                )?)
-            })
-            .await?;
-            if exists {
-                continue;
-            }
-            let frame = decode_jpeg(
-                &source.path,
-                seconds.min((duration - 0.05).max(0.0)),
-                size,
-                frames.join(format!("{}.jpg", analysis::millis(seconds))),
-                cancel,
-            )
-            .await?;
-            let caption = model
-                .caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone())
-                .await;
-            let _ = std::fs::remove_file(&frame);
-            let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-            let caption = caption.trim();
-            if caption.is_empty() {
-                return Err(unreadable());
-            }
-            let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
-            while_running(database, id, move |conn| {
-                checked.verify(conn, file_id)?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
-                    params![evidence, file_id, seconds, caption, checked.revision, model_version],
-                )?;
-                upsert_coverage(
-                    conn,
-                    &evidence,
-                    file_id,
-                    seconds,
-                    duration.min(seconds + 0.001).max(seconds + 0.000_001),
-                    "sampled",
-                    &checked.revision,
-                    &model_version,
-                )
-            })
-            .await?;
-        }
-
-        if job.recipe.timeline_mode.as_deref() == Some("moments") {
-            let grid = match &scan.pool {
-                Some(pool) => Some(pool.frames.iter().map(|(seconds, signature, _)| (*seconds, signature.clone())).collect()),
-                None if scan.complete => activity_grid(&source, duration, scan.signatures, cancel).await?,
-                None => None,
-            };
-            let moments = analyze_moments(
-                id,
-                file_id,
-                &source,
-                duration,
-                (&signals, grid.as_deref()),
-                size,
-                version,
-                (index, total, share),
-                model,
-                frames,
-                cancel,
-                sink,
-                database,
-                moment_decoder(scan.pool.clone()),
-            )
-            .await;
-            let _ = std::fs::remove_dir_all(&pool_folder);
-            moments?;
-        }
-        let _ = std::fs::remove_dir_all(&pool_folder);
-        let (checked, model_version, job_id) = (source.clone(), version.to_owned(), id.to_owned());
-        while_running(database, id, move |conn| {
-            persist_chapter_suggestions(conn, file_id, &checked, &model_version, duration)?;
-            conn.execute(
-                "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
-                params![
-                    (index + 1).to_string(),
-                    share * (index + 1) as f64 / total as f64,
-                    now(),
-                    job_id
-                ],
-            )?;
-            Ok(())
+#[allow(clippy::too_many_arguments)]
+async fn process_video<M: FrameModel>(
+    id: &str,
+    job: &Job,
+    model: &M,
+    frames: &Path,
+    cancel: &Arc<AtomicBool>,
+    sink: &Sink,
+    database: &Arc<Mutex<Connection>>,
+    share: f64,
+    (index, file_id, total): (usize, i64, usize),
+    next_pool: &mut Option<(i64, PoolTask)>,
+) -> Result<()> {
+    let source = running_source(database, id, file_id).await?;
+    let probe = {
+        let (path, flag) = (source.path.clone(), cancel.clone());
+        blocking(move || timeline_media::probe(&path, &flag))
+            .await
+            .map_err(|error| interrupted_or(cancel, error))?
+    };
+    let duration = probe.duration;
+    let version = job.recipe.model_version.as_str();
+    {
+        let (coverage, revision, model_version) = (format!("{id}-{file_id}-coverage"), source.revision.clone(), version.to_owned());
+        with_db(database, move |conn| {
+            upsert_coverage(conn, &coverage, file_id, 0.0, duration, "incomplete", &revision, &model_version)
         })
         .await?;
-        publish(id, sink, database).await;
     }
+
+    let pool_folder = frames.join(format!("pool-{file_id}"));
+    let scan = if timeline_media::FRAME_POOL {
+        let prefetched = match next_pool.take() {
+            Some((next, task)) if next == file_id => Some(task),
+            Some((_, stale)) => {
+                drop(stale);
+                None
+            }
+            None => None,
+        };
+        let scan = pool_signals(id, file_id, &source, duration, &pool_folder, prefetched, cancel, database).await?;
+        if let Some(&next) = job.ids.get(index + 1)
+            && let Ok(next_source) = running_source(database, id, next).await
+        {
+            *next_pool = Some((next, spawn_pool(&next_source.path, &frames.join(format!("pool-{next}")), cancel)));
+        }
+        scan
+    } else {
+        scan_signals(id, file_id, &source, duration, cancel, database).await?
+    };
+    let signals = scan.signals;
+    let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
+    let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
+    let scene_pool = scan.pool.clone().filter(|_| version.starts_with(SCENE_PREFIX));
+    if let Some(pool) = &scene_pool {
+        scene_captions(id, file_id, &source, duration, pool, version, model, &caption_prompt, cancel, database).await?;
+    }
+    let frame_times = if scene_pool.is_some() {
+        Vec::new()
+    } else {
+        analysis::sample_times(duration, job.recipe.interval_seconds, &signals)
+    };
+    for seconds in frame_times {
+        let evidence = format!(
+            "frame:{file_id}:{}:{version}:{}",
+            source.revision,
+            analysis::millis(seconds)
+        );
+        let (lookup, revision) = (evidence.clone(), source.revision.clone());
+        let exists: bool = while_running(database, id, move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
+                params![lookup, revision],
+                |r| r.get(0),
+            )?)
+        })
+        .await?;
+        if exists {
+            continue;
+        }
+        let frame = decode_jpeg(
+            &source.path,
+            seconds.min((duration - 0.05).max(0.0)),
+            size,
+            frames.join(format!("{}.jpg", analysis::millis(seconds))),
+            cancel,
+        )
+        .await?;
+        let caption = model
+            .caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone())
+            .await;
+        let _ = std::fs::remove_file(&frame);
+        let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
+        let caption = caption.trim();
+        if caption.is_empty() {
+            return Err(unreadable());
+        }
+        let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
+        while_running(database, id, move |conn| {
+            checked.verify(conn, file_id)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
+                params![evidence, file_id, seconds, caption, checked.revision, model_version],
+            )?;
+            upsert_coverage(
+                conn,
+                &evidence,
+                file_id,
+                seconds,
+                duration.min(seconds + 0.001).max(seconds + 0.000_001),
+                "sampled",
+                &checked.revision,
+                &model_version,
+            )
+        })
+        .await?;
+    }
+
+    if job.recipe.timeline_mode.as_deref() == Some("moments") {
+        let grid = match &scan.pool {
+            Some(pool) => Some(pool.frames.iter().map(|(seconds, signature, _)| (*seconds, signature.clone())).collect()),
+            None if scan.complete => activity_grid(&source, duration, scan.signatures, cancel).await?,
+            None => None,
+        };
+        let moments = analyze_moments(
+            id,
+            file_id,
+            &source,
+            duration,
+            (&signals, grid.as_deref()),
+            size,
+            version,
+            (index, total, share),
+            model,
+            frames,
+            cancel,
+            sink,
+            database,
+            moment_decoder(scan.pool.clone()),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&pool_folder);
+        moments?;
+    }
+    let _ = std::fs::remove_dir_all(&pool_folder);
+    let (checked, model_version, job_id) = (source.clone(), version.to_owned(), id.to_owned());
+    while_running(database, id, move |conn| {
+        persist_chapter_suggestions(conn, file_id, &checked, &model_version, duration)?;
+        conn.execute(
+            "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
+            params![
+                (index + 1).to_string(),
+                share * (index + 1) as f64 / total as f64,
+                now(),
+                job_id
+            ],
+        )?;
+        Ok(())
+    })
+    .await?;
+    publish(id, sink, database).await;
     Ok(())
 }
 
-/// Logs the scene pass's timing however it ends.
 struct TimingOnDrop<F: FnMut(u64)>(F, std::time::Instant);
 
 impl<F: FnMut(u64)> Drop for TimingOnDrop<F> {
@@ -856,9 +1023,7 @@ impl<F: FnMut(u64)> Drop for TimingOnDrop<F> {
     }
 }
 
-/// The Swift engine's `analyzeScenes` captions: CLIP scenes over the frame
-/// pool, one caption of each scene's representative frame covering the whole
-/// scene, with the Swift evidence ids so either engine skips the other's.
+/// CLIP scenes over the frame pool, one caption of each scene's representative frame covering the scene.
 #[allow(clippy::too_many_arguments)]
 async fn scene_captions<M: FrameModel>(
     id: &str,
@@ -898,11 +1063,9 @@ async fn scene_captions<M: FrameModel>(
             continue;
         }
         let frame = &pool.frames.get(scene.representative).context("Missing scene frame")?.2;
-        let caption = model.caption(frame, prompt, CAPTION_TOKENS, cancel.clone()).await;
-        let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-        let caption = caption.trim();
+        let caption = caption_frame(model, frame, prompt, cancel).await?;
         if caption.is_empty() {
-            return Err(unreadable());
+            continue;
         }
         let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
         while_running(database, id, move |conn| {
@@ -918,33 +1081,69 @@ async fn scene_captions<M: FrameModel>(
     Ok(())
 }
 
-/// A frame pool decoding in the background for the job's next video, so its
-/// hardware decode overlaps this video's captions (the Swift engine's `nextPool`).
-type PoolTask = tokio::task::JoinHandle<Result<timeline_media::Pool>>;
+/// Decodes in the background for the job's next video so its hardware decode overlaps this video's captions.
+struct PoolTask {
+    handle: tokio::task::JoinHandle<Result<timeline_media::Pool>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl PoolTask {
+    async fn finish(mut self) -> Result<timeline_media::Pool> {
+        (&mut self.handle).await.map_err(|error| anyhow!(error)).and_then(|pool| pool)
+    }
+}
+
+/// Dropping the task, on any exit from the job, stops the decode it started.
+impl Drop for PoolTask {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
 
 fn spawn_pool(source: &Path, folder: &Path, cancel: &Arc<AtomicBool>) -> PoolTask {
-    let (path, directory, flag) = (source.to_owned(), folder.to_owned(), cancel.clone());
-    tokio::task::spawn_blocking(move || {
+    let (path, directory) = (source.to_owned(), folder.to_owned());
+    spawn_stoppable(cancel, move |stop| {
         let _ = std::fs::remove_dir_all(&directory);
-        // The duration is only the worker's time limit here (Swift: one hour).
-        // CLIP vectors are not computed here: on the GPU they would compete
-        // with this video's captions (the Swift engine embeds per video too).
-        timeline_media::pool(&path, 3_600.0, &directory, &flag)
+        // The duration is only the worker's time limit. CLIP vectors are not computed here: they
+        // would compete with this video's captions.
+        timeline_media::pool(&path, 3_600.0, &directory, stop)
     })
+}
+
+/// The work sees one flag that is set by the job's cancel or by dropping the returned task.
+fn spawn_stoppable(
+    cancel: &Arc<AtomicBool>,
+    work: impl FnOnce(&AtomicBool) -> Result<timeline_media::Pool> + Send + 'static,
+) -> PoolTask {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (flag, job_cancel) = (stop.clone(), cancel.clone());
+    tokio::spawn(async move {
+        while !flag.load(Ordering::Acquire) {
+            if job_cancel.load(Ordering::Acquire) {
+                flag.store(true, Ordering::Release);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    let flag = stop.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        let result = work(&flag);
+        flag.store(true, Ordering::Release);
+        result
+    });
+    PoolTask { handle, stop }
 }
 
 struct SignalScan {
     signals: Vec<analysis::Signal>,
-    /// The 1 fps grayscale signatures the signals came from.
     signatures: Vec<(f64, Vec<u8>)>,
     complete: bool,
-    /// The half-second frame pool, when this engine samples one.
     pool: Option<Arc<timeline_media::Pool>>,
 }
 
-/// Signals from one frame pool for the whole video. Signal coverage keeps the
-/// chunked decoder's 60-second rows, all sampled by the one pass; if the pool
-/// fails, uniform sampling still covers the file and the rows stay incomplete.
+/// Signal coverage keeps the chunked decoder's 60-second rows, all sampled by the one pass; if the pool fails, uniform
+/// sampling still covers the file and the rows stay incomplete.
 #[allow(clippy::too_many_arguments)]
 async fn pool_signals(
     id: &str,
@@ -956,7 +1155,6 @@ async fn pool_signals(
     cancel: &Arc<AtomicBool>,
     database: &Arc<Mutex<Connection>>,
 ) -> Result<SignalScan> {
-    // One row for the whole video, as the Swift engine's pool path records.
     let chunks = vec![(format!("visual-change:{file_id}:{}:signal-v1:0", source.revision), 0.0, duration)];
     let (pending, revision) = (chunks.clone(), source.revision.clone());
     while_running(database, id, move |conn| {
@@ -969,7 +1167,7 @@ async fn pool_signals(
     let waited = std::time::Instant::now();
     let was_prefetched = prefetched.is_some();
     let decoded = match prefetched {
-        Some(task) => task.await.map_err(|error| anyhow!(error)).and_then(|pool| pool),
+        Some(task) => task.finish().await,
         None => {
             let _ = std::fs::remove_dir_all(folder);
             let (path, directory, flag) = (source.path.clone(), folder.to_owned(), cancel.clone());
@@ -1024,9 +1222,8 @@ async fn scan_signals(
         let chunk = match blocking(move || video_export::signal_frames(&path, start, end, &flag)).await {
             Ok(chunk) => chunk,
             Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
-            // Uniform sampling still covers the file; the unscanned span stays
-            // recorded as incomplete signal coverage.
             Err(_) => {
+                // Uniform sampling still covers the file; the unscanned span stays recorded as incomplete signal coverage.
                 complete = false;
                 break;
             }
@@ -1045,9 +1242,8 @@ async fn scan_signals(
     Ok(SignalScan { signals, signatures, complete, pool: None })
 }
 
-/// Grayscale signatures every `POOL_INTERVAL` seconds, the grid the macOS engine's
-/// frame pool gives `VideoSceneSelection`: the 1 fps scan plus a second 1 fps pass
-/// offset by half a second. `None` when the offset pass fails.
+/// The grid the Mac frame pool gives `VideoSceneSelection`: the 1 fps scan plus a second pass offset by half a second.
+/// `None` when the offset pass fails.
 async fn activity_grid(
     source: &Source,
     duration: f64,
@@ -1080,10 +1276,8 @@ fn merge_grid(whole: Vec<(f64, Vec<u8>)>, offset: Vec<(f64, Vec<u8>)>, duration:
     grid
 }
 
-/// Moment windows and the still spans between them. With a complete signature grid
-/// these are the macOS activity windows (motion only, at most
-/// `MAX_WINDOW_SECONDS`, every grid frame); otherwise the overlapping windows
-/// that cover the whole file.
+/// With a complete signature grid these are the macOS activity windows (motion only, at most `MAX_WINDOW_SECONDS`,
+/// every grid frame); otherwise overlapping windows covering the whole file.
 fn moment_plan(
     duration: f64,
     signals: &[analysis::Signal],
@@ -1163,8 +1357,7 @@ async fn analyze_moments<M: FrameModel>(
     result
 }
 
-/// A window's frame extraction started while the model works on the previous
-/// window. Frame extraction is CPU work; inference is GPU work.
+/// Frame extraction is CPU work while the model works on the previous window.
 struct Prefetch {
     window: usize,
     stop: Arc<AtomicBool>,
@@ -1203,8 +1396,6 @@ fn decode_frame(source: &Path, seconds: f64, size: (u32, u32), output: &Path, ca
     timeline_media::frame_jpeg(source, seconds, size, output, cancel)
 }
 
-/// Moment frames: from the frame pool (the pool frame nearest each time, as
-/// the Swift engine's pool moments use) or decoded one by one.
 fn moment_decoder(pool: Option<Arc<timeline_media::Pool>>) -> impl FrameDecoder {
     move |source: &Path, seconds: f64, size: (u32, u32), output: &Path, cancel: &AtomicBool| -> Result<()> {
         let Some(pool) = &pool else { return decode_frame(source, seconds, size, output, cancel) };
@@ -1214,8 +1405,6 @@ fn moment_decoder(pool: Option<Arc<timeline_media::Pool>>) -> impl FrameDecoder 
     }
 }
 
-/// Decodes every planned frame in order; on failure, cancellation or `stop`
-/// (checked between frames) removes what it wrote.
 fn decode_window<D: FrameDecoder>(
     decoder: &D,
     source: &Path,
@@ -1241,10 +1430,8 @@ fn decode_window<D: FrameDecoder>(
     Ok(paths)
 }
 
-/// Timestamps of a window's distinct frames and where each frame is written.
 fn window_plan(window: &analysis::Window, duration: f64, frames: &Path) -> Result<(Vec<f64>, Vec<(f64, PathBuf)>)> {
-    // Requests past the last decodable frame resolve to that frame; the
-    // distinct-index pass collapses such repeats before inference.
+    // Requests past the last decodable frame resolve to that frame; the distinct-index pass collapses such repeats before inference.
     let times: Vec<f64> = window.times.iter().map(|t| t.min((duration - 0.05).max(0.0))).collect();
     let distinct = analysis::distinct_frame_indices(&times, window)?;
     let kept: Vec<f64> = distinct.iter().map(|&i| times[i]).collect();
@@ -1335,8 +1522,6 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
                 .await;
             remove_all(&paths);
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
-            // One malformed reply leaves only its window incomplete (written
-            // above), as in the Swift engine; the job goes on.
             let Ok(moments) = analysis::parse_moments(&raw, &kept) else {
                 tracing::info!(file_id, start = window.start, "moment reply unparsable; window left incomplete");
                 continue;
@@ -1372,9 +1557,8 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
     Ok(())
 }
 
-/// Speech pass: 16 kHz chunks of each video's first audio track are
-/// transcribed by the speech model; every chunk's coverage is recorded so a
-/// resumed job skips verified chunks and an unreadable one stays incomplete.
+/// 16 kHz chunks of each video's first audio track; every chunk's coverage is recorded so a resumed job skips verified
+/// chunks and an unreadable one stays incomplete.
 #[allow(clippy::too_many_arguments)]
 async fn transcribe<M: FrameModel>(
     id: &str,
@@ -1531,7 +1715,6 @@ fn persist_chapter_suggestions(
     Ok(())
 }
 
-// Portable and tested everywhere; only the Mac app's engine has a recogniser.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 #[path = "timeline_speech.rs"]
 mod apple_speech;

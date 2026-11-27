@@ -1,6 +1,3 @@
-// Library Selected pane (macOS `LibrarySelectedPane`): a 300 px side pane
-// that follows the grid's single-click selection with a 16:10 preview, the
-// file's facts, people, tags, caption and Open preview / Show in Files / Open.
 // A file whose location is offline shows the OFFLINE pill and can't be opened.
 
 use std::cell::{Cell, RefCell};

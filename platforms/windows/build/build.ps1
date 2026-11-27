@@ -19,7 +19,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-# Resolve repo root + platforms/windows root, regardless of where this is invoked from.
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
@@ -30,12 +29,10 @@ Write-Host "FileID Windows build (x64)" -ForegroundColor Cyan
 Write-Host "  engine: $EngineDir"
 Write-Host "  dist:   $StagingDir"
 
-# ─── 1. Toolchain probes ─────────────────────────────────────────────────────
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Error "cargo not found. Install Rust via https://rustup.rs and re-run."
 }
 
-# ─── 2. Clean ───────────────────────────────────────────────────────────────
 if ($Clean) {
     Write-Host "Cleaning previous build artifacts..." -ForegroundColor Yellow
     Push-Location $EngineDir
@@ -44,12 +41,8 @@ if ($Clean) {
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 }
 
-# ─── 2b. Wipe library database (keep downloaded models) ──────────────────────
-# Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch
-# does a full re-scan + re-tag from scratch. Leaves Models\ (CLIP / ArcFace /
-# VLM — hundreds of MB) and thumbs.cache\ untouched, so nothing re-downloads
-# and thumbnails stay warm. Use after a tagging change when an incremental
-# rescan would skip files already in the DB. Close the app first — a running
+# Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch re-scans and
+# re-tags everything. Models\ and thumbs.cache\ are kept. Close the app first: a running
 # engine holds the SQLite file open.
 if ($WipeDb) {
     $FileIdData = Join-Path $env:LOCALAPPDATA "FileID"
@@ -71,12 +64,11 @@ if ($WipeDb) {
     }
 }
 
-# ─── 3. Build engine ────────────────────────────────────────────────────────
 Push-Location $EngineDir
 try {
-    $profileFlag = if ($Release) { "--release" } else { "" }
+    $profileArgs = if ($Release) { @("--release") } else { @() }
     Write-Host "Building FileIDEngine ($([IO.Path]::Combine('release', 'x86_64-pc-windows-msvc')))..." -ForegroundColor Cyan
-    cargo build $profileFlag --target x86_64-pc-windows-msvc
+    cargo build @profileArgs --target x86_64-pc-windows-msvc
 
     if ($RunTests) {
         Write-Host "Running cargo tests..." -ForegroundColor Cyan
@@ -87,7 +79,6 @@ finally {
     Pop-Location
 }
 
-# ─── 4. Stage ───────────────────────────────────────────────────────────────
 $BuildDir = if ($Release) {
     Join-Path $EngineDir "target/x86_64-pc-windows-msvc/release"
 } else {
@@ -101,7 +92,6 @@ if (-not (Test-Path $EngineExe)) {
 New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 Copy-Item $EngineExe (Join-Path $StagingDir "FileIDEngine.exe") -Force
 
-# Strip optional symbols / verify the binary is self-contained.
 $EngineSize = (Get-Item (Join-Path $StagingDir "FileIDEngine.exe")).Length / 1MB
 Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $EngineSize) -ForegroundColor Green
 

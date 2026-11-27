@@ -1,12 +1,7 @@
-//! Speech chunks and passages for on-device recognisers that return timed
-//! words (Apple Speech in the Mac app's engine): the rules of the Swift
-//! engine's `TimelineSpeechTranscription`, so both engines write the same
-//! coverage and passage rows and resume each other's jobs chunk by chunk.
+//! Chunks and passages for timed-word recognisers.
 
 use serde::Deserialize;
 
-/// One recognised word or phrase; `timestamp` is relative to the chunk's
-/// extract start.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Segment {
     pub text: String,
@@ -126,7 +121,6 @@ pub fn passages(segments: &[Segment], chunk: &Chunk, media_duration: f64) -> Vec
     passages
 }
 
-/// Swift's `Character.isPunctuation` for the characters recognisers emit.
 fn is_punctuation(c: char) -> bool {
     c.is_ascii_punctuation()
         || matches!(c, '\u{2010}'..='\u{2027}' | '\u{3001}' | '\u{3002}' | '\u{FF01}' | '\u{FF0C}' | '\u{FF1F}' | '\u{00A1}' | '\u{00BF}')
@@ -168,5 +162,18 @@ mod tests {
         let long: Vec<Segment> = (0..20).map(|i| word("word", f64::from(i) * 0.5, 0.4)).collect();
         assert_eq!(passages(&long, &chunk, 60.0).len(), 2, "a passage spans at most 8 seconds");
         assert!(passages(&[word("  ", 1.0, 0.2)], &chunk, 60.0).is_empty());
+    }
+
+    #[test]
+    fn non_finite_words_are_dropped_and_a_passage_never_ends_after_the_video() {
+        let chunk = chunks(10.0)[0];
+        let ghost = |timestamp: f64, duration: f64, confidence: f64| Segment { text: "ghost".into(), timestamp, duration, confidence };
+        let words = [ghost(f64::NAN, 0.2, 0.9), ghost(1.0, f64::INFINITY, 0.9), ghost(1.0, 0.2, f64::INFINITY), ghost(1.0, 0.2, f64::NAN), word("last", 9.6, 1.0)];
+        let found = passages(&words, &chunk, 10.0);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].text, "last");
+        assert_eq!((found[0].start_seconds, found[0].end_seconds), (9.6, 10.0), "clamped to the video's end");
+        assert!(passages(&[word("hello", 1.0, 0.2)], &chunk, f64::NAN).is_empty());
+        assert!(passages(&[word("hello", 1.0, 0.2)], &chunk, f64::INFINITY).is_empty());
     }
 }

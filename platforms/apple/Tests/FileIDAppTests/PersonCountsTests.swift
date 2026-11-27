@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import FileIDShared
 import Testing
 @testable import FileID
 
@@ -34,5 +35,69 @@ struct PersonCountsTests {
         #expect(first.fileCount == 2)
         #expect(people.map(\.id) == [1, 2])
         #expect(try #require(people.first { $0.id == 2 }).fileCount == 1)
+    }
+}
+
+@Suite struct MovePhotosOutcomeTests {
+    private typealias Outcome = CatalogWrites.FaceMoveOutcome
+
+    @Test func aPhotoCountsOnceEvenWithTwoFacesAndOnlyWhenEveryFaceMoved() {
+        let faces: [(face: Int64, file: Int64)] = [(1, 10), (2, 10), (3, 11), (4, 12)]
+        #expect(Outcome.settle(faceFiles: faces, movedFaces: [1, 2, 3, 4], photosAsked: 3).photosMoved == 3)
+        #expect(Outcome.settle(faceFiles: faces, movedFaces: [1, 3], photosAsked: 3).photosMoved == 1)
+        #expect(Outcome.settle(faceFiles: faces, movedFaces: [], photosAsked: 3).photosMoved == 0)
+    }
+
+    @Test func nothingMovedSaysSoAndPartialSaysHowMany() {
+        #expect(Outcome(photosMoved: 0, photosAsked: 3).status(target: "Alex") == "The photos didn’t move. Try again in a moment.")
+        #expect(Outcome(photosMoved: 3, photosAsked: 3).status(target: "Alex") == "Moved 3 photos to Alex.")
+        #expect(Outcome(photosMoved: 1, photosAsked: 1).status(target: "Alex") == "Moved 1 photo to Alex.")
+        #expect(Outcome(photosMoved: 2, photosAsked: 5).status(target: "Alex") == "Moved 2 photos of 5 to Alex. The rest stayed where they were.")
+    }
+}
+
+@Suite struct SuggestedMergeGhostRowTests {
+    private func pair(_ a: Int64, _ b: Int64) -> MergeSuggestionPair {
+        MergeSuggestionPair(sourcePersonID: a, destinationPersonID: b, similarity: 0.8, sourceAnchorFaceID: 1, destinationAnchorFaceID: 2,
+                            sourceMemberCount: 3, destinationMemberCount: 4)
+    }
+
+    @Test func afterOneMergeEveryPairNamingTheFoldedPersonIsDropped() {
+        let pairs = [pair(1, 3), pair(2, 3), pair(4, 5)]
+        let left = MergeSuggestionPair.stillMergeable(pairs, alive: [1, 2, 4, 5])
+        #expect(left.map(\.id) == ["4:5"])
+        #expect(MergeSuggestionPair.stillMergeable(pairs, alive: [1, 2, 3, 4, 5]).count == 3)
+        #expect(MergeSuggestionPair.stillMergeable(pairs, alive: []).isEmpty)
+    }
+}
+
+@Suite struct PersonDragPayloadTests {
+    @Test func onlyADraggedPersonCardCanStartAMerge() {
+        #expect(PersonDragPayload.decode(PersonDragPayload.encode(42)) == 42)
+        #expect(PersonDragPayload.decode("42") == nil)
+        #expect(PersonDragPayload.decode("fileid-person:") == nil)
+        #expect(PersonDragPayload.decode("fileid-person:abc") == nil)
+        #expect(PersonDragPayload.decode("hello") == nil)
+    }
+}
+
+@Suite struct NamingSessionTests {
+    private func person(_ id: Int64, first: String?) -> ReadStore.PersonRow {
+        ReadStore.PersonRow(id: id, name: nil, title: nil, firstName: first, middleName: nil, lastName: nil, suffix: nil,
+                            isUnknown: false, representativeFaceID: nil, representativeFileID: nil, representativeBBox: nil,
+                            representativePath: nil, representativeCacheRevision: nil, fileCount: 1, faceCount: 1)
+    }
+
+    @Test func namesAlreadyInTheCatalogAtOpenDoNotCountAsSaved() {
+        let opened = [person(1, first: "Alex"), person(2, first: nil)]
+        let baseline = NamingSession.snapshot(opened)
+        #expect(!NamingSession.namedSinceOpen(baseline: baseline, persons: opened))
+        #expect(!NamingSession.namedSinceOpen(baseline: nil, persons: opened))
+    }
+
+    @Test func aNameSavedAfterOpenCountsEvenWhenItRenamesSomeoneAlreadyNamed() {
+        let baseline = NamingSession.snapshot([person(1, first: "Alex"), person(2, first: nil)])
+        #expect(NamingSession.namedSinceOpen(baseline: baseline, persons: [person(1, first: "Alex"), person(2, first: "Sam")]))
+        #expect(NamingSession.namedSinceOpen(baseline: baseline, persons: [person(1, first: "Alexander"), person(2, first: nil)]))
     }
 }

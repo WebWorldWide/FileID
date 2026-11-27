@@ -1,10 +1,4 @@
 ﻿// Round-trip tests for IpcCommand. Asserts:
-//   1. Each variant survives encode → decode → encode without semantic loss
-//      (the resulting payload's structure matches).
-//   2. The wire bytes for empty-payload variants are `{"variantName": {}}`,
-//      NOT a bare string.
-//   3. Optional bookmark and exclusion fields match the shared schema and
-//      are omitted when null.
 
 using System.Text.Json;
 using Xunit;
@@ -36,10 +30,6 @@ public class IpcCommandTests
     [Fact]
     public void StartScan_WithoutRootDisplay_EncodesNull()
     {
-        // When the C# field is null, the wire shape encodes "rootDisplay":null
-        // (Swift Codable does the same for optionals it bothered to encode).
-        // We could omit instead via DefaultIgnoreCondition.WhenWritingNull,
-        // but matching Swift's behavior keeps round-trips byte-equal.
         var cmd = new IpcCommand("t", new StartScanCommand("/abs/path", null));
         var json = IpcCoder.Encode(cmd);
         Assert.Contains("\"rootDisplay\":null", json);
@@ -69,8 +59,7 @@ public class IpcCommandTests
         Assert.IsType(t, rt.Payload);
     }
 
-    // cancelPrewarm gained an optional modelKind (per-model cancel; null = all),
-    // so it is no longer an empty payload — it round-trips its field both ways.
+    // cancelPrewarm gained an optional modelKind (per-model cancel; null = all), so it is no longer an empty payload — it round-trips its field both ways.
     [Fact]
     public void CancelPrewarm_RoundTripsWithAndWithoutModelKind()
     {
@@ -90,8 +79,6 @@ public class IpcCommandTests
     [Fact]
     public void DeepAnalyzeFile_PreservesFileIDExactCasing()
     {
-        // Field name on the wire is "fileID" (matches Swift Codable's
-        // synthesis for `fileID: Int64`). Lower-case "fileId" is wrong.
         var cmd = new IpcCommand("d", new DeepAnalyzeFileCommand(12345, "qwen2_5_vl_7b"));
         var json = IpcCoder.Encode(cmd);
         Assert.Contains("\"fileID\":12345", json);
@@ -145,8 +132,7 @@ public class IpcCommandTests
     [Fact]
     public void DeepAnalyzeAll_OmittedTagsOnly_DefaultsFalse()
     {
-        // Older clients omit tagsOnly; it must decode as false (serde default
-        // on the Rust side, defaulted record param on the C# side).
+        // Older clients omit tagsOnly; it must decode as false (serde default on the Rust side, defaulted record param on the C# side).
         const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":false}}}""";
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeAllCommand>(rt.Payload);

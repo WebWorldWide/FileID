@@ -24,20 +24,21 @@ use std::{
 mod snapshot;
 
 const MAX_FILES: usize = 200_000;
+/// What a search says when the index job was paused by the user, who must resume it.
+pub const PAUSED_BY_USER_MESSAGE: &str = "Visual search is paused. Resume it to search by what’s in a picture; names and text still match.";
+/// What a job interrupted by a restart says. A paused job carrying any message was stopped by the engine, so a search resumes it; a pause the user chose has none and stays paused.
+const INTERRUPTED_MESSAGE: &str = "Interrupted. Resume visual index preparation from the last verified snapshot.";
 static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
 const MAX_GRAPH_BYTES: u64 = snapshot::max_graph_bytes(clip_space::DIMENSION, MAX_FILES);
-/// JSON snapshots written before the binary format; read once, then rewritten.
 const LEGACY_MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
 const EF_SEARCH: usize = 1000;
-/// Changes kept beside the graph and searched directly. Past this many (or a
-/// tenth of the graph) the graph is rebuilt instead.
+/// Past this many changes (or a tenth of the graph) the graph is rebuilt instead.
 const MIN_PENDING_BEFORE_REBUILD: usize = 256;
 const MAX_PENDING: usize = MAX_FILES / 10 + MIN_PENDING_BEFORE_REBUILD;
 const MAX_DELTA_BYTES: u64 = snapshot::max_delta_bytes(clip_space::DIMENSION, MAX_PENDING, MAX_PENDING);
 const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
-/// A catalog with at most this many vectors answers a search that finds no
-/// graph yet by comparing every vector (the graph is built in the background),
-/// so the first search after a scan is ranked like the Swift engine's.
+/// A catalog this small answers a search with no graph yet by comparing every vector (the graph builds in the
+/// background), so the first search after a scan ranks exactly.
 const EXACT_SEARCH_MAX: usize = 50_000;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Revision {
@@ -56,7 +57,6 @@ struct Manifest {
     dimension: usize,
     revision: Revision,
     graph_hash: String,
-    /// Absent for the JSON snapshots older engines wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     format: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,9 +64,7 @@ struct Manifest {
 }
 struct Cache {
     graph: Arc<HnswMap<Embedding, Entry>>,
-    /// Vectors added or changed since `graph` was built, searched directly.
     added: Vec<(Vec<f32>, Entry)>,
-    /// Files in `graph` that are gone or superseded by `added`.
     removed: HashSet<i64>,
     revision: Revision,
     lease: Option<crate::resource_scheduler::Lease>,
@@ -74,9 +72,7 @@ struct Cache {
 }
 #[derive(Default)]
 struct Saved {
-    /// The binary graph file on disk that holds `graph`, when there is one.
     graph_hash: Option<String>,
-    /// Set after a failed save; the next search past it tries again.
     retry_at: Option<std::time::Instant>,
 }
 impl Cache {
@@ -86,7 +82,6 @@ impl Cache {
     fn pending(&self) -> usize {
         self.added.len() + self.removed.len()
     }
-    /// Nearest entries across the graph and the changes beside it, closest first.
     fn nearest(&self, query: &[f32], wanted: usize) -> Vec<(Entry, f32)> {
         let mut candidates = Searcher::default().top_k(&self.graph, query, wanted);
         candidates.retain(|(entry, _)| !self.removed.contains(&entry.file_id));
@@ -109,25 +104,33 @@ struct State {
     worker: Option<Arc<AtomicBool>>,
     closed: bool,
 }
-/// A search reply plus the files judged weaker look-alikes; `weak` is None
-/// when the search was not judged (keyword-only, similar-to-a-file, indexing).
+/// `weak` is None when the search was not judged (keyword-only, similar-to-a-file, indexing).
 pub(crate) struct Judged {
     pub(crate) response: CatalogResponse,
     pub(crate) weak: Option<std::collections::HashSet<i64>>,
+    /// Files whose picture scored as a strong match; the other good matches were found by name, tag, text or description.
+    pub(crate) strong: std::collections::HashSet<i64>,
 }
 impl Judged {
-    /// Good matches first, then weaker look-alikes, and a count that says so.
     pub(crate) fn labelled(mut self) -> Self {
         if let Some(weak) = &self.weak {
             let (good, weaker): (Vec<_>, Vec<_>) = std::mem::take(&mut self.response.hits).into_iter().partition(|hit| !weak.contains(&hit.file_id));
-            self.response.message = Some(search_strength::summary(good.len(), weaker.len()));
+            let strong = good.iter().filter(|hit| self.strong.contains(&hit.file_id)).count();
+            self.response.message = Some(search_strength::summary(good.len(), strong, weaker.len()));
             self.response.hits = good.into_iter().chain(weaker).collect();
         }
         self
     }
 }
-/// A read-only connection lent out for one search and returned afterwards, so
-/// searches skip opening the catalog and parsing its schema each time.
+type KeywordJob = std::thread::JoinHandle<Result<Vec<CatalogHit>>>;
+
+fn finish_keyword(keyword: &mut Vec<CatalogHit>, job: &mut Option<KeywordJob>) -> Result<()> {
+    if let Some(job) = job.take() {
+        *keyword = job.join().map_err(|_| anyhow::anyhow!("The keyword search stopped unexpectedly"))??;
+    }
+    Ok(())
+}
+
 pub(crate) struct Reader<'a> {
     slot: &'a Mutex<Option<Connection>>,
     conn: Option<Connection>,
@@ -158,8 +161,7 @@ pub struct CatalogIndex {
     state: Mutex<State>,
     changed: Condvar,
     scheduler: Arc<ResourceScheduler>,
-    /// Largest catalog searched exactly while the graph is not built; the
-    /// unit tests set it to 0 where they exercise the cold-graph reply.
+    /// The unit tests set it to 0 where they exercise the cold-graph reply.
     exact_max: std::sync::atomic::AtomicUsize,
 }
 impl CatalogIndex {
@@ -168,7 +170,6 @@ impl CatalogIndex {
         *CURRENT.lock() = Arc::downgrade(&index);
         index
     }
-    /// The engine's live index, for Chat's visual retrieval.
     pub fn current() -> Option<Arc<Self>> {
         CURRENT.lock().upgrade()
     }
@@ -196,10 +197,9 @@ impl CatalogIndex {
         )
     }
     pub fn recover(conn: &Connection) -> Result<()> {
-        conn.execute("UPDATE catalog_jobs SET state='paused',error='Interrupted. Resume visual index preparation from the last verified snapshot.',updated_at=?1 WHERE kind='catalogIndex' AND state IN ('queued','running')", [now()])?;
+        conn.execute("UPDATE catalog_jobs SET state='paused',error=?1,updated_at=?2 WHERE kind='catalogIndex' AND state IN ('queued','running')", params![INTERRUPTED_MESSAGE, now()])?;
         Ok(())
     }
-    /// The cached read connection, or a new one while another search holds it.
     pub(crate) fn reader(&self) -> Result<Reader<'_>> {
         let cached = self.reader.lock().take();
         let conn = match cached {
@@ -280,7 +280,6 @@ impl CatalogIndex {
     pub fn search(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
         Ok(self.judged(request, &search_strength::live_encoder)?.response)
     }
-    /// The reply plus the files judged weaker look-alikes (Swift `CatalogSearch.judged`).
     pub(crate) fn judged(self: &Arc<Self>, request: &CatalogRequest, encode: &dyn Fn(&str) -> Option<Vec<f32>>) -> Result<Judged> {
         let root = match request.root_id {
             Some(id) => {
@@ -306,7 +305,7 @@ impl CatalogIndex {
         let mut judged = self.search_unfiltered(&wide, root.as_ref(), encode)?;
         let response = &mut judged.response;
         let conn = self.reader()?;
-        let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
+        let mut statement = conn.prepare(&format!("SELECT 1 FROM files f WHERE f.id=?1 AND {} BETWEEN ?2 AND ?3", crate::util::SQL_TAKEN_DATE))?;
         let mut inside = std::collections::HashSet::new();
         for hit in &response.hits {
             if inside.contains(&hit.file_id) {
@@ -318,8 +317,8 @@ impl CatalogIndex {
         }
         response.hits.retain(|hit| inside.contains(&hit.file_id));
         response.hits.truncate(limit);
-        // Ranking keeps the best hundred overall; files in the window beyond them
-        // come from every file the words describe, newest first (Swift `CatalogSearch.handle`).
+        // Ranking keeps the best hundred overall; files beyond them come from every file the words describe, newest
+        // first.
         let query = request.query.as_deref().map(str::trim).unwrap_or_default();
         if response.hits.len() < limit
             && !query.is_empty()
@@ -330,11 +329,11 @@ impl CatalogIndex {
                 let seen: std::collections::HashSet<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
                 let wanted = serde_json::to_string(&subject)?;
                 let mut more = conn.prepare(
-                    "SELECT id,path_text,kind,COALESCE(vlm_description,'') FROM files
-                     WHERE failed=0 AND id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3 AND {}
-                     ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?4"
-                        .replace("{}", &crate::commands::roots::clause("path_text", "?5"))
-                        .as_str(),
+                    &"SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') FROM files f
+                     WHERE f.failed=0 AND f.id IN (SELECT value FROM json_each(?1)) AND {taken} BETWEEN ?2 AND ?3 AND {roots}
+                     ORDER BY {taken} DESC,f.id DESC LIMIT ?4"
+                        .replace("{taken}", crate::util::SQL_TAKEN_DATE)
+                        .replace("{roots}", &crate::commands::roots::clause("f.path_text", "?5")),
                 )?;
                 let rows = more.query_map(rusqlite::params![wanted, from, to, (limit + seen.len()) as i64, root.as_ref().map(|root| root.param())], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
@@ -376,10 +375,16 @@ impl CatalogIndex {
         };
         let conn = self.reader()?;
         let tx = conn.unchecked_transaction()?;
-        let keyword = if mode == "semantic" {
-            vec![]
-        } else {
-            crate::commands::catalog::search(&tx, query, &[], root)?
+        let (mut keyword, mut keyword_job) = match mode {
+            "semantic" => (vec![], None),
+            "keyword" => (crate::commands::catalog::search(&tx, query, &[], root)?, None),
+            _ => {
+                let (index, words, scope) = (self.clone(), query.to_owned(), root.cloned());
+                (vec![], Some(std::thread::Builder::new().name("catalog-keyword".into()).spawn(move || {
+                    let conn = index.reader()?;
+                    crate::commands::catalog::search(&conn, &words, &[], scope.as_ref())
+                })?))
+            }
         };
         let mut response = CatalogResponse {
             request_id: request.request_id.clone(),
@@ -395,10 +400,12 @@ impl CatalogIndex {
             take_groups: None,
             take_qualities: None,
             take_goal_ranking: None,
+            similar_groups: None,
+            similar_group_total: None,
         };
         if mode == "keyword" {
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-            return Ok(Judged { response, weak: None });
+            return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });
         }
         let mut query_vector = crate::commands::catalog_search::vector(&tx, request)?;
         normalize(&mut query_vector);
@@ -420,26 +427,25 @@ impl CatalogIndex {
             }
             None => {
                 let Some(exact) = self.exact_nearest(&tx, &query_vector, wanted)? else {
+                    finish_keyword(&mut keyword, &mut keyword_job)?;
                     drop(tx);
                     drop(retrieval_lease);
-                    self.prepare()?;
+                    let prepared = self.prepare();
+                    if mode == "semantic" {
+                        prepared.as_ref().map_err(|error| anyhow::anyhow!("{error}"))?;
+                    }
                     response.status = if mode == "semantic" { "error" } else { "ok" }.into();
-                    response.message = Some(
-                        if mode == "semantic" {
-                            "Preparing the local visual search index. Similarity results are not available yet."
-                        } else {
-                            "Keyword results only. Preparing the local visual search index."
-                        }
-                        .into(),
-                    );
+                    response.message = Some(match (&prepared, mode) {
+                        (Err(error), _) => format!("Keyword results only. {error}"),
+                        (Ok(_), "semantic") => "Preparing the local visual search index. Similarity results are not available yet.".into(),
+                        (Ok(_), _) => "Keyword results only. Preparing the local visual search index.".into(),
+                    });
                     response.jobs = crate::commands::catalog::jobs(&conn)?;
                     response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
-                    return Ok(Judged { response, weak: None });
+                    return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });
                 };
-                // The graph is built in the background for the next search. The
-                // search's own lease goes first: a background build is not
-                // admitted beside it. A paused or failed index job does not
-                // stop this answer.
+                // The graph builds in the background for the next search; the search's own lease goes first because a
+                // background build is not admitted beside it. A paused or failed index job does not stop this answer.
                 drop(retrieval_lease);
                 let _ = self.prepare();
                 exact
@@ -476,11 +482,17 @@ impl CatalogIndex {
                     visual.push((hit, margin));
                 }
         }
+        finish_keyword(&mut keyword, &mut keyword_job)?;
         if judging {
             visual.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.file_id.cmp(&b.0.file_id)));
         }
         let weak_visual: Option<std::collections::HashSet<i64>> =
             judging.then(|| visual.iter().filter(|(_, margin)| !search_strength::is_strong(*margin)).map(|(hit, _)| hit.file_id).collect());
+        let strong: std::collections::HashSet<i64> = visual
+            .iter()
+            .filter(|(hit, _)| weak_visual.as_ref().is_some_and(|weak| !weak.contains(&hit.file_id)))
+            .map(|(hit, _)| hit.file_id)
+            .collect();
         let visual: Vec<CatalogHit> = visual.into_iter().map(|(hit, _)| hit).collect();
         response.message = Some(
             if mode == "semantic" {
@@ -492,11 +504,11 @@ impl CatalogIndex {
         );
         if mode == "semantic" {
             response.hits = crate::commands::catalog_search::select(visual, limit, files_only);
-            return Ok(Judged { response, weak: weak_visual });
+            return Ok(Judged { response, weak: weak_visual, strong });
         }
         let Some(mut weak) = weak_visual else {
             response.hits = crate::commands::catalog_search::merge(keyword, visual, limit, files_only);
-            return Ok(Judged { response, weak: None });
+            return Ok(Judged { response, weak: None, strong: std::collections::HashSet::new() });
         };
         for hit in &keyword {
             weak.remove(&hit.file_id);
@@ -505,10 +517,9 @@ impl CatalogIndex {
         let merged = crate::commands::catalog_search::merge(keyword, visual, everything, files_only);
         let (good, weaker): (Vec<_>, Vec<_>) = merged.into_iter().partition(|hit| !weak.contains(&hit.file_id));
         response.hits = crate::commands::catalog_search::select(good.into_iter().chain(weaker).collect(), limit, files_only);
-        Ok(Judged { response, weak: Some(weak) })
+        Ok(Judged { response, weak: Some(weak), strong })
     }
-    /// The nearest vectors by comparing every one, or `None` when the catalog
-    /// is past what is fast to compare (the graph answers those).
+    /// `None` when the catalog is past what is fast to compare (the graph answers those).
     fn exact_nearest(&self, tx: &Connection, query: &[f32], wanted: usize) -> Result<Option<Vec<(Entry, f32)>>> {
         let maximum = self.exact_max.load(Ordering::Relaxed);
         if maximum == 0 {
@@ -553,10 +564,12 @@ impl CatalogIndex {
             let id = Self::job_id();
             let recipe = serde_json::json!({"model":clip_space::model_id()}).to_string();
             conn.execute("INSERT OR IGNORE INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES(?1,'catalogIndex','[]',?2,'queued',1,?3,?3)",params![id,recipe,now()])?;
-            let current: String =
-                conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [&id], |row| row.get(0))?;
+            let (current, error): (String, Option<String>) =
+                conn.query_row("SELECT state,error FROM catalog_jobs WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let interrupted = current == "paused" && error.is_some();
+            ensure!(current != "paused" || interrupted, PAUSED_BY_USER_MESSAGE);
             ensure!(
-                ["queued", "completed"].contains(&current.as_str()),
+                interrupted || ["queued", "completed"].contains(&current.as_str()),
                 "Visual index preparation is stopped or failed. Resume its job; keyword search remains available."
             );
             conn.execute(
@@ -645,8 +658,8 @@ impl CatalogIndex {
         } else {
             None
         };
-        // Loading holds the validated arrays and the graph at once; a JSON
-        // snapshot is parsed into a value tree many times its size.
+        // Loading holds the validated arrays and the graph at once; a JSON snapshot is parsed into a value tree many
+        // times its size.
         let disk_mb = candidate
             .as_ref()
             .map(|(manifest, bytes)| bytes.div_ceil(1_048_576) * if manifest.format.is_some() { 3 } else { 20 })
@@ -693,8 +706,6 @@ impl CatalogIndex {
         result.lease = Some(lease);
         Ok(result)
     }
-    /// Applies the catalog's vector changes since `cache` beside its graph,
-    /// or rebuilds the graph from memory once too many have piled up.
     fn advance(&self, tx: &Connection, cache: &Cache, latest: Revision, cancel: &AtomicBool) -> Result<Cache> {
         let in_graph: HashMap<i64, &str> =
             cache.graph.values.iter().map(|entry| (entry.file_id, entry.fingerprint.as_str())).collect();
@@ -800,8 +811,7 @@ impl CatalogIndex {
             valid: &clip_space::valid,
         }
     }
-    /// A save that fails for any reason but cancellation leaves the index
-    /// usable from memory; a later search tries again.
+    /// A failed save (except cancellation) leaves the index usable from memory; a later search retries.
     fn save_or_defer(&self, cache: &Cache, cancel: &AtomicBool) -> Result<()> {
         match self.save(cache, cancel) {
             Ok(()) => Ok(()),
@@ -898,7 +908,6 @@ impl CatalogIndex {
         }
         Ok(())
     }
-    /// Removes staging files an interrupted save left behind.
     fn sweep_staging(&self) {
         let Ok(entries) = std::fs::read_dir(&self.directory) else { return };
         for entry in entries.flatten() {
@@ -973,8 +982,6 @@ impl CatalogIndex {
         Ok(cache)
     }
 }
-/// Peak memory while building: the rows read, the graph's own copy of them and
-/// its neighbour lists.
 const BUILD_BYTES_PER_POINT: u64 = 8192;
 fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
@@ -1002,7 +1009,6 @@ pub(crate) fn vector_revision(conn: &Connection, namespace: &str) -> Result<Revi
         },
     )?)
 }
-/// Whether the change log still holds every step from `old` to `latest`.
 pub(crate) fn vector_can_advance(conn: &Connection, namespace: &str, old: &Revision, latest: &Revision) -> Result<bool> {
     if old.instance != latest.instance || old.generation > latest.generation || old.generation < 0 {
         return Ok(false);
@@ -1053,7 +1059,6 @@ fn open_bounded(path: &Path, maximum: u64) -> Result<(std::fs::File, u64)> {
     );
     Ok((file, metadata.len()))
 }
-/// Streams a snapshot into a staging file and renames it to `<hash>.<extension>`.
 fn atomic_stream(
     directory: &Path,
     extension: &str,
@@ -1095,8 +1100,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     result
 }
-// Validate private HNSW topology before the crate's unchecked indexing can observe disk data.
-// JSON snapshots only; binary ones are validated as they are read.
+// Validate private HNSW topology before the crate's unchecked indexing can see disk data; binary snapshots are
+// validated as read.
 fn validate_graph(bytes: &[u8]) -> Result<()> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
 

@@ -1,11 +1,5 @@
-// DBWriter — drains the Tagging → DB channel into adaptive-size or 200 ms
-// batches on the single SQLite writer connection.
-//
-// Single-writer is by design: WAL permits concurrent readers but only
-// one writer. Every insert + the resume cursor update land in the same
-// transaction so a crash mid-batch leaves no partial state. The
-// ocr_fts/doc_fts external-content indexes are maintained by the v15
-// sync triggers — never written here directly.
+// DBWriter drains the Tagging → DB channel in adaptive-size or 200 ms batches on the single SQLite writer connection (WAL allows one writer).
+// Every insert and the resume cursor update share one transaction, so a crash leaves no partial state. ocr_fts/doc_fts are maintained by the v15 sync triggers, never written here.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,16 +13,11 @@ use crate::coordinator::ScanCoordinator;
 use crate::pipeline::tagging::TaggedFile;
 use crate::platform::{dbwriter_batch_size_for, memory_tier};
 
-/// Fallback flush trigger if the adaptive sizing yields nothing.
-/// `current_batch_size()` polls memory tier and picks a tier-appropriate
-/// value (Low=64, Balanced=250, High=500). 250 is the Balanced default;
-/// previous behavior was 100/200ms.
+/// Fallback flush size if adaptive sizing yields nothing; `current_batch_size()` picks Low=64, Balanced=250, High=500.
 const BATCH_SIZE_FALLBACK: usize = 250;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Adaptive batch size driven by available RAM. Re-evaluated at the top
-/// of each batch so a memory-pressure shift mid-scan downshifts batch
-/// size before we OOM (rather than tripping the OS-level reaper).
+/// Re-evaluated at the top of each batch so a memory-pressure shift downshifts the batch before an OOM.
 fn current_batch_size() -> usize {
     dbwriter_batch_size_for(memory_tier()).max(1)
 }
@@ -58,22 +47,16 @@ fn take_deferred_face_crops(
         .collect()
 }
 
-/// Stats reported per batch — fed into the `batchSummary` IPC event so
-/// the app sidebar can show throughput in real time.
 #[derive(Debug, Clone, Default)]
 pub struct BatchStats {
     pub batch_index: u32,
     pub files_in_batch: u32,
     pub processed_total: u64,
-    /// Cumulative processed files whose kind runs the expensive vision path
-    /// (Image/Video/Model). Feeds the kind-aware ETA: a blended files/sec
-    /// oscillates an order of magnitude between photo bursts and hash-only
-    /// stretches on mixed libraries.
+    /// Cumulative processed Image/Video/Model files (the expensive vision path), for the kind-aware ETA: a blended files/sec oscillates by an order of magnitude on mixed libraries.
     pub processed_heavy: u64,
-    /// Cumulative failed-file count. Plumbed through Progress events so
-    /// the sidebar "Failures" stat updates during scan instead of waiting
-    /// for ScanComplete.
     pub failed_total: u64,
+    /// Part of `failed_total` that timed out and will be read again this scan, so it is not shown as failed.
+    pub retried_total: u64,
     pub wall_seconds: f64,
     pub files_per_second: f64,
     pub utilization: f64,
@@ -89,28 +72,29 @@ pub struct DbWriter {
     conn: Arc<Mutex<Connection>>,
     coordinator: ScanCoordinator,
     rename_heal_enabled: bool,
+    timeouts_are_retried: bool,
+    retried_timeouts: std::sync::atomic::AtomicU64,
 }
 
 impl DbWriter {
     pub fn new(conn: Arc<Mutex<Connection>>, coordinator: ScanCoordinator) -> Self {
-        // A database with no file rows has neither an old path to heal nor a
-        // legacy hash recipe. Freeze this at scan start so rows inserted by the
-        // current scan do not trigger two pointless heal queries plus a second
-        // disk read on every later batch.
+        // A database with no file rows has no old path to heal and no legacy hash recipe; frozen at scan start so rows inserted by this scan don't trigger pointless heal queries and a second disk read per batch.
         let rename_heal_enabled = conn
             .lock()
             .query_row("SELECT EXISTS(SELECT 1 FROM files LIMIT 1)", [], |row| {
                 row.get::<_, bool>(0)
             })
             .unwrap_or(true);
-        Self { conn, coordinator, rename_heal_enabled }
+        Self { conn, coordinator, rename_heal_enabled, timeouts_are_retried: false, retried_timeouts: std::sync::atomic::AtomicU64::new(0) }
     }
 
-    /// Drain the input receiver until the channel closes, flushing on
-    /// the lesser of `BATCH_SIZE` accumulated rows or `FLUSH_INTERVAL`
-    /// since the first row in the current batch.
-    ///
-    /// Returns total processed + total failed counts when finished.
+    /// Files that time out are read again by a later pass of the same scan, so their rows are counted apart from real failures.
+    pub fn with_timeouts_retried(mut self, retried: bool) -> Self {
+        self.timeouts_are_retried = retried;
+        self
+    }
+
+    /// Drains the receiver until the channel closes, flushing on `BATCH_SIZE` rows or `FLUSH_INTERVAL` after the first row. Returns total processed and failed counts.
     pub async fn run<F>(self, mut input: mpsc::Receiver<TaggedFile>, mut on_batch: F)
         -> Result<(u64, u64)>
     where
@@ -123,8 +107,6 @@ impl DbWriter {
         let mut failed: u64 = 0;
         let mut batch_index: u32 = 0;
         let mut current_target = current_batch_size();
-        // Re-check memory tier every 30s so a pressure shift mid-scan
-        // downshifts batch size before we trip the OOM reaper.
         let mut next_tier_check = Instant::now() + Duration::from_secs(30);
 
         loop {
@@ -177,11 +159,7 @@ impl DbWriter {
                 }
             }
             if self.coordinator.is_cancelled() {
-                // Flush any rows that finished the (paid-for) ML pipeline before
-                // the cancel landed but hadn't hit a batch boundary yet — else up
-                // to current_target-1 fully-tagged files are dropped and must be
-                // fully re-processed on the next scan. Mirrors the Ok(None)/Err
-                // drain arms above.
+                // Flush rows that finished the paid-for ML pipeline before the cancel but hadn't hit a batch boundary; otherwise up to current_target-1 tagged files are re-processed next scan (mirrors the drain arms above).
                 if !buffer.is_empty() {
                     let stats = self.flush_off_runtime(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                     on_batch(stats);
@@ -196,9 +174,7 @@ impl DbWriter {
         self.rename_heal_enabled
     }
 
-    /// `flush` is synchronous SQLite + filesystem work; on the multi-threaded
-    /// runtime hand this worker's other tasks off for its duration instead of
-    /// stalling them.
+    /// `flush` is synchronous SQLite + filesystem work; hand this worker's other tasks off for its duration instead of stalling them.
     fn flush_off_runtime(
         &self,
         buffer: &mut Vec<TaggedFile>,
@@ -214,9 +190,7 @@ impl DbWriter {
         }
     }
 
-    /// Per file in `buffer`, the `(id, old_path)` of every identity-matched
-    /// row at a different path whose old path is gone from disk (a genuine
-    /// move), file_ref matches first.
+    /// Per file, the `(id, old_path)` of identity-matched rows at a different path whose old path is gone (a genuine move), file_ref matches first.
     fn moved_heal_candidates(&self, buffer: &[TaggedFile]) -> Result<Vec<Vec<(i64, String)>>> {
         let mut per_file: Vec<Vec<(i64, String)>> = Vec::with_capacity(buffer.len());
         {
@@ -261,7 +235,6 @@ impl DbWriter {
         Ok(per_file)
     }
 
-    /// Persist `buffer` in a single transaction. Empties the buffer.
     fn flush(
         &self,
         buffer: &mut Vec<TaggedFile>,
@@ -280,50 +253,41 @@ impl DbWriter {
         let mut store = Vec::with_capacity(buffer.len());
         let files_in_batch = buffer.len() as u32;
 
-        // Face-crop ids orphaned by faces_evaluated re-processing, pruned AFTER
-        // the batch commits — never inside the tx, so a batch rollback (which
-        // restores the old face_prints rows) can't leave them crop-less.
+        // Face-crop ids orphaned by faces_evaluated re-processing are pruned AFTER commit, never inside the tx, so a rollback (which restores the old face_prints) can't leave them crop-less.
         let mut crop_ids_to_prune: Vec<i64> = Vec::new();
-        // Face/crop positions to extract by move only after commit. The JPEG
-        // encode + fs::write stays outside the transaction and writer lock.
+        // Crop extraction by move happens after commit: JPEG encode + fs::write stay outside the transaction and writer lock.
         let mut deferred_crops: Vec<DeferredFaceCrop> = Vec::new();
-        // (twin face id, new face id) crop files to copy after commit.
         let mut crop_copies: Vec<(i64, i64)> = Vec::new();
         let mut reused_twins = 0u32;
 
-        // Rename/move heal candidates are resolved BEFORE the writer lock:
-        // `heal_candidate_moved()` does a blocking `symlink_metadata()` stat (is
-        // the candidate's old path still on disk?). On a dead/slow mount
-        // (unmounted NAS, pulled SD/external drive) that stat can block for the
-        // full fs/SMB timeout; inside the tx it would stall the single writer
-        // for the whole batch. Look the candidates up under a brief lock, stat
-        // their old paths with the lock RELEASED, and keep — per file, in SQL
-        // order (file_ref matches first) — only those whose old path is gone.
-        // The legacy BLAKE3 digests come from the decoder's own read
-        // (`TaggedFile::legacy_hashes`), so the writer never re-reads a file.
-        // (F-C1-025, audit R3-16)
+        // Heal candidates are resolved BEFORE the writer lock: `heal_candidate_moved()` stats the old path, which on a dead/slow mount (unmounted NAS, pulled drive) can block for the full fs/SMB timeout and would stall the single writer for the whole batch. Look up under a brief lock, stat with the lock released, keep (per file, file_ref matches first) only candidates whose old path is gone.
+        // Legacy BLAKE3 digests come from the decoder's own read (`TaggedFile::legacy_hashes`), so the writer never re-reads a file.
         let heal_candidates = if self.rename_heal_enabled {
             self.moved_heal_candidates(buffer)?
         } else {
             vec![Vec::new(); buffer.len()]
         };
+        // A failure for a file deleted or renamed after the walk listed it: a new
+        // row would name a missing file and, stamped with this scan's time, survive
+        // the orphan sweep. Checked off the writer lock for the same reason as above.
+        let vanished: Vec<bool> = buffer
+            .iter()
+            .map(|f| f.failed && !f.heal_only && matches!(f.path.try_exists(), Ok(false)))
+            .collect();
 
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
         {
-            // INSERT ... RETURNING id (SQLite 3.35+, bundled is 3.46+)
-            // eliminates the per-row "SELECT id FROM files WHERE path_text = ?"
-            // round-trip. Previously the dbwriter ran one INSERT + one SELECT
-            // per file = 2N statement executions per batch; this drops to N.
-            // The RETURNING clause yields the row id whether the row was
-            // freshly inserted OR updated via the ON CONFLICT DO UPDATE
-            // branch — same id stability the SELECT provided.
+            // INSERT ... RETURNING id (SQLite 3.35+) replaces a per-row SELECT and yields the id on both insert and ON CONFLICT DO UPDATE.
             let mut file_stmt = tx
                 .prepare_cached(INSERT_FILE_RETURNING_ID_SQL)
                 .context("preparing file insert (RETURNING)")?;
             let mut heal_recheck_stmt = tx
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)")
                 .context("preparing rename-heal recheck")?;
+            let mut row_at_path_stmt = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?1)")
+                .context("preparing row-at-path check")?;
             let mut heal_only_check_stmt = tx
                 .prepare_cached(HEAL_ONLY_CHECK_SQL)
                 .context("preparing heal-only check")?;
@@ -342,9 +306,7 @@ impl DbWriter {
                      VALUES (?1, ?2, ?3)",
                 )
                 .context("preparing text_embeddings insert")?;
-            // Records that a doc/pdf's text stage ran so the BGE backfill carve-out stops
-            // re-walking a text-less doc. Separate idempotent UPDATE (lockstep with macOS)
-            // keeps it off the big positional file upsert.
+            // Records that a doc/pdf's text stage ran so the BGE backfill stops re-walking a text-less doc; a separate idempotent UPDATE keeps it off the big positional upsert.
             let mut text_stage_stmt = tx
                 .prepare_cached(
                     "UPDATE files SET text_stage_done = 1 WHERE id = ?1 AND text_stage_done = 0",
@@ -365,11 +327,7 @@ impl DbWriter {
             let mut tag_insert = tx
                 .prepare_cached("INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'auto', ?3)")
                 .context("preparing tag insert")?;
-            // ocr_fts/doc_fts are owned by the v15 sync triggers, so only the
-            // content tables are touched here. Explicit DELETE + INSERT rather
-            // than INSERT OR REPLACE: REPLACE's implicit delete fires the
-            // AFTER DELETE trigger only when recursive triggers are enabled,
-            // which would strand the old text's FTS postings.
+            // ocr_fts/doc_fts are owned by the v15 sync triggers, so only content tables are touched. Explicit DELETE + INSERT, not INSERT OR REPLACE: REPLACE's implicit delete fires the AFTER DELETE trigger only with recursive triggers enabled, stranding the old text's FTS postings.
             let mut ocr_text_stmt = tx
                 .prepare_cached("INSERT INTO ocr_text (file_id, text, handwritten) SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
                 .context("preparing ocr_text insert")?;
@@ -391,6 +349,16 @@ impl DbWriter {
                 )
                 .context("preparing twin children check")?;
             let mut own_clip = tx.prepare_cached(OWN_CLIP_SQL).context("preparing own clip read")?;
+            let mut own_complete_stmt = tx
+                .prepare_cached(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM files WHERE path_text = ?1 AND content_hash = ?2 AND {} \
+                     AND NOT EXISTS (SELECT 1 FROM scan_catchup c WHERE c.file_id = files.id))",
+                    crate::pipeline::twin_reuse::COMPLETE_IMAGE_SQL
+                ))
+                .context("preparing own row check")?;
+            let mut has_clip = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?1)")
+                .context("preparing twin vector check")?;
             let mut own_clip_restore = tx.prepare_cached(OWN_CLIP_RESTORE_SQL).context("preparing own clip restore")?;
             let mut twin_files = tx.prepare_cached(TWIN_FILES_SQL).context("preparing twin files copy")?;
             let mut twin_tags = tx.prepare_cached(TWIN_TAGS_SQL).context("preparing twin tags copy")?;
@@ -419,18 +387,9 @@ impl DbWriter {
             for (i, f) in buffer.iter().enumerate() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
-                // Path redaction is computed lazily INSIDE each error-context
-                // closure below (which almost never runs), not eagerly per file:
-                // redact_path_for_log does two to_lowercase allocs + a paths::root()
-                // lookup, wasted on every row of a 140 files/s flush. The redacted
-                // (never raw) path is still what lands in the log + IPC wire on a
-                // real flush error.
+                // Path redaction is computed lazily inside the error-context closures (which almost never run): redact_path_for_log allocates and looks up paths::root(), wasted on every row of a 140 files/s flush. The redacted path is what lands in the log and IPC on a real error.
                 let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
-                // NFC-normalized search shadow of the path (v16 contract). macOS
-                // writers store `precomposedStringWithCanonicalMapping`; the
-                // Windows engine must match so an NFD filename (Mac/NAS/Dropbox-
-                // synced) is found by the app's NFC query. ASCII is the identity
-                // case (no alloc); only non-ASCII paths compose.
+                // NFC-normalized search shadow of the path (v16 contract): macOS writers store `precomposedStringWithCanonicalMapping`, so an NFD filename (Mac/NAS/Dropbox) must be found by the app's NFC query. ASCII is the no-alloc identity case.
                 let path_search = nfc_path_search(&path_text);
                 let extension = f
                     .path
@@ -439,15 +398,7 @@ impl DbWriter {
                     .unwrap_or("")
                     .to_ascii_lowercase();
 
-                // Rename/move heal: if an existing row matches this file's
-                // content identity at a DIFFERENT path, move it to the new
-                // path BEFORE the INSERT. The ON CONFLICT(path_text) clause
-                // below then updates the (now-relocated) existing row,
-                // preserving its id + every FK-linked row (tags / embeddings /
-                // faces / OCR) — what the rename-heal is for. The pre-pass
-                // candidates are re-checked here: an earlier file in this batch
-                // may already have healed the same row (two copies of one moved
-                // file), so heal the first one still sitting at its old path.
+                // Rename/move heal: move an identity-matching row at a DIFFERENT path to the new path BEFORE the INSERT, so ON CONFLICT(path_text) updates the relocated row and keeps its id and every FK-linked row. Pre-pass candidates are re-checked: an earlier file in this batch may already have healed the same row (two copies of one moved file).
                 let mut healable = None;
                 for (id, old) in &heal_candidates[i] {
                     let still_there: bool = heal_recheck_stmt
@@ -466,7 +417,7 @@ impl DbWriter {
                 }
                 let mut healed = None;
                 if let Some(id) = healable {
-                    match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
+                    match heal_update_stmt.execute(params![path_text, path_hash, id, path_search, crate::db::name_sort::name_sort_key(&path_text)]) {
                         Ok(_) => {
                             healed = Some(id);
                             tracing::info!(
@@ -475,14 +426,7 @@ impl DbWriter {
                                 "[RENAME-HEAL] re-bound existing row to new path"
                             );
                         }
-                        // A content-identical COPY already occupies the new path
-                        // (scanned there independently). Skip the heal rather than
-                        // OR REPLACE-deleting that row — which silently orphaned its
-                        // FTS5 external-content index (ocr_fts/doc_fts have no delete
-                        // triggers, so the rowid entries would be left dangling). The
-                        // moved-away orphan keeps its old path and is cleaned by
-                        // orphan-pruning; the existing row is updated by the INSERT
-                        // ON CONFLICT below.
+                        // A content-identical COPY already occupies the new path: skip the heal rather than OR REPLACE-delete that row, which would orphan its FTS5 external-content index (ocr_fts/doc_fts have no delete triggers). The moved-away orphan keeps its old path for orphan-pruning; the INSERT ON CONFLICT updates the existing row.
                         Err(rusqlite::Error::SqliteFailure(sf, _))
                             if sf.code == rusqlite::ErrorCode::ConstraintViolation =>
                         {
@@ -509,9 +453,7 @@ impl DbWriter {
                                 .execute(params![id, f.scanned_unix])
                                 .context("heal-only touch")?;
                         }
-                        // The old path came back or the new one was taken
-                        // between the walk and this write. No row is made
-                        // from an unanalysed file; the next scan sees it as new.
+                        // The old path came back or the new one was taken since the walk: no row is made from an unanalysed file; the next scan sees it as new.
                         None => tracing::info!(
                             path = %crate::platform::redact_path_for_log(&f.path),
                             "[RENAME-HEAL] move could not be re-bound; the next scan analyses the file"
@@ -529,9 +471,18 @@ impl DbWriter {
                     continue;
                 }
 
-                // A file whose date changed with the same bytes: the catalog drops a
-                // row's vector when its size or date changes, so it is read before the
-                // upsert and put back below when no other row has these bytes.
+                if vanished[i]
+                    && healed.is_none()
+                    && !row_at_path_stmt
+                        .query_row(params![path_text], |r| r.get::<_, bool>(0))
+                        .context("row-at-path check")?
+                {
+                    *failed += 1;
+                    *total += 1;
+                    continue;
+                }
+
+                // Same bytes, changed date: the catalog drops a row's vector when size or date changes, so read it before the upsert and restore it below unless another row has these bytes.
                 let kept_clip: Option<(Vec<u8>, Option<String>)> = match f.content_hash.as_ref() {
                     Some(hash) if f.reuse_twin => own_clip
                         .query_row(params![path_text, hash.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -539,14 +490,28 @@ impl DbWriter {
                         .with_context(|| format!("own clip read for {}", crate::platform::redact_path_for_log(&f.path)))?,
                     _ => None,
                 };
+                // The file's own row already holds an analysis of these bytes (a
+                // touch or a restore changed only the date): it stays as it is, with
+                // the people the user named, unless only another copy has a vector.
+                let own_complete = match f.content_hash.as_ref() {
+                    Some(hash) if f.reuse_twin => own_complete_stmt
+                        .query_row(params![path_text, hash.as_slice()], |r| r.get::<_, bool>(0))
+                        .with_context(|| format!("own row check for {}", crate::platform::redact_path_for_log(&f.path)))?,
+                    _ => false,
+                };
 
+                let created_unix = f
+                    .created_unix
+                    .and_then(|t| crate::util::not_in_the_future(t, f.scanned_unix))
+                    .filter(|&t| f.captured_from_exif || t >= crate::util::EARLIEST_FILE_SYSTEM_DATE_UNIX);
+                let captured_from_exif = f.captured_from_exif && created_unix.is_some();
                 let (file_id, stored_modified): (i64, Option<f64>) = file_stmt
                     .query_row(
                         params![
                             path_text,
                             path_hash,
                             f.size_bytes as i64,
-                            f.created_unix,
+                            created_unix,
                             f.modified_unix,
                             f.scanned_unix,
                             f.kind.as_str(),
@@ -563,16 +528,14 @@ impl DbWriter {
                             f.content_hash.as_ref().map(|h| h.as_slice()),
                             f.file_ref.map(|r| r as i64),
                             path_search,
-                            // ?21/?22 stage-ran gates for the has_faces/has_text
-                            // CASE WHEN in the upsert.
                             f.faces_evaluated,
                             f.ocr_stage_ran || f.doc_stage_ran,
-                            f.captured_from_exif,
+                            captured_from_exif,
+                            crate::db::name_sort::name_sort_key(&path_text),
                         ],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .with_context(|| format!("insert+id for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                // What the row now holds is the time every later write for this file uses.
                 let modified_unix = stored_modified.unwrap_or(f.modified_unix);
 
                 if f.text_stage_done {
@@ -589,10 +552,7 @@ impl DbWriter {
                         .with_context(|| format!("clip insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
-                // BGE-small text embeddings — parallel to clip
-                // above but in a different vector space; persisted into
-                // `text_embeddings` keyed by model so future embeddings
-                // (BGE-m3, Nomic, ...) can coexist without table churn.
+                // BGE-small embeddings go to `text_embeddings` keyed by model so future embedders can coexist without table churn.
                 if let Some(emb) = &f.text_embedding {
                     let bytes = floats_to_le_bytes(emb);
                     text_embed_stmt
@@ -600,23 +560,9 @@ impl DbWriter {
                         .with_context(|| format!("text_embeddings insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
-                // Key the stale-face DELETE on whether the face stage actually
-                // ran this session, NOT on `faces.is_empty()`: an edited/zero-
-                // face re-process must clear orphaned face_prints (else they
-                // keep polluting clusters), while a face-disabled / GPU-dead
-                // session leaves still-valid rows intact (#5). The insert loop
-                // is naturally a no-op when there are no faces.
+                // Key the stale-face DELETE on whether the face stage ran, NOT `faces.is_empty()`: a zero-face re-process must clear orphaned face_prints (they pollute clusters), while a face-disabled / GPU-dead session leaves valid rows intact.
                 if f.faces_evaluated {
-                    // Capture the face ids being replaced so their now-orphaned
-                    // crop JPEGs (face_crops/<id>.jpg) can be pruned below: the
-                    // re-inserted faces get fresh AUTOINCREMENT ids, so without
-                    // this every faces_evaluated re-process leaks the prior crops
-                    // on disk (face_crops/ grows unbounded across re-scans).
-                    // DELETE ... RETURNING id captures the ids being replaced AND
-                    // deletes in one statement (vs a separate SELECT then DELETE) —
-                    // one fewer query per faces-evaluated file under the single
-                    // writer lock. Single-writer DB, so the returned set is exactly
-                    // the pre-delete rows.
+                    // Capture the replaced face ids (DELETE ... RETURNING, one statement under the writer lock) so their orphaned crop JPEGs can be pruned: re-inserted faces get fresh AUTOINCREMENT ids, so otherwise face_crops/ grows unbounded across re-scans.
                     let stale_face_ids: Vec<i64> = face_delete
                         .query_map(params![file_id], |r| r.get::<_, i64>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()
@@ -646,7 +592,7 @@ impl DbWriter {
                         let arcface_bytes = floats_to_le_bytes(&face.embedding);
                         let norm = face.embedding.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
                         let model = face.embedding_model.as_deref().filter(|value| !value.is_empty() && value.len() <= 150 && face.embedding.len() == 128 && face.embedding.iter().all(|v| v.is_finite()) && (0.95..=1.05).contains(&norm));
-                        // print_data legacy: same bytes as arcface_embedding so old code keeps working.
+                        // `print_data` carries the same bytes as `arcface_embedding` for readers of the older column.
                         face_stmt
                             .execute(params![
                                 file_id,
@@ -669,28 +615,17 @@ impl DbWriter {
                             });
                         }
                     }
-                    // Vision faces (the Mac adapters scan): the Swift engine's
-                    // scan-time rows, with no vector or namespace until the
-                    // Mac face pipeline extracts them.
+                    // Vision faces (Mac adapters scan): scan-time rows with no vector or namespace until the Mac face pipeline extracts them.
                     for face in f.vision_faces.iter().flatten() {
                         vision_face_stmt
                             .execute(params![file_id, face.bbox, face.quality, face.excluded])
                             .with_context(|| format!("Vision face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     }
-                    // New AUTOINCREMENT ids never collide with the deleted ones,
-                    // so every captured id is now orphaned. Defer the file delete
-                    // until after commit (below) so a rollback can't orphan crops.
+                    // New AUTOINCREMENT ids never collide with the deleted ones, so every captured id is orphaned; the file delete waits until after commit so a rollback can't orphan crops.
                     crop_ids_to_prune.extend(stale_face_ids);
                 }
 
-                // Delete-then-conditional-insert, but ONLY when the OCR stage
-                // actually ran this session — never on the ambiguous default-
-                // skip path. This clears stale ocr_text (and, via the v15
-                // triggers, ocr_fts) when a re-process now yields empty text
-                // (phantom FTS hits, #11) while leaving valid prior text
-                // untouched on the common skipped sessions. A Deep Analyze
-                // transcription (source 'vlm') outlives rescans of an unchanged
-                // file; the v25 trigger drops it when the file changes.
+                // Delete-then-conditional-insert, only when the OCR stage ran this session, never on the ambiguous skip path: it clears stale ocr_text (and via the v15 triggers ocr_fts) when a re-process yields empty text, and leaves prior text on skipped sessions. A Deep Analyze transcription (source 'vlm') outlives rescans of an unchanged file; the v25 trigger drops it when the file changes.
                 if f.ocr_stage_ran {
                     ocr_text_delete
                         .execute(params![file_id])
@@ -703,8 +638,7 @@ impl DbWriter {
                         }
                 }
 
-                // Document text — same stage-ran-gated
-                // delete-then-conditional-insert as ocr_text above (#11).
+                // Document text: same stage-ran-gated delete-then-insert as ocr_text.
                 if f.doc_stage_ran {
                     doc_text_delete
                         .execute(params![file_id])
@@ -717,17 +651,7 @@ impl DbWriter {
                         }
                 }
 
-                // Auto-tags (classifier output + enriched extras). Gate the
-                // delete-then-reinsert on whether the tagging stage actually ran
-                // this session — exactly like faces_evaluated / ocr_stage_ran /
-                // doc_stage_ran above. A per-file timeout row or a GPU-dead
-                // short-circuit emits an EMPTY `tags` vec; without this gate the
-                // unconditional DELETE would wipe a file's previously-persisted
-                // RAM++/CLIP-scene/Year/camera auto-tags on a transient slow read
-                // or a mid-scan GPU TDR, with nothing re-inserted (data loss).
-                // When the stage DID run, delete any prior `source='auto'` rows
-                // and re-insert the fresh set atomically. User tags
-                // (`source='user'`) are untouched either way.
+                // Auto-tags: delete-then-reinsert only when the tagging stage ran, like faces_evaluated / ocr_stage_ran / doc_stage_ran. A timeout row or GPU-dead short-circuit emits an EMPTY `tags` vec, and an unconditional DELETE would wipe previously-persisted auto-tags (data loss). `source='user'` tags are untouched either way.
                 if f.tags_evaluated {
                     tag_delete
                         .execute(params![file_id])
@@ -741,11 +665,7 @@ impl DbWriter {
                     }
                 }
 
-                // A byte-identical image analyzed before: copy the twin row's
-                // tags, embedding, text and faces, keeping this file's own
-                // year and camera chips. With no twin row (the file was only
-                // touched, or the twin vanished) a row that already has its own
-                // results keeps them; a bare one is retried next scan.
+                // A byte-identical image analyzed before: copy the twin row's tags, embedding, text and faces, keeping this file's own year and camera chips. With no twin row, a row with its own results keeps them; a bare one is retried next scan.
                 if f.reuse_twin {
                     let twin: Option<i64> = match f.content_hash.as_ref() {
                         Some(hash) => twin_lookup
@@ -753,6 +673,14 @@ impl DbWriter {
                             .optional()
                             .with_context(|| format!("twin lookup for {}", crate::platform::redact_path_for_log(&f.path)))?,
                         None => None,
+                    };
+                    let twin = match twin {
+                        Some(_) if own_complete && kept_clip.is_some() => None,
+                        Some(twin_id) if own_complete => has_clip
+                            .query_row(params![twin_id], |r| r.get::<_, bool>(0))
+                            .context("twin vector check")?
+                            .then_some(twin_id),
+                        twin => twin,
                     };
                     let redacted = || crate::platform::redact_path_for_log(&f.path);
                     if let Some(twin_id) = twin {
@@ -775,9 +703,7 @@ impl DbWriter {
                         twin_clip.execute(params![file_id, twin_id]).with_context(|| format!("twin clip copy for {}", redacted()))?;
                         twin_ocr.execute(params![file_id, twin_id]).with_context(|| format!("twin ocr copy for {}", redacted()))?;
                         let source_revision = format!("{}:{}", f.size_bytes, modified_unix.to_bits());
-                        // The Mac scan (`vision_faces`) stores faces without vectors
-                        // and leaves the file revision to the Mac face pipeline; its
-                        // copies are stored the same way.
+                        // The Mac scan (`vision_faces`) stores faces without vectors and leaves the file revision to the Mac face pipeline; its copies are stored the same way.
                         let mac_scan = f.vision_faces.is_some();
                         if !mac_scan {
                             catalog_revision.execute(params![file_id, source_revision, f.scanned_unix])?;
@@ -817,9 +743,7 @@ impl DbWriter {
                                 .with_context(|| format!("twin face copy for {}", redacted()))?;
                             crop_copies.push((face.id, new_id));
                         }
-                        // The copy owes what its twin owes (`Tagging.twinCopy`): the
-                        // catch-up pass then tags both. The twin's Year and camera
-                        // tags are its own, so the copy's are worked out again.
+                        // The copy owes what its twin owes (`Tagging.twinCopy`), so catch-up tags both; the twin's Year and camera tags are its own, so the copy's are recomputed.
                         let owes = owed_copy
                             .execute(params![file_id, twin_id, f.size_bytes as i64, modified_unix, f.scanned_unix])
                             .with_context(|| format!("twin catch-up marker for {}", redacted()))?;
@@ -845,8 +769,7 @@ impl DbWriter {
                     }
                 }
 
-                // Remember a failure that is about the file, so a file that
-                // can never be read stops costing a full attempt on every scan.
+                // Remember a failure that is about the file so an unreadable file stops costing a full attempt every scan.
                 if f.failed {
                     if !f.failure_is_transient {
                         failure_record
@@ -867,8 +790,7 @@ impl DbWriter {
                     .as_ref()
                     .filter(|owed| owed.stages & crate::pipeline::catch_up::OWED_MASK != 0 && (f.tags_evaluated || f.ocr_stage_ran))
                 {
-                    // What the scan still owes this file (the Swift writer's step
-                    // 2b), in the same transaction as the tags it describes.
+                    // What the scan still owes this file, in the same transaction as the tags it describes.
                     owed_write
                         .execute(params![
                             file_id,
@@ -881,7 +803,6 @@ impl DbWriter {
                         ])
                         .with_context(|| format!("catch-up marker for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 } else if f.tags_evaluated || f.ocr_stage_ran {
-                    // A full analysis replaces any earlier marker.
                     owed_clear
                         .execute(params![file_id])
                         .with_context(|| format!("catch-up marker clear for {}", crate::platform::redact_path_for_log(&f.path)))?;
@@ -894,6 +815,9 @@ impl DbWriter {
 
                 if f.failed {
                     *failed += 1;
+                    if self.timeouts_are_retried && f.error_message.as_deref() == Some(crate::pipeline::tagging::TIMED_OUT_MESSAGE) {
+                        self.retried_timeouts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 } else if matches!(
                     f.kind,
                     crate::pipeline::discovery::FileKind::Image | crate::pipeline::discovery::FileKind::Video
@@ -926,39 +850,23 @@ impl DbWriter {
         }
         tx.commit().context("commit batch")?;
 
-        // The batch is durable: move each original crop allocation into the
-        // post-commit work list. Before commit the originals remain untouched,
-        // so a rollback never writes crops for rows that do not exist.
+        // The batch is durable: move the crop allocations to the post-commit list; before commit the originals stay untouched, so a rollback never writes crops for nonexistent rows.
         let crops_to_write = take_deferred_face_crops(buffer, deferred_crops);
 
-        // Batch is durable; now prune crop JPEGs for the face ids it replaced.
-        // (After commit so a rolled-back batch never deletes a live crop.)
+        // Prune replaced face-crop JPEGs after commit so a rolled-back batch never deletes a live crop.
         for old_id in crop_ids_to_prune {
             remove_face_crop(old_id);
         }
 
-        // Periodic WAL checkpoint to keep the -wal file from growing
-        // unboundedly on long scans. SQLite's auto-checkpoint (on this
-        // connection) fires at ~1000 pages, but a -wal that never goes
-        // through TRUNCATE keeps growing on disk. Every WAL_CHECKPOINT_BATCHES
-        // commits we ask for a PASSIVE checkpoint; on success the WAL
-        // gets truncated next time it crosses the threshold. PASSIVE
-        // doesn't block readers, so this is safe to call from the
-        // hot scan path.
+            // Periodic PASSIVE WAL checkpoint: a -wal that never goes through TRUNCATE keeps growing on long scans. PASSIVE does not block readers.
         const WAL_CHECKPOINT_BATCHES: u32 = 32;
         if batch_index > 0 && batch_index % WAL_CHECKPOINT_BATCHES == 0 {
-            // Invariant: no transaction open at this point — tx.commit
-            // above closes it, and we're the only writer (the mutex
-            // around conn enforces single-writer). Asserting via
-            // is_autocommit() catches a future regression where someone
-            // adds a BEGIN before this block.
+            // Invariant: no transaction is open here (tx.commit closed it and the conn mutex enforces a single writer); is_autocommit() catches a regression that adds a BEGIN before this block.
             debug_assert!(
                 conn.is_autocommit(),
                 "WAL checkpoint must not run inside an open transaction"
             );
-            // Best-effort — failure here just means the WAL stays a
-            // little larger; it doesn't break correctness. A
-            // SQLITE_BUSY here is normal if a reader is mid-query.
+            // Best-effort: failure only leaves the WAL a little larger; SQLITE_BUSY is normal if a reader is mid-query.
             if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)") {
                 tracing::debug!(?e, batch_index, "periodic WAL checkpoint failed (transient, continuing)");
             }
@@ -966,9 +874,7 @@ impl DbWriter {
 
         drop(conn);
 
-        // Encode + write the batch's face-crop JPEGs now — AFTER the tx committed
-        // and the writer lock dropped — so per-face JPEG encode + fs::write never
-        // blocks the engine's only writer (or a concurrent scan flush). (audit P1)
+        // Crop JPEG encode + write happen AFTER commit and writer-lock release so they never block the engine's only writer.
         for (face_id, crop) in crops_to_write {
             if let Err(err) = save_face_crop(face_id, crop) {
                 tracing::warn!(?err, face_id, "face crop write failed");
@@ -991,6 +897,7 @@ impl DbWriter {
             processed_total: *total,
             processed_heavy: *heavy,
             failed_total: *failed,
+            retried_total: self.retried_timeouts.load(std::sync::atomic::Ordering::Relaxed),
             wall_seconds: wall,
             files_per_second: if wall > 0.0 { f64::from(files_in_batch) / wall } else { 0.0 },
             utilization: 0.0,
@@ -1013,11 +920,7 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
     values[idx]
 }
 
-/// Hot-path INSERT. Returns `id` whether the row was freshly inserted or
-/// updated via the ON CONFLICT DO UPDATE branch — SQLite 3.35+ guarantees
-/// RETURNING fires on both paths. Eliminates the per-row SELECT round
-/// trip the previous implementation paid (2N statement executions per
-/// batch → N).
+/// Hot-path INSERT. Returns `id` whether the row was freshly inserted or updated via ON CONFLICT (SQLite RETURNING fires on both).
 const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
     INSERT INTO files (
         path_text, path_hash, size_bytes,
@@ -1027,12 +930,13 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         has_faces, has_text,
         camera_model, location_lat, location_lon,
         failed, error_message,
-        content_hash, file_ref, path_search
+        content_hash, file_ref, path_search, name_sort
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?24)
     ON CONFLICT(path_text) DO UPDATE SET
         path_hash    = excluded.path_hash,
         path_search  = excluded.path_search,
+        name_sort    = excluded.name_sort,
         size_bytes   = excluded.size_bytes,
         -- A time within a microsecond of the stored one is the same time, stored by an
         -- engine that rounded its last bit differently: keep the stored number so the
@@ -1069,20 +973,8 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
     RETURNING id, modified_at
 "#;
 
-// Rename/move heal lookup (v8 identity). Find an existing row whose
-// `file_ref` (volume-local; the common rename case) or `content_hash`
-// (cross-volume) matches, but at a DIFFERENT path. NULL identity columns
-// never match — a row without identity can't be healed. Also returns the
-// candidate's current `path_text` and a `by_ref` flag so the caller can
-// distinguish a true MOVE (file_ref reused only for the same file) from a
-// coexisting byte-identical COPY (two distinct files share a content_hash);
-// only the former may heal unconditionally — see the call site.
-// ?4/?6 are the legacy BLAKE3 digests rows stamped by pre-SHA-256 builds hold
-// (released v0.0.1 stamped BLAKE3): ?4 is the v0.0.1 recipe — full-file at or
-// under the cap, head ‖ interior samples ‖ tail ‖ size over it — and ?6 the
-// pre-interior-sample over-cap composite (NULL at or under the cap). Without
-// them the recipe change would orphan every legacy row on its first
-// post-upgrade move. The upsert after the heal re-stamps the current recipe.
+// Rename/move heal lookup (v8 identity): an existing row whose `file_ref` (volume-local) or `content_hash` (cross-volume) matches at a DIFFERENT path; NULL identity never matches. Returns `path_text` and a `by_ref` flag distinguishing a true move from a coexisting byte-identical copy (see the call site).
+// ?4/?6 are the legacy BLAKE3 digests of rows stamped by pre-SHA-256 builds (v0.0.1): ?4 the v0.0.1 recipe (full-file at or under the cap, head ‖ interior samples ‖ tail ‖ size over it), ?6 the pre-interior-sample over-cap composite (NULL at or under the cap). Without them the recipe change would orphan every legacy row on its first move; the upsert re-stamps the current recipe.
 const HEAL_LOOKUP_SQL: &str = r#"
     SELECT id, path_text,
            (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5) AS by_ref
@@ -1096,16 +988,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
     LIMIT 32
 "#;
 
-// Heal: move the existing row to the new path. `UPDATE OR ABORT` is LOAD-BEARING:
-// `files.path_text` is declared `UNIQUE ON CONFLICT REPLACE`, so a PLAIN `UPDATE`
-// that collides on path_text silently REPLACE-deletes the row already sitting at
-// the new path (a content-identical copy scanned there independently) and
-// FK-cascades ITS user tags + person assignments — permanent, unrecoverable loss
-// of user-authored metadata. `OR ABORT` overrides the schema's REPLACE with ABORT
-// so the collision raises SQLITE_CONSTRAINT, which the call site catches to SKIP
-// the heal (leaving both rows intact — the intended behavior). Empirically
-// verified against SQLite: plain UPDATE deletes the copy's row; OR ABORT preserves
-// it. (audit 2026-07: rename-heal ON CONFLICT REPLACE data-loss)
+// Heal: `UPDATE OR ABORT` is load-bearing. path_text is UNIQUE ON CONFLICT REPLACE, so a plain UPDATE would silently delete a content-identical copy at the new path along with its user tags. OR ABORT turns that collision into a skipped heal.
 // ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
 // from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
 // query, mirroring the INSERT path.
@@ -1114,32 +997,45 @@ const HEAL_ONLY_CHECK_SQL: &str = "SELECT EXISTS(SELECT 1 FROM files WHERE id = 
 
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE OR ABORT files
-       SET path_text = ?1, path_hash = ?2, path_search = ?4
+       SET path_text = ?1, path_hash = ?2, path_search = ?4, name_sort = ?5
      WHERE id = ?3
 "#;
 
-/// Decide whether a heal candidate (an existing row matched by identity at a
-/// different path) genuinely MOVED, and may therefore re-bind to the new path.
-///
-/// Heal ONLY when the candidate's previous path no longer exists on disk — a
-/// genuine rename/move always leaves its old path gone. This single gate is
-/// required for BOTH match kinds. A `content_hash`-only match also fires for a
-/// COEXISTING byte-identical COPY (two distinct files share one content hash). A
-/// `file_ref` (NTFS MFT id) match is only VOLUME-LOCAL, so two distinct files
-/// on different volumes (an external / SD / NAS drive scanned into the same
-/// library), or two hardlinks to one file, can collide on the same ref — the
-/// old `by_ref` short-circuit healed those unconditionally. Healing a
-/// coexisting file steals the original's row and, via `UPDATE OR REPLACE`,
-/// FK-cascades its tags/faces away — silent data loss. The old-path-gone gate
-/// keeps coexisting files as distinct rows while still healing every real move
-/// (whose old path is, by definition, gone). `symlink_metadata` (not
-/// `metadata`) so a dangling symlink still counts as present and is not treated
-/// as a move.
+/// Whether a heal candidate genuinely MOVED: heal ONLY when its previous path no longer exists, for BOTH match kinds. A content_hash-only match also fires for a coexisting byte-identical copy, and a `file_ref` (NTFS MFT id) is only volume-local, so files on different volumes or two hardlinks can collide. Healing a coexisting file steals its row and, via `UPDATE OR REPLACE`, FK-cascades its tags/faces away (silent data loss). `symlink_metadata` so a dangling symlink still counts as present.
 fn heal_candidate_moved(old_path: &str) -> bool {
-    std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(
-        std::path::Path::new(old_path),
-    ))
-    .is_err()
+    let path = std::path::Path::new(old_path);
+    let gone = matches!(
+        std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(path)),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+    );
+    gone && removable_volume_root(path).is_none_or(|root| std::fs::read_dir(root).is_ok_and(|mut entries| entries.next().is_some()))
+}
+
+/// The mount point of a drive the path lives on, when that drive can be unplugged. A path under an unmounted volume fails to stat exactly like a deleted file, so an offline library's rows must not look "moved".
+fn removable_volume_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut components = path.components();
+    match components.next()? {
+        Component::Prefix(prefix) => {
+            let mut root = std::path::PathBuf::from(prefix.as_os_str());
+            root.push(std::path::MAIN_SEPARATOR_STR);
+            Some(root)
+        }
+        Component::RootDir => {
+            let names: Vec<&std::ffi::OsStr> = components
+                .filter_map(|c| if let Component::Normal(n) = c { Some(n) } else { None })
+                .take(4)
+                .collect();
+            let depth = match names.first()?.to_str()? {
+                "Volumes" | "mnt" => 2,
+                "media" => 3,
+                "run" if names.get(1).and_then(|n| n.to_str()) == Some("media") => 4,
+                _ => return None,
+            };
+            (names.len() >= depth).then(|| names[..depth].iter().fold(std::path::PathBuf::from("/"), |root, name| root.join(name)))
+        }
+        _ => None,
+    }
 }
 
 const INSERT_CLIP_SQL: &str = r#"
@@ -1228,7 +1124,6 @@ struct TwinFace {
 }
 
 impl TwinFace {
-    /// The face as a scan stores it before any vector is extracted.
     fn without_vector(self) -> Self {
         Self { print_data: Vec::new(), embedding: None, model: None, processing: None, ..self }
     }
@@ -1249,10 +1144,7 @@ const CATALOG_REVISION_SQL: &str = "INSERT INTO catalog_revisions(file_id,revisi
      VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at \
      WHERE catalog_revisions.revision!=excluded.revision";
 
-/// Convert a slice of f32 to little-endian bytes for BLOB storage.
-/// Matches the macOS GRDB layout exactly (CoreML / ORT both produce
-/// host-endian f32 → we always normalize to LE on the way to disk so a
-/// macOS DB opens cleanly on Windows even if endianness ever drifts).
+/// f32 → little-endian bytes for BLOB storage, matching the macOS GRDB layout so a DB opens on either OS regardless of host endianness.
 fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
     for f in v {
@@ -1261,30 +1153,15 @@ fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
     out
 }
 
-/// NFC-normalize a path string for the `path_search` shadow column (v16
-/// contract). macOS writers store `precomposedStringWithCanonicalMapping`;
-/// this is the cross-platform-clean Windows mirror, dependency-free (no NFC
-/// crate is in the locked set). It composes the canonical Latin base+combining
-/// pairs — the real-world NFD filename surface (Mac/HFS+/APFS, NAS, Dropbox
-/// sync decompose accented names: "cafe\u{0301}" -> "caf\u{e9}"). ASCII and
-/// already-composed paths return unchanged via the fast path (no allocation),
-/// so the 140 files/s hot loop pays nothing on the common case. Stacked
-/// multi-mark sequences (vanishingly rare in filenames) are left as-is — still
-/// no worse than the prior verbatim behavior.
-///
-/// `pub(crate)` so the other path-mutating writers (restructure-apply, bulk
-/// rename, trash-restore) can reuse this single canonical normalizer instead
-/// of re-stamping `path_search = path_text` verbatim.
+/// NFC-normalize a path for the `path_search` shadow column (v16 contract), dependency-free (no NFC crate in the locked set): composes the canonical Latin base+combining pairs, the real NFD filename surface (HFS+/APFS, NAS, Dropbox). ASCII and composed paths return unchanged without allocating; stacked multi-mark sequences are left as-is.
+/// `pub(crate)` so other path-mutating writers (restructure-apply, bulk rename, trash-restore) share one normalizer.
 pub fn nfc_path_search(path: &str) -> String {
-    // Fast path: a pure-ASCII path is already NFC (NFC is the identity on
-    // ASCII), so skip the scan + allocation entirely.
     if path.is_ascii() {
         return path.to_string();
     }
     let mut out = String::with_capacity(path.len());
     let mut chars = path.chars().peekable();
     while let Some(base) = chars.next() {
-        // Try to fold a following combining mark into `base`.
         if let Some(&mark) = chars.peek()
             && let Some(composed) = compose_canonical(base, mark) {
                 out.push(composed);
@@ -1296,9 +1173,7 @@ pub fn nfc_path_search(path: &str) -> String {
     out
 }
 
-/// Look up the canonical composition of `base` + a single combining `mark`.
-/// Table is sorted by (base, mark) for binary search; generated from the
-/// Unicode canonical-decomposition data for the Latin range.
+/// Canonical composition of `base` + one combining `mark`; the table is sorted by (base, mark) for binary search.
 fn compose_canonical(base: char, mark: char) -> Option<char> {
     let key = (base as u32, mark as u32);
     NFC_LATIN_COMPOSE
@@ -1307,10 +1182,9 @@ fn compose_canonical(base: char, mark: char) -> Option<char> {
         .and_then(|i| char::from_u32(NFC_LATIN_COMPOSE[i].2))
 }
 
-/// (base, combining-mark, precomposed) canonical-composition triples for the
-/// Latin-1 Supplement + Latin Extended-A range. Sorted by (base, mark).
+/// (base, combining-mark, precomposed) triples for Latin-1 Supplement + Latin Extended-A, sorted by (base, mark).
 #[rustfmt::skip]
-const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
+pub(crate) const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
     (0x0041, 0x0300, 0x00C0), (0x0041, 0x0301, 0x00C1), (0x0041, 0x0302, 0x00C2), (0x0041, 0x0303, 0x00C3),
     (0x0041, 0x0304, 0x0100), (0x0041, 0x0306, 0x0102), (0x0041, 0x0307, 0x0226), (0x0041, 0x0308, 0x00C4),
     (0x0041, 0x030A, 0x00C5), (0x0041, 0x030C, 0x01CD), (0x0041, 0x030F, 0x0200), (0x0041, 0x0311, 0x0202),
@@ -1371,9 +1245,7 @@ const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
     (0x01B7, 0x030C, 0x01EE), (0x0292, 0x030C, 0x01EF),
 ];
 
-/// Encode a 112×112 RGB crop as JPEG and write to face_crops/<face_id>.jpg.
-/// Cheap (37 KB raw → ~5 KB JPEG @ q85). Lets the People tab card render
-/// real faces instead of placeholder gray circles.
+/// Encodes a 112×112 RGB crop as JPEG at face_crops/<face_id>.jpg (37 KB raw → ~5 KB at q85).
 fn save_face_crop(face_id: i64, crop_rgb_112: Vec<u8>) -> anyhow::Result<()> {
     use anyhow::Context;
     let dir = crate::paths::faces_dir().context("resolving faces dir")?;
@@ -1391,16 +1263,13 @@ fn save_face_crop(face_id: i64, crop_rgb_112: Vec<u8>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Best-effort copy of a twin's crop JPEG for a face row copied from it.
 fn copy_face_crop(twin_face_id: i64, face_id: i64) {
     if let Ok(dir) = crate::paths::faces_dir() {
         let _ = std::fs::copy(dir.join(format!("{twin_face_id}.jpg")), dir.join(format!("{face_id}.jpg")));
     }
 }
 
-/// Best-effort removal of a face crop JPEG (face_crops/<face_id>.jpg) orphaned
-/// by a faces_evaluated re-process. Silent on any error — a leftover crop is
-/// cosmetic disk use, never a correctness issue.
+/// Best-effort removal of a face crop orphaned by a faces_evaluated re-process; a leftover crop is cosmetic disk use, never a correctness issue.
 pub(crate) fn remove_face_crop(face_id: i64) {
     if let Ok(dir) = crate::paths::faces_dir() {
         let _ = std::fs::remove_file(dir.join(format!("{face_id}.jpg")));
@@ -1410,9 +1279,10 @@ pub(crate) fn remove_face_crop(face_id: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::name_sort::name_sort_key;
     use crate::pipeline::discovery::FileKind;
     use crate::pipeline::tagging::DetectedFace;
-    use rusqlite::OptionalExtension; // .optional() in ingest_with_heal (lib code no longer uses it)
+    use rusqlite::OptionalExtension;
     use std::path::PathBuf;
 
     #[test]
@@ -1435,8 +1305,7 @@ mod tests {
         assert!(writer.rename_heal_enabled);
     }
 
-    /// The files-table upsert alone (no heal, no child rows), via the real
-    /// INSERT_FILE_RETURNING_ID_SQL so drift in its ON CONFLICT clause shows up.
+    /// The files-table upsert alone via the real INSERT_FILE_RETURNING_ID_SQL, so drift in its ON CONFLICT clause shows up.
     fn insert_one(conn: &Connection, f: &TaggedFile) -> Result<()> {
         let path_text = f.path.to_string_lossy();
         conn.query_row(
@@ -1465,6 +1334,7 @@ mod tests {
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
                 f.captured_from_exif,
+                crate::db::name_sort::name_sort_key(&path_text),
             ],
             |row| row.get::<_, i64>(0),
         )?;
@@ -1546,8 +1416,7 @@ mod tests {
         assert_eq!(moved[0].1.as_ptr(), original);
     }
 
-    /// Re-ingesting the same path twice produces exactly one row. Guards
-    /// against the ON CONFLICT clause regressing to INSERT OR IGNORE.
+    /// Re-ingesting the same path twice yields one row (guards against INSERT OR IGNORE).
     #[test]
     fn duplicate_path_resolves_to_single_row() {
         let conn = crate::db::test_support::memory_db();
@@ -1580,11 +1449,7 @@ mod tests {
         assert_eq!(state, (0, None));
     }
 
-    /// `INSERT_FILE_RETURNING_ID_SQL` must yield the row id on BOTH the
-    /// freshly-inserted and ON CONFLICT DO UPDATE branches. The hot-path
-    /// flush relies on this — if RETURNING only fired on insert, every
-    /// repeat-scan row would error with QueryReturnedNoRows. Guards the
-    /// redundant-SELECT elimination.
+    /// INSERT_FILE_RETURNING_ID_SQL must yield the row id on BOTH the insert and ON CONFLICT DO UPDATE branches, or every repeat-scan row errors with QueryReturnedNoRows.
     #[test]
     fn insert_returning_id_yields_same_id_on_conflict() {
         let conn = crate::db::test_support::memory_db();
@@ -1607,14 +1472,14 @@ mod tests {
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0, false, false, false],
+                    row.17, row.18, row.0, false, false, false, name_sort_key(&row.0)],
             |r| r.get(0),
         ).expect("first insert returns id");
         let id2: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0, false, false, false],
+                    row.17, row.18, row.0, false, false, false, name_sort_key(&row.0)],
             |r| r.get(0),
         ).expect("ON CONFLICT branch must also return id");
         assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");
@@ -1631,7 +1496,7 @@ mod tests {
                 INSERT_FILE_RETURNING_ID_SQL,
                 params![path, 7_i64, 1_i64, created, 1.0, 1.0, "image", "jpg", None::<i64>, None::<f64>,
                         0_i64, 0_i64, None::<String>, None::<f64>, None::<f64>, 0_i64, None::<String>,
-                        None::<Vec<u8>>, None::<i64>, path, false, false, from_exif],
+                        None::<Vec<u8>>, None::<i64>, path, false, false, from_exif, name_sort_key(path)],
                 |r| r.get::<_, i64>(0),
             ).unwrap();
             conn.query_row("SELECT CAST(created_at AS INTEGER) FROM files", [], |r| r.get::<_, i64>(0)).unwrap()
@@ -1641,11 +1506,43 @@ mod tests {
         assert_eq!(upsert(1_200_000_000.0, true), 1_200_000_000, "EXIF capture time corrects a copy date");
     }
 
-    /// A re-scan whose vision/EXIF stage produced no values (decode
-    /// failed / online-only placeholder / GPU dead) must NOT null out
-    /// previously-computed phash/camera/GPS, nor flip has_faces/has_text off
-    /// while their child rows still exist. COALESCE protects the nullable
-    /// scalars; the ?21/?22 stage-ran gates protect the NOT NULL booleans.
+    #[test]
+    fn a_fat_zero_date_is_not_stored_as_the_creation_date_but_a_captured_one_is() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let fat_zero = 315_532_800.0;
+        let mut copied = fixture(r"C:\lib\COPY.jpg");
+        copied.created_unix = Some(fat_zero);
+        let mut scanned_in = fixture(r"C:\lib\SCAN_1975.jpg");
+        scanned_in.created_unix = Some(160_000_000.0);
+        scanned_in.captured_from_exif = true;
+        let mut buffer = vec![copied, scanned_in];
+        DbWriter::new(conn.clone(), ScanCoordinator::new()).flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let stored = |path: &str| -> Option<f64> {
+            conn.lock().query_row("SELECT created_at FROM files WHERE path_text = ?1", params![path], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(stored(r"C:\lib\COPY.jpg"), None, "the volume's 1980 placeholder is not a date");
+        assert_eq!(stored(r"C:\lib\SCAN_1975.jpg"), Some(160_000_000.0), "a date the photo itself carries is kept");
+    }
+
+    #[test]
+    fn a_capture_date_in_the_future_is_not_stored() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let mut future = fixture(r"C:\lib\IMG_FUTURE.jpg");
+        future.created_unix = Some(2_212_000_000.0);
+        future.captured_from_exif = true;
+        let mut real = fixture(r"C:\lib\IMG_PAST.jpg");
+        real.created_unix = Some(1_600_000_000.0);
+        real.captured_from_exif = true;
+        let mut buffer = vec![future, real];
+        DbWriter::new(conn.clone(), ScanCoordinator::new()).flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let stored = |path: &str| -> Option<f64> {
+            conn.lock().query_row("SELECT created_at FROM files WHERE path_text = ?1", params![path], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(stored(r"C:\lib\IMG_FUTURE.jpg"), None, "a 2040 date must not become the photo's date");
+        assert_eq!(stored(r"C:\lib\IMG_PAST.jpg"), Some(1_600_000_000.0));
+    }
+
+    /// A re-scan whose vision/EXIF stage produced nothing (decode failed, placeholder, GPU dead) must not null out phash/camera/GPS or flip has_faces/has_text off while child rows exist: COALESCE guards the nullable scalars, the ?21/?22 stage-ran gates the NOT NULL booleans.
     #[test]
     fn stage_skipped_rescan_preserves_prior_metadata() {
         let conn = crate::db::test_support::memory_db();
@@ -1660,8 +1557,6 @@ mod tests {
         a.ocr_stage_ran = true;
         insert_one(&conn, &a).unwrap();
 
-        // Re-scan where nothing was produced this session (placeholder / decode
-        // fail / models missing): all metadata NULL/false, no stage ran.
         let mut b = fixture(r"C:\lib\IMG_META.jpg");
         b.phash = None;
         b.camera_model = None;
@@ -1689,7 +1584,6 @@ mod tests {
         assert_eq!(hf, 1, "has_faces not cleared when the faces stage didn't run");
         assert_eq!(ht, 1, "has_text not cleared when the text stage didn't run");
 
-        // Positive control: a stage that DID run with a fresh value overwrites.
         let mut c = fixture(r"C:\lib\IMG_META.jpg");
         c.has_faces = false;
         c.faces_evaluated = true; // stage ran and found none → must clear
@@ -1720,8 +1614,7 @@ mod tests {
         assert_eq!(aesthetic, Some(0.91));
     }
 
-    /// ON CONFLICT must UPDATE (not skip) so a rescan with new
-    /// size/modified_at writes them. Guards against INSERT OR IGNORE.
+    /// ON CONFLICT must UPDATE (not skip) so a rescan writes the new size/modified_at.
     #[test]
     fn duplicate_path_updates_size_and_modified() {
         let conn = crate::db::test_support::memory_db();
@@ -1775,15 +1668,10 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Arbitrary insert mix (with intentional duplicates) → row count
-        /// must equal the number of distinct paths. Both the scan resume
-        /// cursor and the People-tab dedup logic rely on path_text being
-        /// unique.
+        /// Arbitrary inserts with duplicates: row count equals distinct paths (the resume cursor and People-tab dedup rely on path_text uniqueness).
         #[test]
         fn row_count_equals_distinct_paths(
-            // Generate a small set of candidate paths…
             paths in proptest::collection::vec(r"C:\\test\\[a-z0-9]{1,8}\\f\.jpg", 1..6),
-            // …then sample with repetition to force duplicates.
             order in proptest::collection::vec(0usize..6, 1..50),
         ) {
             let conn = crate::db::test_support::memory_db();
@@ -1801,16 +1689,7 @@ mod tests {
             proptest::prop_assert_eq!(n as usize, distinct.len());
         }
 
-        /// Embedding BLOB round-trip must be byte-for-byte lossless and
-        /// little-endian on every host. Reading via f32::from_le_bytes
-        /// matches what the C# app and the macOS engine do; any future
-        /// switch to to_ne_bytes would silently corrupt embeddings when
-        /// the same DB file moves between architectures.
-        ///
-        /// We generate via u32 → f32::from_bits so NaN bit patterns are
-        /// in scope: byte-level round-trip must preserve NaN payloads
-        /// too, even though value equality wouldn't. We compare on bit
-        /// patterns rather than f32 equality for that reason.
+        /// Embedding BLOB round-trip must be byte-for-byte lossless and little-endian on every host (to_ne_bytes would corrupt DBs moved across architectures). Generated via f32::from_bits so NaN payloads are in scope; compared on bit patterns.
         #[test]
         fn embedding_le_bytes_round_trip(
             bits in proptest::collection::vec(proptest::num::u32::ANY, 1..520),
@@ -1832,10 +1711,7 @@ mod tests {
         }
     }
 
-    /// 512-d zero vector → 2048 zero bytes; matches the embedding column
-    /// shape MobileCLIP and ArcFace both produce. Guards against a future
-    /// Vec::with_capacity bug where capacity is allocated but data is not
-    /// written.
+    /// A 512-d zero vector → 2048 zero bytes, guarding a Vec::with_capacity bug that allocates but doesn't write.
     #[test]
     fn embedding_le_bytes_zero_vector() {
         let v = vec![0.0_f32; 512];
@@ -1844,7 +1720,6 @@ mod tests {
         assert!(bytes.iter().all(|&b| b == 0));
     }
 
-    // ---- rename-heal data-loss regression -----------------------------------
 
     #[test]
     fn only_new_or_changed_images_and_videos_count_as_analysed_media() {
@@ -1879,9 +1754,7 @@ mod tests {
         dir
     }
 
-    /// Mirror of the heal+insert per-file body in `flush`, exercising the
-    /// real HEAL_LOOKUP_SQL / `heal_candidate_moved` / HEAL_UPDATE_SQL /
-    /// INSERT_FILE_RETURNING_ID_SQL so the old-path-gone heal guard is under test end-to-end.
+    /// Mirrors the heal+insert per-file body of `flush` over the real SQL constants and `heal_candidate_moved`, so the old-path-gone guard is tested end to end.
     fn ingest_with_heal(conn: &Connection, f: &TaggedFile) -> i64 {
         let path_text = f.path.to_string_lossy();
         let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
@@ -1917,12 +1790,9 @@ mod tests {
                 .unwrap();
             if let Some((id, old_path, _by_ref)) = healed
                 && heal_candidate_moved(&old_path) {
-                    // Mirror the production guard: `UPDATE OR ABORT` raises a
-                    // UNIQUE violation when the new path is already occupied by a
-                    // live row — skip the heal in that case (don't clobber it).
                     match conn.execute(
                         HEAL_UPDATE_SQL,
-                        params![path_text, path_hash, id, path_search],
+                        params![path_text, path_hash, id, path_search, crate::db::name_sort::name_sort_key(&path_text)],
                     ) {
                         Ok(_) => {}
                         Err(rusqlite::Error::SqliteFailure(e, _))
@@ -1957,15 +1827,43 @@ mod tests {
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
                 f.captured_from_exif,
+                crate::db::name_sort::name_sort_key(&path_text),
             ],
             |r| r.get(0),
         )
         .unwrap()
     }
 
-    /// The `by_ref` flag must be 1 only for a `file_ref` match and 0 (never
-    /// SQL NULL) for a content_hash-only match — even when the incoming
-    /// file_ref is NULL but the matched row has one.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_under_an_unmounted_volume_is_not_a_moved_file() {
+        for old in [
+            "/Volumes/fileid-test-offline-drive/Photos/a.jpg",
+            "/mnt/fileid-test-offline-drive/Photos/a.jpg",
+            "/media/someone/fileid-test-offline-drive/a.jpg",
+            "/run/media/someone/fileid-test-offline-drive/a.jpg",
+        ] {
+            assert!(!heal_candidate_moved(old), "{old}");
+        }
+        let dir = unique_tmp_dir("heal_moved");
+        let gone = dir.join("deleted.jpg");
+        assert!(heal_candidate_moved(&gone.to_string_lossy()), "a deleted file on a mounted disk is a move");
+        assert!(!heal_candidate_moved(&dir.to_string_lossy()), "a present path is not moved");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removable_volume_roots_are_found_for_mount_conventions_only() {
+        let root = |p: &str| removable_volume_root(std::path::Path::new(p)).map(|r| r.to_string_lossy().into_owned());
+        assert_eq!(root("/Volumes/Adlon/a/b.jpg").as_deref(), Some("/Volumes/Adlon"));
+        assert_eq!(root("/media/u/Disk/x").as_deref(), Some("/media/u/Disk"));
+        assert_eq!(root("/run/media/u/Disk/x").as_deref(), Some("/run/media/u/Disk"));
+        assert_eq!(root("/Users/a/Pictures/x.jpg"), None);
+        assert_eq!(root("/Volumes"), None);
+    }
+
+    /// `by_ref` is 1 only for a `file_ref` match and 0 (never NULL) for a content_hash-only match, even when the incoming file_ref is NULL but the matched row has one.
     #[test]
     fn heal_lookup_flags_ref_match_but_not_hash_only() {
         let conn = crate::db::test_support::memory_db();
@@ -1983,8 +1881,6 @@ mod tests {
             .unwrap();
         assert!(by_ref, "file_ref match must set by_ref");
 
-        // Incoming file_ref NULL, matched only via content_hash → by_ref = 0,
-        // and crucially not NULL (which would break r.get::<_, i64>).
         let by_ref_none: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
@@ -1995,10 +1891,7 @@ mod tests {
         assert!(!by_ref_none, "content_hash-only match must clear by_ref");
     }
 
-    /// C4: a row stamped by a pre-SHA-256 build carries a BLAKE3 digest. The
-    /// lookup must match it via the legacy fallbacks — ?4 (v0.0.1 recipe) or
-    /// ?6 (pre-interior-sample recipe) — even though the current-recipe
-    /// digest (?2) differs, or the row never heals.
+    /// A row stamped by a pre-SHA-256 build carries a BLAKE3 digest; the lookup must match it via the legacy ?4 / ?6 fallbacks even though the current-recipe digest (?2) differs.
     #[test]
     fn heal_lookup_matches_legacy_recipe_digest_via_fallback() {
         let conn = crate::db::test_support::memory_db();
@@ -2036,10 +1929,7 @@ mod tests {
         );
     }
 
-    /// Two byte-identical files that COEXIST (a copy, not a move)
-    /// must each get their own row. Before the fix the second file's
-    /// content_hash heal stole the first's row and dropped it from the
-    /// library.
+    /// Two byte-identical files that COEXIST (a copy, not a move) must each keep their own row; the content_hash heal must not steal the first's.
     #[test]
     fn coexisting_byte_identical_copies_stay_distinct_rows() {
         let dir = unique_tmp_dir("b1_copy");
@@ -2074,7 +1964,6 @@ mod tests {
         let dir = unique_tmp_dir("b1_move");
         let new_path = dir.join("moved.jpg");
         std::fs::write(&new_path, b"payload").unwrap();
-        // Old path is never created on disk → "gone" → a real move.
         let old_path = dir.join("gone").join("orig.jpg");
 
         let conn = crate::db::test_support::memory_db();
@@ -2149,37 +2038,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Regression (audit 2026-07 — rename-heal ON CONFLICT REPLACE data-loss):
-    /// when a content-identical COPY already occupies the new path with a LIVE
-    /// row carrying user-authored metadata, the heal of a moved-away orphan onto
-    /// that path must NOT clobber the copy's row. Before the `UPDATE OR ABORT`
-    /// fix, `path_text UNIQUE ON CONFLICT REPLACE` made a plain UPDATE silently
-    /// delete the copy's row + FK-cascade its user tags/person names.
+    /// Regression: when a content-identical COPY occupies the new path with a LIVE row carrying user metadata, healing a moved-away orphan onto that path must NOT clobber it. `path_text UNIQUE ON CONFLICT REPLACE` made a plain UPDATE silently delete the copy's row and FK-cascade its user tags/person names; `UPDATE OR ABORT` prevents it.
     #[test]
     fn heal_does_not_clobber_a_live_copy_at_the_new_path() {
         let dir = unique_tmp_dir("heal_no_clobber");
-        // Both copies exist on disk when first scanned, so each gets its own row
-        // (the heal only fires when an old path is GONE).
         let p1 = dir.join("orig.jpg");
         let p2 = dir.join("copy.jpg");
         std::fs::write(&p1, b"payload").unwrap();
         std::fs::write(&p2, b"payload").unwrap();
 
         let conn = crate::db::test_support::memory_db();
-        // Row A at P1 (same content hash), P1 present → no heal.
         let mut a = fixture(p1.to_str().unwrap());
         a.content_hash = Some([0x33; 32]);
         a.file_ref = None;
         let id_a = ingest_with_heal(&conn, &a);
 
-        // Row B at P2 (independent copy, same hash). P1 still present, so the heal
-        // lookup's old-path-gone check fails → B gets its OWN row.
         let mut b = fixture(p2.to_str().unwrap());
         b.content_hash = Some([0x33; 32]);
         b.file_ref = None;
         let id_b = ingest_with_heal(&conn, &b);
         assert_ne!(id_a, id_b, "the copy at P2 must get its OWN row while P1 still exists");
-        // Now the orphan's old path disappears (P1 moved/deleted).
         std::fs::remove_file(&p1).unwrap();
         conn.execute(
             "INSERT INTO tags (file_id, tag, source, score) VALUES (?1, 'Grandma', 'user', 1.0)",
@@ -2187,9 +2065,7 @@ mod tests {
         )
         .unwrap();
 
-        // Reprocess P2 (e.g. mtime changed): the heal lookup finds orphan A
-        // (P1 gone, hash matches) and tries to re-bind A onto P2 — which is
-        // occupied by live row B. The heal must be SKIPPED, not clobber B.
+        // Reprocess P2: the heal finds orphan A (P1 gone, hash matches) but P2 is occupied by live row B, so the heal must be skipped.
         let id_reproc = ingest_with_heal(&conn, &b);
         assert_eq!(id_reproc, id_b, "reprocessing P2 must keep B's row id");
 
@@ -2209,14 +2085,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A true rename detected via file_ref (NTFS MFT id) heals when the old
-    /// path is GONE from disk — a real move always leaves its old path absent.
     #[test]
     fn file_ref_rename_with_old_path_gone_heals() {
         let dir = unique_tmp_dir("b1_ref_rename");
         let new_path = dir.join("after.png");
         std::fs::write(&new_path, b"x").unwrap();
-        // Old path is never created on disk → "gone" → a real move.
         let old_path = dir.join("gone").join("before.png");
 
         let conn = crate::db::test_support::memory_db();
@@ -2236,13 +2109,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Cross-volume / hardlink safety: a file_ref match while the OLD path is
-    /// STILL present on disk is NOT a rename. The NTFS MFT reference is only
-    /// volume-local, so two distinct files on different volumes (or two
-    /// hardlinks to one file) can collide on the same ref. Healing such a
-    /// collision would re-bind one file's row to the other's path and, via
-    /// UPDATE OR REPLACE, FK-cascade the loser's tags/faces away — silent data
-    /// loss. The old-path-gone gate keeps them as two distinct rows.
+    /// Cross-volume/hardlink safety: a file_ref match while the OLD path still exists is NOT a rename (MFT refs are volume-local), and healing would FK-cascade the loser's tags/faces away. The old-path-gone gate keeps two distinct rows.
     #[test]
     fn file_ref_collision_with_both_paths_present_stays_distinct() {
         let dir = unique_tmp_dir("b1_ref_collision");
@@ -2268,19 +2135,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file_ref match while the old path is GONE but the candidate
-    /// row's size DIFFERS is NOT a genuine move. An NTFS MFT reference is only
-    /// volume-local, so a cross-volume collision (or a reused ref) whose old
-    /// path happens to be absent must not re-bind an unrelated file's row and
-    /// FK-cascade its tags/faces onto a different file. The size_bytes
-    /// corroboration on the file_ref heal arm blocks it; a true rename (same
-    /// size) still heals (see file_ref_rename_with_old_path_gone_heals).
+    /// A file_ref match with the old path GONE but a different row size is not a genuine move (volume-local MFT ref collision or reuse); the size_bytes corroboration blocks it, while a true rename still heals.
     #[test]
     fn file_ref_heal_requires_matching_size() {
         let dir = unique_tmp_dir("r3_17_size");
         let new_path = dir.join("after.png");
         std::fs::write(&new_path, b"x").unwrap();
-        // Old path never created on disk → "gone" → would heal if size matched.
         let old_path = dir.join("gone").join("before.png");
 
         let conn = crate::db::test_support::memory_db();
@@ -2302,13 +2162,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ENG-18: an NTFS `file_ref` with the high bit set (a non-zero sequence
-    /// number lives in the top 16 bits) exceeds `i64::MAX`. rusqlite's
-    /// `ToSql for u64` rejects values above `i64::MAX`, so binding the raw u64
-    /// errored and the `?` aborted the entire flush batch — losing the whole
-    /// catalog. We now bitcast `u64 -> i64` losslessly at every bind site; the
-    /// insert must succeed and the value must still round-trip through the
-    /// heal lookup (same MFT ref → rename → heal, not a duplicate row).
+    /// An NTFS `file_ref` with the high bit set exceeds `i64::MAX`, which rusqlite's `ToSql for u64` rejects, aborting the whole flush batch. Values are bitcast u64 → i64 at every bind site; the insert must succeed and still round-trip through the heal lookup.
     #[test]
     fn high_bit_file_ref_does_not_abort_insert() {
         let dir = unique_tmp_dir("eng18_ref");
@@ -2332,12 +2186,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The v15 sync triggers own ocr_fts/doc_fts; the writer only
-    /// touches the content tables (explicit DELETE + INSERT — the flush
-    /// pattern). FTS must follow through insert → re-process (delete+insert)
-    /// → direct update → delete with no stale postings and no corruption.
-    /// Before the fix the writer's manual FTS statements double-fired against
-    /// a macOS-installed trigger set → SQLITE_CORRUPT on every re-process.
+    /// The v15 sync triggers own ocr_fts/doc_fts; the writer touches only content tables (explicit DELETE + INSERT). FTS must follow insert → re-process → update → delete with no stale postings. A manual FTS statement would double-fire against the triggers and corrupt the index on re-process.
     #[test]
     fn fts_follows_content_tables_via_triggers() {
         let conn = crate::db::test_support::memory_db();
@@ -2401,9 +2250,7 @@ mod tests {
         }
     }
 
-    /// Every writer path stamps `path_search` (= `path_text` on
-    /// Windows — see the v16 migration note) so the app's normalization-
-    /// insensitive LIKE never misses engine-written rows.
+    /// Every writer path stamps `path_search` so the app's normalization-insensitive LIKE never misses engine-written rows.
     #[test]
     fn writers_populate_path_search() {
         let conn = crate::db::test_support::memory_db();
@@ -2424,7 +2271,7 @@ mod tests {
         let new_path = r"C:\lib\renamed.jpg";
         conn.execute(
             HEAL_UPDATE_SQL,
-            params![new_path, 42i64, id, nfc_path_search(new_path)],
+            params![new_path, 42i64, id, nfc_path_search(new_path), crate::db::name_sort::name_sort_key(new_path)],
         )
         .unwrap();
         let healed: String = conn
@@ -2433,19 +2280,34 @@ mod tests {
         assert_eq!(healed, r"C:\lib\renamed.jpg", "heal must re-stamp path_search");
     }
 
-    // An NFD filename (decomposed — base letter + combining mark,
-    // the on-disk form for Mac/NAS/Dropbox-synced names) must be stored as
-    // NFC in path_search so the app's NFC query (LIKE) finds it. Before the
-    // write-side normalization the engine stored the verbatim NFD bytes, which
-    // an NFC query could never match.
+    #[test]
+    fn writers_stamp_the_name_sort_key_on_insert_and_on_a_healed_rename() {
+        let conn = crate::db::test_support::memory_db();
+        let path = "/lib/Zoë 10.jpg";
+        let id: i64 = conn
+            .query_row(
+                INSERT_FILE_RETURNING_ID_SQL,
+                params![path, 7_i64, 1_i64, None::<f64>, 1.0, 1.0, "image", "jpg", None::<i64>, None::<f64>,
+                        0_i64, 0_i64, None::<String>, None::<f64>, None::<f64>, 0_i64, None::<String>,
+                        None::<Vec<u8>>, None::<i64>, path, false, false, false, name_sort_key(path)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let key = |conn: &Connection| -> String {
+            conn.query_row("SELECT name_sort FROM files WHERE id = ?1", params![id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(key(&conn), name_sort_key("/x/zoe 10.jpg"));
+        let renamed = "/lib/Apple 2.jpg";
+        conn.execute(HEAL_UPDATE_SQL, params![renamed, 9_i64, id, renamed, name_sort_key(renamed)]).unwrap();
+        assert_eq!(key(&conn), name_sort_key("apple 2.jpg"));
+    }
+
+    // An NFD filename (Mac/NAS/Dropbox-synced) must be stored as NFC in path_search so the app's NFC query finds it.
     #[test]
     fn nfd_filename_is_searchable_by_nfc_query() {
-        // "cafe\u{0301}" is NFD: ASCII 'e' + COMBINING ACUTE ACCENT (U+0301).
         let nfd_path = "C:\\lib\\cafe\u{0301}.jpg";
-        // "café" is NFC: precomposed 'é' (U+00E9) — what a search field yields.
         let nfc_query = "%caf\u{00E9}.jpg";
 
-        // Sanity: the two byte-strings genuinely differ pre-normalization.
         assert_ne!(nfd_path, "C:\\lib\\caf\u{00E9}.jpg",
             "test vector must actually be NFD, not NFC");
 
@@ -2453,7 +2315,6 @@ mod tests {
         let f = fixture(nfd_path);
         insert_one(&conn, &f).unwrap();
 
-        // path_text keeps the verbatim (NFD) bytes; path_search is NFC.
         let (stored_text, stored_search): (String, String) = conn
             .query_row(
                 "SELECT path_text, path_search FROM files LIMIT 1",
@@ -2465,7 +2326,6 @@ mod tests {
         assert_eq!(stored_search, "C:\\lib\\caf\u{00E9}.jpg",
             "path_search must be NFC-composed");
 
-        // The NFC query finds the row only via the NFC path_search column.
         let found_via_search: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM files WHERE path_search LIKE ?1",
@@ -2476,8 +2336,6 @@ mod tests {
         assert_eq!(found_via_search, 1,
             "NFC query must match the NFC-normalized path_search");
 
-        // Control: the same NFC query against verbatim path_text would miss
-        // (this is the bug the column fixes).
         let found_via_text: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM files WHERE path_text LIKE ?1",
@@ -2570,14 +2428,7 @@ mod tests {
         assert_eq!(preserved, "manual marker");
     }
 
-    // The recipe-v1 (legacy) content-hash re-read for an over-cap
-    // (>16 MB) file is a ~2 MB blocking disk read. It must be computed BEFORE
-    // the writer lock (into `legacy_hashes`), never inside the single-writer
-    // transaction. This test drives the real `flush`: it seeds a row stamped
-    // with the legacy digest of an over-cap temp file at a now-gone path, then
-    // flushes the same content at a new path. The heal can only fire if `flush`
-    // read the legacy digest off disk and matched it via the `?6` fallback —
-    // exercising the hoisted (pre-lock) read path end-to-end.
+    // The legacy content-hash re-read for an over-cap (>16 MB) file is a ~2 MB blocking disk read and must happen BEFORE the writer lock (into `legacy_hashes`), never inside the single-writer transaction. Drives the real `flush` with a row stamped with the legacy digest at a now-gone path; the heal fires only if `flush` read the digest off disk and matched via `?6`.
     #[test]
     fn a_full_database_fails_the_batch_whole_and_the_writer_recovers() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
@@ -2613,21 +2464,38 @@ mod tests {
         assert_eq!(rows, 200);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_writer_commits_every_row_across_more_than_two_batches_and_the_tail() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let n = current_batch_size() * 2 + 7;
+        let (tx, rx) = mpsc::channel(n + 1);
+        for i in 0..n {
+            tx.send(fixture(&format!("/lib/many/{i}.jpg"))).await.unwrap();
+        }
+        drop(tx);
+        let mut batches = 0u32;
+        let (total, failed) = writer.run(rx, |_| batches += 1).await.unwrap();
+        assert_eq!((total, failed), (n as u64, 0));
+        assert!(batches >= 3, "two full batches and the tail are three commits, got {batches}");
+        let rows: i64 = conn.lock().query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows as usize, n, "no row is lost between batches or in the final partial batch");
+        let distinct: i64 = conn.lock().query_row("SELECT COUNT(DISTINCT path_hash) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(distinct as usize, n);
+    }
+
     #[test]
     fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
         let dir = unique_tmp_dir("overcap_legacy");
         let over_cap_bytes = crate::util::content_hash::FULL_HASH_MAX_BYTES + 4096;
         let new_path = dir.join("moved_here.bin");
-        // Distinct, non-trivial byte pattern so head/tail samples are stable.
         let mut content = vec![0u8; over_cap_bytes as usize];
         for (i, b) in content.iter_mut().enumerate() {
             *b = (i % 251) as u8;
         }
         std::fs::write(&new_path, &content).unwrap();
 
-        // The pre-interior-sample digest the decoder thread would NOT have
-        // stamped — `flush` reproduces it by re-reading the file, which is the
-        // read we hoisted off the lock.
+        // The pre-interior-sample digest the decoder thread would NOT have stamped; `flush` reproduces it by re-reading the file.
         let legacy_digest =
             crate::util::content_hash::legacy_content_hashes(&new_path, over_cap_bytes)
                 .unwrap()
@@ -2636,8 +2504,6 @@ mod tests {
 
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
 
-        // Seed the prior row at a path that no longer exists on disk (genuine
-        // move) carrying the legacy digest as its content_hash.
         let old_path = dir.join("was_here.bin"); // never written → gone from disk
         {
             let c = conn.lock();
@@ -2648,8 +2514,6 @@ mod tests {
             insert_one(&c, &seed).unwrap();
         }
 
-        // Incoming file at the NEW path: a DIFFERENT (current-recipe) digest in
-        // ?2 so the heal can only match through the legacy ?4 fallback.
         let mut incoming = fixture(new_path.to_str().unwrap());
         incoming.size_bytes = over_cap_bytes;
         incoming.kind = FileKind::Other;
@@ -2663,8 +2527,6 @@ mod tests {
         let mut failed = 0u64;
         writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 0).unwrap();
 
-        // Exactly one row, re-bound to the new path — proves the legacy digest
-        // was read (pre-lock) and consumed by the heal.
         let c = conn.lock();
         let row_count: i64 = c
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
@@ -2683,11 +2545,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Pre-SHA-256 builds (released v0.0.1 tagging.rs) stamped full-file BLAKE3
-    // for under-cap files. On a cross-volume move file_ref is useless, so the
-    // heal can only match by reproducing that digest — gating the legacy probe
-    // on over-cap orphaned every ≤16 MB legacy row (fresh row inserted, the old
-    // row's user tags / person assignments / embeddings pruned).
+    // Pre-SHA-256 builds (v0.0.1) stamped full-file BLAKE3 for under-cap files. On a cross-volume move file_ref is useless, so the heal must reproduce that digest; gating the legacy probe on over-cap orphaned every ≤16 MB legacy row.
     #[test]
     fn under_cap_legacy_blake3_row_heals_instead_of_orphaning() {
         let dir = unique_tmp_dir("undercap_legacy");
@@ -2696,7 +2554,6 @@ mod tests {
         let size = content.len() as u64;
         std::fs::write(&new_path, &content).unwrap();
 
-        // Exactly what v0.0.1 stamped for a file within the full-hash window.
         let v001_digest = *blake3::hash(&content).as_bytes();
 
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
@@ -2712,8 +2569,6 @@ mod tests {
             seed_id = c.query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
         }
 
-        // Rescan-style ingest at the new path: current build stamps SHA-256,
-        // no file_ref match possible (cross-volume move).
         let mut incoming = fixture(new_path.to_str().unwrap());
         incoming.size_bytes = size;
         incoming.kind = FileKind::Other;
@@ -2745,10 +2600,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Released v0.0.1 stamped over-cap files with blake3(head ‖ interior
-    // samples ‖ tail ‖ size_le). Reproducing only the older head ‖ tail ‖ size
-    // composite left every v0.0.1-stamped over-cap row unable to heal — the
-    // seed digest here can only match via the v0.0.1-recipe probe (?4).
+    // v0.0.1 stamped over-cap files with blake3(head ‖ interior samples ‖ tail ‖ size_le); the seed digest here can only match via the v0.0.1-recipe probe (?4).
     #[test]
     fn over_cap_v001_interior_sample_row_heals() {
         let dir = unique_tmp_dir("overcap_v001");
@@ -3052,6 +2904,42 @@ mod twin_reuse_tests {
         assert_eq!(owed(&conn, "/lib/b.jpg"), None);
     }
 
+    fn copy_after_spoiling_the_twin(spoil: &str, switch_off: bool) -> (i64, i64, i64) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [31u8; 32];
+        writer.flush(&mut vec![analyzed("/lib/a.jpg", hash)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        conn.lock().execute_batch(spoil).unwrap();
+        let mut copy = reused("/lib/b.jpg", hash, "Year_2021");
+        copy.reuse_twin = !switch_off;
+        writer.flush(&mut vec![copy], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        let db = conn.lock();
+        db.query_row(
+            "SELECT f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id), (SELECT count(*) FROM clip_embeddings WHERE file_id = f.id) \
+             FROM files f WHERE path_text = '/lib/b.jpg'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_copy_never_takes_over_a_failed_row_a_non_image_a_sampled_hash_or_a_row_with_reuse_switched_off() {
+        let none = (1, 0, 0);
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET failed = 1", false), none, "failed twin");
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET kind = 'video'", false), none, "non-image twin");
+        assert_eq!(copy_after_spoiling_the_twin("UPDATE files SET content_hash = substr(content_hash, 1, 16)", false), none, "sampled or short hash");
+        assert_eq!(
+            copy_after_spoiling_the_twin("DELETE FROM tags; DELETE FROM clip_embeddings", false),
+            none,
+            "a twin that kept no tag and no vector"
+        );
+        let (failed, tags, clips) = copy_after_spoiling_the_twin("SELECT 1", true);
+        assert_eq!((failed, tags, clips), (0, 0, 0), "reuse off: the copy keeps only its own row and gets nothing of the twin's");
+        let (failed, tags, clips) = copy_after_spoiling_the_twin("SELECT 1", false);
+        assert_eq!((failed, tags, clips), (0, 3, 1), "positive control: the intact twin is taken over");
+    }
+
     #[test]
     fn a_copy_of_an_earlier_scan_is_served_from_the_catalog() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
@@ -3090,6 +2978,67 @@ mod twin_reuse_tests {
             .query_row("SELECT count(*) FROM clip_embeddings c JOIN files f ON f.id = c.file_id WHERE f.path_text = '/lib/own.jpg'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(vectors, 1, "a date change with the same bytes must not cost the file its vector");
+    }
+
+    fn face_rows(conn: &Arc<Mutex<Connection>>, path: &str) -> Vec<String> {
+        conn.lock()
+            .prepare(
+                "SELECT fp.id || '|' || COALESCE(fp.person_id, 'none') || '|' || fp.bbox FROM face_prints fp \
+                 JOIN files f ON f.id = fp.file_id WHERE f.path_text = ?1 ORDER BY fp.id",
+            )
+            .unwrap()
+            .query_map(params![path], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn touched_file_keeps(other_copy: bool) {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let hash = [11u8; 32];
+        let mut first = vec![analyzed("/lib/own.jpg", hash)];
+        if other_copy {
+            first.push(analyzed("/lib/backup/own.jpg", hash));
+        }
+        writer.flush(&mut first, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let file_id: i64 = {
+            let db = conn.lock();
+            let file_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = '/lib/own.jpg'", [], |r| r.get(0)).unwrap();
+            db.execute("INSERT INTO persons (name, file_count, created_at) VALUES ('Ada', 1, 0)", []).unwrap();
+            db.execute("UPDATE face_prints SET person_id = ?1 WHERE file_id = ?2", params![db.last_insert_rowid(), file_id]).unwrap();
+            db.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'holiday', 'user')", params![file_id]).unwrap();
+            file_id
+        };
+        let faces_before = face_rows(&conn, "/lib/own.jpg");
+        assert!(faces_before.len() == 1 && !faces_before[0].contains("none"));
+
+        let mut touched = reused("/lib/own.jpg", hash, "Year_2020");
+        touched.modified_unix += 3_600.0;
+        writer.flush(&mut vec![touched], &mut 0, &mut 0, &mut 0, 1).unwrap();
+
+        let db = conn.lock();
+        let (id, failed, user_tags, vectors): (i64, i64, i64, i64) = db
+            .query_row(
+                "SELECT f.id, f.failed, (SELECT count(*) FROM tags WHERE file_id = f.id AND source = 'user'), \
+                 (SELECT count(*) FROM clip_embeddings WHERE file_id = f.id) FROM files f WHERE path_text = '/lib/own.jpg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        drop(db);
+        assert_eq!((id, failed, user_tags, vectors), (file_id, 0, 1, 1), "other copy: {other_copy}");
+        assert_eq!(face_rows(&conn, "/lib/own.jpg"), faces_before, "face rows and their people survive; other copy: {other_copy}");
+    }
+
+    #[test]
+    fn a_file_whose_date_changed_but_bytes_did_not_keeps_its_row_faces_and_people() {
+        touched_file_keeps(false);
+    }
+
+    #[test]
+    fn a_touched_file_with_a_copy_elsewhere_keeps_its_own_faces_and_people() {
+        touched_file_keeps(true);
     }
 
     fn tags_only(path: &str, hash: [u8; 32]) -> TaggedFile {
@@ -3279,6 +3228,15 @@ mod failure_memory_tests {
             .unwrap()
     }
 
+    /// A failure is only recorded for a file that is still on disk.
+    fn on_disk(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("fileid-failure-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, b"broken").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
     fn given_up(conn: &Arc<Mutex<Connection>>) -> Vec<String> {
         let db = conn.lock();
         let mut stmt = db.prepare(catch_up::GIVEN_UP_SQL).unwrap();
@@ -3289,19 +3247,20 @@ mod failure_memory_tests {
     fn three_failures_of_the_same_file_are_remembered_and_a_success_forgets_them() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let broken = on_disk("broken.jpg");
         for attempt in 1..=3 {
-            writer.flush(&mut vec![file("/lib/broken.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
-            assert_eq!(memory(&conn, "/lib/broken.jpg"), Some((4, i64::from(attempt), catch_up::failure_context().to_string())));
+            writer.flush(&mut vec![file(&broken, true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+            assert_eq!(memory(&conn, &broken), Some((4, i64::from(attempt), catch_up::failure_context().to_string())));
             assert_eq!(given_up(&conn).len(), usize::from(attempt == 3));
         }
         let (failed, message): (i64, String) = conn
             .lock()
-            .query_row("SELECT failed, error_message FROM files WHERE path_text = '/lib/broken.jpg'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT failed, error_message FROM files WHERE path_text = ?1", [&broken], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((failed, message.as_str()), (1, "image decode: broken"), "the row the Library lists as unreadable is kept");
 
-        writer.flush(&mut vec![file("/lib/broken.jpg", false)], &mut 0, &mut 0, &mut 0, 4).unwrap();
-        assert_eq!(memory(&conn, "/lib/broken.jpg"), None);
+        writer.flush(&mut vec![file(&broken, false)], &mut 0, &mut 0, &mut 0, 4).unwrap();
+        assert_eq!(memory(&conn, &broken), None);
         assert!(given_up(&conn).is_empty());
     }
 
@@ -3309,25 +3268,26 @@ mod failure_memory_tests {
     fn a_changed_file_or_engine_starts_counting_again_and_transient_failures_never_count() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let (a, offline) = (on_disk("a.jpg"), on_disk("offline.jpg"));
         for attempt in 0..3 {
-            writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
+            writer.flush(&mut vec![file(&a, true)], &mut 0, &mut 0, &mut 0, attempt).unwrap();
         }
-        assert_eq!(given_up(&conn), vec!["/lib/a.jpg".to_string()]);
+        assert_eq!(given_up(&conn), vec![a.clone()]);
 
         // Edited on disk: the next failure is the first for the new content.
-        let mut edited = file("/lib/a.jpg", true);
+        let mut edited = file(&a, true);
         edited.modified_unix += 60.0;
         writer.flush(&mut vec![edited], &mut 0, &mut 0, &mut 0, 3).unwrap();
-        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+        assert_eq!(memory(&conn, &a).map(|m| m.1), Some(1));
         assert!(given_up(&conn).is_empty());
 
         // Failures recorded by another engine build do not count for this one.
         conn.lock().execute("UPDATE scan_failures SET attempts = 3, engine_build = 'fileid-engine 0.0.1 portable'", []).unwrap();
         assert!(given_up(&conn).is_empty());
-        let mut again = file("/lib/a.jpg", true);
+        let mut again = file(&a, true);
         again.modified_unix += 60.0;
         writer.flush(&mut vec![again], &mut 0, &mut 0, &mut 0, 4).unwrap();
-        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| m.1), Some(1));
+        assert_eq!(memory(&conn, &a).map(|m| m.1), Some(1));
 
         // The stored row changed without a scan (size differs): not given up.
         conn.lock().execute("UPDATE scan_failures SET attempts = 3", []).unwrap();
@@ -3335,19 +3295,20 @@ mod failure_memory_tests {
         conn.lock().execute("UPDATE files SET size_bytes = size_bytes + 1", []).unwrap();
         assert!(given_up(&conn).is_empty());
 
-        let mut transient = file("/lib/offline.jpg", true);
+        let mut transient = file(&offline, true);
         transient.failure_is_transient = true;
         for attempt in 5..9 {
             writer.flush(&mut vec![transient.clone()], &mut 0, &mut 0, &mut 0, attempt).unwrap();
         }
-        assert_eq!(memory(&conn, "/lib/offline.jpg"), None);
+        assert_eq!(memory(&conn, &offline), None);
     }
 
     #[test]
     fn a_failure_replaces_work_owed_from_an_earlier_scan() {
         let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
-        writer.flush(&mut vec![file("/lib/a.jpg", false)], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let a = on_disk("a.jpg");
+        writer.flush(&mut vec![file(&a, false)], &mut 0, &mut 0, &mut 0, 0).unwrap();
         conn.lock()
             .execute(
                 "INSERT INTO scan_catchup (file_id, stages, size_bytes, modified_at, vision, face_count, attempts, created_at) \
@@ -3355,8 +3316,316 @@ mod failure_memory_tests {
                 [],
             )
             .unwrap();
-        writer.flush(&mut vec![file("/lib/a.jpg", true)], &mut 0, &mut 0, &mut 0, 1).unwrap();
-        assert_eq!(memory(&conn, "/lib/a.jpg").map(|m| (m.0, m.1)), Some((4, 1)));
+        writer.flush(&mut vec![file(&a, true)], &mut 0, &mut 0, &mut 0, 1).unwrap();
+        assert_eq!(memory(&conn, &a).map(|m| (m.0, m.1)), Some((4, 1)));
     }
 }
 
+#[cfg(test)]
+mod timeout_retry_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    fn timed_out(path: PathBuf) -> TaggedFile {
+        let mut file = TaggedFile::bare(&DiscoveredFile {
+            path,
+            kind: FileKind::Image,
+            size_bytes: 4,
+            modified_unix: 1.0,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        });
+        file.failed = true;
+        file.error_message = Some(crate::pipeline::tagging::TIMED_OUT_MESSAGE.to_string());
+        file
+    }
+
+    fn flush_one(writer: &DbWriter, file: TaggedFile) -> BatchStats {
+        writer.flush(&mut vec![file], &mut 0, &mut 0, &mut 0, 0).unwrap()
+    }
+
+    #[test]
+    fn a_timed_out_file_that_a_later_pass_reads_again_is_not_counted_as_failed_yet() {
+        let folder = std::env::temp_dir().join(format!("fileid-timeout-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (a, b) = (folder.join("a.jpg"), folder.join("b.jpg"));
+        std::fs::write(&a, b"jpeg").unwrap();
+        std::fs::write(&b, b"jpeg").unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let retrying = DbWriter::new(conn.clone(), ScanCoordinator::new()).with_timeouts_retried(true);
+        let stats = flush_one(&retrying, timed_out(a));
+        assert_eq!((stats.failed_total, stats.retried_total), (1, 1));
+        let last_pass = DbWriter::new(conn, ScanCoordinator::new());
+        let stats = flush_one(&last_pass, timed_out(b));
+        assert_eq!((stats.failed_total, stats.retried_total), (1, 0), "no pass is left to read it again");
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rescan_preservation_tests {
+    use super::*;
+    use crate::pipeline::discovery::{DiscoveredFile, FileKind};
+    use std::path::PathBuf;
+
+    const PATH: &str = "/lib/IMG_0001.jpg";
+
+    fn scan(modified_unix: f64) -> TaggedFile {
+        TaggedFile::bare(&DiscoveredFile {
+            path: PathBuf::from(PATH),
+            kind: FileKind::Image,
+            size_bytes: 4,
+            modified_unix,
+            created_unix: None,
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        })
+    }
+
+    fn analysed(modified_unix: f64, tags: &[&str], ocr: &str) -> TaggedFile {
+        let mut file = scan(modified_unix);
+        file.tags = tags.iter().map(|tag| ((*tag).to_string(), None)).collect();
+        file.tags_evaluated = true;
+        file.faces_evaluated = true;
+        file.ocr_stage_ran = true;
+        file.ocr_text = Some(ocr.to_string());
+        file
+    }
+
+    fn flush(writer: &DbWriter, file: TaggedFile, batch: u32) {
+        writer.flush(&mut vec![file], &mut 0, &mut 0, &mut 0, batch).unwrap();
+    }
+
+    struct Seeded {
+        conn: Arc<Mutex<Connection>>,
+        writer: DbWriter,
+        file_id: i64,
+        face_id: i64,
+        person_id: i64,
+    }
+
+    /// A scanned file with an automatic tag, OCR text, one face the user has
+    /// named, and a tag the user typed.
+    fn seeded() -> Seeded {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        flush(&writer, analysed(1_700_000_000.0, &["beach"], "alpha bravo"), 0);
+        let (file_id, face_id, person_id) = {
+            let db = conn.lock();
+            let file_id: i64 = db.query_row("SELECT id FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).unwrap();
+            db.execute("INSERT INTO persons (name, file_count, created_at) VALUES ('Mom', 1, 0)", []).unwrap();
+            let person_id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES (?1, ?2, X'01', '{}')",
+                params![file_id, person_id],
+            )
+            .unwrap();
+            let face_id = db.last_insert_rowid();
+            db.execute("INSERT INTO tags (file_id, tag, source) VALUES (?1, 'keepme', 'user')", [file_id]).unwrap();
+            (file_id, face_id, person_id)
+        };
+        Seeded { conn, writer, file_id, face_id, person_id }
+    }
+
+    fn state(seed: &Seeded) -> (Option<i64>, Vec<String>, Vec<Option<i64>>, Vec<String>, i64) {
+        let db = seed.conn.lock();
+        let id = db.query_row("SELECT id FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).ok();
+        let tags = db
+            .prepare("SELECT tag || ':' || source FROM tags ORDER BY tag")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let people = db
+            .prepare("SELECT person_id FROM face_prints ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let text = db
+            .prepare("SELECT text FROM ocr_text ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let failed = db.query_row("SELECT failed FROM files WHERE path_text = ?1", [PATH], |r| r.get(0)).unwrap();
+        (id, tags, people, text, failed)
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_row_id_and_the_people_the_user_named() {
+        let seed = seeded();
+        let before = state(&seed);
+        assert_eq!(before.2, vec![Some(seed.person_id)]);
+
+        // The same file again with the face stage skipped (the usual state of
+        // a scan that reads only what changed).
+        let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+        again.faces_evaluated = false;
+        flush(&seed.writer, again, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id), "files.id survives a rewrite");
+        assert_eq!(after.2, vec![Some(seed.person_id)], "the named face stays named");
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+        assert_eq!(seed.conn.lock().query_row("SELECT id FROM face_prints", [], |r| r.get::<_, i64>(0)).unwrap(), seed.face_id);
+    }
+
+    #[test]
+    fn a_changed_file_whose_stages_did_not_run_keeps_its_tags_people_and_text() {
+        let seed = seeded();
+        // A read that timed out, or models that were not ready: the file
+        // changed, nothing was produced, no stage ran.
+        let changed = scan(1_700_000_060.0);
+        flush(&seed.writer, changed, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id));
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()], "tags survive");
+        assert_eq!(after.2, vec![Some(seed.person_id)], "the person assignment survives");
+        assert_eq!(after.3, vec!["alpha bravo".to_string()], "the text survives");
+        assert_eq!(after.4, 0);
+    }
+
+    #[test]
+    fn a_failed_read_of_a_changed_file_records_the_failure_and_keeps_what_was_found_before() {
+        let seed = seeded();
+        let mut failed = scan(1_700_000_060.0);
+        failed.failed = true;
+        failed.error_message = Some("image decode: broken".to_string());
+        flush(&seed.writer, failed, 1);
+
+        let after = state(&seed);
+        assert_eq!(after.0, Some(seed.file_id), "the row is not replaced");
+        assert_eq!(after.4, 1, "the failure is recorded");
+        assert_eq!(after.1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+        assert_eq!(after.2, vec![Some(seed.person_id)]);
+        assert_eq!(after.3, vec!["alpha bravo".to_string()]);
+
+        // The next good read clears the failure and replaces the old results.
+        flush(&seed.writer, analysed(1_700_000_060.0, &["sunset"], "charlie"), 2);
+        let healed = state(&seed);
+        assert_eq!(healed.0, Some(seed.file_id));
+        assert_eq!(healed.4, 0);
+        assert_eq!(healed.1, vec!["keepme:user".to_string(), "sunset:auto".to_string()], "automatic tags are replaced, the user's stay");
+        assert_eq!(healed.3, vec!["charlie".to_string()]);
+    }
+
+    #[test]
+    fn a_file_deleted_after_discovery_gets_no_failed_row_but_a_broken_one_does() {
+        let dir = std::env::temp_dir().join(format!("fileid-vanish-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (gone, broken, known) = (dir.join("deleted.jpg"), dir.join("broken.jpg"), dir.join("known.jpg"));
+        std::fs::write(&broken, b"not a jpeg").unwrap();
+        std::fs::write(&known, b"jpeg").unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut first = analysed(1_700_000_000.0, &["beach"], "alpha");
+        first.path = known.clone();
+        writer.flush(&mut vec![first], &mut 0, &mut 0, &mut 0, 0).unwrap();
+        std::fs::remove_file(&known).unwrap();
+        let failure = |path: &PathBuf| {
+            let mut file = scan(1_700_000_000.0);
+            file.path = path.clone();
+            file.failed = true;
+            file.error_message = Some("Could not decode image".to_string());
+            file
+        };
+        let (mut total, mut failed) = (0, 0);
+        writer
+            .flush(&mut vec![failure(&gone), failure(&broken), failure(&known)], &mut total, &mut 0, &mut failed, 1)
+            .unwrap();
+        let rows: Vec<(String, bool)> = conn
+            .lock()
+            .prepare("SELECT path_text, failed FROM files ORDER BY path_text")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let tags: i64 = conn.lock().query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let text = |p: &PathBuf| p.to_string_lossy().into_owned();
+        assert_eq!(rows, vec![(text(&broken), true), (text(&known), true)], "a known file that went missing keeps its row for the orphan sweep");
+        assert_eq!(tags, 1, "the known file's tags survive its failed read");
+        assert_eq!((total, failed), (3, 3), "the vanished file still counts as a failure of this scan");
+    }
+
+    fn unit_vector() -> Vec<f32> {
+        let mut vector = vec![0.0f32; crate::models::clip_space::DIMENSION];
+        vector[0] = 1.0;
+        vector
+    }
+
+    fn clip_rows(seed: &Seeded) -> Vec<(i64, String)> {
+        seed.conn
+            .lock()
+            .prepare("SELECT file_id, model FROM clip_embeddings")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn rescanning_an_unchanged_image_fills_a_missing_vector_once_and_never_duplicates_it() {
+        let seed = seeded();
+        assert!(clip_rows(&seed).is_empty(), "the first scan had no CLIP model");
+        for batch in 1..=2 {
+            let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+            again.clip_embedding = Some(unit_vector());
+            flush(&seed.writer, again, batch);
+            assert_eq!(clip_rows(&seed), vec![(seed.file_id, crate::models::clip_space::model_id().to_string())]);
+        }
+        assert_eq!(state(&seed).1, vec!["beach:auto".to_string(), "keepme:user".to_string()]);
+    }
+
+    #[test]
+    fn a_vector_from_an_older_model_is_replaced_in_place_and_the_users_tags_stay() {
+        let seed = seeded();
+        seed.conn
+            .lock()
+            .execute(
+                "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?1, X'00', 'clip_legacy')",
+                [seed.file_id],
+            )
+            .unwrap();
+        let mut again = analysed(1_700_000_000.0, &["beach"], "alpha bravo");
+        again.clip_embedding = Some(unit_vector());
+        flush(&seed.writer, again, 1);
+        let rows = clip_rows(&seed);
+        assert_eq!(rows, vec![(seed.file_id, crate::models::clip_space::model_id().to_string())]);
+        let blob: Vec<u8> = seed.conn.lock().query_row("SELECT embedding FROM clip_embeddings", [], |r| r.get(0)).unwrap();
+        assert_eq!(blob.len(), crate::models::clip_space::DIMENSION * 4);
+        assert!(state(&seed).1.contains(&"keepme:user".to_string()));
+    }
+
+    #[test]
+    fn a_file_that_timed_out_is_walked_again_even_though_its_date_is_unchanged() {
+        let seed = seeded();
+        let sql = format!(
+            "SELECT path_text FROM files WHERE failed = 0 {}",
+            crate::scan_session::SKIP_SET_CONTENT_HASH_GATE
+        );
+        let skipped = |seed: &Seeded| -> Vec<String> {
+            let db = seed.conn.lock();
+            db.execute("UPDATE files SET content_hash = X'01'", []).ok();
+            db.prepare(&sql).unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        };
+        assert_eq!(skipped(&seed), vec![PATH.to_string()], "a cleanly scanned file is skipped");
+
+        let mut timed_out = scan(1_700_000_000.0);
+        timed_out.failed = true;
+        timed_out.error_message = Some("per-file timeout after 60s".into());
+        flush(&seed.writer, timed_out, 1);
+        assert!(skipped(&seed).is_empty(), "a timed-out file is marked failed, so the next scan walks it again");
+    }
+}

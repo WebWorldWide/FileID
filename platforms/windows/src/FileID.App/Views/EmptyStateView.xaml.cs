@@ -1,7 +1,4 @@
-﻿// EmptyStateView code-behind. Six DPs (Glyph / Title / Body / Secondary /
-// ActionLabel / ActionGlyph) plus an ActionInvoked routed event.
-
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace FileID.Views;
@@ -57,7 +54,6 @@ public sealed partial class EmptyStateView : UserControl
     public string ActionLabel { get => (string)GetValue(ActionLabelProperty); set => SetValue(ActionLabelProperty, value); }
     public string ActionGlyph { get => (string)GetValue(ActionGlyphProperty); set => SetValue(ActionGlyphProperty, value); }
 
-    /// <summary>Raised when the user clicks the primary action button.</summary>
     public event EventHandler? ActionInvoked;
 
     private void OnActionClicked(object sender, RoutedEventArgs e) => ActionInvoked?.Invoke(this, EventArgs.Empty);

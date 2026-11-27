@@ -1,19 +1,6 @@
-// TagWriter — writes macOS Finder tags onto files via the standard
-// `URLResourceKey.tagNamesKey` API.
-//
-// Finder tags are an Apple-blessed, system-wide tag mechanism that
-// shows up everywhere macOS shows tags: Finder sidebar, Spotlight
-// (`tag:Mom` queries), Smart Folders, Notes, Mail. They survive moves
-// across volumes that support extended attributes.
-//
-// Writes are reversible — `setTags` overwrites, so the user can clear
-// FileID's tags by passing an empty list. Finder tags stay the source
-// of truth (editable in Finder if FileID is ever uninstalled); the only
-// journal is the last-batch undo record built from `TagOutcome`s, which
-// captures the exact per-file diff so undo removes ONLY what FileID added
-// — never the user's own tags. The journal is rewritten on every bulk
-// batch (an all-unchanged batch CLEARS it) and undo is gated by an age +
-// file-identity guard, mirroring the rename journal.
+// Writes Finder tags via `URLResourceKey.tagNamesKey`; they are shared with Finder, Spotlight and Smart Folders, and survive moves on xattr-capable volumes.
+// setTags overwrites, so the undo journal (the last batch's TagOutcomes) removes only the tags FileID added, never the user's own.
+// The journal is rewritten on every bulk batch (an all-unchanged batch clears it); undo is gated by an age and file-identity guard.
 import Foundation
 
 public enum TagWriter {
@@ -30,18 +17,13 @@ public enum TagWriter {
         }
     }
 
-    /// Read the Finder tags currently on a file. Returns an empty array
-    /// if the file has none (or if the read fails — see throwing variant
-    /// `readTagsThrowing` if you need to distinguish).
+    /// Returns an empty array when the file has no tags or the read fails; use `readTagsThrowing` to tell them apart.
     public static func readTags(at url: URL) -> [String] {
         (try? readTagsThrowing(at: url)) ?? []
     }
 
     public static func readTagsThrowing(at url: URL) throws -> [String] {
-        // URL caches resourceValues per instance — a caller holding a
-        // long-lived URL would read back its own stale tag list after a
-        // write (silently breaking read-modify-write flows like undo).
-        // Re-resolving from the path defeats the instance cache.
+        // URL caches resourceValues per instance, so re-resolve from the path: a stale list would break read-modify-write (undo).
         let fresh = URL(fileURLWithPath: url.path)
         let values: URLResourceValues
         do {
@@ -52,14 +34,9 @@ public enum TagWriter {
         return values.tagNames ?? []
     }
 
-    /// Replace the file's Finder tags with `tags` exactly. Empty array
-    /// clears all tags. Idempotent — same tags as already set is a no-op.
-    ///
-    /// Uses `NSURL.setResourceValue(_:forKey:)` rather than the
-    /// `URLResourceValues.tagNames` setter, which is macOS 26-only.
+    /// Replaces the file's Finder tags exactly; an empty array clears them. Uses NSURL.setResourceValue because the tagNames setter is macOS 26-only.
     public static func setTags(_ tags: [String], at url: URL) throws {
         try ReadOnlyLocations.requireSourceMutation(url)
-        // Normalize: trim whitespace, drop empties, dedupe preserving order.
         var seen: Set<String> = []
         let cleaned = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -74,13 +51,11 @@ public enum TagWriter {
         }
     }
 
-    /// Add the supplied tags to whatever the file already has. Existing
-    /// tags from other tools (or from the user's own Finder sessions)
-    /// are preserved. This is the right call for "tag this person's
-    /// photos" — never blow away a user-applied "Important" tag.
+    /// Adds the supplied tags to the existing ones, preserving tags from other tools or the user (never blow away a user's "Important" tag).
     @discardableResult
     public static func addTags(_ tags: [String], at url: URL) throws -> [String] {
-        let existing = readTags(at: url)
+        try ReadOnlyLocations.requireSourceMutation(url)
+        let existing = try readTagsThrowing(at: url)
         let merged = mergeTags(existing: existing, adding: tags)
         if merged != existing {
             try setTags(merged, at: url)
@@ -92,7 +67,8 @@ public enum TagWriter {
     /// present are silently ignored. Returns the resulting tag list.
     @discardableResult
     public static func removeTags(_ tags: [String], at url: URL) throws -> [String] {
-        let existing = readTags(at: url)
+        try ReadOnlyLocations.requireSourceMutation(url)
+        let existing = try readTagsThrowing(at: url)
         let toRemove = Set(tags.map { $0.lowercased() })
         let kept = existing.filter { !toRemove.contains($0.lowercased()) }
         if kept.count != existing.count {
@@ -101,13 +77,8 @@ public enum TagWriter {
         return kept
     }
 
-    /// Bulk apply: add `tags` to every URL. Returns per-URL results so
-    /// the UI can surface partial failures. Doesn't bail on first error.
-    ///
-    /// `added`     — files that were modified (at least one new tag applied).
-    /// `unchanged` — files that already had every tag we tried to add.
-    /// `failed`    — files where the write threw.
-    /// `succeeded` — `added + unchanged` (kept as a convenience).
+    /// Bulk apply: adds `tags` to every URL and returns per-URL results without bailing on the first error. `added` changed, `unchanged` already had them,
+    /// `failed` threw; `succeeded` is added + unchanged.
     public struct BatchResult: Sendable {
         public let added: Int
         public let unchanged: Int
@@ -118,29 +89,20 @@ public enum TagWriter {
     }
 
     public static func addTagsBulk(_ tags: [String], to urls: [URL]) -> BatchResult {
-        // `journal: nil` — Cleanup auto-tag and People tagging keep their prior
-        // behavior of NOT feeding the Library "Undo last tags" journal, which
-        // is reserved for the explicit bulk-tag sheet.
+        // journal: nil keeps Cleanup and People tagging out of the Library "Undo last tags" journal, which is reserved for the bulk-tag sheet.
         let detailed = addTagsBulkDetailed(tags, to: urls, journal: nil)
         return BatchResult(added: detailed.outcomes.count, unchanged: detailed.unchanged,
                            failed: detailed.failed, firstError: detailed.firstError)
     }
 
-    /// One modified file in a detailed bulk run: the exact tags newly
-    /// added (after − before, case-insensitive). This is what makes undo
-    /// precise — it removes only what FileID applied, never a tag the
-    /// user already had.
+    /// One modified file in a detailed bulk run: the exact tags newly added (after − before, case-insensitive), so undo removes only what FileID applied.
     public struct TagOutcome: Codable, Sendable, Equatable {
         public let path: String
         public let addedTags: [String]
-        /// Identity captured at apply time (nil in journals from older builds
-        /// and from the pure `init(path:addedTags:)`). Undo skips an entry on
-        /// mismatch so a same-named replacement file's tags are never
-        /// stripped.
+        /// Identity captured at apply time (nil in entries from older builds). Undo skips an entry on mismatch so a replacement file's tags are never stripped.
         public let fileSize: Int64?
         public let modifiedAt: Date?
-        /// When the batch was applied — undo ignores entries older than
-        /// `undoJournalMaxAge`, mirroring the rename journal's 7-day expiry.
+        /// When the batch was applied; undo ignores entries older than `undoJournalMaxAge`.
         public let appliedAt: Date?
 
         public init(path: String, addedTags: [String]) {
@@ -151,8 +113,7 @@ public enum TagWriter {
             self.appliedAt = nil
         }
 
-        /// Capture the file's identity + an apply timestamp so undo can verify
-        /// the same file is still there before stripping tags.
+        /// Captures the file's identity and an apply timestamp so undo can verify the same file is still there.
         init(capturing path: String, addedTags: [String], at appliedAt: Date = Date()) {
             self.path = path
             self.addedTags = addedTags
@@ -199,10 +160,7 @@ public enum TagWriter {
                 }
             }
         }
-        // Rewrite the undo journal on EVERY batch — including an all-unchanged
-        // one (outcomes empty → journal cleared). Without this, an all-unchanged
-        // batch left the PREVIOUS batch's journal in place and "Undo last tags"
-        // stripped tags from a different, earlier set of files.
+        // Rewrite on every batch, even an all-unchanged one (empty outcomes clears the journal): otherwise undo strips tags from an earlier batch's files.
         if let journal {
             recordUndoJournal(outcomes, in: journal)
         }
@@ -210,26 +168,15 @@ public enum TagWriter {
                                    failed: failed, firstError: firstError)
     }
 
-    // MARK: - Undo journal
-    //
-    // The undo journal persists the most recent bulk-tag batch so the Library
-    // "Undo last tags" button can remove only what FileID just added. It lives
-    // in TagWriter (not the app) so it is rewritten/cleared in lock-step with
-    // the batch that produced it, mirroring the rename journal's age + file-
-    // identity guards (BulkRenameSheet).
+    // Undo journal: the last bulk-tag batch, kept in TagWriter so it is rewritten in lock-step with the batch that produced it.
 
-    /// UserDefaults key for the bulk-tag undo journal. MUST stay equal to the
-    /// app's `BulkTagSheet.lastBatchKey` — both record/read this one journal,
-    /// so an all-unchanged batch here clears the app's "Undo last tags" button.
+    /// UserDefaults key for the bulk-tag undo journal. Must equal `BulkTagSheet.lastBatchKey`, which reads the same journal.
     public static let undoJournalKey = "bulkTag.lastBatch.v1"
 
-    /// Undo ignores journal entries older than this — a weeks-old batch is far
-    /// likelier to hit a same-named replacement file than to be an intentional
-    /// undo (mirrors `BulkRenameSheet.lastBatchMaxAge`).
+    /// Undo ignores entries older than this: an old batch is likelier to hit a same-named replacement file than to be intentional.
     public static let undoJournalMaxAge: TimeInterval = 7 * 24 * 60 * 60
 
-    /// Overwrite the undo journal with this batch's outcomes; an empty batch
-    /// CLEARS it so a stale earlier batch can never be undone by mistake.
+    /// Overwrites the undo journal with this batch's outcomes; an empty batch clears it.
     static func recordUndoJournal(_ outcomes: [TagOutcome], in defaults: UserDefaults = .standard) {
         if outcomes.isEmpty {
             defaults.removeObject(forKey: undoJournalKey)
@@ -238,9 +185,7 @@ public enum TagWriter {
         }
     }
 
-    /// Undo a previous detailed bulk apply: remove ONLY the recorded
-    /// added tags from each file. A file whose recorded tags are already
-    /// gone counts as undone (removeTags is a no-op for absent tags).
+    /// Undo a previous detailed bulk apply: removes only the recorded added tags from each file. Absent tags count as undone.
     public static func undoBulkAdd(_ outcomes: [TagOutcome])
         -> (undone: Int, skipped: Int, failed: Int, firstError: String?) {
         var undone = 0
@@ -250,18 +195,13 @@ public enum TagWriter {
         let fm = FileManager.default
         let now = Date()
         for outcome in outcomes {
-            // Age guard: a stale journal is far likelier to hit a same-named
-            // replacement file than to be an intentional undo.
+            // Age guard: a stale journal is likelier to hit a replacement file than to be an intentional undo.
             if let applied = outcome.appliedAt,
                now.timeIntervalSince(applied) > undoJournalMaxAge {
                 skipped += 1
                 continue
             }
-            // Identity guard: if the file at this path no longer matches the
-            // size/mtime captured at apply time, a DIFFERENT file occupies it —
-            // stripping tags would mangle an unrelated file. Skip it.
-            // Entries with no identity data (written by older builds) are skipped
-            // too — we cannot verify them, so stripping is unsafe.
+            // Identity guard: a different file at this path would be mangled. Entries without identity (older builds) are skipped too.
             guard let size = outcome.fileSize, let mtime = outcome.modifiedAt else {
                 skipped += 1
                 continue
@@ -289,11 +229,8 @@ public enum TagWriter {
         return (undone, skipped, failed, firstError)
     }
 
-    // MARK: - Merging
 
-    /// Case-insensitive merge that preserves the EXISTING capitalization
-    /// when a duplicate is added. So if "Mom" exists and the caller adds
-    /// "mom", the result keeps "Mom".
+    /// Case-insensitive merge that keeps the existing capitalization: "Mom" plus "mom" stays "Mom".
     public static func mergeTags(existing: [String], adding new: [String]) -> [String] {
         var out = existing
         var lowerSeen = Set(existing.map { $0.lowercased() })

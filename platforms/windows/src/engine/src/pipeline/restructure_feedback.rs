@@ -1,10 +1,4 @@
-//! Learn-from-corrections: a token→folder co-occurrence memory backed by the v18
-//! `restructure_feedback` table. Every move a user APPLIES is approved, so the moved
-//! file's filename tokens are credited toward its destination folder; the next plan
-//! reads those weights as an ADDITIVE confidence hint — it can upgrade a move the
-//! planner already produced to Auto, never re-route. Instance-based, no model
-//! retraining (the SOTA pattern, deep-research 2026-06-17). Lockstep with the Swift
-//! engine's `RestructureFeedback`.
+//! Learn-from-corrections: token→folder co-occurrence memory over `restructure_feedback`. Additive confidence hint only; never re-routes a move.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,13 +9,9 @@ use rusqlite::{params, Connection};
 use super::restructure::{Confidence, ProposedMove};
 use super::restructure_semantic::filename_tokens;
 
-/// Total summed feedback weight (over a move's filename tokens toward its destination
-/// folder) at/above which the destination is treated as the user's learned habit and
-/// the move is upgraded to auto-confidence. Lockstep with the Swift constant.
+/// Feedback weight (one per applied file, per token) at which a move's destination counts as the user's learned habit and the move is upgraded to auto-confidence.
 pub(crate) const FEEDBACK_AUTO_WEIGHT: i64 = 3;
 
-/// Basename of a destination FILE path's parent folder — the "folder" key. None when
-/// the destination has no parent or an empty basename.
 fn dest_folder(dest: &Path) -> Option<String> {
     dest.parent()
         .and_then(|p| p.file_name())
@@ -30,9 +20,7 @@ fn dest_folder(dest: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Credit each applied move's filename tokens toward its destination folder. Best-
-/// effort — a feedback write never fails an apply. `now` is the unix timestamp stamped
-/// on the touched rows. Call ONLY on a forward apply (never undo).
+/// Best-effort: a feedback write never fails an apply. Call only on a forward apply, never on undo.
 pub(crate) fn record<'a>(
     conn: &Arc<Mutex<Connection>>,
     moves: impl Iterator<Item = (&'a Path, &'a Path)>,
@@ -54,10 +42,7 @@ pub(crate) fn record<'a>(
     }
 }
 
-/// Additive confidence boost: a planned move whose filename tokens were previously
-/// filed into the SAME destination folder is upgraded to Auto (with a note), because
-/// the user has demonstrably filed files like this there before. Only touches
-/// confidence on the moves the planner already produced — never re-routes.
+/// Upgrades a planned Review move to Auto (with a note) when its filename tokens were filed into the same destination folder often enough. Never re-routes.
 pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
     if moves.is_empty() {
         return;
@@ -69,13 +54,7 @@ pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
         return;
     };
     for m in moves.iter_mut() {
-        // Only upgrade Review → Auto. An Ask-tier move is one the butler was
-        // explicitly UNSURE about — RESTRUCTURE.md defines Ask as "leave in
-        // place, needs per-file consent". Upgrading Ask → Auto here (at plan
-        // time, before the plan is spooled) let feedback weight silently
-        // rewrite an unsure move to auto, so exclude_ask_tier no longer
-        // matched it and it rode the bulk stored-plan apply without the
-        // consent the Ask tier exists to require.
+        // Review → Auto only: Ask-tier moves are explicitly unsure and need per-file consent, so feedback never upgrades them.
         if matches!(m.confidence, Confidence::Auto | Confidence::Ask) {
             continue;
         }
@@ -84,9 +63,7 @@ pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
         };
         let mut score: i64 = 0;
         for token in filename_tokens(&m.source) {
-            score += stmt
-                .query_row(params![folder, &token], |r| r.get::<_, i64>(0))
-                .unwrap_or(0);
+            score = score.max(stmt.query_row(params![folder, &token], |r| r.get::<_, i64>(0)).unwrap_or(0));
         }
         if score >= FEEDBACK_AUTO_WEIGHT {
             m.confidence = Confidence::Auto;
@@ -129,9 +106,6 @@ mod tests {
 
     #[test]
     fn record_then_boost_upgrades_a_matching_move() {
-        // Labeled scenario: the user applied three "acme invoice" files into
-        // /lib/Invoices; a NEW similar file the planner only marked Review must be
-        // upgraded to Auto on the learned filing habit.
         let db = db();
         let applied: Vec<(PathBuf, PathBuf)> = (0..3)
             .map(|i| {
@@ -155,6 +129,15 @@ mod tests {
     }
 
     #[test]
+    fn one_earlier_filing_is_not_enough_however_many_tokens_its_name_shares() {
+        let db = db();
+        record(&db, [(Path::new("/in/acme_invoice_march.pdf"), Path::new("/lib/Invoices/acme_invoice_march.pdf"))].into_iter(), 0.0);
+        let mut moves = vec![pm(1, "/in/acme_invoice_march_copy.pdf", "/lib/Invoices/acme_invoice_march_copy.pdf", Confidence::Review)];
+        boost(&db, &mut moves);
+        assert_eq!(moves[0].confidence, Confidence::Review);
+    }
+
+    #[test]
     fn boost_leaves_unrelated_moves_alone() {
         let db = db();
         record(
@@ -173,11 +156,7 @@ mod tests {
 
     #[test]
     fn boost_never_upgrades_an_ask_tier_move() {
-        // The butler marked this move Ask (explicitly unsure — "leave in place,
-        // needs consent"). Even with overwhelming filing history toward the
-        // destination, boost() must NOT rewrite it to Auto, or it would ride
-        // the bulk stored-plan apply without the per-file consent the Ask tier
-        // exists to require.
+        // Even with heavy filing history, an Ask move must stay Ask, or it would ride the bulk stored-plan apply without the per-file consent that tier requires.
         let db = db();
         let applied: Vec<(PathBuf, PathBuf)> = (0..5)
             .map(|i| {

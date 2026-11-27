@@ -1,8 +1,6 @@
 import SwiftUI
 import FileIDShared
 
-private let queueSpring = Animation.spring(response: 0.38, dampingFraction: 0.8)
-
 struct FaceQueueList: View {
     let model: FaceQueueModel
     let personByID: [Int64: ReadStore.PersonRow]
@@ -22,7 +20,7 @@ struct FaceQueueList: View {
                 MetaText(model.kind == .merges ? FaceQueueText.mergesEmpty : FaceQueueText.splitsEmpty, color: Theme.text3)
             }
         }
-        .animation(reduceMotion ? nil : queueSpring, value: model.changes)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: model.changes)
         .task(id: previewIDs) {
             let ids = previewIDs
             let loaded = await Task.detached(priority: .userInitiated) { [store] in store.faceCrops(ids) }.value
@@ -123,6 +121,8 @@ private struct FaceMergeRow: View {
                 .buttonStyle(.dsPrimary).tint(Theme.gold).accessibilityLabel(FaceQueueText.mergeLabel(item))
                 .help(FaceQueueText.mergeHelp)
         }
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(1)
         .disabled(model.busy)
     }
 }

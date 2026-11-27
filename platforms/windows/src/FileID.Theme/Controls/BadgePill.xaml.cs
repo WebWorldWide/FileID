@@ -1,11 +1,8 @@
-﻿// BadgePill — code-behind for the BadgePill UserControl. Two DPs:
-//   - Label: the displayed text
-//   - Accent: the tint color (a SolidColorBrush; we reach in for the .Color
-//     to derive the 15%-opaque background fill)
+﻿// BadgePill code-behind. Two DPs: Label (the text) and Accent (a SolidColorBrush
+// whose .Color tints the text and the 15%-opaque background fill).
 //
 // Default accent is gold; callers override per semantic role (Ai for
-// AI-running, Info for informational, Delight for success). Keep this
-// control intentionally minimal — anything more is scope creep.
+// AI-running, Info for informational, Delight for success).
 
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -28,7 +25,6 @@ public sealed partial class BadgePill : UserControl
     public BadgePill()
     {
         InitializeComponent();
-        // Apply current state once after Initialize so resources are reachable.
         ApplyAccent();
     }
 
@@ -78,13 +74,11 @@ public sealed partial class BadgePill : UserControl
         {
             return b.Color;
         }
-        // Fallback: pull GoldColor from the merged theme dictionary.
         if (Application.Current?.Resources["GoldColor"] is Color goldColor)
         {
             return goldColor;
         }
-        // Last-resort literal — should never hit unless Theme.xaml failed
-        // to merge, in which case the rest of the UI is also broken.
+        // Last resort: only reached if Theme.xaml failed to merge.
         return Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00);
     }
 

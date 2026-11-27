@@ -9,7 +9,7 @@
 #     Contents/
 #       MacOS/
 #         FileID       ← SwiftUI app, located via Bundle.main
-#         FileIDEngine ← spawned as child by EngineClient.locateEngineBinary()
+#         fileidd      ← the shared Rust engine, spawned as child by EngineClient
 #       Resources/
 #         FileID.icns
 #       Info.plist     ← CFBundleIconFile = "FileID"
@@ -64,13 +64,11 @@ if [ ! -d "$XCODE_DEV_DIR" ] && [ ! -f "$METALLIB_CACHE_CHECK" ]; then
     exit 1
 fi
 
-echo "🔨 Building FileID + FileIDEngine ($CONFIGURATION)..."
+echo "🔨 Building FileID ($CONFIGURATION); assemble_app.sh builds fileidd..."
 if [ -d "$XCODE_DEV_DIR" ]; then
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c "$CONFIGURATION" --product FileID
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c "$CONFIGURATION" --product FileIDEngine
 else
     swift build -c "$CONFIGURATION" --product FileID
-    swift build -c "$CONFIGURATION" --product FileIDEngine
 fi
 
 # MLX requires a precompiled GPU kernel library; use FileID's Xcode-compatible builder.
@@ -92,13 +90,13 @@ echo "🛑 Quitting any running FileID processes..."
 osascript -e 'tell application "FileID" to quit' >/dev/null 2>&1 || true
 sleep 0.5
 pkill -f "FileID.app/Contents/MacOS/FileID"        2>/dev/null || true
-pkill -f "FileID.app/Contents/MacOS/FileIDEngine"  2>/dev/null || true
+pkill -f "FileID.app/Contents/MacOS/fileidd"       2>/dev/null || true
 pkill -x "FileID"                                   2>/dev/null || true
-pkill -x "FileIDEngine"                             2>/dev/null || true
+pkill -x "fileidd"                                   2>/dev/null || true
 sleep 0.5
 # Final hammer for anything still alive after the polite kill.
 pkill -9 -f "FileID.app/Contents/MacOS/"           2>/dev/null || true
-pkill -9 -x "FileIDEngine"                          2>/dev/null || true
+pkill -9 -x "fileidd"                               2>/dev/null || true
 
 APP_SUPPORT="$HOME/Library/Application Support"
 if [ "$WIPE_MODE" != "none" ]; then

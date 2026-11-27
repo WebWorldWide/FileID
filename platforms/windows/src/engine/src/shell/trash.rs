@@ -1,11 +1,5 @@
-// Trash — IFileOperation::DeleteItem with FOF_ALLOWUNDO.
-//
-// Each delete goes into the user's Recycle Bin so the action is reversible
-// from Explorer's "Restore" in case the user changes their mind.
-//
-// Concurrency: each worker thread owns its own STA COM apartment (per
-// the IFileOperation contract). The pool is built by the caller; we
-// just expose the per-call API. The Cleanup tab uses an 8-parallel pool.
+// Trash via IFileOperation::DeleteItem with FOF_ALLOWUNDO: deletes go to the Recycle Bin so Explorer's "Restore" can undo them.
+// Each worker thread owns its own STA COM apartment, as IFileOperation requires.
 
 use anyhow::Result;
 #[cfg(windows)]
@@ -39,8 +33,7 @@ fn trash_path_checked(
     use std::os::windows::ffi::OsStrExt;
     crate::util::read_only::require_source_mutation(path)?;
 
-    // Verbatim (\\?\) probe: a bare `path.exists()` misses >260-char paths the
-    // verbatim discovery walk indexed, silently no-opping the delete (#28).
+    // A bare `path.exists()` misses paths over 260 characters, which would silently skip the delete; probe the verbatim form.
     let probe = crate::util::path_safety::to_extended_length(path);
     if std::fs::symlink_metadata(&probe).is_err() {
         if expected.is_some() {
@@ -59,9 +52,6 @@ fn trash_path_checked(
         .collect();
 
     unsafe {
-        // Each call enters and leaves the apartment. The Cleanup pool will
-        // amortize this with one apartment per worker; for ad-hoc one-off
-        // deletes the per-call cost (~ms) is fine.
         let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let must_uninit = hr.is_ok();
 
@@ -98,14 +88,9 @@ fn trash_path_checked(
         if must_uninit {
             CoUninitialize();
         }
-        // SHCreateItemFromParsingName / IShellItem are shell-namespace APIs that
-        // don't reliably honor a non-extended >260-char path (and \\?\ doesn't help
-        // them either) — so a long path the verbatim probe found can fail the delete
-        // with a cryptic HRESULT. Surface a clear, actionable error instead of the
-        // raw HRESULT so the caller/user knows WHY. (A longPathAware exe manifest is
-        // the real fix but needs a build/dependency change — owner's call.)
+        // The shell items do not reliably accept paths over 260 characters even in verbatim form; report that instead of a cryptic HRESULT.
         if let Err(e) = result {
-            let path_len = wide.len().saturating_sub(1); // wide units, excluding NUL
+            let path_len = wide.len().saturating_sub(1);
             if path_len > 260 {
                 anyhow::bail!(
                     "Path is too long for the Recycle Bin ({path_len} chars > 260); Windows shell \
@@ -140,17 +125,12 @@ pub(crate) fn trash_path_as(
     }
 }
 
-/// Batch wrapper. Trashes each path; returns one bool per input, true = success.
-/// 8-parallel STA worker pool: each OS thread initializes COM apartment-
-/// threaded once + stays in the pool for the batch's lifetime, amortizing
-/// the ~1-2 ms CoInitialize cost across N files. Matches macOS's 8-way
-/// async trash pattern. Order of `paths` is preserved in the result.
+/// Trashes each path and returns one bool per input (true = success), in order. A pool of STA workers initialises COM once per thread.
 pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
     if paths.is_empty() {
         return Vec::new();
     }
     if paths.len() <= 4 {
-        // Tiny batches: sequential is faster than spinning up workers.
         return paths.iter().map(|p| trash_path(p).is_ok()).collect();
     }
 
@@ -165,7 +145,6 @@ pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
         let rx = input_rx.clone();
         let tx = output_tx.clone();
         std::thread::spawn(move || {
-            // One CoInitializeEx per worker; held for the whole batch.
             #[cfg(windows)]
             let init_ok = unsafe {
                 windows::Win32::System::Com::CoInitializeEx(
@@ -184,13 +163,12 @@ pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
             }
         });
     }
-    drop(output_tx); // workers hold the only senders now
+    drop(output_tx);
 
     for (i, p) in paths.iter().enumerate() {
-        // unbounded relative to capacity since channel is sized to N.
         let _ = input_tx.send((i, p.clone()));
     }
-    drop(input_tx); // workers will see channel close + exit
+    drop(input_tx);
 
     let mut result = vec![false; n];
     while let Ok((idx, ok)) = output_rx.recv() {

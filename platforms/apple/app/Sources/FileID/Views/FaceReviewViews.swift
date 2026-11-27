@@ -2,8 +2,6 @@ import SwiftUI
 import AppKit
 import FileIDShared
 
-private let reviewSpring = Animation.spring(response: 0.38, dampingFraction: 0.8)
-
 struct FaceReviewList: View {
     let model: FaceReviewModel
     let personByID: [Int64: ReadStore.PersonRow]
@@ -23,8 +21,8 @@ struct FaceReviewList: View {
                 MetaText(FaceReviewText.empty, color: Theme.text3)
             }
         }
-        .animation(reduceMotion ? nil : reviewSpring, value: model.items.map(\.faceID))
-        .animation(reduceMotion ? nil : reviewSpring, value: model.undoOperationID)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: model.items.map(\.faceID))
+        .animation(reduceMotion ? nil : Theme.springStandard, value: model.undoOperationID)
     }
 
     private var acceptAll: some View {
@@ -83,7 +81,8 @@ private struct FaceReviewRow: View {
             FaceReviewCrop(path: candidate?.representativePath, bbox: candidate?.representativeBBox,
                            revision: candidate?.representativeCacheRevision, label: FaceReviewText.name(item.personName))
             details
-            Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
             actions
         }
         .padding(10)
@@ -93,17 +92,20 @@ private struct FaceReviewRow: View {
         .accessibilityLabel(FaceReviewText.rowLabel(item))
     }
 
+    private var personLabel: String? { item.personName == nil ? candidate?.displayName : nil }
+
     private var details: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(FaceReviewText.name(item.personName).capitalizedFirst)
+            Text((personLabel ?? FaceReviewText.name(item.personName)).capitalizedFirst)
                 .font(Theme.Font.body(14, .semibold))
-                .foregroundStyle(item.personName == nil ? Theme.text3 : Theme.text1)
-            Text(FaceReviewText.reason(item))
+                .foregroundStyle(item.personName == nil && personLabel == nil ? Theme.text3 : Theme.text1)
+            Text(FaceReviewText.reason(item, personLabel: personLabel))
                 .font(Theme.Font.body(12.5))
                 .foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .help(FaceReviewText.scoreHelp(item.score))
-            MetaText(item.lowQuality == true ? "\(FaceReviewText.fileName(item)) · \(FaceReviewText.lowQuality)" : FaceReviewText.fileName(item), size: 11)
+            MetaText(FaceReviewText.fileName(item), size: 12).lineLimit(1).truncationMode(.middle)
+            if item.lowQuality == true { MetaText(FaceReviewText.lowQuality, size: 12) }
         }
     }
 
@@ -116,6 +118,7 @@ private struct FaceReviewRow: View {
             button("Accept", .accept, style: .primary, label: FaceReviewText.acceptLabel(item))
                 .help(FaceReviewText.acceptHelp)
         }
+        .fixedSize()
         .disabled(model.busy)
     }
 
@@ -153,7 +156,10 @@ struct FaceReviewCrop: View {
             .overlay(face)
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
-            .task(id: key) { image = await FaceReviewCropLoader.crop(path: path, bbox: bbox, revision: revision, key: key) }
+            .task(id: key) {
+                let loaded = await FaceReviewCropLoader.crop(path: path, bbox: bbox, revision: revision, key: key)
+                if !Task.isCancelled { image = loaded }
+            }
             .accessibilityElement()
             .accessibilityLabel(label)
             .accessibilityAddTraits(.isImage)
@@ -202,13 +208,14 @@ struct FaceReviewSheet: View {
     let splits: FaceQueueModel
     let personByID: [Int64: ReadStore.PersonRow]
     let store: ReadStore
+    var startOn: FaceQueueKind?
     let onDone: () -> Void
     @State private var queue: FaceQueueKind = .faces
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text(FaceReviewText.title).font(Theme.Font.body(20, .semibold))
+                Text(FaceReviewText.title).font(Theme.Font.display(28))
                     .accessibilityLabel(FaceReviewText.header(waiting))
                 MetaText("\(waiting) waiting")
                 Spacer()
@@ -216,22 +223,20 @@ struct FaceReviewSheet: View {
             }
             .padding(16)
             picker.padding(.horizontal, 16).padding(.bottom, 12)
-            Divider()
-            ScrollView { content.padding(16) }
+            Hairline()
+            ScrollView(.vertical) { content.padding(16) }
         }
         .frame(minWidth: 760, minHeight: 520)
+        .sheetSurface()
+        .dsEscapeCancels(onDone)
         .task { await loadAll() }
     }
 
     private var waiting: Int { model.total + merges.total + splits.total }
 
     private var picker: some View {
-        Picker("Queue", selection: $queue) {
-            ForEach(FaceQueueKind.allCases) { kind in Text("\(kind.title) (\(count(kind)))").tag(kind) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .accessibilityLabel("Which suggestions to review")
+        SegmentedBar(selection: $queue, options: FaceQueueKind.allCases.map { ($0, "\($0.title) (\(count($0)))") })
+            .accessibilityLabel("Which suggestions to review")
     }
 
     private func count(_ kind: FaceQueueKind) -> Int {
@@ -255,7 +260,7 @@ struct FaceReviewSheet: View {
         await model.reload()
         await merges.reload()
         await splits.reload()
-        if model.total == 0 { queue = merges.total > 0 ? .merges : (splits.total > 0 ? .splits : .faces) }
+        if let startOn { queue = startOn } else if model.total == 0 { queue = merges.total > 0 ? .merges : (splits.total > 0 ? .splits : .faces) }
     }
 }
 

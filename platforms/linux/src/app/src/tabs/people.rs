@@ -1,22 +1,5 @@
-// People tab — face-cluster viewer over `persons` + `face_prints`, the 1:1 port
-// of macOS `PeopleView.swift` (+ PersonDetailSheet / SuggestedMergesSheet /
-// MergeTargetPicker).
-//
-//   * a `gtk::FlowBox` of person cards (representative face crop + name +
-//     "N photos · M faces"), read directly from the DB (the engine is the
-//     single writer; the app is a reader, mirroring `library.rs`),
-//   * "Group faces" → `runFaceClustering`,
-//   * a person-detail `adw::Dialog` (structured-name `adw::EntryRow`s + photo
-//     grid + "I don't know who this is") that saves via `renamePerson` /
-//     `markPersonsAsUnknown` on close,
-//   * "Merge people" (checkbox mode → target picker → `mergeClusters`),
-//   * "Mark unknown" (checkbox mode → `markPersonsAsUnknown`), and
-//   * "Suggest merges" — the shared engine's corroborated candidate pairs,
-//     presented in a sheet whose Merge buttons fan out `mergeClusters`.
-//
-// Live-scan behaviour mirrors `library.rs`: the tab subscribes to engine events
-// and throttle-reloads as face detection lands during a scan, then reloads on
-// completion.
+// People tab: face-cluster viewer over `persons` + `face_prints`, read from the DB (the engine is
+// the only writer). Live-scan reloads are throttled like library.rs.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -444,7 +427,6 @@ struct Ui {
 }
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
-    // ── Header ────────────────────────────────────────────────────────────────
     let count_label = gtk::Label::builder()
         .label("")
         .xalign(0.0)
@@ -511,7 +493,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     header.append(&status_label);
     header.append(&bulk_strip);
 
-    // ── Content: grid / empty / no-clusters ──────────────────────────────────
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .max_children_per_line(16)
@@ -558,7 +539,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .vexpand(true)
         .build();
 
-    // ── Hidden-unknowns footer ───────────────────────────────────────────────
     let footer_label = gtk::Label::builder()
         .label("")
         .css_classes(["dim-label"])
@@ -577,7 +557,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     footer.append(&footer_spacer);
     footer.append(&footer_button);
 
-    // ── Root ─────────────────────────────────────────────────────────────────
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -711,6 +690,12 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         }
                         refresh_view(&ui);
                     }
+                    EngineEvent::FaceClusteringCancelled(message) => {
+                        if ui.face_clustering.borrow_mut().finish_active().is_some() {
+                            set_status(&ui, message.clone());
+                        }
+                        refresh_view(&ui);
+                    }
                     EngineEvent::Exited => {
                         abandon_merges(&ui);
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
@@ -814,7 +799,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.upcast()
 }
 
-// ── View refresh ──────────────────────────────────────────────────────────────
 
 fn refresh_view(ui: &Rc<Ui>) {
     let clustering = ui.face_clustering.borrow().is_active();
@@ -1101,7 +1085,6 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
     }
 }
 
-// ── Person grid + cards ───────────────────────────────────────────────────────
 
 /// Everything a card is built from; a card is rebuilt only when this changes.
 #[derive(Clone, PartialEq)]
@@ -1355,7 +1338,6 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
     });
 }
 
-// ── Reload (DB → caches → view) ───────────────────────────────────────────────
 
 /// Reads people again, but only while this page is on screen; otherwise it
 /// is marked stale and reads once the next time it is shown.
@@ -1437,7 +1419,6 @@ fn set_status(ui: &Rc<Ui>, msg: String) {
     ui.status_label.set_visible(true);
 }
 
-// ── Face review ───────────────────────────────────────────────────────────────
 
 fn show_review_count(ui: &Ui, slot: usize, count: i64) {
     let mut counts = ui.review_counts.get();
@@ -1605,7 +1586,6 @@ fn open_face_review(ui: &Rc<Ui>) {
     dialog.present(Some(&ui.anchor));
 }
 
-// ── Clustering ────────────────────────────────────────────────────────────────
 
 fn start_clustering(ui: &Rc<Ui>) {
     let generation = match ui.face_clustering.borrow_mut().begin() {
@@ -1624,7 +1604,6 @@ fn start_clustering(ui: &Rc<Ui>) {
     }
 }
 
-// ── Person-detail dialog ──────────────────────────────────────────────────────
 
 fn set_person_dialog_busy(
     group: &adw::PreferencesGroup,
@@ -1785,8 +1764,6 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         .hexpand(true)
         .child(&photo_grid)
         .build();
-    // Move photos that show someone else to the right person (macOS "Select
-    // photos", then "Move to another person…").
     let select_mode = Rc::new(Cell::new(false));
     let select_btn = crate::v3::secondary("Select photos", false);
     select_btn.set_tooltip_text(Some("Move photos that show someone else to the right person"));
@@ -2285,7 +2262,6 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
 
     dialog.present(Some(&ui.anchor));
 
-    // Photos load off the main loop, then tiles stream in.
     let rx = read_person_files_async(pid);
     let photos_weak = photos.downgrade();
     glib::MainContext::default().spawn_local(async move {
@@ -2524,7 +2500,6 @@ fn unbind_photo_tile(item: &gtk::ListItem) {
     }
 }
 
-// ── Merge-target picker (manual merge mode) ───────────────────────────────────
 
 fn open_merge_target_picker(ui: &Rc<Ui>) {
     let ids: Vec<i64> = ui.merge_checked.borrow().iter().copied().collect();
@@ -2819,7 +2794,6 @@ fn undo_merge_record(ui: &Rc<Ui>, record: MergeRecord, entry: Option<u64>) -> bo
     true
 }
 
-// ── Suggested merges ──────────────────────────────────────────────────────────
 
 fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
     btn.set_sensitive(false);
@@ -2842,7 +2816,10 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                     btn.set_label("Suggest merges");
                     return;
                 }
-                break Vec::new();
+                set_status(&ui, "Couldn't look for people to merge. FileID restarted. Try again.".to_owned());
+                btn.set_sensitive(true);
+                btn.set_label("Suggest merges");
+                return;
             };
             match &*event {
                 EngineEvent::MergeSuggestions(result) => {
@@ -2858,7 +2835,12 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                         })
                         .collect();
                 }
-                EngineEvent::Exited => break Vec::new(),
+                EngineEvent::Exited => {
+                    set_status(&ui, "Couldn't look for people to merge. FileID restarted. Try again.".to_owned());
+                    btn.set_sensitive(true);
+                    btn.set_label("Suggest merges");
+                    return;
+                }
                 EngineEvent::Error { kind, message, .. }
                     if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" =>
                 {
@@ -3139,7 +3121,6 @@ fn preferred<'a>(a: &'a PersonRow, b: &'a PersonRow) -> (&'a PersonRow, &'a Pers
     }
 }
 
-// ── DB reads (mirror of macOS/Windows ReadStore) ──────────────────────────────
 
 fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
     let (tx, rx) = async_channel::bounded::<Snapshot>(1);
@@ -3187,11 +3168,9 @@ fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<PersonFace>>
     rx
 }
 
-// The representative face: the persisted pick when it is still active, else
-// the lowest-id active face. Two correlated WHERE-clause lookups — SQLite
-// rejects an outer reference (`p.representative_face_id`) inside a scalar
-// subquery's ORDER BY with "no such column", which silently emptied the whole
-// People tab (the error was swallowed into a default snapshot).
+// The representative face: the persisted pick when it is still active, else the lowest-id active
+// face. Two correlated WHERE lookups, because SQLite rejects an outer reference inside a scalar
+// subquery's ORDER BY.
 const PERSON_SNAPSHOT_SQL: &str = "\
     SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
            COALESCE(p.is_unknown, 0), \
@@ -3306,7 +3285,6 @@ fn read_person_files_at_path(
     Ok(rows)
 }
 
-// ── Thumbnail decode + face crop ──────────────────────────────────────────────
 
 /// Decode raw image bytes, crop to the (pixel, top-left-origin) face bbox with
 /// 20% padding like macOS `cropFace`, then scale down to `max_px`. Decoding
@@ -3458,7 +3436,6 @@ fn person_icon() -> Option<gtk::IconPaintable> {
     ))
 }
 
-// ── Small helpers ─────────────────────────────────────────────────────────────
 
 fn norm(s: &str) -> Option<String> {
     let t = s.trim();

@@ -1,6 +1,4 @@
-﻿// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
-// Split from EngineClient.cs as a partial class so the lifecycle code (spawn,
-// stdout loop, event router) stays separate from the per-command surface.
+﻿// Outbound IPC command facade and AutoPilot orchestration; lifecycle code (spawn, stdout loop, event router) lives in EngineClient.cs.
 
 using System;
 using System.Collections.Generic;
@@ -15,17 +13,7 @@ namespace FileID.ViewModels;
 
 internal sealed partial class EngineClient
 {
-    /// <summary>Maximum size of a single IPC frame in bytes. Windows
-    /// pipe buffers default to ~64 KB; flushing more than that in a
-    /// single Write can deadlock if the engine's stdout reader hasn't
-    /// drained its half. 1 MB is generous for every legitimate command
-    /// today (each fits comfortably under 100 KB) — beyond that the
-    /// caller should chunk explicitly.</summary>
-    // 64 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES)
-    // and the inbound read cap (MaxFrameChars). The old 1 MiB cap rejected a large
-    // applyRestructure (>~3.5k moves) — the same move set the engine just sent in
-    // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
-    // to carry a ~200k-move whole-library apply.
+    /// 64 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES) and the inbound read cap (MaxFrameChars). A 1 MiB cap rejected a large applyRestructure (>~3.5k moves), the same move set the engine sent in restructurePlan, leaving a big reorganize unappliable; 64 MiB carries a ~200k-move whole-library apply.
     private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
     private sealed record ScanStartRequest(
         ScanPhase? PreviousPhase,
@@ -148,9 +136,7 @@ internal sealed partial class EngineClient
         return queued;
     }
 
-    // FEAT-2: track scan duration locally so the SidebarProcessingControl
-    // CompletedPanel can show "Scan complete — N files in 1m 23s." Used
-    // to be hard-coded to "in 0s" because of a placeholder typo.
+    // Scan duration is tracked locally for the CompletedPanel's "Scan complete — N files in 1m 23s."
     private DateTime? _scanStartedAt;
     private TimeSpan _lastScanDuration;
     public TimeSpan LastScanDuration
@@ -159,9 +145,6 @@ internal sealed partial class EngineClient
         private set => Set(ref _lastScanDuration, value);
     }
 
-    /// Authoritative processed-file count from the last ScanComplete (the
-    /// engine's final total). The completed-scan summary reads this instead of
-    /// LastProgress.Processed, which can be throttle-stale by up to one batch.
     public ulong LastScanProcessedFiles { get; private set; }
     public async Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
@@ -189,10 +172,7 @@ internal sealed partial class EngineClient
 
         _scanStartedAt = DateTime.UtcNow;
         _shownPhaseRank = -1;
-        // Clear stale Deep Analyze latches so the pipeline strip doesn't jump a
-        // fresh (re)scan straight to "Done" off a prior session's
-        // DeepAnalyzeComplete. Done here — the common path for ALL scan starts
-        // (incl. Settings "Force re-tag") — not only the optimistic-UI hook.
+        // Clear stale Deep Analyze latches so a fresh scan (including Force re-tag) does not jump the pipeline strip to "Done" off a prior DeepAnalyzeComplete.
         DeepAnalyzeComplete = null;
         DeepAnalyzeProgress = null;
         DeepAnalyzeStarting = null;
@@ -217,10 +197,7 @@ internal sealed partial class EngineClient
         }
     }
 
-    /// <summary>Reset Phase + LastError before a fresh user action (e.g. retrying
-    /// Start Scan after a failure). Without this, the sidebar's Failed branch
-    /// keeps showing the previous error message because Phase is still
-    /// <see cref="ScanPhase.Failed"/> at the moment of the new click.</summary>
+    /// <summary>Resets Phase + LastError before a fresh user action; otherwise the sidebar's Failed branch keeps showing the previous error because Phase is still <see cref="ScanPhase.Failed"/>.</summary>
     public void ClearPhaseAndError()
     {
         Phase = null;
@@ -229,15 +206,7 @@ internal sealed partial class EngineClient
         _shownPhaseRank = -1;
     }
 
-    /// <summary>full UI-state reset for the wipe-and-rescan flow.
-    /// Phase=null + LastProgress=null + LastBatch=null + LastError=null
-    /// + LastWarning=null + LastScanDuration=zero. Without this, the
-    /// sidebar continues to show the previous scan's "Completed" panel
-    /// (with its file count + duration) during the multi-second wipe
-    /// window — the user reports "the old scan stats are still there
-    /// after I wipe", which reads as broken even though the engine is
-    /// in fact tearing down. Call BEFORE the shutdown so the visual
-    /// transition is immediate.</summary>
+    /// <summary>Full UI-state reset for wipe-and-rescan (Phase, LastProgress, LastBatch, LastError, LastWarning, LastScanDuration). Without it the sidebar shows the previous scan's "Completed" panel during the multi-second wipe window. Call BEFORE the shutdown so the transition is immediate.</summary>
     public void ResetForWipe()
     {
         Phase = null;
@@ -264,39 +233,30 @@ internal sealed partial class EngineClient
         _shownPhaseRank = -1;
     }
 
-    // internal (not private) so FileID.App.Tests can assert the classification
-    // headlessly — the EngineClient singleton itself needs a UI-thread
-    // DispatcherQueue and can't be constructed in a test worker.
+    // internal so FileID.App.Tests can assert the classification headlessly; the EngineClient singleton needs a UI-thread DispatcherQueue.
     internal static bool IsNonFatalWarningKind(string? kind) => kind switch
     {
         "stages_skipped_missing_models" => true,
         "discovery_partial" => true,
         "checkpoint_failed_at_shutdown" => true,
         "cuda_dll_registration_failed" => true,
-        // The VLM server rejected our image payload but the batch fell back
-        // to the per-file CLI path — tags still land, just slower. Surface as a
-        // warning, not a scary error.
+        // The VLM server rejected our image payload but the batch fell back to the per-file CLI path, so tags still land (slower): a warning, not an error.
         "vlm_server_payload_rejected" => true,
-        // #21: an incremental rescan found nothing new — informational, not an
-        // error. #10: a second Deep Analyze bounced because one is already
-        // running — a benign "already busy" notice, not a failure.
+        // An incremental rescan that found nothing new, and a second Deep Analyze bounced because one is running, are informational notices, not errors.
         "scan_already_running" => true,
         "rescan_no_changes" => true,
         "deep_analyze_already_running" => true,
-        // A concurrent RunFaceClustering bounced off the engine's single-flight
-        // guard — a manual Re-cluster while clustering is already running is a
-        // benign "already busy" notice, not a scary red error.
+        // A concurrent RunFaceClustering bounced off the engine's single-flight guard: a benign "already busy" notice.
         "face_clustering_busy" => true,
-        // IPC parity: the engine now reports undecodable command frames
-        // (macOS has always emitted this kind). Diagnostic, not actionable.
+        // A grouping pass that a scan took over runs again after that scan, and a scan that fell back to the slower CPU path still completes: notices, not failures.
+        "face_clustering_cancelled" => true,
+        "scan_slower_path" => true,
+        // The engine reports undecodable command frames. Diagnostic, not actionable.
         "command_decode_failed" => true,
         _ => false,
     };
 
-    // FEAT-1: optimistic pause flag — flipped here on the IPC send so
-    // the sidebar UI can bind to IsPaused without waiting for the next
-    // ScanProgress event (which doesn't currently surface pause state
-    // anyway). Cleared on resume + cancel + scan complete.
+    // Optimistic pause flag, flipped on the IPC send so the sidebar can bind IsPaused without waiting for a ScanProgress event (which doesn't surface pause state). Cleared on resume, cancel and scan complete.
     private bool _isPaused;
     public bool IsPaused
     {
@@ -351,15 +311,7 @@ internal sealed partial class EngineClient
     }
     public async Task CancelScanAsync()
     {
-        // Clear the "in-flight" indicators only once the cancel has been
-        // handed to the engine: clearing first left the sidebar reading Idle
-        // over a scan that was still running whenever the send failed. The
-        // engine follows up with PhaseChanged(Cancelled) + a possible final
-        // Progress event; both are no-ops on the already-cleared state.
-        // Without the clear, _scanStartedAt + LastProgress + LastBatch +
-        // IsPaused kept their prior-scan values until the next scan started,
-        // so the sidebar's "Scan complete — N files in MM:SS" panel showed
-        // the STALE values from before the cancel.
+        // Clear the in-flight indicators only after the engine has the cancel: clearing first left the sidebar Idle over a still-running scan when the send failed. The later PhaseChanged(Cancelled) and Progress events are no-ops on the cleared state.
         var generation = SpawnGeneration;
         await SendCommandAsync(new CancelScanCommand()).ConfigureAwait(false);
 
@@ -404,12 +356,7 @@ internal sealed partial class EngineClient
         }
     }
 
-    /// <summary>Send ShutdownCommand and wait for the engine process to
-    /// actually exit (HasExited == true). Returns when the process is
-    /// gone or after <paramref name="timeout"/> elapses (engine wedged —
-    /// caller decides whether to proceed or surface an error). Used by
-    /// RestartAsync and by the in-app wipe flow, which both need the
-    /// SQLite file handle released before continuing.</summary>
+    /// <summary>Sends ShutdownCommand and waits for the process to exit (HasExited), or until <paramref name="timeout"/> elapses (engine wedged; the caller decides). Used by RestartAsync and the wipe flow, which need the SQLite file handle released.</summary>
     public async Task<bool> StopAndWaitForExitAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         try
@@ -419,7 +366,6 @@ internal sealed partial class EngineClient
         catch (Exception ex)
         {
             DebugLog.Warn("[ENGINE] StopAndWaitForExitAsync: ShutdownAsync threw: " + ex.Message);
-            // Even if the IPC send failed, OnProcessExited may still fire.
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -445,14 +391,7 @@ internal sealed partial class EngineClient
         return false;
     }
 
-    /// <summary>Cleanly stop the engine and respawn it. Used after a
-    /// Performance Pack install so the new EP is picked up — the
-    /// RuntimeProbe runs once at startup, so a fresh process is the only
-    /// way to switch DLLs on the search path.
-    ///
-    /// Throws TimeoutException if the engine doesn't reach Ready within
-    /// 60 s (10 s shutdown + 30 s startup + 20 s slack). On timeout,
-    /// State is left where the FSM happened to land — caller can retry.</summary>
+    /// <summary>Cleanly stops and respawns the engine (e.g. after a Performance Pack install: RuntimeProbe runs once at startup, so a fresh process is the only way to switch DLLs on the search path). Throws TimeoutException if the engine isn't Ready within 60 s (10 s shutdown + 30 s startup + 20 s slack); State is left where the FSM landed and the caller can retry.</summary>
     public async Task RestartAsync(CancellationToken ct = default)
     {
         DebugLog.Info("[ENGINE] RestartAsync requested.");
@@ -461,10 +400,7 @@ internal sealed partial class EngineClient
             throw new TimeoutException("Engine restart was aborted because the current process did not stop.");
         }
 
-        // Force a fresh spawn. StartAsync is idempotent if a process is
-        // already running, but here we explicitly want a new one. If the
-        // backoff path already kicked off StartAsync, this call is a
-        // no-op (the _isStarting gate dedupes).
+        // Force a fresh spawn: StartAsync is idempotent for a running process, and if the backoff path already started one this is a no-op (the _isStarting gate dedupes).
         DebugLog.Info("[ENGINE] RestartAsync: requesting fresh spawn.");
         try { await StartAsync().ConfigureAwait(false); }
         catch (Exception ex)
@@ -472,20 +408,14 @@ internal sealed partial class EngineClient
             DebugLog.Warn("[ENGINE] StartAsync threw during restart: " + ex.Message);
         }
 
-        // Wait for the new process to reach Ready.
         await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         DebugLog.Info("[ENGINE] RestartAsync complete; engine is Ready.");
     }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
 
-    /// <summary>Fire-and-forget wipeLibrary command (no wait for the reply).</summary>
     public Task WipeLibraryAsync() => SendCommandAsync(new WipeLibraryCommand());
 
-    /// <summary>Send wipeLibrary and await the engine's libraryWiped reply.
-    /// The engine truncates every table on its single writer connection, so
-    /// this needs no shutdown/restart and can't race the OS file-lock the way
-    /// deleting fileid.sqlite from the app process does. Throws TimeoutException
-    /// if no reply lands within <paramref name="timeout"/>.</summary>
+    /// <summary>Sends wipeLibrary and awaits the engine's libraryWiped reply. The engine truncates every table on its single writer connection, so no shutdown/restart is needed and it can't race the OS file lock the way deleting fileid.sqlite from the app process does. Throws TimeoutException if no reply lands within <paramref name="timeout"/>.</summary>
     public async Task<LibraryWiped> WipeLibraryAndWaitAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<LibraryWiped>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -498,8 +428,7 @@ internal sealed partial class EngineClient
                 tcs.TrySetResult(r);
             }
         };
-        // Reset first so a second identical wipe still raises PropertyChanged
-        // (records compare by value; an equal reply wouldn't re-fire Set()).
+        // Reset first so a second identical wipe still raises PropertyChanged (records compare by value; an equal reply wouldn't re-fire Set()).
         LastLibraryWiped = null;
         PropertyChanged += handler;
         try
@@ -521,24 +450,11 @@ internal sealed partial class EngineClient
         }
     }
 
-    // A reply that carries commandID (IPC 1.28.0) goes only to the wait that sent
-    // that command (BulkResultMatcher); a reply without one (an older engine) is
-    // matched by `actionPrefix` against the single shared LastBulkAction slot
-    // (trashFiles carries an undo-batch suffix, which the StartsWith match
-    // ignores). The prefix match alone would let two concurrent same-prefix waits
-    // both resolve off whichever reply lands first, so the per-prefix gate stays:
-    // at most one same-prefix wait is live at a time.
+    // A reply with a commandID goes only to the wait that sent it (BulkResultMatcher). An older engine's reply without one is matched by `actionPrefix` against the shared LastBulkAction slot (trashFiles carries an undo-batch suffix, which StartsWith ignores). Two concurrent same-prefix waits would both resolve off the first reply, so at most one same-prefix wait is live.
     private static readonly AsyncLocal<Action<string>?> _bulkCommandIdObserver = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _bulkWaitGates = new();
 
-    /// <summary>Run a bulk command and await its <c>BulkActionResult</c> reply,
-    /// matched by the action prefix the engine tags replies with
-    /// (e.g. "trashFiles", "applyTags", "renameFiles", "restoreFromTrash"). Mirrors
-    /// <see cref="WipeLibraryAndWaitAsync"/>: callers can then surface
-    /// Succeeded/Failed instead of fire-and-forgetting (the silent-failure class —
-    /// "user thinks files were deleted but they weren't"). Throws TimeoutException
-    /// if no matching reply lands. The separate UndoStack listener still captures
-    /// the same result for undo independently.</summary>
+    /// <summary>Runs a bulk command and awaits its <c>BulkActionResult</c>, matched by the engine's action prefix ("trashFiles", "applyTags", "renameFiles", "restoreFromTrash"), so callers surface Succeeded/Failed instead of the silent-failure class ("user thinks files were deleted but they weren't"). Throws TimeoutException if no matching reply lands. The UndoStack listener captures the same result independently.</summary>
     public async Task<BulkActionResult> WaitForBulkActionResultAsync(
         string actionPrefix,
         Func<Task> send,
@@ -636,10 +552,7 @@ internal sealed partial class EngineClient
         }
     }
 
-    // A wait that gave up keeps its prefix reserved so a late reply cannot be
-    // read as the next operation's result. A reply that never comes (and an
-    // engine that never restarts) must not block that kind of action for the
-    // rest of the session, so the reservation also ends after this hold.
+    // A wait that gave up keeps its prefix reserved so a late reply can't be read as the next operation's result. A reply that never comes must not block that kind of action for the session, so the reservation also ends after this hold.
     private static void ReleaseAfterLateReplyHold(Action release) =>
         _ = Task.Delay(BulkActionTimeout.LateReplyHold).ContinueWith(
             _ => release(),
@@ -648,15 +561,7 @@ internal sealed partial class EngineClient
             TaskScheduler.Default);
 
     public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
-    /// <summary>Send deepAnalyzeFile and await the engine's terminal
-    /// <c>DeepAnalyzeComplete</c> reply (the single-file handler always emits
-    /// one — on success, analyze failure, AND the no-model early return), so a
-    /// stuck or no-model run surfaces instead of fire-and-forgetting (the user
-    /// otherwise sees the stream card stay open with no result and no error).
-    /// Mirrors the awaited-bounded pattern in <see cref="WaitForBulkActionResultAsync"/>;
-    /// the IPC wire shape is unchanged. A single VLM caption can be slow, so the
-    /// timeout is generous and a no-response is surfaced as a warning (the run
-    /// may still be in flight) rather than a hard error.</summary>
+    /// <summary>Sends deepAnalyzeFile and awaits the terminal <c>DeepAnalyzeComplete</c> (the single-file handler always emits one: success, failure, AND the no-model early return), so a stuck or no-model run surfaces instead of leaving the stream card open with no result. A single VLM caption can be slow, so the timeout is generous and a no-response is a warning (the run may still be in flight), not an error.</summary>
     public async Task DeepAnalyzeFileAsync(long fileId, string modelKind)
     {
         var completion = new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(
@@ -748,31 +653,13 @@ internal sealed partial class EngineClient
         }
     }
     public Task DeepAnalyzeCancelAsync() => SendCommandAsync(new DeepAnalyzeCancelCommand());
-    /// <summary>No-progress (stall) window for a prewarm/pack install. A large
-    /// pack download is legitimately long, so we do NOT cap total wall time —
-    /// instead the watchdog only fires when NO <c>ModelDownloadProgress</c>
-    /// event lands for this long, which means the engine wedged. Each progress
-    /// event re-arms the window (any progress = engine alive), so a healthy
-    /// multi-GB download never false-fails. 120 s (was 90 s) sits ABOVE the
-    /// engine's own 60 s read-timeout + resume cycle (downloader.rs): a transient
-    /// HuggingFace stall self-heals — the engine errors the dead read at ~60 s,
-    /// resumes from the .part, and re-emits progress — re-arming this window
-    /// before it fires, so the user is no longer told to "cancel and retry"
-    /// (interrupting recovery) mid-self-heal. Only a genuinely wedged engine
-    /// (no progress for a full 120 s) still alarms.</summary>
+    /// <summary>No-progress (stall) window for a prewarm/pack install. Total wall time is NOT capped (large downloads are legitimately long); the watchdog fires only when no <c>ModelDownloadProgress</c> lands for this long, and each event re-arms it. 120 s sits ABOVE the engine's 60 s read-timeout + resume cycle (downloader.rs), so a transient HuggingFace stall self-heals (the engine errors the dead read, resumes from .part, re-emits progress) before this fires; only a genuinely wedged engine alarms.</summary>
     private static readonly TimeSpan PrewarmNoProgressTimeout = TimeSpan.FromSeconds(120);
 
-    /// <summary>Absolute backstop. Even with a stall watchdog, a pathological
-    /// engine could dribble one byte every 89 s forever; this caps the total
-    /// watch at a generous ceiling so the UI is never wedged indefinitely. Set
-    /// well above any realistic pack download on a slow link.</summary>
+    /// <summary>Absolute backstop: a pathological engine could dribble a byte every 89 s forever, so the watch is capped well above any realistic pack download on a slow link.</summary>
     private static readonly TimeSpan PrewarmAbsoluteCeiling = TimeSpan.FromHours(2);
 
-    // Per-model-kind stall-guard cancellation (mirrors the engine's per-kind
-    // cancel registry). A single global flag here would let a per-row Cancel kill
-    // the stall guards of every OTHER concurrently-downloading model during
-    // Install All, even though those downloads keep running. `_prewarmCancelAll`
-    // is the legacy cancel-everything path (CancelPrewarmAsync(null)).
+    // Per-model-kind stall-guard cancellation: a single global flag would let a per-row Cancel kill the stall guards of every other concurrent download during Install All. `_prewarmCancelAll` cancels everything (CancelPrewarmAsync(null)).
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _prewarmCancelledKinds = new();
     private int _prewarmCancelAllRequested;
 
@@ -780,35 +667,21 @@ internal sealed partial class EngineClient
         Interlocked.CompareExchange(ref _prewarmCancelAllRequested, 0, 0) == 1
         || _prewarmCancelledKinds.ContainsKey(modelKind);
 
-    /// <summary>Erase a kind's cancel mark. Call only from explicit user
-    /// Install/Retry entry points (the ModelInstallerService installActions):
-    /// the mark must survive a prewarm dispatch that was REQUESTED before the
-    /// cancel — during engine cold start the dispatch parks in
-    /// WaitForReadyAsync for up to 75 s while the CancelPrewarm IPC faults, so
-    /// the mark is the only record the cancel ever happened.</summary>
+    /// <summary>Erases a kind's cancel mark. Call only from explicit user Install/Retry entry points: a prewarm dispatch REQUESTED before the cancel can park in WaitForReadyAsync for up to 75 s during engine cold start while the CancelPrewarm IPC faults, so the mark is the only record the cancel happened.</summary>
     internal void ClearPrewarmCancelMark(string modelKind) =>
         _prewarmCancelledKinds.TryRemove(modelKind, out _);
 
     public Task PrewarmModelAsync(string modelKind, bool clearCancelMark = true)
     {
         DebugLog.Info($"[INSTALL] EngineClient.PrewarmModelAsync('{modelKind}') called. State={State}, _stdin={(_stdin is null ? "NULL" : "alive")}");
-        // Direct callers (Settings performance pack, Deep Analyze installer,
-        // auto-installers) are fresh intent: clear this kind's cancel mark and
-        // any pending cancel-all so its (and others') stall guards re-arm.
-        // ModelInstallerService.PrewarmAsync passes false: its installAction
-        // cleared the mark at click time, and clearing again at dispatch would
-        // erase a Cancel that arrived while the dispatch was parked waiting
-        // for engine Ready.
+        // Direct callers (Settings pack, Deep Analyze installer, auto-installers) are fresh intent: clear this kind's cancel mark and any pending cancel-all so stall guards re-arm. ModelInstallerService.PrewarmAsync passes false: its installAction cleared the mark at click time, and clearing again at dispatch would erase a Cancel that arrived while the dispatch waited for Ready.
         if (clearCancelMark)
         {
             Interlocked.Exchange(ref _prewarmCancelAllRequested, 0);
             _prewarmCancelledKinds.TryRemove(modelKind, out _);
         }
         var send = SendCommandAsync(new PrewarmModelCommand(modelKind));
-        // Detached stall guard — keeps PrewarmModelAsync fire-and-forget (callers
-        // like ModelInstallerService schedule their own UI-slot watchdog after
-        // this returns) while still surfacing a wedged install to LastError when
-        // nothing else is watching (Settings / auto-installer paths).
+        // Detached stall guard: keeps PrewarmModelAsync fire-and-forget while still surfacing a wedged install to LastError when nothing else is watching.
         _ = StartPrewarmStallGuardAsync(modelKind, send);
         return send;
     }
@@ -821,26 +694,15 @@ internal sealed partial class EngineClient
         }
         catch
         {
-            // The IPC send itself failed; SendCommandAsync's awaiter already
-            // throws to the caller (which surfaces it). Nothing to watch.
             return;
         }
 
         var startedAt = DateTime.UtcNow;
         var lastSeenAt = startedAt;
-        // Each ModelDownloadProgress event is a fresh record instance, so a
-        // reference change is a reliable "the engine emitted progress" signal.
+        // Each ModelDownloadProgress is a fresh record, so a reference change reliably means the engine emitted progress.
         var lastProgress = ModelDownloadProgress;
 
-        // Per-kind terminal latch. The shared ModelDownloadProgress slot is
-        // overwritten by OTHER concurrent installs (Install-All), so polling it
-        // only at wake time can MISS this kind's terminal (fraction >= 1.0)
-        // event — after which, once the other downloads go quiet, the guard would
-        // false-fire a "stopped responding" toast for a model that actually
-        // finished (the reported clip_text symptom). Subscribing for the loop's
-        // lifetime and latching the first terminal event for THIS kind makes a
-        // completed install always stop the guard, regardless of what later
-        // overwrites the slot. (The 90s→120s bump alone does NOT fix this.)
+        // Per-kind terminal latch. The shared ModelDownloadProgress slot is overwritten by OTHER concurrent installs, so polling it only at wake time can MISS this kind's terminal (fraction >= 1.0), after which the guard would false-fire "stopped responding" for a finished model. Subscribing for the loop's lifetime and latching the first terminal event makes a completed install always stop the guard.
         var reachedTerminal = 0;
         void OnProgress(object? _, PropertyChangedEventArgs e)
         {
@@ -853,11 +715,7 @@ internal sealed partial class EngineClient
             }
         }
         PropertyChanged += OnProgress;
-        // Catch a terminal that already landed between `await send` and here.
-        // Use >= 1.0 (not 0.999): in-progress events are clamped to min(0.999)
-        // (engine prewarm.rs), so 1.0 latches ONLY on the genuine terminal —
-        // a clamped near-done value must not silence the guard while the engine
-        // is still in its no-progress finalize phase (concat / SHA-256 / extract).
+        // Catch a terminal that already landed between `await send` and here. Use >= 1.0, not 0.999: in-progress events are clamped to min(0.999) (engine prewarm.rs), so 1.0 latches ONLY on the genuine terminal; a near-done value must not silence the guard during the engine's no-progress finalize phase (concat / SHA-256 / extract).
         if (ModelDownloadProgress is { } seed
             && string.Equals(seed.ModelKind, modelKind, StringComparison.Ordinal)
             && seed.Fraction >= 1.0)
@@ -875,21 +733,16 @@ internal sealed partial class EngineClient
                 await Task.Delay(PrewarmNoProgressTimeout).ConfigureAwait(false);
 
                 if (IsPrewarmCancelled(modelKind)) return;
-                // The latch catches this kind's terminal even when a later,
-                // other-kind event has overwritten the shared slot.
                 if (Interlocked.CompareExchange(ref reachedTerminal, 0, 0) == 1) return;
 
                 var current = ModelDownloadProgress;
-                // A relevant engine error already routed to LastError (prewarm
-                // failures emit EngineError); stop watching so we don't pile a
-                // generic stall message on top of the specific one.
+                // A relevant engine error already routed to LastError (prewarm failures emit EngineError); stop watching so a generic stall message doesn't pile on the specific one.
                 if (LastError is { } err
                     && string.Equals(err.ModelKind, modelKind, StringComparison.Ordinal))
                 {
                     return;
                 }
-                // Any new progress (different slot reference) means the engine is
-                // alive — re-arm the window.
+                // Any new progress (different slot reference) means the engine is alive: re-arm the window.
                 if (!ReferenceEquals(current, lastProgress))
                 {
                     lastProgress = current;
@@ -922,13 +775,6 @@ internal sealed partial class EngineClient
         return SendCommandAsync(new CancelPrewarmCommand(modelKind));
     }
 
-    // RunAutoPilotAsync + AwaitPhaseAsync + ClearAutoPilot removed
-    // along with the AutoPilot button. macOS has no equivalent explicit
-    // pipeline button — auto-advance from scan → face clustering is the
-    // standard behavior (wired in EngineClient.Apply's ScanCompleteEvent
-    // case). Deep Analyze stays manual on both platforms (gated on the
-    // user naming ≥1 person first).
-
     public Task PlanRestructureAsync(string libraryRoot)
     {
         LastError = null;
@@ -939,6 +785,7 @@ internal sealed partial class EngineClient
     private int _restructureCommandInFlight;
     internal bool LastRestructureResultWasUndo { get; private set; }
     internal bool LastRestructureResultWasShortcutApply { get; private set; }
+    internal bool LastRestructureResultWasShortcutUndo { get; private set; }
     internal string? RestructureOperationRoot { get; private set; }
 
     public async Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks)
@@ -952,9 +799,7 @@ internal sealed partial class EngineClient
         try { await SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks)).ConfigureAwait(false); }
         catch { Interlocked.Exchange(ref _restructureCommandInFlight, 0); throw; }
     }
-    /// <summary>Reverse the most recent applyRestructure — the engine replays its
-    /// on-disk undo journal. Reply lands on LastRestructureApplyResult; cancelled
-    /// or failed work stays retryable.</summary>
+    /// <summary>Reverses the most recent applyRestructure by replaying the engine's on-disk undo journal. Reply lands on LastRestructureApplyResult; cancelled or failed work stays retryable.</summary>
     public async Task UndoRestructureAsync(string libraryRoot)
     {
         if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
@@ -967,8 +812,7 @@ internal sealed partial class EngineClient
         RestructureOperationRoot = libraryRoot;
         LastError = null;
         LastWarning = null;
-        // Clear the flag if the send faults (engine not Ready) — else it latches and
-        // mis-attributes the next apply's result as the undo's. (app)
+        // Clear the flag if the send faults (engine not Ready); otherwise it latches and mis-attributes the next apply's result as the undo's.
         UndoRestructureInFlight = true;
         try
         {
@@ -1060,20 +904,13 @@ internal sealed partial class EngineClient
     public Task RenamePersonAsync(long personId, string? title, string? first, string? middle, string? last, string? suffix) =>
         SendCommandAsync(new RenamePersonCommand(personId, title, first, middle, last, suffix));
 
-    /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select mode.</summary>
     public Task MarkPersonsAsUnknownAsync(System.Collections.Generic.IReadOnlyList<long> personIds) =>
         SendCommandAsync(new MarkPersonsAsUnknownCommand(personIds));
 
     public Task FindMergeSuggestionsAsync() =>
         SendCommandAsync(new FindMergeSuggestionsCommand());
 
-    /// <summary>Send findMergeSuggestions and await the engine's matching
-    /// <c>mergeSuggestions</c> reply (lands on <see cref="LastMergeSuggestions"/>).
-    /// Mirrors the awaited-bounded pattern of <see cref="WaitForBulkActionResultAsync"/>:
-    /// the SuggestedMergesSheet can show "looking…" → result/timeout instead of
-    /// sitting forever on the placeholder when clustering is still running on the
-    /// engine. The IPC wire shape is unchanged. Throws TimeoutException if no reply
-    /// lands within <paramref name="timeout"/>.</summary>
+    /// <summary>Sends findMergeSuggestions and awaits the matching <c>mergeSuggestions</c> reply (lands on <see cref="LastMergeSuggestions"/>), so the SuggestedMergesSheet shows "looking…" → result/timeout instead of sitting on the placeholder while clustering still runs. Throws TimeoutException if no reply lands within <paramref name="timeout"/>.</summary>
     public async Task<MergeSuggestions> WaitForMergeSuggestionsAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<MergeSuggestions>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1086,13 +923,7 @@ internal sealed partial class EngineClient
                 tcs.TrySetResult(r);
             }
         };
-        // Do NOT reset LastMergeSuggestions to null here. That fires
-        // PropertyChanged → SuggestedMergesSheet.Render() with a null result,
-        // flashing "No likely merges found." over the "Looking…" placeholder before
-        // the real reply lands. Unlike LastLibraryWiped/LastBulkAction (value-type
-        // records that CAN be value-equal across replies, so they need the reset),
-        // each MergeSuggestions reply carries a fresh Pairs list ⇒ never value-equal
-        // to the prior ⇒ the handler below still fires on the next reply.
+        // Do NOT reset LastMergeSuggestions to null here: that fires PropertyChanged → SuggestedMergesSheet.Render() with a null result, flashing "No likely merges found." over "Looking…". Unlike LastLibraryWiped/LastBulkAction (value-type records that CAN be value-equal across replies), each MergeSuggestions carries a fresh Pairs list, so the handler still fires on the next reply.
         PropertyChanged += handler;
         try
         {
@@ -1119,14 +950,7 @@ internal sealed partial class EngineClient
     public Task EmbedImageQueryAsync(long fileId, string queryId) =>
         SendCommandAsync(new EmbedImageQueryCommand(fileId, queryId));
 
-    /// <summary>Send restoreFromTrash and await the engine's matching
-    /// <c>BulkActionResult</c> reply (action prefix "restoreFromTrash"), surfacing
-    /// any partial/total failure or non-response to LastError/LastWarning so the
-    /// user isn't told "restored" when the engine timed out or some entries
-    /// couldn't come back. Mirrors the awaited-bounded pattern in
-    /// <see cref="WaitForBulkActionResultAsync"/>; the IPC wire shape is
-    /// unchanged (still a single restoreFromTrash command). The UndoStack
-    /// listener captures the same reply independently.</summary>
+    /// <summary>Sends restoreFromTrash and awaits the matching <c>BulkActionResult</c> (prefix "restoreFromTrash"), surfacing partial/total failure or non-response to LastError/LastWarning so the user isn't told "restored" when it timed out or some entries couldn't come back. The UndoStack listener captures the same reply independently.</summary>
     public async Task<bool> RestoreFromTrashAsync(string batchId)
     {
         try
@@ -1164,11 +988,7 @@ internal sealed partial class EngineClient
     public Task RevertMergeAsync(long sourcePersonId, long destPersonId, IReadOnlyList<long> faceIdsToRevert) =>
         SendCommandAsync(new RevertMergeCommand(sourcePersonId, destPersonId, faceIdsToRevert));
 
-    /// <summary>Ask the engine to render a video keyframe out-of-process; it
-    /// replies with a <c>thumbnailGenerated</c> event that lands on
-    /// <see cref="LastThumbnailGenerated"/>. <paramref name="modifiedAt"/> is
-    /// the file's modified-unix time, echoed back so ThumbnailService can
-    /// write the result under its (path, modifiedAt) cache key.</summary>
+    /// <summary>Asks the engine to render a video keyframe out-of-process; the reply lands on <see cref="LastThumbnailGenerated"/>. <paramref name="modifiedAt"/> is echoed back so ThumbnailService can write the result under its (path, modifiedAt) cache key.</summary>
     public Task GenerateVideoThumbnailAsync(string path, double? modifiedAt) =>
         SendCommandAsync(new GenerateVideoThumbnailCommand(path, modifiedAt));
 

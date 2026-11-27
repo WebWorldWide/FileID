@@ -59,7 +59,7 @@ pub async fn handle(
         Ok(Ok((response, queued))) => {
             if let Some(database) = scheduler {
                 let resumed = match (action == "resumeJob", job_id.clone()) {
-                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| super::timeline::is_timeline_job(conn, &id))
+                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| is_job_of_kind(conn, &id, super::timeline::JOB_KIND))
                         .await
                         .unwrap_or(false),
                     _ => false,
@@ -94,6 +94,8 @@ pub async fn handle(
     .await;
 }
 
+const POOLED_READS: [&str; 6] = ["search", "detail", "jobs", "proposeNames", "autoTakeGroups", "similarGroups"];
+
 fn execute_with_index(
     database: Option<Arc<Mutex<Connection>>>,
     index: Option<Arc<crate::catalog_index::CatalogIndex>>,
@@ -118,8 +120,9 @@ fn execute_with_index(
             return Ok(result);
         }
     }
-    // Reads run on a pooled read-only connection so they never wait on a scan's writes.
-    if ["search", "detail", "jobs"].contains(&request.action.as_str())
+    // Reads run on a pooled read-only connection so they never wait on a scan's writes. The name and take-group suggestions
+    // also list folders on the source drive, which must not happen while the shared writer is held.
+    if POOLED_READS.contains(&request.action.as_str())
         && let Some(mut reader) = crate::db::reader_for(&database)?
     {
         return execute(&mut reader, &request);
@@ -128,8 +131,7 @@ fn execute_with_index(
     execute(&mut conn, &request)
 }
 
-/// Scores outside the database lock: the lock is held only to read the files
-/// and their cached signals, and again to store new signals.
+/// The lock is held only to read files and cached signals, and again to store new ones.
 fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result<CatalogResponse> {
     use super::catalog_take_auto::{prepare, store, TakeFaceAnalyzer};
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
@@ -170,6 +172,8 @@ pub(crate) fn response(id: &str, status: &str, message: Option<String>) -> Catal
         take_groups: None,
         take_qualities: None,
         take_goal_ranking: None,
+        similar_groups: None,
+        similar_group_total: None,
     }
 }
 
@@ -304,12 +308,12 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         }
         "jobs" => result.jobs = jobs(conn)?,
         "pauseJob" | "resumeJob" | "cancelJob" => {
+            // Only jobs with a worker in this engine can change state.
             let id = request.job_id.as_deref().unwrap_or_default();
             let tx = conn.transaction()?;
-            // Only jobs with a worker in this engine can change state (Swift `FileIDEngineMain`).
-            if !super::timeline::is_timeline_job(&tx, id)?
-                && !super::take_grouping::is_job(&tx, id)?
-                && !super::face_refresh::is_job(&tx, id)?
+            if !is_job_of_kind(&tx, id, super::timeline::JOB_KIND)?
+                && !is_job_of_kind(&tx, id, super::take_grouping::JOB_KIND)?
+                && !is_job_of_kind(&tx, id, super::face_refresh::JOB_KIND)?
             {
                 bail!("This job has no supported worker in this engine.")
             }
@@ -336,7 +340,8 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             return Ok(super::timeline::enqueue(conn, request, model, ffmpeg)?.1);
         }
         "autoTakeGroups" => {
-            result.take_groups = Some(super::catalog_take_auto::discover(conn, request.limit.unwrap_or(100))?);
+            let (offset, limit) = super::catalog_take_auto::page_bounds(request.offset, request.limit)?;
+            result.take_groups = Some(super::catalog_take_auto::discover(conn, offset, limit)?);
         }
         "enqueueTakeGrouping" => return super::take_grouping::enqueue(conn, request),
         "takeGroupProposals" => return super::take_grouping::proposals(conn, request),
@@ -363,6 +368,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             result.take_goal_ranking = Some(Box::new(super::catalog_take_auto::goal_unavailable(goal, ids)));
         }
         "scoreTakes" => bail!("Scoring runs outside the catalog lock"),
+        "similarGroups" => return super::catalog_similar::page(conn, request),
         "listEvents" | "suggestTakeGroups" | "saveEvent" | "deleteEvent" | "undoEventEdit" | "takeGroup"
         | "setTakeFeedback" | "undoTakeFeedback" => {
             crate::commands::catalog_takes::execute(conn, request, &mut result)?;
@@ -418,7 +424,6 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
     let mut statement = conn.prepare("SELECT id,kind,file_ids_json,state,progress,error,created_at,updated_at FROM catalog_jobs ORDER BY created_at DESC LIMIT 200")?;
     let rows = statement
         .query_map([], |r| {
-            // One malformed row (another engine, a hand edit) must not hide every job.
             let json: Option<String> = r.get(2)?;
             let ids = json.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
             Ok(CatalogJob {
@@ -434,6 +439,17 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+pub(crate) fn jobs_of_kind(conn: &Connection, kind: &str) -> Result<Vec<CatalogJob>> {
+    Ok(jobs(conn)?.into_iter().filter(|job| job.kind == kind).collect())
+}
+
+pub(crate) fn is_job_of_kind(conn: &Connection, id: &str, kind: &str) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
+        .optional()?
+        .is_some_and(|found| found == kind))
 }
 
 #[cfg(test)]
@@ -481,6 +497,123 @@ mod tests {
         assert!(execute(&mut conn, &undo).unwrap().chapters[0].stale);
         assert!(execute(&mut conn, &undo).unwrap().chapters.is_empty());
         assert!(execute(&mut conn, &undo).is_err());
+    }
+
+    fn save_chapter(conn: &mut Connection, chapter: CatalogChapter) -> Result<CatalogResponse> {
+        let mut request: CatalogRequest = serde_json::from_value(serde_json::json!({"requestID":"save","action":"saveChapter"})).unwrap();
+        request.chapter = Some(chapter);
+        execute(conn, &request)
+    }
+
+    fn chapter(id: &str, file: i64, start: f64, end: f64, title: &str) -> CatalogChapter {
+        CatalogChapter {
+            id: id.into(),
+            file_id: file,
+            start_seconds: start,
+            end_seconds: end,
+            title: title.into(),
+            summary: String::new(),
+            source_revision: String::new(),
+            model_version: "user".into(),
+            confidence: 1.0,
+            user_edited: true,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn a_chapter_cannot_replace_another_files_chapter_and_bad_times_are_refused() {
+        let mut conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 1, "/internal/1.mov", "video");
+        crate::db::test_support::insert_file(&conn, 2, "/internal/2.mov", "video");
+        save_chapter(&mut conn, chapter("one", 1, 2.0, 3.0, "One")).unwrap();
+        assert!(save_chapter(&mut conn, chapter("one", 2, 5.0, 6.0, "Taken over")).is_err());
+        let kept: (i64, f64, String) = conn
+            .query_row("SELECT file_id,start_seconds,title FROM catalog_chapters WHERE id='one'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(kept, (1, 2.0, "One".to_owned()), "the other file's chapter is untouched");
+        for bad in [
+            chapter("two", 2, -1.0, 3.0, "Two"),
+            chapter("two", 2, 4.0, 3.0, "Two"),
+            chapter("two", 2, 1.0, f64::INFINITY, "Two"),
+            chapter("two", 2, f64::NAN, 3.0, "Two"),
+            chapter("two", 2, 1.0, 3.0, "   "),
+            chapter("two", 2, 1.0, 3.0, &"x".repeat(201)),
+            chapter("", 2, 1.0, 3.0, "Two"),
+        ] {
+            let shown = format!("{bad:?}");
+            assert!(save_chapter(&mut conn, bad).is_err(), "{shown}");
+        }
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_chapters", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "nothing invalid was stored");
+        let journaled: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_corrections", [], |r| r.get(0)).unwrap();
+        assert_eq!(journaled, 1, "only the valid save was journaled");
+    }
+
+    #[test]
+    fn passages_observations_and_coverage_go_stale_when_the_source_changes() {
+        let mut conn = crate::db::test_support::memory_db();
+        for id in [1, 2] {
+            crate::db::test_support::insert_file(&conn, id, &format!("/internal/{id}.mov"), "video");
+            conn.execute(
+                "INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,1,2,'grandma sings happy birthday','100:10','speech',0.9)",
+                params![format!("passage-{id}"), id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?1,?2,0,5,'verified','100:10','speech')",
+                params![format!("coverage-{id}"), id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO catalog_observations(id,file_id,start_seconds,end_seconds,source_revision,model_version,confidence,user_edited) VALUES(?1,?2,1,2,'100:10','faces',0.9,1)",
+                params![format!("observation-{id}"), id],
+            )
+            .unwrap();
+        }
+        let query: CatalogRequest =
+            serde_json::from_value(serde_json::json!({"requestID":"search","action":"search","query":"grandma birthday"})).unwrap();
+        let state = |conn: &Connection, id: i64| -> (bool, String, bool) {
+            conn.query_row(
+                "SELECT p.stale,c.status,o.stale FROM catalog_passages p JOIN catalog_coverage c ON c.file_id=p.file_id \
+                 JOIN catalog_observations o ON o.file_id=p.file_id WHERE p.file_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        conn.execute("UPDATE files SET scanned_at=5 WHERE id=1", []).unwrap();
+        assert_eq!(state(&conn, 1), (false, "verified".into(), false), "a rescan of an unchanged file keeps its evidence");
+        assert_eq!(execute(&mut conn, &query).unwrap().hits.iter().filter(|h| h.file_id == 1).count(), 1);
+
+        conn.execute("UPDATE files SET size_bytes=200 WHERE id=1", []).unwrap();
+        assert_eq!(state(&conn, 1), (true, "stale".into(), true));
+        assert_eq!(state(&conn, 2), (false, "verified".into(), false), "another file keeps its evidence");
+        conn.execute("UPDATE files SET modified_at=11 WHERE id=2", []).unwrap();
+        assert_eq!(state(&conn, 2), (true, "stale".into(), true));
+        assert!(execute(&mut conn, &query).unwrap().hits.is_empty(), "stale transcripts never answer a search");
+    }
+
+    #[test]
+    fn name_and_take_group_suggestions_run_on_the_pooled_reader_not_the_shared_writer() {
+        for action in ["proposeNames", "autoTakeGroups"] {
+            assert!(POOLED_READS.contains(&action), "{action}");
+        }
+        let dir = std::env::temp_dir().join(format!("fileid-catalog-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = crate::db::open_writer(&dir.join("fileid.sqlite")).unwrap();
+        crate::db::test_support::insert_file(&writer, 1, "/internal/IMG_0001.jpg", "image");
+        let database = Arc::new(Mutex::new(writer));
+        for value in [
+            serde_json::json!({"requestID":"names","action":"proposeNames","fileIDs":[1],"naming":{"style":"short","maxLength":40}}),
+            serde_json::json!({"requestID":"takes","action":"autoTakeGroups"}),
+        ] {
+            let request: CatalogRequest = serde_json::from_value(value).unwrap();
+            let reply = execute_with_index(Some(database.clone()), None, request).unwrap();
+            assert_eq!(reply.status, "ok");
+        }
+        drop(database);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

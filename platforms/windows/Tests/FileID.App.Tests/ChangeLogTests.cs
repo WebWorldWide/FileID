@@ -1,8 +1,4 @@
-﻿// ChangeLog — the session change log behind UndoStack and the
-// SessionChangesSheet. Pins the log's contract: entries survive undo
-// (as Undone), survive failure (as UndoFailed + retry), restructure
-// pushes supersede older restructure entries, and reverse capacity
-// expires closures without dropping session history.
+﻿// ChangeLog — the session change log behind UndoStack and the SessionChangesSheet. Pins the log's contract: entries survive undo (as Undone), survive failure (as UndoFailed + retry), restructure pushes supersede older restructure entries, and reverse capacity expires closures without dropping session history.
 
 using System;
 using System.ComponentModel;
@@ -16,6 +12,17 @@ namespace FileID.App.Tests;
 public class ChangeLogTests
 {
     private static ChangeLog Log => ChangeLog.Instance;
+
+    [Fact]
+    public void UndoableOnlyLog_DoesNotBlockClose_ButStaysPending()
+    {
+        Log.Clear();
+        Log.Push("rename 2 files", ChangeKind.Rename, () => Task.FromResult(true));
+
+        Assert.Equal(1, Log.PendingCount);
+        Assert.Equal(0, Log.ActiveUndoCount);
+        Log.Clear();
+    }
 
     [Fact]
     public async Task Undo_MarksEntryUndone_AndKeepsItInHistory()
@@ -205,6 +212,7 @@ public class ChangeLogTests
         Assert.Equal(ChangeStatus.Undoing, current.Status);
         Assert.True(Log.IsUndoInFlight);
         Assert.Equal(2, Log.PendingCount);
+        Assert.Equal(1, Log.ActiveUndoCount);
         Assert.False(UndoStack.Instance.CanUndo);
         Assert.False(await Log.UndoAsync(older));
 
@@ -212,6 +220,7 @@ public class ChangeLogTests
         Assert.True(await undo);
         Assert.Equal(ChangeStatus.Undone, current.Status);
         Assert.False(Log.IsUndoInFlight);
+        Assert.Equal(0, Log.ActiveUndoCount);
         Assert.Equal(1, Log.PendingCount);
         Assert.True(UndoStack.Instance.CanUndo);
         Log.Clear();
@@ -246,7 +255,6 @@ public class ChangeLogTests
         Assert.True(UndoStack.Instance.CanUndo);
         Assert.Equal("op-b", UndoStack.Instance.TopLabel);
 
-        // Undo b directly through the log; the facade's "top" moves to a.
         Assert.True(await Log.UndoAsync(b));
         Assert.Equal("op-a", UndoStack.Instance.TopLabel);
 

@@ -1,21 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    RestructureView — recommendation-first + file-first reorg UI, ported 1:1
-    from macOS RestructureView.swift.
-
-    Plan auto-generates on open (engine planRestructure IPC). The body reads the
-    engine plan and groups moves by Tier into plain-language recommendation cards
-    (Keep / Tidy / Reorganize). Each card expands in place to the actual files
-    (checkbox + "from <folder>") and a "See all N files" drill-down. A stat hero,
-    a Flow/Tree diagram toggle (Sankey ribbons / before-after tree), a Run Deep
-    Analyze nudge, and a "Staying put" disclosure round out the surface. The
-    floating ApplyBar applies the *selected* moves as shortcuts, then real moves.
-
-    Crash-safety (platforms/windows/CLAUDE.md): every list is an ItemsRepeater +
-    DataTemplate over an observable VM — never imperatively-built children — and
-    all tints resolve via {x:Bind ...Brush} / {ThemeResource}, never a code-side
-    theme-dictionary lookup.
--->
+<!-- RestructureView: recommendation-first, file-first reorganize UI (port of macOS RestructureView.swift). The plan generates on open (planRestructure IPC) and its moves are grouped by tier into Keep / Tidy / Reorganize cards that expand in place to files, with a "See all N files" drill-down. A stat hero, a Flow/Tree toggle, a Deep Analyze nudge and a "Staying put" disclosure sit around them; the floating ApplyBar applies the selected moves. Lists are ItemsRepeater over observable VMs and tints resolve via {x:Bind} brushes or {ThemeResource}, never a code-side theme lookup. -->
 <UserControl
     x:Class="FileID.Views.Restructure.RestructureView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -27,8 +11,7 @@
     mc:Ignorable="d">
 
     <UserControl.Resources>
-        <!-- Outcome tints (macOS RestructureOutcome.tint): Keep green, Tidy
-             orange, Reorganize gold. Reorganize reuses the app GoldBrush. -->
+        <!-- Outcome tints: Keep green, Tidy orange, Reorganize gold (the app GoldBrush). -->
         <SolidColorBrush x:Key="RestructureKeepBrush" Color="#6CC24A" />
         <SolidColorBrush x:Key="RestructureTidyBrush" Color="#FF9F45" />
 
@@ -114,8 +97,7 @@
                        Text="FileID keeps your well-named folders and suggests a tidier home for everything else. Nothing moves until you press Move."/>
         </StackPanel>
 
-        <!-- Prototype v3 step strip (DESIGN_V3_PORT Restructure): Preview ·
-             Review · Move, pinned above the scrolling content. -->
+        <!-- Step strip (Preview, Review, Move), pinned above the scrolling content. -->
         <Border Grid.Row="1"
                 x:Name="StepStrip"
                 CornerRadius="{StaticResource CornerRadiusL}"
@@ -253,8 +235,7 @@
                     </Button>
                 </Grid>
 
-                <!-- No content embeddings at all (macOS missingContentModelsBanner):
-                     the plan can only sort by date, so say why and offer the fix. -->
+                <!-- No content embeddings at all: the plan can only sort by date, so say why and offer the fix. -->
                 <Grid x:Name="MissingContentModelsBanner"
                       Visibility="Collapsed"
                       ColumnSpacing="14"
@@ -296,9 +277,7 @@
                     </Button>
                 </Grid>
 
-                <!-- Deep Analyze nudge — shown when few files have captions yet.
-                     Mirrors macOS deepAnalyzeHintBanner: reading file contents
-                     sharpens bucketing. -->
+                <!-- Deep Analyze nudge, shown while few files have captions: reading contents sharpens bucketing. -->
                 <Border x:Name="DeepAnalyzeHintBanner"
                         Visibility="Collapsed"
                         CornerRadius="10"
@@ -676,7 +655,7 @@
                         <FontIcon Glyph="&#xE73E;" FontSize="22" Foreground="{StaticResource RestructureKeepBrush}" VerticalAlignment="Center" />
                         <StackPanel Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="Nothing to move" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="This library is already organized: every folder has a clear name and matching contents."
+                            <TextBlock Text="Your folders here are already well organized. FileID doesn’t rename the folder you chose."
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
@@ -685,7 +664,7 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift. -->
+        <!-- Floating ApplyBar (port of macOS RestructureApplyBar.swift). -->
         <Border Grid.Row="3"
                 CornerRadius="16"
                 BorderBrush="{ThemeResource GoldDimBrush}"
@@ -804,8 +783,7 @@
                             VerticalAlignment="Center"
                             Spacing="10"
                             Margin="12,0,12,0">
-                    <!-- R2: one-click reversal of the last apply; shown when the
-                         engine reports an undoable run (EngineClient.CanUndoRestructure). -->
+                    <!-- One-click reversal of the last apply, shown when the engine reports an undoable run (EngineClient.CanUndoRestructure). -->
                     <Button x:Name="UndoButton"
                             Visibility="Collapsed"
                             Click="OnUndoClicked"

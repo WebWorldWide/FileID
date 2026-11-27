@@ -1,13 +1,11 @@
-//! Pending face vectors in a macOS face space, as the Swift engine's
-//! `FaceAnalysisCache` and `FaceClustering.extractPendingPrints` keep them: a
-//! face needs a vector when it has none, or one from another model, processing
-//! or file version; a vector is saved only while the face, its box and its
-//! photo's size and time are unchanged; a face that fails backs off (1 min
-//! doubling to 1 h). The extractor itself is behind [`Extractor`] (the Mac
-//! pipeline in `apple::faces`), so this file stays portable and testable.
+//! Pending face vectors in a macOS face space: a face needs a vector when it has none or one from another model,
+//! processing or file version; a vector is saved only while the face, box and photo size/time are unchanged; a failing
+//! face backs off (1 min doubling to 1 h). The extractor is behind [`Extractor`] (`apple::faces`), so this file stays
+//! portable and testable.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,9 +13,21 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub const MAX_PER_BATCH: usize = 5000;
-const EXTRACTION_THREADS: usize = 4;
 
-/// A face row whose vector needs computing.
+/// Photos read at once: one per performance core, four on a machine short of memory (each holds a decoded frame).
+pub fn extraction_threads() -> usize {
+    if let Some(n) = std::env::var("FILEID_X_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) { return n; }
+    let most = match crate::platform::memory_tier() {
+        crate::platform::MemoryTier::Low => 4,
+        _ => 8,
+    };
+    crate::platform::performance_core_count().clamp(2, most)
+}
+
+/// Faces extracted so far and in all, reported at most a few times a second while photos are read.
+pub type Progress<'a> = &'a (dyn Fn(usize, usize) + Sync);
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
     pub id: i64,
@@ -29,7 +39,6 @@ pub struct Input {
 }
 
 impl Input {
-    /// `FaceCacheProvenance.sourceRevision`.
     pub fn revision(&self) -> String {
         source_revision(self.size, self.modified)
     }
@@ -55,8 +64,6 @@ fn normalized(blob: Option<&[u8]>) -> bool {
     (0.95..=1.05).contains(&sum)
 }
 
-/// `FaceAnalysisCache.pending`: faces after `after` (by id) without a current
-/// vector in `model` / `processing`, skipping those still backing off.
 pub fn pending(conn: &Connection, model: &str, processing: &str, limit: usize, after: i64, now: f64) -> rusqlite::Result<Vec<Input>> {
     let mut statement = conn.prepare_cached(
         "SELECT fp.id,fp.file_id,fp.bbox,f.path_text,f.size_bytes,f.modified_at,fp.arcface_embedding,fp.embedding_model,
@@ -99,8 +106,7 @@ pub fn pending(conn: &Connection, model: &str, processing: &str, limit: usize, a
     Ok(out)
 }
 
-/// `FaceAnalysisCache.persist`: saves the vector while the photo and the face
-/// row are unchanged. True when the row was updated.
+/// True when the row was updated.
 pub fn persist(conn: &Connection, input: &Input, embedding: &[f32], model: &str, processing: &str, now: f64) -> rusqlite::Result<bool> {
     let blob: Vec<u8> = embedding.iter().flat_map(|v| v.to_le_bytes()).collect();
     if model.is_empty() || model.chars().count() > 150 || !normalized(Some(&blob)) {
@@ -138,8 +144,7 @@ pub fn persist(conn: &Connection, input: &Input, embedding: &[f32], model: &str,
     Ok(changed == 1)
 }
 
-/// `FaceAnalysisCache.recordFailure`: retry after 1 min, doubling per attempt
-/// up to 1 h, while the photo and box stay the same.
+/// Retry after 1 min, doubling per attempt up to 1 h, while the photo and box stay the same.
 pub fn record_failure(conn: &Connection, input: &Input, model: &str, processing: &str, reason: &str, now: f64) -> rusqlite::Result<()> {
     if !now.is_finite() || model.is_empty() || model.chars().count() > 150 || !["source_unavailable_or_changed", "no_embedding"].contains(&reason) {
         return Ok(());
@@ -177,20 +182,17 @@ pub fn record_failure(conn: &Connection, input: &Input, model: &str, processing:
     Ok(())
 }
 
-/// One face's vector and crop JPEG.
 pub struct Embedded {
     pub embedding: Vec<f32>,
     pub jpeg: Option<Vec<u8>>,
 }
 
-/// Computes the vectors of one photo's faces (one result per box, in order).
 pub trait Extractor: Sync {
     fn model(&self) -> &str;
     fn extract(&self, path: &Path, boxes: &[String]) -> Vec<Option<Embedded>>;
 }
 
-/// The photo's size, catalog modification time and inode, so a file that
-/// changes while its faces are read is caught (`currentIdentity`).
+/// Size, catalog mtime and inode, so a file changing while its faces are read is caught (`currentIdentity`).
 fn identity(path: &str) -> Option<(i64, f64, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified = super::face_clustering_mac::catalog_mtime(&metadata)?;
@@ -224,7 +226,6 @@ fn extract_one(rows: Vec<Input>, extractor: &dyn Extractor) -> FileResult {
     FileResult { rows, vectors, unavailable: false }
 }
 
-/// What one extraction pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
     pub pending: usize,
@@ -233,10 +234,8 @@ pub struct Summary {
     pub files: usize,
 }
 
-/// `FaceClustering.extractPendingPrints`: batches of [`MAX_PER_BATCH`] pending
-/// faces (`skip` left out), photos read on a few threads outside the catalog
-/// lock, vectors saved and failures recorded per batch, crop JPEGs written to
-/// `crops` for saved faces. Stops between photos once `cancelled` turns true.
+/// Photos are read on a few threads outside the catalog lock, vectors saved and failures recorded per batch, crops
+/// written for saved faces; stops between photos once `cancelled` is true.
 pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
     database: &Arc<Mutex<Connection>>,
     extractor: &dyn Extractor,
@@ -244,10 +243,17 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
     skip: &HashSet<i64, S>,
     crops: Option<&Path>,
     cancelled: &(dyn Fn() -> bool + Sync),
+    progress: Progress,
 ) -> rusqlite::Result<Summary> {
     let model = extractor.model().to_string();
     let mut total = Summary::default();
     let mut cursor = 0i64;
+    let expected = {
+        let conn = database.lock();
+        pending(&conn, &model, processing, usize::MAX, 0, super::face_review::now())?.iter().filter(|input| !skip.contains(&input.id)).count()
+    };
+    let finished = AtomicUsize::new(0);
+    let last_report = Mutex::new(None::<Instant>);
     loop {
         if cancelled() {
             return Ok(total);
@@ -271,9 +277,8 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
         let queue = Mutex::new(by_path.into_values().collect::<Vec<_>>());
         let results = Mutex::new(Vec::<FileResult>::new());
         std::thread::scope(|scope| {
-            for _ in 0..EXTRACTION_THREADS.min(files.max(1)) {
-                // As Swift's `extractOneFile` (`DispatchQueue.global(qos: .userInitiated)`):
-                // Vision and the HEVC decoder schedule by the caller's QoS.
+            for _ in 0..extraction_threads().min(files.max(1)) {
+                // User-initiated QoS: Vision and the HEVC decoder schedule by the caller's QoS.
                 scope.spawn(|| {
                     crate::util::qos::interactive(|| {
                         loop {
@@ -282,7 +287,14 @@ pub fn extract_pending<S: std::hash::BuildHasher + Sync>(
                             }
                             let Some(rows) = queue.lock().pop() else { return };
                             let result = extract_one(rows, extractor);
+                            let now_finished = finished.fetch_add(result.rows.len(), Ordering::Relaxed) + result.rows.len();
                             results.lock().push(result);
+                            if let Some(mut last) = last_report.try_lock()
+                                && last.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL)
+                            {
+                                *last = Some(Instant::now());
+                                progress(now_finished.min(expected), expected);
+                            }
                         }
                     });
                 });
@@ -343,7 +355,7 @@ fn save_crop(dir: &Path, id: i64, jpeg: &[u8]) {
     }
     let path = dir.join(format!("{id}.jpg"));
     let temporary = dir.join(format!(".{id}.jpg.tmp"));
-    if std::fs::write(&temporary, jpeg).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+    if std::fs::write(&temporary, crate::util::face_crop_stamp::stamp(jpeg)).is_ok() && std::fs::rename(&temporary, &path).is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
 }

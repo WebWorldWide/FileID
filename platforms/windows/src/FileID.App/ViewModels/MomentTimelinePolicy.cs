@@ -2,9 +2,6 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Search &amp; Moments timeline geometry (macOS MomentTimeline, GTK
-/// moments_timeline.rs): the Examined, Chapters and Speech lanes, the gold
-/// playhead and the ruler.</summary>
 internal static class MomentTimelinePolicy
 {
     public enum ChapterState { Accepted, Draft, Stale }
@@ -23,8 +20,6 @@ internal static class MomentTimelinePolicy
         : chapter.UserEdited || chapter.ModelVersion == "user" ? ChapterState.Accepted
         : ChapterState.Draft;
 
-    /// <summary>The player's length when known, else the latest end of any chapter,
-    /// examined span or speech passage (at least 1 s).</summary>
     public static double Duration(double? natural, IReadOnlyList<CatalogChapter> chapters, params IReadOnlyList<(double Start, double End)>[] lanes)
     {
         if (natural is { } known && double.IsFinite(known) && known > 0) return known;
@@ -34,9 +29,6 @@ internal static class MomentTimelinePolicy
         return Math.Max(ends.DefaultIfEmpty(0).Max(), 1);
     }
 
-    /// <summary>Spans clamped to [0, duration] (end never before start, unreadable starts
-    /// dropped), sorted, and merged when they overlap or sit within <paramref name="gap"/>
-    /// seconds of each other, so a lane draws at most about one mark per pixel.</summary>
     public static IReadOnlyList<(double Start, double End)> MergeSpans(IEnumerable<(double Start, double End)> spans, double duration, double gap = 0)
     {
         var limit = double.IsFinite(duration) && duration > 0 ? duration : double.MaxValue;
@@ -66,11 +58,9 @@ internal static class MomentTimelinePolicy
         return merged;
     }
 
-    /// <summary>The seconds one pixel covers, used as the merge gap for a lane.</summary>
     public static double PixelSeconds(double duration, double width) =>
         width > 0 && duration > 0 ? duration / width : 0;
 
-    /// <summary>Examined mark: a 1 px tick for a sampled point (under 1.5 px wide), else a span.</summary>
     public static (double X, double Width, bool Point) ExaminedMark((double Start, double End) span, double duration, double width)
     {
         var x0 = X(span.Start, duration, width);
@@ -101,7 +91,6 @@ internal static class MomentTimelinePolicy
     public static double SeekSeconds(double x, double width, double duration) =>
         duration <= 0 ? 0 : Math.Clamp(x / Math.Max(width, 1), 0, 1) * duration;
 
-    /// <summary>First step from the macOS list that gives at most eight ticks.</summary>
     public static double RulerStep(double duration)
     {
         foreach (var step in Steps)
@@ -143,7 +132,6 @@ internal static class MomentTimelinePolicy
     public static string PlayerMeta(double position, double duration) =>
         $"{HitPresentation.Clock(position)} / {HitPresentation.Clock(duration)}";
 
-    /// <summary>The lavender note over the chapter list while drafts are unreviewed.</summary>
     public static string? DraftNote(IReadOnlyList<CatalogChapter> chapters)
     {
         var drafts = chapters.Where(chapter => State(chapter) == ChapterState.Draft).ToArray();

@@ -1,20 +1,5 @@
-// HEIC / HEIF decode — Windows.Graphics.Imaging.BitmapDecoder (WinRT).
-//
-// image-rs doesn't ship a HEIC decoder (libheif is GPL/LGPL with a system
-// dep that breaks our "download and run" promise). Windows ships a HEIF
-// codec via the HEIF Image Extensions store app — pre-installed on
-// Windows 11, available free on the Microsoft Store for Windows 10
-// 1809+. When present, WinRT's BitmapDecoder transparently decodes
-// HEIC/HEIF the same way it decodes PNG/JPEG/BMP/TIFF.
-//
-// We use this as a fallback only — `decode_image_sync` in tagging.rs
-// always tries image-rs first (faster, no COM apartment cost). If image-
-// rs returns an error AND the file extension is .heic / .heif, we route
-// here. When the codec isn't installed (BitmapDecoder::CreateAsync
-// errors), the call reports whether the decoder is absent or the individual
-// file is malformed/unsupported — never panics, never blocks.
-//
-// Output shape matches `decode_image_sync`: tightly packed RGB8 + (w,h).
+// HEIC/HEIF fallback decode through Windows.Graphics.Imaging.BitmapDecoder; image-rs has no HEIC decoder.
+// Needs the HEIF Image Extensions codec; when it is missing the error says so. Output is tightly packed RGB8 plus (w, h).
 
 use anyhow::{Context, Result};
 use std::os::windows::ffi::OsStrExt;
@@ -25,19 +10,8 @@ use windows::Graphics::Imaging::BitmapDecoder;
 use windows::Storage::{FileAccessMode, StorageFile};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-/// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop so the COM
-/// apartment is scoped to a single `decode` call. HEIC decode runs on the raw
-/// decoder-pool OS threads (and the Deep-Analyze tokio blocking pool) — both RECYCLED
-/// across tasks — and `decode_image_sync` reaches here with NO prior COM init, so the
-/// first WinRT activation (`StorageFile::GetFileFromPathAsync`) was failing
-/// CO_E_NOTINITIALIZED; the caller then mis-reported it as "HEIF codec not installed",
-/// silently dropping every HEIC/HEIF (the default iPhone format) from tagging/faces/
-/// CLIP/thumbnails even with the codec present. Every other WinRT shell module inits a
-/// COM apartment; heic.rs was the lone exception. MTA because these threads pump no
-/// message loop and the blocking `.join()` waits below would risk an STA deadlock;
-/// `did_init` is true only when WE init'd (S_OK/S_FALSE) — on RPC_E_CHANGED_MODE an
-/// outer caller owns the apartment so we must NOT uninit. Mirrors `shell::video::ComScope`.
-/// (HEIC COM init)
+/// Scopes a COM apartment to one `decode` call. Recycled worker threads arrive without COM initialised, which would otherwise surface as a false "HEIF codec not installed".
+/// MTA, because these threads pump no message loop. `did_init` is false on RPC_E_CHANGED_MODE, where an outer caller owns the apartment and it must not be uninitialised.
 struct ComScope {
     did_init: bool,
 }
@@ -90,16 +64,9 @@ fn decoder_creation_error(error: windows::core::Error) -> anyhow::Error {
     }
 }
 
-/// Decode a HEIC / HEIF file off disk into tightly packed RGB8 + (w,h).
-/// Returns a classified `Err` when the codec is absent or the file cannot be
-/// decoded by an installed HEIF provider.
 pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
-    // Scoped COM apartment for the WinRT activations below — held for the whole
-    // function (the decoder + pixel-data async ops all need it live). Without it every
-    // HEIC failed CO_E_NOTINITIALIZED on the apartment-less decoder-pool threads.
+    // Held for the whole function: the async decoder ops need the apartment live.
     let _com = ComScope::enter();
-    // StorageFile::GetFileFromPathAsync wants an absolute, normalized,
-    // wide-char path. encode_wide handles UTF-16 conversion.
     let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     if wide.is_empty() {
         anyhow::bail!("heic decode: empty path");
@@ -126,14 +93,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     if pw == 0 || ph == 0 {
         anyhow::bail!("heic decode: zero-dimension image");
     }
-    // Match the rest of the pipeline's per-worker decode budget (50 MP =
-    // ~150 MB RGB8 — the same MAX_DECODED_PIXELS ceiling tagging.rs/deep_analyze
-    // enforce for image-rs decodes). HEIC has no image-rs decoder, so this is
-    // HEIC's only size guard; the previous 160 MP value let a 50-160 MP HEIC
-    // allocate up to ~480 MB RGB through the full ML pipeline, busting the
-    // per-worker RAM budget the 50 MP cap exists to hold (and the read-ahead
-    // channel's per-frame sizing assumption). 50-160 MP HEIC is rare pro
-    // panorama/stitched output; bounding it keeps the 50K-file RSS goal safe.
+    // Same per-worker decode budget as the rest of the pipeline (50 MP is about 150 MB of RGB8); HEIC's only size guard.
     const MAX_PIXELS: u64 = 50_000_000;
     if (pw as u64) * (ph as u64) > MAX_PIXELS {
         anyhow::bail!(
@@ -141,10 +101,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         );
     }
 
-    // GetPixelDataAsync returns the decoded frame in the decoder's
-    // default format (BGRA8 for HEIF Image Extensions). The default
-    // applies EXIF orientation and any embedded ICC profile to sRGB —
-    // matching what Explorer + Photos render.
+    // The default pixel format is BGRA8, with EXIF orientation and the ICC profile already applied.
     let pixel_provider = decoder
         .GetPixelDataAsync()
         .context("GetPixelDataAsync")?
@@ -165,12 +122,11 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         );
     }
 
-    // BGRA → RGB. Drop alpha + swap channel order in one pass.
     let mut rgb = Vec::with_capacity((pw as usize) * (ph as usize) * 3);
     for chunk in bgra.as_chunks::<4>().0.iter().take((pw as usize) * (ph as usize)) {
-        rgb.push(chunk[2]); // R from BGRA[2]
-        rgb.push(chunk[1]); // G from BGRA[1]
-        rgb.push(chunk[0]); // B from BGRA[0]
+        rgb.push(chunk[2]);
+        rgb.push(chunk[1]);
+        rgb.push(chunk[0]);
     }
     Ok((rgb, pw, ph))
 }

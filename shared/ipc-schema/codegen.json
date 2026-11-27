@@ -225,7 +225,9 @@
           "takeFeedback",
           "takeDecision",
           "naming",
-          "nameEdits"
+          "nameEdits",
+          "offset",
+          "similarThreshold"
         ],
         "fields": {
           "queryVector": {
@@ -332,6 +334,9 @@
       },
       "ModelCatalog": {
         "fields": {
+          "availableMemoryMB": {
+            "type": "u64"
+          },
           "vramMB": {
             "type": "u64"
           }
@@ -385,6 +390,12 @@
             "type": "u64"
           },
           "availableMB": {
+            "type": "u64"
+          },
+          "postScanOwed": {
+            "type": "u64"
+          },
+          "postScanDone": {
             "type": "u64"
           }
         }
@@ -603,6 +614,8 @@
           "recommendation",
           "suggestedTakeGroups",
           "takeGroups",
+          "similarGroups",
+          "similarGroupTotal",
           "takeQualities",
           "takeGoalRanking"
         ],

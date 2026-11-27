@@ -117,6 +117,10 @@ install -Dm644 "${DATA}/${APP_ID}.desktop"      "${APPDIR}/usr/share/application
 install -Dm644 "${DATA}/${APP_ID}.metainfo.xml" "${APPDIR}/usr/share/metainfo/${APP_ID}.metainfo.xml"
 install -Dm644 "${DATA}/${APP_ID}.svg"          "${APPDIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
 
+# Apache-2.0 text and the third-party notices (the bundled GTK4/libadwaita runtime is LGPL).
+install -Dm644 "${REPO_ROOT}/LICENSE"                   "${APPDIR}/usr/share/licenses/${APP_ID}/LICENSE"
+install -Dm644 "${REPO_ROOT}/THIRD_PARTY_NOTICES.txt"   "${APPDIR}/usr/share/licenses/${APP_ID}/THIRD_PARTY_NOTICES.txt"
+
 # linuxdeploy's root-icon (.DirIcon) step rejects a scalable-only theme on
 # some continuous builds — give it a 256px raster fallback when a
 # rasterizer is available.

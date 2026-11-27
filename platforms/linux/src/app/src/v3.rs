@@ -1,7 +1,4 @@
-// Prototype v3 controls (shared/docs/DESIGN_V3_PORT.md, "Controls"): buttons,
-// segmented bar, panel, rail row, status pill, fields and timecodes, so every
-// page builds the same 28 px targets, the same gold focus ring and the same
-// springs. The look lives in theme.rs under the `v3-*` classes.
+// Shared v3 controls; their styling lives in theme.rs under the `v3-*` classes.
 
 use adw::prelude::*;
 use gtk::glib;
@@ -94,6 +91,14 @@ pub fn section(text: &str) -> gtk::Label {
     label
 }
 
+/// A section label for short fixed text. Letter-spaced labels measure narrower than they draw, so
+/// an ellipsizing one is cut short with room to spare.
+pub fn section_whole(text: &str) -> gtk::Label {
+    let label = section(text);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    label
+}
+
 pub fn meta(text: &str) -> gtk::Label {
     label(text, &["v3-meta"])
 }
@@ -118,7 +123,6 @@ pub fn spacer() -> gtk::Box {
     spacer
 }
 
-/// A vertical-only scroll area that fills the space it is given.
 pub fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -545,7 +549,6 @@ pub fn parent_name(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Opens a file in the default app, or shows it in the file manager.
 pub fn open_file(widget: &impl IsA<gtk::Widget>, path: &str) {
     let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
     let window = widget.root().and_downcast::<gtk::Window>();

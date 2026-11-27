@@ -11,6 +11,17 @@ public enum DurationText {
         return "\(sec)s"
     }
 
+    /// A rough estimate in words: "about 40 seconds", "about 35 minutes", "about 2.5 hours".
+    public static func approximate(_ seconds: Double) -> String {
+        guard seconds.isFinite else { return "—" }
+        let s = max(0, seconds)
+        if s < 90 { let n = max(1, Int(s.rounded())); return "about \(n) second\(n == 1 ? "" : "s")" }
+        if s < 5_400 { let n = Int((s / 60).rounded()); return "about \(n) minute\(n == 1 ? "" : "s")" }
+        let hours = (s / 360).rounded() / 10
+        let text = hours == hours.rounded() ? String(Int(hours)) : String(format: "%.1f", hours)
+        return "about \(text) hour\(text == "1" ? "" : "s")"
+    }
+
     /// Playback position: "1:02:03" or "4:05".
     public static func clock(_ seconds: Double) -> String {
         let (h, m, s) = parts(seconds)

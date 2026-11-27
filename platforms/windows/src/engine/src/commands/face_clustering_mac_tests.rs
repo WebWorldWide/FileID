@@ -22,13 +22,50 @@ fn space() -> Space {
     Space { model: MODEL.into(), processing: crate::commands::face_refresh::MAC_PROCESSING.into() }
 }
 
-/// Unit vector near axis `identity`, nudged by `jitter` along axis 100 + `face`.
 fn vector(identity: usize, face: usize, jitter: f32) -> Vec<u8> {
     let mut values = vec![0.0f32; DIM];
     values[identity] = 1.0;
     values[100 + face % 28] = jitter;
     let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
     encode(&values.iter().map(|v| v / norm).collect::<Vec<_>>())
+}
+
+thread_local! {
+    static PROBE: std::cell::RefCell<Option<Arc<Mutex<Connection>>>> = const { std::cell::RefCell::new(None) };
+    static STATS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+pub(super) fn note_stat() {
+    let held = PROBE.with(|probe| probe.borrow().as_ref().is_some_and(|database| database.try_lock().is_none()));
+    STATS.with(|stats| {
+        let (all, under_lock) = stats.get();
+        stats.set((all + 1, under_lock + usize::from(held)));
+    });
+}
+
+#[test]
+fn a_clustering_pass_stats_each_photo_once_and_never_under_the_catalog_lock() {
+    let catalog = Catalog::new();
+    for face in 1..=6 {
+        catalog.face(face, (face % 2) as usize, 0.6, None);
+    }
+    let Catalog { conn, dir: _dir } = catalog;
+    let database = Arc::new(Mutex::new(conn));
+    PROBE.with(|probe| *probe.borrow_mut() = Some(database.clone()));
+    STATS.with(|stats| stats.set((0, 0)));
+    let outcome = super::run(&database, &space(), &|| false).unwrap();
+    PROBE.with(|probe| *probe.borrow_mut() = None);
+    assert!(outcome.error.is_none());
+    assert_eq!(STATS.with(std::cell::Cell::get), (6, 0), "(stats, stats made while the writer lock was held)");
+}
+
+fn presence(conn: &Connection) -> Presence {
+    Presence::of(conn).unwrap()
+}
+
+fn merge(conn: &mut Connection) -> Result<usize> {
+    let presence = presence(conn);
+    auto_merge(conn, &space(), &presence, &|| false)
 }
 
 struct Catalog {
@@ -42,7 +79,6 @@ impl Catalog {
         Self { conn, dir: tempdir() }
     }
 
-    /// A photo on disk with one face, stamped as the Swift engine stamps it.
     fn face(&self, id: i64, identity: usize, quality: f64, person: Option<i64>) {
         let path = self.dir.0.join(format!("{id}.jpg"));
         std::fs::write(&path, format!("photo {id}")).unwrap();
@@ -80,7 +116,7 @@ impl Catalog {
 
     fn run(self) -> (Self, Outcome) {
         let database = Arc::new(Mutex::new(self.conn));
-        let outcome = super::run(&database, &space());
+        let outcome = super::run(&database, &space(), &|| false).unwrap();
         let conn = Arc::try_unwrap(database).ok().unwrap().into_inner();
         (Self { conn, dir: self.dir }, outcome)
     }
@@ -119,6 +155,26 @@ fn a_swift_catalog_keeps_person_ids_names_and_unknowns() {
     assert_eq!(outcome.result.face_count, 8);
     let (again, _) = catalog.run();
     assert_eq!(again.assignments(), before);
+}
+
+#[test]
+fn person_count_is_the_number_of_people_the_page_shows() {
+    let catalog = Catalog::new();
+    catalog.person(10, Some("Alex"), false);
+    catalog.person(20, None, false);
+    catalog.person(40, None, false);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 1, 0.6, Some(20));
+    }
+    let (catalog, outcome) = catalog.run();
+    let stored: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+    let shown = crate::read::people::active_people(&catalog.conn, None).unwrap().len();
+    assert_eq!(stored, 2, "the emptied unnamed person is cleared so it cannot pile up toward the person limit");
+    assert_eq!(shown, 2);
+    assert_eq!(outcome.result.person_count as usize, shown);
 }
 
 #[test]
@@ -199,4 +255,632 @@ fn held_faces_are_only_ever_uncertain() {
     assert_eq!(decide(&scored, &HashSet::new(), true).outcome, "uncertain");
     let unknown_first = vec![Scored { person: 3, score: 0.9, unknown: true }, Scored { person: 1, score: 0.8, unknown: false }];
     assert_eq!(decide(&unknown_first, &HashSet::new(), false).outcome, "unmatched");
+}
+
+/// Two people whose faces are the same identity (axis 0), four faces each, so the only thing that can keep
+/// them apart is what the user has said about them.
+fn twin_people(first: (Option<&str>, bool), second: (Option<&str>, bool), verdict: Option<bool>) -> (Catalog, usize) {
+    let catalog = Catalog::new();
+    catalog.person(10, first.0, first.1);
+    catalog.person(20, second.0, second.1);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 0, 0.6, Some(20));
+    }
+    if let Some(same) = verdict {
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO face_verifications(person_a,person_b,same_person,confidence,vlm_model,verified_at,face_a,face_b) VALUES(10,20,?1,1,'user',0,1,5)",
+                [i64::from(same)],
+            )
+            .unwrap();
+    }
+    let mut conn = catalog.conn;
+    let absorbed = merge(&mut conn).unwrap();
+    (Catalog { conn, dir: catalog.dir }, absorbed)
+}
+
+fn owners(catalog: &Catalog) -> Vec<Option<i64>> {
+    catalog.assignments().into_iter().map(|(_, person)| person).collect()
+}
+
+#[test]
+fn auto_merge_joins_two_unnamed_people_who_are_the_same_identity() {
+    let (catalog, absorbed) = twin_people((None, false), (None, false), None);
+    assert_eq!(absorbed, 1);
+    let owners = owners(&catalog);
+    assert!(owners.iter().all(|owner| *owner == owners[0] && owner.is_some()), "{owners:?}");
+}
+
+fn crowds(jitter: f32, size: i64) -> (Catalog, usize) {
+    let catalog = Catalog::new();
+    catalog.person(10, None, false);
+    catalog.person(20, None, false);
+    for face in 1..=2 * size {
+        catalog.face(face, 0, 0.6, Some(if face <= size { 10 } else { 20 }));
+        catalog
+            .conn
+            .execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=?2", params![vector(0, face as usize, jitter), face])
+            .unwrap();
+    }
+    let mut conn = catalog.conn;
+    let absorbed = merge(&mut conn).unwrap();
+    (Catalog { conn, dir: catalog.dir }, absorbed)
+}
+
+#[test]
+fn auto_merge_does_not_pile_two_loose_crowds_into_one_oversized_person() {
+    let (_catalog, absorbed) = crowds(1.0, 160);
+    assert_eq!(absorbed, 0);
+}
+
+#[test]
+fn auto_merge_still_joins_two_tight_halves_of_one_big_identity() {
+    let (_catalog, absorbed) = crowds(0.3, 160);
+    assert_eq!(absorbed, 1);
+}
+
+#[test]
+fn auto_merge_folds_an_unnamed_person_into_the_named_one_and_never_the_other_way() {
+    let (catalog, absorbed) = twin_people((None, false), (Some("Alex"), false), None);
+    assert_eq!(absorbed, 1);
+    assert!(owners(&catalog).iter().all(|owner| *owner == Some(20)), "the named person keeps every face");
+    let name: String = catalog.conn.query_row("SELECT name FROM persons WHERE id=20", [], |row| row.get(0)).unwrap();
+    assert_eq!(name, "Alex");
+}
+
+#[test]
+fn auto_merge_never_joins_two_named_people() {
+    let (catalog, absorbed) = twin_people((Some("Alex"), false), (Some("Sam"), false), None);
+    assert_eq!(absorbed, 0);
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+}
+
+#[test]
+fn auto_merge_never_joins_a_person_marked_unknown() {
+    let (catalog, absorbed) = twin_people((None, false), (None, true), None);
+    assert_eq!(absorbed, 0);
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+}
+
+#[test]
+fn auto_merge_never_joins_two_people_the_user_said_are_different() {
+    let (catalog, absorbed) = twin_people((None, false), (None, false), Some(false));
+    assert_eq!(absorbed, 0);
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+    let verdicts: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM face_verifications", [], |row| row.get(0)).unwrap();
+    assert_eq!(verdicts, 1, "the verdict is kept");
+}
+
+#[test]
+fn auto_merge_does_not_join_people_who_share_a_photo() {
+    let catalog = Catalog::new();
+    catalog.person(10, None, false);
+    catalog.person(20, None, false);
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 5..=8 {
+        catalog.face(face, 0, 0.6, Some(20));
+    }
+    // Face 5 is a second face in photo 1: two people in one photo are two people.
+    catalog
+        .conn
+        .execute("UPDATE face_prints SET file_id=1, source_revision=(SELECT revision FROM catalog_revisions WHERE file_id=1) WHERE id=5", [])
+        .unwrap();
+    let mut conn = catalog.conn;
+    let absorbed = merge(&mut conn).unwrap();
+    assert_eq!(absorbed, 0);
+    let people: Vec<Option<i64>> = Catalog { conn, dir: catalog.dir }.assignments().into_iter().map(|(_, person)| person).collect();
+    assert_eq!(people, vec![Some(10), Some(10), Some(10), Some(10), Some(20), Some(20), Some(20), Some(20)]);
+}
+
+fn many_clusters(count: usize, size_of: impl Fn(usize) -> usize) -> BTreeMap<usize, Vec<usize>> {
+    (0..count).map(|id| (id, (0..size_of(id)).collect())).collect()
+}
+
+#[test]
+fn the_person_cap_keeps_every_protected_person_and_drops_the_smallest_others() {
+    let clusters = many_clusters(MAX_PERSONS + 3, |id| if id < 3 { 1 } else { 5 + id % 7 });
+    let protected: HashSet<usize> = (0..3).collect();
+    let (kept, truncated) = cap(clusters.clone(), &protected, 0).unwrap();
+    assert_eq!(kept.len(), MAX_PERSONS);
+    assert!((0..3).all(|id| kept.contains_key(&id)), "protected people survive even though they are the smallest");
+    assert_eq!(truncated, clusters.values().map(Vec::len).sum::<usize>() - kept.values().map(Vec::len).sum::<usize>());
+    let dropped_largest = clusters.iter().filter(|(id, _)| !kept.contains_key(id)).map(|(_, m)| m.len()).max().unwrap();
+    let kept_smallest = kept.iter().filter(|(id, _)| **id >= 3).map(|(_, m)| m.len()).min().unwrap();
+    assert!(dropped_largest <= kept_smallest, "only the smallest unprotected clusters are dropped");
+}
+
+#[test]
+fn people_already_kept_use_up_the_person_cap_and_an_overfull_protected_set_refuses() {
+    let clusters = many_clusters(10, |_| 4);
+    let (kept, truncated) = cap(clusters.clone(), &HashSet::new(), MAX_PERSONS - 6).unwrap();
+    assert_eq!((kept.len(), truncated), (6, 16), "only the six free slots are filled");
+    let all: HashSet<usize> = clusters.keys().copied().collect();
+    assert!(cap(clusters.clone(), &all, MAX_PERSONS - 6).is_err(), "ten protected people do not fit in six slots");
+    assert!(cap(clusters.clone(), &HashSet::new(), MAX_PERSONS + 1).is_err(), "preserved people over the cap refuse");
+    let (kept, truncated) = cap(clusters, &HashSet::new(), MAX_PERSONS - 10).unwrap();
+    assert_eq!((kept.len(), truncated), (10, 0), "a run that fits loses nothing");
+}
+
+fn person_ids(catalog: &Catalog) -> Vec<i64> {
+    let mut statement = catalog.conn.prepare("SELECT id FROM persons ORDER BY id").unwrap();
+    statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+#[test]
+fn mixed_legacy_stale_and_malformed_face_caches_are_deferred_and_keep_every_identity() {
+    for fault in ["model", "processing", "legacy", "revision", "nan"] {
+        let catalog = Catalog::new();
+        catalog.person(10, Some("Confirmed"), false);
+        catalog.person(20, None, false);
+        catalog.face(1, 0, 0.6, Some(10));
+        catalog.face(2, 0, 0.6, Some(20));
+        let fault_sql = match fault {
+            "model" => "UPDATE face_prints SET embedding_model='other-weights' WHERE id=2",
+            "processing" => "UPDATE face_prints SET processing_version='macos-other-crops' WHERE id=2",
+            "legacy" => "UPDATE face_prints SET embedding_model=NULL WHERE id=2",
+            "revision" => "UPDATE face_prints SET source_revision='stale' WHERE id=2",
+            _ => "UPDATE face_prints SET arcface_embedding=?1 WHERE id=2",
+        };
+        if fault == "nan" {
+            catalog.conn.execute(fault_sql, [encode(&[f32::NAN; DIM])]).unwrap();
+        } else {
+            catalog.conn.execute(fault_sql, []).unwrap();
+        }
+        let partition = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN, &presence(&catalog.conn)).unwrap();
+        assert_eq!((partition.rows.len(), partition.deferred), (1, 1), "{fault}");
+        let mut conn = catalog.conn;
+        assert_eq!(merge(&mut conn).unwrap(), 0, "{fault}");
+        let catalog = Catalog { conn, dir: catalog.dir };
+        assert_eq!(catalog.assignments(), vec![(1, Some(10)), (2, Some(20))], "{fault}");
+        let (catalog, outcome) = catalog.run();
+        assert!(outcome.error.is_none(), "{fault}");
+        assert_eq!(outcome.result.deferred_faces, Some(1), "{fault}");
+        assert_eq!(catalog.assignments(), vec![(1, Some(10)), (2, Some(20))], "{fault}");
+        assert_eq!(person_ids(&catalog), vec![10, 20], "{fault}");
+        let name: String = catalog.conn.query_row("SELECT name FROM persons WHERE id=10", [], |row| row.get(0)).unwrap();
+        assert_eq!(name, "Confirmed", "{fault}");
+    }
+}
+
+#[test]
+fn a_bridge_face_cannot_chain_two_named_people_together() {
+    let catalog = Catalog::new();
+    catalog.person(5, None, false);
+    catalog.person(10, Some("Adam"), false);
+    catalog.person(20, Some("Bob"), false);
+    catalog.face(1, 0, 0.6, Some(10));
+    catalog.face(2, 0, 0.6, Some(20));
+    catalog.face(3, 0, 0.6, Some(5));
+    let mut conn = catalog.conn;
+    let absorbed = merge(&mut conn).unwrap();
+    let catalog = Catalog { conn, dir: catalog.dir };
+    assert_eq!(absorbed, 1, "only the unnamed bridge is absorbed");
+    let assignments = catalog.assignments();
+    assert_eq!(&assignments[..2], &[(1, Some(10)), (2, Some(20))], "neither named person loses a face");
+    assert!(matches!(assignments[2].1, Some(10 | 20)));
+    let names: Vec<String> = catalog.conn.prepare("SELECT name FROM persons WHERE name IS NOT NULL ORDER BY id").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(names, vec!["Adam", "Bob"]);
+}
+
+#[test]
+fn people_named_only_by_a_title_middle_name_or_suffix_are_never_auto_merged() {
+    let catalog = Catalog::new();
+    catalog.conn.execute("INSERT INTO persons(id,title,is_unknown,created_at,file_count) VALUES(10,'Dr.',0,0,0)", []).unwrap();
+    catalog.conn.execute("INSERT INTO persons(id,middle_name,suffix,is_unknown,created_at,file_count) VALUES(20,'Quincy','Jr.',0,0,0)", []).unwrap();
+    for face in 1..=3 {
+        catalog.face(face, 0, 0.6, Some(10));
+    }
+    for face in 4..=6 {
+        catalog.face(face, 0, 0.6, Some(20));
+    }
+    let mut conn = catalog.conn;
+    assert_eq!(merge(&mut conn).unwrap(), 0);
+    let catalog = Catalog { conn, dir: catalog.dir };
+    assert_eq!(owners(&catalog), vec![Some(10), Some(10), Some(10), Some(20), Some(20), Some(20)]);
+}
+
+/// `count` unnamed people, one face each, all the same identity: every pair of them qualifies.
+fn crowd(count: i64) -> Catalog {
+    let catalog = Catalog::new();
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    for id in 1..=count {
+        catalog.person(id, None, false);
+        catalog.face(id, 0, 0.6, Some(id));
+    }
+    tx.commit().unwrap();
+    catalog
+}
+
+#[test]
+fn a_merge_search_over_its_edge_budget_merges_no_one() {
+    // 1,415 people give 1,000,405 qualifying pairs, one more than the 1,000,000-edge budget allows.
+    let catalog = crowd(1415);
+    let before = catalog.assignments();
+    let mut conn = catalog.conn;
+    assert_eq!(merge(&mut conn).unwrap(), 0);
+    let catalog = Catalog { conn, dir: catalog.dir };
+    assert_eq!(catalog.assignments(), before, "a search that ran out of budget changes nothing");
+    let file_counts: i64 = catalog.conn.query_row("SELECT COUNT(*) FROM persons WHERE file_count=0", [], |row| row.get(0)).unwrap();
+    assert_eq!(file_counts, 1415, "no person row was touched");
+
+    let catalog = crowd(1414);
+    let mut conn = catalog.conn;
+    assert_eq!(merge(&mut conn).unwrap(), 1413, "inside the budget the same crowd is one person");
+}
+
+#[test]
+fn an_exhausted_join_budget_returns_no_partial_graph() {
+    let same: Vec<Vec<f32>> = vec![decode(&vector(0, 1, 0.0)); 3];
+    let small = vec![false; 3];
+    let join = |vectors: &[Vec<f32>], small: &[bool], evaluations: usize, found: Vec<(f32, usize, usize)>| {
+        Join { vectors, small, tight: 0.65, loose: 0.55, evaluations, exceeded: false, found }.edges()
+    };
+    assert_eq!(join(&same, &small, 0, Vec::new()).map(|edges| edges.len()), Some(3));
+    assert_eq!(join(&same, &small, JOIN_EVALUATIONS - 2, Vec::new()), None, "direct sweep out of work");
+    assert_eq!(join(&same, &small, 0, vec![(1.0, 0, 0); JOIN_EDGES - 1]), None, "direct sweep out of edges");
+
+    let dense: Vec<Vec<f32>> = vec![decode(&vector(0, 1, 0.0)); 720];
+    let small = vec![false; dense.len()];
+    assert!(dense.len() * (dense.len() - 1) / 2 > JOIN_DIRECT_PAIRS, "the vantage-point path");
+    assert_eq!(join(&dense, &small, 0, Vec::new()).map(|edges| edges.len()), Some(720 * 719 / 2));
+    assert_eq!(join(&dense, &small, JOIN_EVALUATIONS - 100, Vec::new()), None, "tree search out of work");
+    assert_eq!(join(&dense, &small, 0, vec![(1.0, 0, 0); JOIN_EDGES - 100]), None, "tree search out of edges");
+}
+
+#[test]
+fn pairs_at_the_exact_thresholds_are_joined_the_same_by_the_tree_and_the_direct_predicate() {
+    const WIDE: usize = 512;
+    let (tight, loose) = (0.65f32, 0.55f32);
+    let along = |cosine: f32| {
+        let mut values = vec![0.0f32; WIDE];
+        values[0] = cosine;
+        values[1] = (1.0 - cosine * cosine).max(0.0).sqrt();
+        values
+    };
+    let mut vectors = vec![along(1.0)];
+    for cosine in [tight.next_up(), tight, tight.next_down(), loose.next_up(), loose, loose.next_down()] {
+        vectors.push(along(cosine));
+    }
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    while vectors.len() < 720 {
+        let mut values: Vec<f32> = (0..WIDE)
+            .map(|axis| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                if axis < 2 { 0.0 } else { (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5 }
+            })
+            .collect();
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        for value in &mut values {
+            *value /= norm;
+        }
+        vectors.push(values);
+    }
+    let mut small = vec![false; vectors.len()];
+    small[4..=6].fill(true);
+    assert!(vectors.len() * (vectors.len() - 1) / 2 > JOIN_DIRECT_PAIRS, "the vantage-point path");
+    let tree = Join { vectors: &vectors, small: &small, tight, loose, evaluations: 0, exceeded: false, found: Vec::new() }.edges().unwrap();
+    let mut direct = Vec::new();
+    for i in 0..vectors.len() {
+        for j in i + 1..vectors.len() {
+            let cosine = dot(&vectors[i], &vectors[j]);
+            if cosine >= tight || (cosine >= loose && (small[i] || small[j])) {
+                direct.push((cosine, i, j));
+            }
+        }
+    }
+    direct.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let with_base: Vec<usize> = tree.iter().filter(|(_, i, _)| *i == 0).map(|(_, _, j)| *j).collect();
+    assert_eq!(with_base, vec![1, 2, 4, 5], "at or above tight, or at or above loose for a small person, and nothing below");
+    assert_eq!(tree, direct);
+}
+
+#[test]
+fn a_photo_changed_after_the_partition_was_read_refuses_the_commit() {
+    let catalog = Catalog::new();
+    catalog.person(10, Some("Maya"), false);
+    catalog.face(1, 0, 0.6, Some(10));
+    let seen = presence(&catalog.conn);
+    let selected = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN, &seen).unwrap();
+    assert_eq!(selected.rows.len(), 1);
+    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0, &seen).is_ok());
+    catalog.conn.execute("UPDATE files SET size_bytes = size_bytes + 1 WHERE id = 1", []).unwrap();
+    assert!(require_unchanged(&catalog.conn, &selected, &space(), &HashSet::new(), 0.0, &seen).is_err());
+    std::fs::write(catalog.dir.0.join("1.jpg"), [1u8, 2]).unwrap();
+    let current = load_partition(&catalog.conn, &space(), &HashSet::new(), 0.0, MAX_FACES_PER_RUN, &presence(&catalog.conn)).unwrap();
+    assert_eq!((current.rows.len(), current.deferred), (0, 1));
+    assert_eq!(person_ids(&catalog), vec![10]);
+}
+
+#[test]
+fn faces_of_people_marked_unknown_do_not_use_up_the_face_window() {
+    let catalog = Catalog::new();
+    catalog.person(10, None, true);
+    catalog.person(20, None, false);
+    catalog.face(1, 0, 0.6, Some(10));
+    catalog.face(2, 1, 0.6, Some(20));
+    catalog.conn.execute("UPDATE persons SET is_unknown=0", []).unwrap();
+    let loaded = load_partition(&catalog.conn, &space(), &HashSet::from([1]), 0.0, 1, &presence(&catalog.conn)).unwrap();
+    assert_eq!(loaded.rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![2]);
+    assert!(!loaded.overflowed);
+}
+
+#[test]
+fn a_pass_with_nothing_to_cluster_still_reports_the_people_it_kept() {
+    let catalog = Catalog::new();
+    catalog.person(10, Some("Maya"), false);
+    catalog.face(1, 0, 0.6, Some(10));
+    let (catalog, outcome) = catalog.run();
+    assert!(outcome.error.is_none());
+    assert_eq!((outcome.result.person_count, outcome.result.face_count), (1, 1));
+    assert_eq!(catalog.assignments(), vec![(1, Some(10))]);
+}
+
+#[test]
+fn oversized_evidence_is_deferred_while_other_people_still_merge() {
+    let catalog = Catalog::new();
+    for (person, face) in [(10, 1), (20, 2), (30, 3)] {
+        catalog.person(person, None, false);
+        catalog.face(face, 0, 0.6, Some(person));
+    }
+    let oversized = encode(&[1.0f32; 4097]);
+    catalog.conn.execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=3", [&oversized]).unwrap();
+    let mut conn = catalog.conn;
+    assert_eq!(merge(&mut conn).unwrap(), 1);
+    let catalog = Catalog { conn, dir: catalog.dir };
+    let assignments = catalog.assignments();
+    assert_eq!(assignments[0].1, assignments[1].1);
+    assert_eq!(assignments[2], (3, Some(30)), "the deferred face keeps its person");
+    let bytes: i64 = catalog.conn.query_row("SELECT LENGTH(arcface_embedding) FROM face_prints WHERE id=3", [], |row| row.get(0)).unwrap();
+    assert_eq!(bytes, 4097 * 4, "and its evidence");
+    assert_eq!(person_ids(&catalog), vec![10, 20, 30], "auto-merge keeps every person row");
+}
+
+#[test]
+fn a_plan_that_would_pass_the_person_limit_writes_nothing() {
+    let catalog = Catalog::new();
+    catalog.face(1, 0, 0.6, None);
+    catalog.face(2, 1, 0.6, None);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    for id in 100..100 + MAX_PERSONS as i64 - 1 {
+        tx.execute("INSERT INTO persons(id,name,is_unknown,created_at,file_count) VALUES(?1,'Kept',0,0,0)", [id]).unwrap();
+    }
+    tx.commit().unwrap();
+    let plan = |faces: &[i64]| -> Vec<Planned> {
+        faces
+            .iter()
+            .map(|face| Planned { person: None, faces: vec![*face], representative: *face, centroid: decode(&vector(0, 1, 0.0)), radius: 0.1 })
+            .collect()
+    };
+    let pool = HashSet::from([1, 2]);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    let refused = apply(&tx, &plan(&[1, 2]), &pool, &HashSet::new(), 1.0, &|| false);
+    assert!(refused.is_err(), "8,001 people");
+    drop(tx);
+    assert_eq!(person_ids(&catalog).len(), MAX_PERSONS - 1);
+    assert_eq!(catalog.assignments(), vec![(1, None), (2, None)]);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    assert_eq!(apply(&tx, &plan(&[1]), &pool, &HashSet::new(), 1.0, &|| false).unwrap(), MAX_PERSONS as i64, "exactly the limit fits");
+}
+
+#[test]
+fn unnamed_people_left_without_faces_are_cleared_and_do_not_count_toward_the_person_limit() {
+    let catalog = Catalog::new();
+    catalog.face(1, 0, 0.6, None);
+    catalog.person(5, Some("Named"), false);
+    catalog.person(6, None, true);
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    for id in 100..100 + MAX_PERSONS as i64 {
+        tx.execute("INSERT INTO persons(id,is_unknown,created_at,file_count) VALUES(?1,0,0,0)", [id]).unwrap();
+    }
+    tx.commit().unwrap();
+    let plan = vec![Planned { person: None, faces: vec![1], representative: 1, centroid: decode(&vector(0, 1, 0.0)), radius: 0.1 }];
+    let tx = catalog.conn.unchecked_transaction().unwrap();
+    apply(&tx, &plan, &HashSet::from([1]), &HashSet::new(), 1.0, &|| false).unwrap();
+    tx.commit().unwrap();
+    let kept = person_ids(&catalog);
+    assert!(kept.contains(&5) && kept.contains(&6), "named and unknown people stay");
+    assert_eq!(kept.len(), 3, "{kept:?}");
+}
+
+#[test]
+fn a_persist_that_fails_part_way_leaves_every_person_and_assignment_as_it_was() {
+    let catalog = Catalog::new();
+    for face in 1..=4 {
+        catalog.face(face, 0, 0.6, None);
+    }
+    for face in 5..=8 {
+        catalog.face(face, 1, 0.6, None);
+    }
+    // The recount is the last statement of the write, after the new people and their faces.
+    catalog
+        .conn
+        .execute_batch("CREATE TEMP TRIGGER refuse_recount BEFORE UPDATE OF file_count ON persons BEGIN SELECT RAISE(ABORT,'refused'); END;")
+        .unwrap();
+    let (catalog, outcome) = catalog.run();
+    assert_eq!(outcome.error.map(|(kind, _)| kind), Some("face_cluster_persist_failed"));
+    assert!(person_ids(&catalog).is_empty(), "the people created before the failure were rolled back");
+    assert!(catalog.assignments().iter().all(|(_, person)| person.is_none()), "and so were their faces");
+    catalog.conn.execute_batch("DROP TRIGGER refuse_recount").unwrap();
+    let (catalog, outcome) = catalog.run();
+    assert!(outcome.error.is_none());
+    assert_eq!(person_ids(&catalog).len(), 2, "with the refusal gone the same pass publishes");
+    assert!(catalog.assignments().iter().all(|(_, person)| person.is_some()));
+}
+
+fn unit_vector(parts: &[(usize, f32)]) -> Vec<f32> {
+    let mut values = vec![0.0f32; DIM];
+    for &(index, weight) in parts {
+        values[index] += weight;
+    }
+    let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+    values.iter().map(|v| v / norm).collect()
+}
+
+#[test]
+fn one_bridge_face_between_two_look_alike_groups_does_not_join_them() {
+    let near_bridge = |member: usize| if member < 5 { 0.3 } else { 0.0 };
+    let mut vectors = Vec::new();
+    for member in 0..20 {
+        vectors.push(unit_vector(&[(0, 1.0), (10 + member, 0.1), (100, near_bridge(member))]));
+    }
+    for member in 0..20 {
+        vectors.push(unit_vector(&[(1, 1.0), (40 + member, 0.1), (100, near_bridge(member))]));
+    }
+    vectors.push(unit_vector(&[(0, 1.0), (1, 1.0), (100, 0.5)]));
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let clusters = cluster(&vectors, &files, &|| false).unwrap();
+    let group_of = |face: usize| clusters.iter().find(|(_, members)| members.contains(&face)).map(|(id, _)| *id).unwrap();
+    assert_ne!(group_of(0), group_of(20), "the two groups stay separate people");
+    for member in 1..20 {
+        assert_eq!(group_of(0), group_of(member));
+        assert_eq!(group_of(20), group_of(20 + member));
+    }
+}
+
+fn scattered_faces(count: usize, identities: usize) -> Vec<Vec<f32>> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    };
+    let centres: Vec<Vec<f32>> = (0..identities).map(|_| (0..DIM).map(|_| next()).collect()).collect();
+    (0..count)
+        .map(|face| {
+            let centre = &centres[face % identities];
+            let raw: Vec<f32> = centre.iter().map(|value| value * 2.0 + next()).collect();
+            let norm = raw.iter().map(|value| value * value).sum::<f32>().sqrt();
+            raw.iter().map(|value| value / norm).collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_large_library_gets_the_exact_nearest_faces_not_an_approximate_set() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX + 200, 90);
+    let k = 17;
+    let lists = nearest_lists(&vectors, k, &|| false).unwrap();
+    assert_eq!(lists.len(), vectors.len());
+    for row in (0..vectors.len()).step_by(23) {
+        let mut every: Vec<Neighbor> =
+            (0..vectors.len()).map(|other| Neighbor { idx: other, similarity: l2_cosine(&vectors[row], &vectors[other]) }).collect();
+        every.sort_by(compare);
+        every.truncate(k);
+        let found: Vec<usize> = lists[row].iter().map(|hit| hit.idx).collect();
+        let exact: Vec<usize> = every.iter().map(|hit| hit.idx).collect();
+        assert_eq!(found, exact, "face {row}: the nearest faces, best first");
+    }
+}
+
+#[test]
+fn people_found_among_more_faces_than_the_exact_limit_match_a_full_comparison() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX + 200, 90);
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let large = cluster(&vectors, &files, &|| false).unwrap();
+    let (params, mutual) = hyperparameters();
+    let k = params.k_nn + 1;
+    let full = identity_clustering::cluster_with_options(
+        &vectors,
+        |i| {
+            let mut hits: Vec<Neighbor> =
+                (0..vectors.len()).map(|j| Neighbor { idx: j, similarity: l2_cosine(&vectors[i], &vectors[j]) }).collect();
+            hits.select_nth_unstable_by(k, compare);
+            hits.truncate(k);
+            hits.sort_by(compare);
+            hits.retain(|hit| hit.idx != i);
+            hits
+        },
+        params,
+        &[],
+        mutual,
+    );
+    let mut expected: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (face, group) in full.cluster_ids.iter().enumerate() {
+        expected.entry(*group).or_default().push(face);
+    }
+    let groups = |map: &BTreeMap<usize, Vec<usize>>| -> BTreeSet<Vec<usize>> { map.values().cloned().collect() };
+    assert_eq!(groups(&large), groups(&expected));
+}
+
+fn stops_after(polls: &std::sync::atomic::AtomicUsize, allowed: usize) -> impl Fn() -> bool + Sync + '_ {
+    move || polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= allowed
+}
+
+#[test]
+fn a_stop_during_the_neighbour_search_of_a_large_library_is_noticed_within_a_few_checks() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX + 2_000, 90);
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    assert!(cluster(&vectors, &files, &stops_after(&polls, 20)).is_none());
+    assert!(polls.load(std::sync::atomic::Ordering::Relaxed) < 100, "the search kept running after the stop");
+}
+
+#[test]
+fn a_stop_while_every_face_is_compared_with_every_other_gives_no_grouping() {
+    let vectors = scattered_faces(BRUTE_FORCE_MAX, 90);
+    let files: Vec<i64> = (0..vectors.len() as i64).collect();
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    assert!(cluster(&vectors, &files, &stops_after(&polls, 20)).is_none());
+}
+
+#[test]
+fn a_stop_while_loose_faces_are_attached_to_people_leaves_them_unattached() {
+    let mut vectors: Vec<Vec<f32>> = (0..6).map(|member| unit_vector(&[(0, 1.0), (10 + member, 0.05)])).collect();
+    vectors.push(unit_vector(&[(0, 1.0), (30, 0.05)]));
+    let (held, files, face_ids): (Vec<bool>, Vec<i64>, Vec<i64>) = (vec![false; 7], (0..7).collect(), (0..7).collect());
+    let different = HashSet::new();
+    let attach = |cancelled: &dyn Fn() -> bool| {
+        let attach = Attach { vectors: &vectors, held: &held, files: &files, face_ids: &face_ids, different: &different, min_size: 3, cancelled };
+        attach.run(BTreeMap::from([(0, vec![0, 1, 2, 3, 4, 5])]), &[6])
+    };
+    assert_eq!(attach(&|| false)[&0], vec![0, 1, 2, 3, 4, 5, 6], "the loose face joins the person it looks like");
+    assert_eq!(attach(&|| true)[&0], vec![0, 1, 2, 3, 4, 5], "a stopped pass attaches nothing more");
+}
+
+#[test]
+fn a_stop_while_photos_are_checked_on_disk_is_noticed_between_photos() {
+    let catalog = Catalog::new();
+    for face in 1..=40 {
+        catalog.face(face, (face % 3) as usize, 0.6, None);
+    }
+    let database = Mutex::new(catalog.conn);
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = Presence::build(&database, &stops_after(&polls, 5)).err().expect("the check was stopped");
+    assert!(stopped.is::<Stopped>());
+    assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 6, "no photo was checked after the stop");
+}
+
+#[test]
+fn a_pass_stopped_at_any_point_leaves_the_catalog_untouched_or_fully_grouped() {
+    for allowed in 0..40 {
+        let catalog = Catalog::new();
+        for face in 1..=12 {
+            catalog.face(face, (face % 3) as usize, 0.6, None);
+        }
+        let before = catalog.assignments();
+        let database = Arc::new(Mutex::new(catalog.conn));
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let outcome = super::run(&database, &space(), &stops_after(&polls, allowed));
+        let after: Vec<(i64, Option<i64>)> = {
+            let conn = database.lock();
+            let mut statement = conn.prepare("SELECT id, person_id FROM face_prints ORDER BY id").unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        if outcome.is_none() {
+            let fully_grouped = after.iter().all(|(_, person)| person.is_some());
+            assert!(after == before || fully_grouped, "stopped after {allowed} checks and left a half-written grouping: {after:?}");
+        }
+        if allowed == 0 {
+            assert!(outcome.is_none(), "a pass told to stop before it starts does nothing");
+        }
+    }
 }

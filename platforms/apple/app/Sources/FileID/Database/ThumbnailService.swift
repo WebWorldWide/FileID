@@ -107,7 +107,15 @@ public final class ThumbnailService {
         return nil
     }
 
-    /// The bucket's pixel size on this display, within what the engine renders.
+    /// A busy engine can miss its reply window for a large video, so a video tile that comes back empty asks once more before it settles for its icon. `onMiss` runs as soon as the first ask comes back empty, so the tile shows its icon during the wait instead of an empty box.
+    public func tileThumbnail(for url: URL, size: CGFloat, onMiss: @MainActor () -> Void = {}) async -> NSImage? {
+        if let image = await thumbnail(for: url, size: size) { return image }
+        guard Self.isVideo(url), !Task.isCancelled else { return nil }
+        onMiss()
+        guard (try? await Task.sleep(for: .seconds(5))) != nil else { return nil }
+        return await thumbnail(for: url, size: size)
+    }
+
     nonisolated static func enginePixelSize(size: CGFloat, scale: CGFloat) -> Int {
         min(max(Int((size * scale).rounded()), 64), 2048)
     }
@@ -116,7 +124,6 @@ public final class ThumbnailService {
         FileTypes.videos.contains(url.pathExtension.lowercased())
     }
 
-    /// Requests round up to a few shared sizes so views reuse one cache entry.
     nonisolated static func bucket(_ size: CGFloat) -> CGFloat {
         [256, 512, 1024].first { size <= $0 } ?? 2048
     }
@@ -214,6 +221,11 @@ public final class ThumbnailService {
         // File identity for invalidation — a stat is cheap next to a remote
         // decode, and lets an edited / replaced file miss its stale thumb.
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let alias = ThumbnailDiskCache.aliasURL(path: url.path, size: size, scale: scale)
+        if attrs == nil, let offline = ThumbnailDiskCache.load(alias) {
+            await thumbDecodeGate.release()
+            return offline
+        }
         let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970
         let mtime = modified ?? 0
         let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
@@ -221,20 +233,23 @@ public final class ThumbnailService {
                                              bytes: bytes, size: size, scale: scale)
         let cachedData = ThumbnailDiskCache.load(diskURL)
         await thumbDecodeGate.release()
-        if let cachedData { return cachedData }
+        if let cachedData {
+            ThumbnailDiskCache.link(alias: alias, to: diskURL)
+            return cachedData
+        }
 
         let jpegData = await render(url: url, size: size, scale: scale, modifiedAt: modified,
                                     videoSource: videoSource, quickLook: quickLookJPEG)
         if let jpegData, !Task.isCancelled {
             if (try? ReadOnlyLocations.requireWritable(diskURL)) != nil {
                 try? jpegData.write(to: diskURL, options: .atomic)
+                ThumbnailDiskCache.link(alias: alias, to: diskURL)
                 ThumbnailDiskCache.noteWrite()
             }
         }
         return jpegData
     }
 
-    /// The engine's frame when it answers for a video, else Quick Look.
     nonisolated static func render(
         url: URL, size: CGFloat, scale: CGFloat, modifiedAt: Double?,
         videoSource: VideoThumbnailSource?,
@@ -248,9 +263,26 @@ public final class ThumbnailService {
             if let engineData { return engineData }
         }
         await thumbDecodeGate.acquire()
-        let jpegData = Task.isCancelled ? nil : await quickLook(url, size, scale)
+        var jpegData = Task.isCancelled ? nil : await quickLook(url, size, scale)
+        if jpegData == nil, !Task.isCancelled {
+            jpegData = contentThumbnailJPEG(url: url, size: size, scale: scale)
+        }
         await thumbDecodeGate.release()
         return jpegData
+    }
+
+    /// Quick Look picks its decoder from the file name's extension, so a JPEG named .png comes back empty. ImageIO reads the
+    /// bytes, whatever the name.
+    nonisolated static func contentThumbnailJPEG(url: URL, size: CGFloat, scale: CGFloat) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(quickLookSide(size: size, scale: scale) * scale)
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return jpegData(image)
     }
 
     /// `generateBestRepresentation` (single-callback) — the plural
@@ -278,6 +310,28 @@ public final class ThumbnailService {
     /// which left large previews of big photos loading forever.
     nonisolated static func quickLookSide(size: CGFloat, scale: CGFloat) -> CGFloat {
         min(size, 3072 / max(scale, 1))
+    }
+
+    /// A person tile's face crop is kept on disk beside the thumbnails, so a tile never re-reads the original photo (slow on a
+    /// network or USB drive) after the first time. The identity already carries the photo's revision, box and processing.
+    nonisolated static func faceCropURL(identity: String, in directory: URL? = nil) -> URL {
+        let hex = SHA256.hash(data: Data("face|\(identity)".utf8)).map { String(format: "%02x", $0) }.joined()
+        return (directory ?? ThumbnailDiskCache.dir).appendingPathComponent("\(hex).jpg")
+    }
+
+    nonisolated static func storedFaceCrop(identity: String, in directory: URL? = nil) async -> NSImage? {
+        let url = faceCropURL(identity: identity, in: directory)
+        guard let data = await Task.detached(priority: .userInitiated, operation: { ThumbnailDiskCache.load(url) }).value else { return nil }
+        return await decoded(data)
+    }
+
+    nonisolated static func storeFaceCrop(_ image: NSImage, identity: String, in directory: URL? = nil) {
+        let url = faceCropURL(identity: identity, in: directory)
+        guard (try? ReadOnlyLocations.requireWritable(url)) != nil,
+              let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let data = jpegData(pixels) else { return }
+        try? data.write(to: url, options: .atomic)
+        ThumbnailDiskCache.noteWrite()
     }
 
     nonisolated static func jpegData(_ image: CGImage) -> Data? {
@@ -321,7 +375,7 @@ private actor ThumbnailGate {
 
 /// On-disk JPEG thumbnail cache under Application Support/FileID/thumbnails/.
 /// Stateless beyond the filesystem; every I/O error degrades gracefully.
-private enum ThumbnailDiskCache {
+enum ThumbnailDiskCache {
     static let dir: URL = {
         let d = AppSupportPath.fileID.appendingPathComponent("thumbnails", isDirectory: true)
         if (try? ReadOnlyLocations.requireWritable(d)) != nil {
@@ -338,6 +392,24 @@ private enum ThumbnailDiskCache {
         let hex = SHA256.hash(data: Data(raw.utf8))
             .map { String(format: "%02x", $0) }.joined()
         return dir.appendingPathComponent("\(hex).jpg")
+    }
+
+    /// A second name for a thumbnail, keyed by path and size alone, so a file whose drive is unplugged (no mtime or size to hash) still finds its picture.
+    static func aliasURL(in directory: URL? = nil, path: String, size: CGFloat, scale: CGFloat) -> URL {
+        let raw = "alias|\(path)|\(Int(size))|\(Int(scale))"
+        let hex = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return (directory ?? dir).appendingPathComponent("\(hex).jpg")
+    }
+
+    /// Points `alias` at `blob`, replacing an older alias for a file that changed.
+    static func link(alias: URL, to blob: URL) {
+        let manager = FileManager.default
+        guard (try? ReadOnlyLocations.requireWritable(alias)) != nil else { return }
+        let aliasID = try? alias.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        let blobID = try? blob.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        if let aliasID, let blobID, aliasID.isEqual(blobID) { return }
+        try? manager.removeItem(at: alias)
+        try? manager.linkItem(at: blob, to: alias)
     }
 
     static func load(_ url: URL) -> Data? {
@@ -362,7 +434,6 @@ private enum ThumbnailDiskCache {
         DispatchQueue.global(qos: .utility).async { trim() }
     }
 
-    /// Deletes the oldest thumbnails until the folder is back under the cap.
     private static func trim() {
         guard (try? ReadOnlyLocations.requireWritable(dir)) != nil,
               let files = try? FileManager.default.contentsOfDirectory(

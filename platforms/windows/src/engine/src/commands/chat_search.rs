@@ -1,12 +1,10 @@
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct SearchPlan {
     pub query: String,
     pub kinds: Vec<String>,
     pub person_ids: Vec<i64>,
     pub person_names: Vec<String>,
-    /// "Kyle and Maya": files with every named person, not any of them.
     pub all_people: bool,
-    /// "without Maya": people whose files are left out.
     pub excluded_person_ids: Vec<i64>,
     pub excluded_person_names: Vec<String>,
     pub event_ids: Vec<String>,
@@ -50,6 +48,17 @@ mod tests {
         }
         assert_eq!(timestamp("12:03"), Some(723.0));
     }
+    #[test]
+    fn an_and_inside_a_new_search_does_not_inherit_the_previous_search() {
+        let people = vec![(1, vec!["Kyle".into()]), (2, vec!["Maya".into()])];
+        let orchard = SearchPlan::resolve_known("orchard photos", None, &people, &[], false);
+        let fresh = SearchPlan::resolve_known("videos of Kyle and Maya", Some(&orchard), &people, &[], false);
+        assert_eq!((fresh.query.as_str(), fresh.kinds.clone()), ("", vec!["video".to_owned()]));
+        assert!(fresh.person_ids == [1, 2] && fresh.all_people);
+        let more = SearchPlan::resolve_known("and sunsets", Some(&orchard), &people, &[], false);
+        assert_eq!(more.query, "orchard sunsets");
+    }
+
     #[test]
     fn both_people_excluded_people_and_follow_ups() {
         let people = vec![(1, vec!["Kyle".into()]), (2, vec!["Maya".into()]), (3, vec!["Ann Lee".into()])];
@@ -123,8 +132,6 @@ impl SearchPlan {
     pub fn resolve(text: &str, previous: Option<&Self>) -> Self {
         Self::resolve_known(text, previous, &[], &[], false)
     }
-    /// `follow_up` narrows `previous` even without a refinement word
-    /// ("how many are from 2018?").
     pub fn resolve_known(
         text: &str,
         previous: Option<&Self>,
@@ -169,6 +176,7 @@ impl SearchPlan {
                 "document" | "documents" => &["doc", "pdf"],
                 "pdf" | "pdfs" => &["pdf"],
                 "audio" => &["audio"],
+                "3d" => &["model"],
                 _ => &[],
             }
         };
@@ -177,18 +185,21 @@ impl SearchPlan {
             "of", "my", "files", "file", "with", "in", "all", "only", "just", "now", "these", "those", "instead",
             "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were", "do", "does", "did", "have", "has",
             "there", "any", "about", "that", "i", "mentioning", "mention", "mentions", "named", "called", "titled",
-            "regarding", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
+            "regarding", "every", "one", "ones", "them", "they", "it", "its", "taken", "he", "she", "him", "her", "his", "their",
             "similar", "closest", "nearest", "lookalike", "lookalikes", "resemble", "resembles", "resembling",
         ];
-        // "how many of them show Alex?" and "what is he wearing?" point back at the last search.
         let refinement = follow_up
+            || normalized.first().is_some_and(|word| word == "and")
             || normalized.iter().any(|word| {
                 [
-                    "only", "just", "now", "these", "those", "instead", "also", "and", "them", "they", "ones", "he", "she",
+                    "only", "just", "now", "these", "those", "instead", "also", "them", "they", "ones", "he", "she",
                     "him", "her", "his", "their",
                 ]
                 .contains(&word.as_str())
             });
+        let model_nouns: Vec<usize> = (1..normalized.len())
+            .filter(|&index| normalized[index - 1] == "3d" && ["model", "models", "object", "objects", "asset", "assets"].contains(&normalized[index].as_str()))
+            .collect();
         let mut kinds: Vec<String> = if negative {
             vec![]
         } else {
@@ -208,10 +219,12 @@ impl SearchPlan {
                     && !event_indices.contains(index)
                     && !time_indices.contains(index)
                     && !excluded_indices.contains(index)
+                    && !model_nouns.contains(index)
                     && !fillers.contains(&word.as_str())
                     && (negative || aliases(word).is_empty())
             })
-            .map(|(_, (word, _))| *word)
+            .map(|(_, (word, _))| word.trim_end_matches(['?', '!', '.', ',', ';', ':']))
+            .filter(|word| !word.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
         if refinement && !normalized.iter().any(|word| word == "all")
@@ -319,9 +332,7 @@ fn timestamp(value: &str) -> Option<f64> {
         values[0] * 3600 + values[1] * 60 + values[2]
     } as f64)
 }
-/// People named right after "without"/"except"/"not" (optionally "of"/"the",
-/// joined by "or"/"and"/","), with the words they used, negation included.
-/// Mirrors macOS `ChatSearchPlan.matchExclusions`.
+/// People named right after "without"/"except"/"not", with the words used, negation included.
 fn match_exclusions(
     words: &[String],
     negations: &[&str],

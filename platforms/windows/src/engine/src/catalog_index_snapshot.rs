@@ -1,16 +1,13 @@
-//! Binary snapshot of the visual search graph and of the small set of changes
-//! applied on top of it. Everything is little-endian.
+//! Binary snapshot of the visual search graph and the small set of changes applied on top of it; everything
+//! little-endian.
 //!
-//! Graph file: `FIDGRAPH`, version u32, dimension u32, model length u32, model
-//! bytes, point count u64, then the graph in its field order with every
-//! sequence prefixed by a u64 length: ef_search u64; points (each a u64
-//! dimension and that many f32); the base layer (64 u32 neighbours per point);
-//! the upper layers (each a u64 size and 32 u32 neighbours per node); entries
-//! (i64 file id, u64 length, fingerprint bytes).
+//! Graph file: `FIDGRAPH`, version u32, dimension u32, model length u32 + bytes, point count u64, then the graph in
+//! field order with every sequence prefixed by a u64 length: ef_search u64; points (u64 dimension + f32s); base layer
+//! (64 u32 neighbours per point); upper layers (u64 size + 32 u32 neighbours per node); entries (i64 file id, u64
+//! length, fingerprint bytes).
 //!
-//! Delta file: `FIDDELTA`, version u32, dimension u32, added count u64, removed
-//! count u64, added entries (i64 file id, 64 fingerprint bytes, dimension f32),
-//! removed file ids (i64).
+//! Delta file: `FIDDELTA`, version u32, dimension u32, added count u64, removed count u64, added entries (i64 file id,
+//! 64 fingerprint bytes, dimension f32), removed file ids (i64).
 
 use super::Entry;
 use crate::util::hnsw_index::Embedding;
@@ -30,8 +27,7 @@ const MAX_MODEL_BYTES: usize = 200;
 const FINGERPRINT_BYTES: usize = 64;
 const HEADER_ALLOWANCE: u64 = 4096;
 
-/// The largest graph file `points` vectors of `dimension` can produce. Upper
-/// layers shrink geometrically and never hold more nodes than the base layer.
+/// Upper layers shrink geometrically and never hold more nodes than the base layer.
 pub(super) const fn max_graph_bytes(dimension: usize, points: usize) -> u64 {
     let point = 8 + 4 * dimension as u64;
     let zero = 4 * ZERO_WIDTH as u64;
@@ -97,7 +93,6 @@ fn finish<W: Write>(out: BufWriter<HashingWriter<'_, W>>) -> Result<(String, u64
     Ok((hex::encode(out.hasher.finalize()), out.written))
 }
 
-/// Streams the graph to `out`; returns the SHA-256 of the bytes and their count.
 pub(super) fn write_graph<W: Write>(
     out: W,
     model: &str,
@@ -170,8 +165,7 @@ impl<R: Read> Source<R> {
     fn i64(&mut self) -> Result<i64> {
         Ok(i64::from_le_bytes(self.array()?))
     }
-    /// Refuses a declared size the rest of the file cannot hold, before any
-    /// allocation is sized from it.
+    /// Refuses a declared size the rest of the file cannot hold, before sizing any allocation from it.
     fn holds(&self, items: u64, each: u64) -> Result<usize> {
         let bytes = items.checked_mul(each).ok_or_else(|| anyhow::anyhow!("Invalid visual index size"))?;
         ensure!(bytes <= self.remaining, "Truncated visual index snapshot");
@@ -216,9 +210,8 @@ struct Parts {
     fingerprints: Vec<String>,
 }
 
-/// Reads and validates a graph file of `length` bytes in one pass. Nothing
-/// from the file reaches the graph code until every bound and the checksum
-/// hold, because searching indexes neighbours without checks.
+/// Nothing reaches the graph code until every bound and the checksum hold, because searching indexes neighbours without
+/// checks.
 pub(super) fn read_graph<R: Read>(input: R, length: u64, expected_hash: &str, shape: &Shape<'_>) -> Result<HnswMap<Embedding, Entry>> {
     let mut source = Source { input: BufReader::with_capacity(1 << 16, input), hasher: Sha256::new(), remaining: length };
     ensure!(&source.array::<8>()? == GRAPH_MAGIC, "Not a visual index snapshot");
@@ -322,8 +315,7 @@ pub(super) fn read_delta<R: Read>(input: R, length: u64, expected_hash: &str, sh
     Ok(delta)
 }
 
-/// Writes a value's primitives in field order; sequences carry a u64 length,
-/// fixed-size arrays and structs carry nothing.
+/// Sequences carry a u64 length; fixed-size arrays and structs carry nothing.
 struct Flat<'a, W: Write> {
     out: &'a mut W,
 }
@@ -466,7 +458,6 @@ impl<W: Write> ser::SerializeStruct for &mut Flat<'_, W> {
     }
 }
 
-/// The validated arrays presented to the graph's deserializer in field order.
 #[derive(Clone, Copy)]
 enum Node<'a> {
     Map(&'a Parts),

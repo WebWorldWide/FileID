@@ -1,5 +1,4 @@
-// Root window: Prototype v3 shell. Title bar over a hairline-split
-// sidebar + page, all on the LavaLamp.
+// Root window: title bar over a hairline-split sidebar and page, all on the LavaLamp.
 import SwiftUI
 import AppKit
 import FileIDShared
@@ -15,6 +14,7 @@ struct MainWindow: View {
     @AppStorage(LibraryScope.storageKey) private var scopeRootID: Int = 0
     @AppStorage(TextSize.storageKey) private var textSizeRaw: String = TextSize.standard.rawValue
     @State private var pickedURL: URL?
+    @State private var scanCounterThrottle = ScanCounterThrottle()
     @State private var isDragHovering = false
     @State private var chatPresented = false
     private let toasts = ToastCenter.shared
@@ -92,6 +92,10 @@ struct MainWindow: View {
             case .act:     return [.cleanup, .restructure, .tools]
             }
         }
+        static let lastUsedKey = "lastArea"
+        static func lastUsed(defaults: UserDefaults = .standard) -> Area {
+            defaults.string(forKey: lastUsedKey).flatMap(Area.init(rawValue:)) ?? .browse
+        }
         /// Switching areas returns to the page last used in that area.
         func remembered(current: Tab) -> Tab {
             if tabs.contains(current) { return current }
@@ -105,13 +109,15 @@ struct MainWindow: View {
         Binding(get: { Tab(rawValue: activeTabRaw) ?? .library },
                 set: { newValue in
                     activeTabRaw = newValue.rawValue
-                    if let area = newValue.area { UserDefaults.standard.set(newValue.rawValue, forKey: "lastTab.\(area.rawValue)") }
+                    if let area = newValue.area {
+                        UserDefaults.standard.set(newValue.rawValue, forKey: "lastTab.\(area.rawValue)")
+                        UserDefaults.standard.set(area.rawValue, forKey: Area.lastUsedKey)
+                    }
                 })
     }
     private var activeTab: Tab { Tab(rawValue: activeTabRaw) ?? .library }
 
-    /// A job list taken from a search reply goes stale (the pill kept saying
-    /// "Moments 0%"), so any page asks again each second while a job runs.
+    /// A job list taken from a search reply goes stale, so any page asks again each second while a job runs.
     nonisolated static func jobsNeedRefresh(_ jobs: [CatalogJob]) -> Bool {
         jobs.contains { $0.state == "queued" || $0.state == "running" }
     }
@@ -161,16 +167,22 @@ struct MainWindow: View {
                            pickedURL: $pickedURL, onSwitchTab: { activeTabBinding.wrappedValue = $0 }, pickFolder: pickFolder)
                         .font(Theme.Font.body(13.5))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .engineUnavailableOverlay(engine: engine, activeTab: activeTab)
+                        .overlay(alignment: .bottom) {
+                            if let toast = toasts.current {
+                                ToastView(toast: toast).padding(.bottom, 22)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
+                        }
                         .focusSection()
-                    // Chat stays beside the current page, as before the redesign;
-                    // the Chat page is the same conversation at full width.
+                    // Chat stays beside the current page; the Chat page is the same conversation at full width.
                     if chatPresented && activeTab != .chat {
                         VHairline()
-                        ChatWorkbench(engine: engine, onClose: { chatPresented = false })
+                        ChatWorkbench(engine: engine, store: store, onClose: { chatPresented = false })
                             .font(Theme.Font.body(13.5))
                             .frame(width: 380)
                             .focusSection()
-                            .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.86), ignoresSafeAreaEdges: [])
+                            .background(Theme.surfaceBase.opacity(0.86), ignoresSafeAreaEdges: [])
                             .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
                             .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
                     }
@@ -178,11 +190,20 @@ struct MainWindow: View {
                 }
             }
             .preferredColorScheme(.dark)
-            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: sidebarVisible)
-            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
+            .animation(reduceMotion ? nil : Theme.springStandard, value: sidebarVisible)
+            .animation(reduceMotion ? nil : Theme.springStandard, value: chatPresented)
             .accentColor(Theme.gold)
-            .background { shortcutHost }
             .onReceive(NotificationCenter.default.publisher(for: .fileIDChooseFolder)) { _ in pickFolder() }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDGoToTab)) { note in
+                if let raw = note.object as? String, let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleChat)) { _ in
+                if activeTab != .chat { chatPresented.toggle() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDToggleMotion)) { _ in atmospherePaused.toggle() }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+                restorePickedFolderIfPossible()
+            }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()
@@ -194,6 +215,7 @@ struct MainWindow: View {
                 handoff.navigate = { activeTabBinding.wrappedValue = $0 }
                 handoff.chooseFolder = { chooseProposed($0) }
                 #if DEBUG
+                if SelfShot.opensChatDrawer { chatPresented = true }
                 SelfShot.run(engine: engine, store: store,
                              navigate: { raw in if let tab = Tab(rawValue: raw) { activeTabBinding.wrappedValue = tab } },
                              openFolder: { url, scan in if scan { choose(url) } else { pickedURL = url } })
@@ -208,12 +230,20 @@ struct MainWindow: View {
             .onChange(of: scopeRootID) { _, _ in applyScope(engine.libraryRoots) }
             // The counts in the sidebar and page header must catch up when a scan ends on any
             // page, not only while the Library page is the one on screen.
+            .onChange(of: engine.lastProgress?.processed) { _, _ in
+                if scanCounterThrottle.shouldRefresh(scanPhase: engine.lastProgress?.phase, now: Date()) { store.openIfPossible() }
+            }
             .onChange(of: engine.lastTerminalEventAt) { _, _ in
                 // A first scan creates the catalog after launch, so the reader may not be open yet.
                 store.openIfPossible()
                 store.notifyChanged()
             }
-            .onChange(of: engineReady, initial: true) { _, ready in if ready { engine.refreshLibraryRoots() } }
+            .onChange(of: engineReady, initial: true) { _, ready in
+                guard ready else { return }
+                store.openIfPossible()
+                store.notifyChanged()
+                engine.refreshLibraryRoots()
+            }
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
             .task(id: Self.jobsNeedRefresh(engine.catalogJobs)) {
@@ -225,21 +255,15 @@ struct MainWindow: View {
             }
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
                 guard let result = engine.lastFaceClustering, result.personCount > 0 else { return }
-                toasts.show("Scan complete · \(result.personCount) people grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
+                toasts.show("Scan complete · \(Plural.noun(result.personCount, "person", "people")) grouped", actionLabel: activeTab == .people ? nil : "Open People", duration: 7) {
                     activeTabBinding.wrappedValue = .people
                 }
             }
             .task(id: engine.deepAnalyzeComplete?.processed ?? -1) {
                 guard let done = engine.deepAnalyzeComplete, done.processed > 0 else { return }
-                toasts.show("Descriptions ready for \(done.processed.formatted()) files", actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
+                toasts.show(DescribeRunSummary.toast(processed: done.processed, ran: done.modelKind, chosen: DeepAnalyzeSettings.shared.activeKind), actionLabel: activeTab == .library ? nil : "Open Library", duration: 7) {
                     activeTabBinding.wrappedValue = .library
                 }
-            }
-
-            if let toast = toasts.current {
-                VStack { Spacer(); ToastView(toast: toast).padding(.bottom, 22) }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .allowsHitTesting(true)
             }
 
             if isDragHovering {
@@ -256,7 +280,7 @@ struct MainWindow: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: toasts.current?.id)
+        .animation(reduceMotion ? nil : Theme.springStandard, value: toasts.current?.id)
         .environment(\.atmospherePaused, atmospherePaused)
         .onDrop(of: [.fileURL], isTargeted: $isDragHovering) { providers in
             guard let provider = providers.first else { return false }
@@ -271,8 +295,8 @@ struct MainWindow: View {
                     let folderName = url.lastPathComponent
                     DispatchQueue.main.async {
                         let alert = NSAlert()
-                        alert.messageText = "Folder isn't readable"
-                        alert.informativeText = "\"\(folderName)\" can't be read. If it's a network share, mount it and try again. If it's a system folder, pick a folder you own."
+                        alert.messageText = "Folder isn’t readable"
+                        alert.informativeText = "“\(folderName)” can’t be read. If it’s a network share, mount it and try again. If it’s a system folder, pick a folder you own."
                         alert.alertStyle = .warning
                         alert.runModal()
                     }
@@ -282,20 +306,6 @@ struct MainWindow: View {
             }
             return true
         }
-    }
-
-    /// ⌘1…⌘9 jump to pages; invisible buttons carry the shortcuts.
-    private var shortcutHost: some View {
-        Group {
-            ForEach(Array(Tab.order.enumerated()), id: \.offset) { index, tab in
-                Button("") { activeTabBinding.wrappedValue = tab }
-                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
-            }
-            Button("") { atmospherePaused.toggle() }.keyboardShortcut("m", modifiers: [.command, .shift])
-        }
-        .opacity(0)
-        .frame(width: 0, height: 0)
-        .accessibilityHidden(true)
     }
 
     // MARK: - Folder picking
@@ -323,8 +333,8 @@ struct MainWindow: View {
         if panel.runModal() == .OK, let url = panel.url {
             guard FileManager.default.isReadableFile(atPath: url.path) else {
                 let alert = NSAlert()
-                alert.messageText = "Can't read \(url.lastPathComponent)"
-                alert.informativeText = "FileID doesn't have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
+                alert.messageText = "Can’t read \(url.lastPathComponent)"
+                alert.informativeText = "FileID doesn’t have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
@@ -339,7 +349,10 @@ struct MainWindow: View {
         // and a second scan would start on top of the running one.
         let scanning = engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false
         if scanning {
-            guard pickedURL != url else { return }
+            guard pickedURL != url else {
+                toasts.show("Already reading \(url.lastPathComponent).")
+                return
+            }
             let alert = NSAlert()
             alert.messageText = "A scan is running. Stop it and scan the new folder?"
             alert.informativeText = "Files already read are kept. You can scan the first folder again later and it picks up where it stopped."
@@ -347,7 +360,9 @@ struct MainWindow: View {
             alert.addButton(withTitle: "Stop and Scan \(url.lastPathComponent)")
             alert.addButton(withTitle: "Keep Scanning")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
-            engine.cancelScan()
+            pickedURL = url
+            engine.replaceScan(with: url)
+            return
         }
         if pickedURL != url { engine.clearProgress() }
         pickedURL = url
@@ -373,22 +388,18 @@ struct MainWindow: View {
 
     private func restorePickedFolderIfPossible() {
         guard pickedURL == nil,
-              let data = UserDefaults.standard.data(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey)
+              UserDefaults.standard.data(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey) != nil
         else { return }
         let key = SecurityScopedBookmark.pickedFolderDefaultsKey
         Task.detached(priority: .utility) {
-            guard let accessibleURL = SecurityScopedBookmark.retainAccess(for: data) else {
-                await MainActor.run {
-                    guard self.pickedURL == nil else { return }
-                    UserDefaults.standard.removeObject(forKey: key)
-                }
-                return
-            }
-            var isDir: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: accessibleURL.path, isDirectory: &isDir) && isDir.boolValue
+            let url = PickedFolderRestore.accessibleFolder(
+                defaults: .standard, key: key,
+                retain: { SecurityScopedBookmark.retainAccess(for: $0) },
+                isDirectory: { var isDir: ObjCBool = false; return FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDir) && isDir.boolValue })
+            guard let url else { return }
             await MainActor.run {
                 guard self.pickedURL == nil else { return }
-                if exists { self.pickedURL = accessibleURL } else { UserDefaults.standard.removeObject(forKey: key) }
+                self.pickedURL = url
             }
         }
     }

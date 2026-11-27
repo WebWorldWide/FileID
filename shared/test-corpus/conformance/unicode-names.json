@@ -1,0 +1,596 @@
+[
+  {
+    "name": "restructure-keeps-the-spelling-of-existing-folders",
+    "description": "A move into a sibling of a folder whose name is stored decomposed (NFD) or composed (NFC) keeps that folder's name exactly as it is on disk; apply and undo leave one spelling of each folder.",
+    "tree": [
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/K1.JPG",
+        "content": "k1.jpgRe",
+        "row": {
+          "id": 10,
+          "kind": "image",
+          "created_at": 1789812000
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/K2.JPG",
+        "content": "k2.jpgRe",
+        "row": {
+          "id": 11,
+          "kind": "image",
+          "created_at": 1789812600
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/K3.JPG",
+        "content": "k3.jpgRe",
+        "row": {
+          "id": 12,
+          "kind": "image",
+          "created_at": 1789813200
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D1.ARW",
+        "content": "d1.arwRe",
+        "row": {
+          "id": 13,
+          "kind": "image",
+          "created_at": 1789813800
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D2.ARW",
+        "content": "d2.arwRe",
+        "row": {
+          "id": 14,
+          "kind": "image",
+          "created_at": 1789814400
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D3.ARW",
+        "content": "d3.arwRe",
+        "row": {
+          "id": 15,
+          "kind": "image",
+          "created_at": 1789815000
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/K1.ARW",
+        "content": "rK1.ARWRe",
+        "row": {
+          "id": 16,
+          "kind": "image",
+          "created_at": 1789812000
+        }
+      },
+      {
+        "path": "Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/K2.ARW",
+        "content": "rK2.ARWRe",
+        "row": {
+          "id": 17,
+          "kind": "image",
+          "created_at": 1789812600
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/K1.JPG",
+        "content": "k1.jpg\u00dcn",
+        "row": {
+          "id": 30,
+          "kind": "image",
+          "created_at": 1789912000
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/K2.JPG",
+        "content": "k2.jpg\u00dcn",
+        "row": {
+          "id": 31,
+          "kind": "image",
+          "created_at": 1789912600
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/K3.JPG",
+        "content": "k3.jpg\u00dcn",
+        "row": {
+          "id": 32,
+          "kind": "image",
+          "created_at": 1789913200
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D1.ARW",
+        "content": "d1.arw\u00dcn",
+        "row": {
+          "id": 33,
+          "kind": "image",
+          "created_at": 1789913800
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D2.ARW",
+        "content": "d2.arw\u00dcn",
+        "row": {
+          "id": 34,
+          "kind": "image",
+          "created_at": 1789914400
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D3.ARW",
+        "content": "d3.arw\u00dcn",
+        "row": {
+          "id": 35,
+          "kind": "image",
+          "created_at": 1789915000
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/RAWs/K1.ARW",
+        "content": "rK1.ARW\u00dcn",
+        "row": {
+          "id": 36,
+          "kind": "image",
+          "created_at": 1789912000
+        }
+      },
+      {
+        "path": "\u00dcn\u00ef Game 9-20-26/Photos/RAWs/K2.ARW",
+        "content": "rK2.ARW\u00dcn",
+        "row": {
+          "id": 37,
+          "kind": "image",
+          "created_at": 1789912600
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "save": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 13,
+                "source": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D1.ARW}",
+                "destination": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D1.ARW}"
+              },
+              {
+                "fileID": 14,
+                "source": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D2.ARW}",
+                "destination": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D2.ARW}"
+              },
+              {
+                "fileID": 15,
+                "source": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs/D3.ARW}",
+                "destination": "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D3.ARW}"
+              },
+              {
+                "fileID": 33,
+                "source": "{path:\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D1.ARW}",
+                "destination": "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D1.ARW}"
+              },
+              {
+                "fileID": 34,
+                "source": "{path:\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D2.ARW}",
+                "destination": "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D2.ARW}"
+              },
+              {
+                "fileID": 35,
+                "source": "{path:\u00dcn\u00ef Game 9-20-26/Photos/JPEGs/D3.ARW}",
+                "destination": "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D3.ARW}"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "apply",
+        "command": {
+          "applyRestructure": {
+            "libraryRoot": "{root}",
+            "moves": {
+              "$var": "plan.moves"
+            },
+            "useSymlinks": false
+          }
+        },
+        "await": "restructureApplyResult",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "applied": 6,
+          "failed": 0
+        }
+      },
+      {
+        "label": "folders keep their spelling after apply",
+        "fs": {
+          "entries": {
+            ".": [
+              "\u00dcn\u00ef Game 9-20-26",
+              "Re\u0301sume\u0301 Game 9-19-26"
+            ],
+            "Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs": [
+              "D1.ARW",
+              "D2.ARW",
+              "D3.ARW",
+              "K1.ARW",
+              "K2.ARW"
+            ],
+            "\u00dcn\u00ef Game 9-20-26/Photos/RAWs": [
+              "D1.ARW",
+              "D2.ARW",
+              "D3.ARW",
+              "K1.ARW",
+              "K2.ARW"
+            ]
+          }
+        }
+      },
+      {
+        "label": "catalog paths keep the spelling",
+        "db": "SELECT path_text FROM files WHERE id IN (13,33) ORDER BY id",
+        "expect": [
+          [
+            "{path:Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs/D1.ARW}"
+          ],
+          [
+            "{path:\u00dcn\u00ef Game 9-20-26/Photos/RAWs/D1.ARW}"
+          ]
+        ]
+      },
+      {
+        "label": "rescan after apply",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180
+      },
+      {
+        "label": "a rescan finds the moved files as the same rows",
+        "db": "SELECT count(*), coalesce(sum(failed),0), min(id), max(id) FROM files",
+        "expect": [
+          [
+            16,
+            0,
+            10,
+            37
+          ]
+        ]
+      },
+      {
+        "label": "undo",
+        "command": {
+          "undoRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructureApplyResult",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "applied": 6,
+          "failed": 0
+        }
+      },
+      {
+        "label": "folders keep their spelling after undo",
+        "fs": {
+          "entries": {
+            ".": [
+              "\u00dcn\u00ef Game 9-20-26",
+              "Re\u0301sume\u0301 Game 9-19-26"
+            ],
+            "Re\u0301sume\u0301 Game 9-19-26/Photos/JPEGs": [
+              "D1.ARW",
+              "D2.ARW",
+              "D3.ARW",
+              "K1.JPG",
+              "K2.JPG",
+              "K3.JPG"
+            ],
+            "\u00dcn\u00ef Game 9-20-26/Photos/JPEGs": [
+              "D1.ARW",
+              "D2.ARW",
+              "D3.ARW",
+              "K1.JPG",
+              "K2.JPG",
+              "K3.JPG"
+            ],
+            "Re\u0301sume\u0301 Game 9-19-26/Photos/RAWs": [
+              "K1.ARW",
+              "K2.ARW"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "restructure-new-folder-names-are-composed",
+    "description": "A folder the planner invents from filename words is named in composed Unicode (NFC) whether the files' names are stored composed or decomposed; the files keep their own names.",
+    "tree": [
+      {
+        "path": "Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf",
+        "content": "r\u00e9sum\u00e9_\u00fcn\u00efcode 0",
+        "row": {
+          "id": 1,
+          "kind": "doc",
+          "created_at": 1780259200
+        }
+      },
+      {
+        "path": "Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf",
+        "content": "r\u00e9sum\u00e9_\u00fcn\u00efcode 1",
+        "row": {
+          "id": 2,
+          "kind": "doc",
+          "created_at": 1780518400
+        }
+      },
+      {
+        "path": "Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf",
+        "content": "r\u00e9sum\u00e9_\u00fcn\u00efcode 2",
+        "row": {
+          "id": 3,
+          "kind": "doc",
+          "created_at": 1780777600
+        }
+      },
+      {
+        "path": "Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf",
+        "content": "r\u00e9sum\u00e9_\u00fcn\u00efcode 3",
+        "row": {
+          "id": 4,
+          "kind": "doc",
+          "created_at": 1781036800
+        }
+      },
+      {
+        "path": "Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf",
+        "content": "r\u00e9sum\u00e9_\u00fcn\u00efcode 4",
+        "row": {
+          "id": 5,
+          "kind": "doc",
+          "created_at": 1781296000
+        }
+      },
+      {
+        "path": "Downloads/fa\u00e7ade_\u00f1o\u00f1o_0.pdf",
+        "content": "fa\u00e7ade_\u00f1o\u00f1o 0",
+        "row": {
+          "id": 11,
+          "kind": "doc",
+          "created_at": 1781259200
+        }
+      },
+      {
+        "path": "Downloads/fa\u00e7ade_\u00f1o\u00f1o_1.pdf",
+        "content": "fa\u00e7ade_\u00f1o\u00f1o 1",
+        "row": {
+          "id": 12,
+          "kind": "doc",
+          "created_at": 1781518400
+        }
+      },
+      {
+        "path": "Downloads/fa\u00e7ade_\u00f1o\u00f1o_2.pdf",
+        "content": "fa\u00e7ade_\u00f1o\u00f1o 2",
+        "row": {
+          "id": 13,
+          "kind": "doc",
+          "created_at": 1781777600
+        }
+      },
+      {
+        "path": "Downloads/fa\u00e7ade_\u00f1o\u00f1o_3.pdf",
+        "content": "fa\u00e7ade_\u00f1o\u00f1o 3",
+        "row": {
+          "id": 14,
+          "kind": "doc",
+          "created_at": 1782036800
+        }
+      },
+      {
+        "path": "Downloads/fa\u00e7ade_\u00f1o\u00f1o_4.pdf",
+        "content": "fa\u00e7ade_\u00f1o\u00f1o 4",
+        "row": {
+          "id": 15,
+          "kind": "doc",
+          "created_at": 1782296000
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "plan",
+        "save": "plan",
+        "command": {
+          "planRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructurePlan",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "moves": {
+            "$tol": "set",
+            "value": [
+              {
+                "fileID": 1,
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf}"
+              },
+              {
+                "fileID": 2,
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf}"
+              },
+              {
+                "fileID": 3,
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf}"
+              },
+              {
+                "fileID": 4,
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf}"
+              },
+              {
+                "fileID": 5,
+                "source": "{path:Downloads/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf}",
+                "destination": "{path:R\u00e9sum\u00e9 \u00dcn\u00efcode/re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf}"
+              },
+              {
+                "fileID": 11,
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_0.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_0.pdf}"
+              },
+              {
+                "fileID": 12,
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_1.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_1.pdf}"
+              },
+              {
+                "fileID": 13,
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_2.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_2.pdf}"
+              },
+              {
+                "fileID": 14,
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_3.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_3.pdf}"
+              },
+              {
+                "fileID": 15,
+                "source": "{path:Downloads/fa\u00e7ade_\u00f1o\u00f1o_4.pdf}",
+                "destination": "{path:Fa\u00e7ade \u00d1o\u00f1o/fa\u00e7ade_\u00f1o\u00f1o_4.pdf}"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "apply",
+        "command": {
+          "applyRestructure": {
+            "libraryRoot": "{root}",
+            "moves": {
+              "$var": "plan.moves"
+            },
+            "useSymlinks": false
+          }
+        },
+        "await": "restructureApplyResult",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "applied": 10,
+          "failed": 0
+        }
+      },
+      {
+        "label": "new folders are composed",
+        "fs": {
+          "entries": {
+            ".": [
+              "Downloads",
+              "R\u00e9sum\u00e9 \u00dcn\u00efcode",
+              "Fa\u00e7ade \u00d1o\u00f1o"
+            ],
+            "Downloads": [],
+            "R\u00e9sum\u00e9 \u00dcn\u00efcode": [
+              "re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf"
+            ],
+            "Fa\u00e7ade \u00d1o\u00f1o": [
+              "fa\u00e7ade_\u00f1o\u00f1o_0.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_1.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_2.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_3.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_4.pdf"
+            ]
+          }
+        }
+      },
+      {
+        "label": "rescan after apply",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180
+      },
+      {
+        "label": "a rescan finds the moved files as the same rows",
+        "db": "SELECT count(*), coalesce(sum(failed),0), min(id), max(id) FROM files",
+        "expect": [
+          [
+            10,
+            0,
+            1,
+            15
+          ]
+        ]
+      },
+      {
+        "label": "undo",
+        "command": {
+          "undoRestructure": {
+            "libraryRoot": "{root}"
+          }
+        },
+        "await": "restructureApplyResult",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "applied": 10,
+          "failed": 0
+        }
+      },
+      {
+        "label": "files are back under their own names",
+        "fs": {
+          "entries": {
+            "Downloads": [
+              "fa\u00e7ade_\u00f1o\u00f1o_0.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_1.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_2.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_3.pdf",
+              "fa\u00e7ade_\u00f1o\u00f1o_4.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_0.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_1.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_2.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_3.pdf",
+              "re\u0301sume\u0301_u\u0308ni\u0308code_4.pdf"
+            ]
+          }
+        }
+      }
+    ]
+  }
+]

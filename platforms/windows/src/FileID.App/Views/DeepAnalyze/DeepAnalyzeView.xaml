@@ -1,18 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<!--
-    DeepAnalyzeView — VLM picker + analyze controls + live caption
-    stream.
-
-    Layout:
-      Row 0: Page header (title + subtitle)
-      Row 1: llama.cpp runtime banner (visible if missing)
-    Row 2: Model picker five cards in two Grid rows
-      Row 3: Active card panel — Analyze whole library / selected / current,
-             Cancel, Skip-existing toggle
-      Row 4: Live caption stream — current file thumb + token RichText +
-             progress bar + N-of-M counter
-      Row 5: Proposed renames footer — link to BulkRenameSheet pre-seeded
--->
+<!-- DeepAnalyzeView: VLM picker, analyze controls and the live caption stream. -->
 <UserControl
     x:Class="FileID.Views.DeepAnalyze.DeepAnalyzeView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -22,9 +9,7 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <!-- HorizontalAlignment=Center (was Stretch) for the
-             same reason as Settings — center the MaxWidth-capped column
-             on wide windows. -->
+        <!-- Centers the MaxWidth-capped column on wide windows. -->
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">

@@ -19,8 +19,7 @@ cluster again with the given environment overrides.
   people_eval.py --engine <FileIDEngine> --images <dir> --labels <labels.json> --work <dir>
   people_eval.py ... --name tight --env FILEID_FACE_PASS1_COS=0.70
   people_eval.py ... --incremental
-  people_eval.py --engine <fileid-engine> --flavor rust --scan-flavor swift   # Rust clusters the Swift scan
-  people_eval.py ... --scan-flavor swift --reembed   # ... after embedding every face itself
+  people_eval.py ... --reembed   # clear the scan's face vectors so the engine embeds every face itself
 
 --split tune clusters only the photos of that half (the other half's faces are
 removed from the scratch copy before clustering), so thresholds and suggestion
@@ -417,7 +416,6 @@ def evaluate(labels, assigned):
 
 
 def queue_report(labels, assigned, database: Path):
-    """Score the stored merge and split suggestions against the labels."""
     connection = sqlite3.connect(database)
     tables = tables_of(connection)
     merges = list(connection.execute("SELECT person_id, other_person_id, score FROM face_merge_suggestions")) \
@@ -474,11 +472,8 @@ def summary_line(name, block):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--engine", required=True, type=Path, help="FileIDEngine or fileid-engine binary")
-    parser.add_argument("--flavor", choices=("swift", "rust"), default="swift")
-    parser.add_argument("--scan-flavor", choices=("swift", "rust"),
-                        help="cluster the stored scan of this flavor (default: --flavor); "
-                             "e.g. --flavor rust --scan-flavor swift re-clusters a Swift scan with the Rust engine")
+    parser.add_argument("--engine", required=True, type=Path, help="FileIDEngine binary (the shared Rust engine)")
+    parser.add_argument("--flavor", choices=("rust",), default="rust")
     parser.add_argument("--images", type=Path, default=EVAL_ROOT / "people/images")
     parser.add_argument("--labels", type=Path, default=EVAL_ROOT / "people/labels.json")
     parser.add_argument("--work", type=Path, default=EVAL_ROOT / "people/runs",
@@ -511,15 +506,12 @@ def main():
     env = parse_env(args.env)
     scan_env = {k: v for k, v in env.items() if k in SCAN_ENV_KEYS}
     scan_key = hashlib.sha256(json.dumps(scan_env, sort_keys=True).encode()).hexdigest()[:8] if scan_env else "default"
-    scan_flavor = args.scan_flavor or args.flavor
-    scan_state = work / f"{scan_flavor}-scan-{scan_key}"
+    scan_state = work / f"{args.flavor}-scan-{scan_key}"
     snapshot = scan_state / "snapshot.sqlite"
 
     before = live_state_snapshot()
-    meta = {"name": args.name, "flavor": args.flavor, "scanFlavor": scan_flavor, "env": env, "split": args.split,
+    meta = {"name": args.name, "flavor": args.flavor, "env": env, "split": args.split,
             "reembed": args.reembed}
-    if scan_flavor != args.flavor and (args.rescan or not snapshot.exists()):
-        raise SystemExit(f"no stored {scan_flavor} scan in {scan_state}; run that flavor first")
     if args.rescan or not snapshot.exists():
         meta["scanRun"] = run_scan(args.engine, images, scan_state, env, args.timeout, home)
         checkpoint(database_path(scan_state))

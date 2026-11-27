@@ -1,7 +1,5 @@
-// When a file's text deserves a careful read: Vision's accurate tier during the
-// scan (macOS) and a VLM transcription during Deep Analyze (every engine).
-// Mirrored rule for rule by the Rust engine's `pipeline/text_reading.rs`; the
-// shared conformance case pins the search side.
+// Decides when a file's text deserves a careful read: Vision's accurate tier during scan, and a VLM transcription during Deep Analyze.
+// Mirrors the Rust engine's pipeline/text_reading.rs rule for rule; the shared conformance case pins the search side.
 import Foundation
 
 package enum TextReading {
@@ -74,7 +72,7 @@ package enum TextReading {
                     return true
                 }
             }
-            if char.isLetter, !"aeiouyAEIOUY".contains(char) {
+            if isLatinLetter(char), !"aeiouyAEIOUY".contains(char) {
                 consonantRun += 1
                 if consonantRun >= 5 { return true }
             } else {
@@ -82,6 +80,21 @@ package enum TextReading {
             }
         }
         return false
+    }
+
+    /// Latin, Latin-1, Latin Extended and Latin Extended Additional: the scripts where five consonants in a row means a mangled read. A Cyrillic, Greek or CJK word has no vowels to tell apart, so the rule must not apply to it.
+    package static func isLatinLetter(_ char: Character) -> Bool {
+        guard char.isLetter, let value = char.unicodeScalars.first?.value else { return false }
+        return value < 0x0250 || (0x1E00...0x1EFF).contains(value)
+    }
+
+    /// True when most of the letters in `text` are Latin; the fast English-only read can say nothing about other scripts.
+    package static func isMostlyLatin(_ text: String) -> Bool {
+        var latin = 0, other = 0
+        for char in text where char.isLetter {
+            if isLatinLetter(char) { latin += 1 } else { other += 1 }
+        }
+        return latin >= other
     }
 
     package static func garbled(_ text: String) -> (count: Int, share: Double) {
@@ -107,7 +120,7 @@ package enum TextReading {
     package static func isHandwritten(fastText: String, carefulText: String, tags: [String], paperLike: Bool) -> Bool {
         guard !carefulText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         if hasHandwritingHint(tags) { return true }
-        guard paperLike else { return false }
+        guard paperLike, isMostlyLatin(carefulText) else { return false }
         return garbled(fastText).share >= garbledShareThreshold
             || disagreement(fast: fastText, careful: carefulText) >= garbledShareThreshold
     }

@@ -505,7 +505,8 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     frame.set_margin_start(10);
     frame.set_margin_end(10);
     frame.set_margin_bottom(10);
-    let stack = gtk::Stack::builder().vhomogeneous(false).build();
+    // Not homogeneous: the hidden scan page would otherwise set the sidebar's width.
+    let stack = gtk::Stack::builder().vhomogeneous(false).hhomogeneous(false).build();
     frame.append(&stack);
 
     let pick = vbox(8);
@@ -588,16 +589,7 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         move |toggle| {
             let open = !details.reveals_child();
             details.set_reveal_child(open);
-            toggle.set_icon_name(if open {
-                "pan-up-symbolic"
-            } else {
-                "pan-down-symbolic"
-            });
-            toggle.set_tooltip_text(Some(if open {
-                "Hide scan details"
-            } else {
-                "Show scan details"
-            }));
+            sync_details_toggle(toggle, open);
             if open {
                 let target = stats.clone();
                 let _ = crate::spring::animate(&stats, 0.0, 1.0, move |v| {
@@ -711,6 +703,7 @@ impl ScanCard {
         self.details_toggle.set_visible(!rows.is_empty());
         if rows.is_empty() {
             self.details.set_reveal_child(false);
+            sync_details_toggle(&self.details_toggle, false);
         }
         // Rows are kept and retexted: this runs for every progress update.
         let mut shown = self.stat_rows.borrow_mut();
@@ -759,5 +752,34 @@ impl ScanCard {
         for button in [&self.pause, &self.resume, &self.cancel] {
             button.set_sensitive(status.engine_ready);
         }
+    }
+}
+
+fn sync_details_toggle(toggle: &gtk::Button, open: bool) {
+    toggle.set_icon_name(if open {
+        "pan-up-symbolic"
+    } else {
+        "pan-down-symbolic"
+    });
+    toggle.set_tooltip_text(Some(if open {
+        "Hide scan details"
+    } else {
+        "Show scan details"
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_sidebar_never_asks_for_more_than_its_fixed_width() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let sidebar = Sidebar::new(Rc::new(|_| {}));
+        let (minimum, _, _, _) = sidebar.root.measure(gtk::Orientation::Horizontal, -1);
+        assert!(minimum <= 232, "the sidebar asks for {minimum} px");
     }
 }

@@ -1,5 +1,4 @@
-// Describe Files page (tab id "deep-analyze"): on-device VLM descriptions and
-// suggested names, the port of macOS `DeepAnalyzeViews.swift`.
+// Describe Files page (tab id "deep-analyze"): on-device VLM descriptions and suggested names.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -25,11 +24,9 @@ mod deep_scope;
 const PROPOSED_LIMIT: i64 = 200;
 const APPLY_TAGS_TIMEOUT_SECS: u64 = 15;
 
-// ─── VLM registry (Linux mirror of macOS `AIModelKind`) ──────────────────────
-// `model_kind` keys are the exact strings the engine accepts (see the shared
-// engine `models::registry::lookup_full`). RAM / seconds-per-image are display
-// estimates; until the engine's `listModels` catalog arrives the picker shows
-// the ones that fit this machine.
+// model_kind keys are the exact strings the engine accepts (models::registry::lookup_full). RAM and
+// seconds-per-image are display estimates; the picker shows only models that fit this machine
+// until the engine's listModels catalog arrives.
 struct VlmKind {
     key: &'static str,
     display: &'static str,
@@ -38,7 +35,11 @@ struct VlmKind {
     license: &'static str,
 }
 
-const VLMS: [VlmKind; 3] = [
+const LARGE_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_LARGE_KIND;
+const SMALL_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_SMALL_KIND;
+const SMALLEST_VLM_KIND: &str = fileid_engine::commands::models::PORTABLE_SMALLEST_KIND;
+
+const VLMS: [VlmKind; 6] = [
     VlmKind {
         key: "qwen2_5_vl_7b",
         display: "Qwen2.5-VL 7B",
@@ -60,6 +61,27 @@ const VLMS: [VlmKind; 3] = [
         secs_per_image: 14.0,
         license: "Apache-2.0",
     },
+    VlmKind {
+        key: LARGE_VLM_KIND,
+        display: "GLM-4.6V",
+        ram_gb: 84.0,
+        secs_per_image: 30.0,
+        license: "MIT",
+    },
+    VlmKind {
+        key: SMALL_VLM_KIND,
+        display: "Qwen3-VL 2B",
+        ram_gb: 3.0,
+        secs_per_image: 3.0,
+        license: "Apache-2.0",
+    },
+    VlmKind {
+        key: SMALLEST_VLM_KIND,
+        display: "Qwen3-VL 2B (compact)",
+        ram_gb: 2.4,
+        secs_per_image: 3.0,
+        license: "Apache-2.0",
+    },
 ];
 
 fn vlm_by_key(key: &str) -> &'static VlmKind {
@@ -72,11 +94,11 @@ fn recommended_vlm_kind(
     free_disk_bytes: Option<u64>,
 ) -> &'static str {
     let order: &[&str] = if total_ram_gb >= 47.5 {
-        &["mistral_small_3_2", "qwen2_5_vl_7b", "gemma_3_4b"]
+        &[LARGE_VLM_KIND, "mistral_small_3_2", "qwen2_5_vl_7b", SMALL_VLM_KIND, SMALLEST_VLM_KIND]
     } else if total_ram_gb >= 15.0 {
-        &["qwen2_5_vl_7b", "gemma_3_4b"]
+        &["qwen2_5_vl_7b", SMALL_VLM_KIND, SMALLEST_VLM_KIND]
     } else {
-        &["gemma_3_4b"]
+        &[SMALL_VLM_KIND, SMALLEST_VLM_KIND]
     };
     order
         .iter()
@@ -88,7 +110,21 @@ fn recommended_vlm_kind(
                 .copied()
                 .find(|kind| vlm_fits(kind, total_ram_gb, available_ram_gb, None))
         })
-        .unwrap_or("gemma_3_4b")
+        .unwrap_or(SMALLEST_VLM_KIND)
+}
+
+thread_local! {
+    static ENGINE_RECOMMENDED_KIND: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// The engine's listModels pick among the choices on offer, or none when it is
+/// absent, not on offer, or under terms the user has not accepted.
+fn engine_recommended_kind(shown: &[VlmChoice], recommended_id: Option<&str>) -> Option<&'static str> {
+    let id = recommended_id?;
+    shown
+        .iter()
+        .find(|choice| choice.id == id && !choice.terms_required)
+        .map(|choice| choice.id)
 }
 
 fn vlm_fits(
@@ -97,27 +133,18 @@ fn vlm_fits(
     available_ram_gb: f64,
     free_disk_bytes: Option<u64>,
 ) -> bool {
-    let (minimum_total, working_set) = match kind {
-        "mistral_small_3_2" => (23.5, 16.0),
-        "qwen2_5_vl_7b" => (11.5, 7.0),
-        "gemma_3_4b" => (7.5, 4.5),
-        _ => return false,
-    };
-    if total_ram_gb < minimum_total {
+    let gib = model_install_info(kind).1;
+    if gib <= 0.0 {
         return false;
     }
-    let reserve = if total_ram_gb <= 10.0 {
-        2.0
-    } else if total_ram_gb <= 20.0 {
-        4.0
+    let requested = fileid_engine::util::model_memory::estimate_download_mb((gib * 1_073_741_824.0) as u64);
+    let total = (total_ram_gb * 1024.0) as u64;
+    let memory_fits = if available_ram_gb > 0.0 {
+        fileid_engine::util::model_memory::fits_now(total, (available_ram_gb * 1024.0) as u64, requested)
     } else {
-        6.0
+        fileid_engine::util::model_memory::fits_budget(total, requested)
     };
-    let mut usable = (total_ram_gb - reserve).max(0.0);
-    if available_ram_gb > 0.0 {
-        usable = usable.min((available_ram_gb - 1.5).max(0.0));
-    }
-    if usable < working_set {
+    if !memory_fits {
         return false;
     }
     let Some(free) = free_disk_bytes else {
@@ -134,6 +161,9 @@ pub fn recommended_vlm_display() -> &'static str {
 }
 
 pub(super) fn host_recommended_vlm_kind() -> &'static str {
+    if let Some(kind) = ENGINE_RECOMMENDED_KIND.with(Cell::get) {
+        return kind;
+    }
     let total = fileid_engine::platform::physical_memory_gb();
     let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
     let free = fileid_engine::paths::models_dir()
@@ -142,7 +172,6 @@ pub(super) fn host_recommended_vlm_kind() -> &'static str {
     recommended_vlm_kind(total, available, free)
 }
 
-// ─── Tab entrypoint ──────────────────────────────────────────────────────────
 
 pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let default_kind = host_recommended_vlm_kind();
@@ -343,6 +372,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         apply_in_flight: Cell::new(false),
         apply_generation: Cell::new(0),
         active_kind: Cell::new(default_kind),
+        user_picked: Cell::new(false),
         counts: Cell::new(StatusCounts::default()),
         tip_dismissed: Cell::new(false),
         lbl_active,
@@ -412,7 +442,6 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     wire_actions(&ui, &folder_btn);
     sync_run_state(&ui);
 
-    // ── Live engine events → cards ───────────────────────────────────────────
     let rx = ui.engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
@@ -435,7 +464,6 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     overlay.upcast()
 }
 
-// ─── Shared UI state ─────────────────────────────────────────────────────────
 
 struct PickRow {
     key: &'static str,
@@ -450,6 +478,7 @@ struct DeepUi {
     apply_in_flight: Cell<bool>,
     apply_generation: Cell<u64>,
     active_kind: Cell<&'static str>,
+    user_picked: Cell<bool>,
     counts: Cell<StatusCounts>,
     tip_dismissed: Cell<bool>,
 
@@ -504,7 +533,6 @@ struct DeepUi {
     apply_all: gtk::Button,
 }
 
-// ─── Command routing ─────────────────────────────────────────────────────────
 
 fn send_cmd(ui: &Rc<DeepUi>, payload: CommandPayload) -> bool {
     let payload = match deep_scope::prepare(payload) {
@@ -539,9 +567,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button) {
             if ui.in_flight.get() || run_blocker(&ui).is_some() {
                 return;
             }
-            // Gate a restricted-model (e.g. Gemma) download behind license
-            // acceptance, like macOS gates every describe entry point. On
-            // acceptance the gate re-emits this click so the run proceeds.
+            // A restricted model (e.g. Gemma) needs license acceptance; the gate re-emits this click once accepted.
             let kind = ui.active_kind.get();
             if !crate::model_license::ensure_or_prompt(button, kind) {
                 return;
@@ -567,8 +593,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button) {
             if ui.in_flight.get() {
                 return;
             }
-            // Gate the restricted-model download before opening the picker; the
-            // gate re-emits this click after acceptance (parity with macOS).
+            // Same license gate as the run button, before the picker opens.
             if !crate::model_license::ensure_or_prompt(btn, ui.active_kind.get()) {
                 return;
             }
@@ -899,16 +924,29 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 
-/// Optimistic refresh after a fire-and-forget command (the engine's
-/// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
-/// so we re-read the DB shortly after instead of waiting for confirmation).
+fn rename_summary(succeeded: u32, failed: u32, messages: &[fileid_engine::ipc::BulkActionItem]) -> String {
+    if failed == 0 {
+        return format!("Renamed {}.", plural(succeeded as usize, "file"));
+    }
+    let reason = messages
+        .iter()
+        .find(|item| !item.ok)
+        .and_then(|item| item.message.as_deref())
+        .filter(|message| !crate::engine_errors::looks_technical(message));
+    let head = format!("Renamed {}; {failed} couldn't be renamed.", plural(succeeded as usize, "file"));
+    match reason {
+        Some(reason) => format!("{head} {reason}"),
+        None => head,
+    }
+}
+
+/// Re-reads the DB shortly after a fire-and-forget command; `renameResult` events are not surfaced.
 fn schedule_refresh(ui: &Rc<DeepUi>, ms: u64) {
     let ui = ui.clone();
     glib::timeout_add_local_once(Duration::from_millis(ms), move || refresh(&ui));
 }
 
-/// Flip into the "running" presentation the instant a run is requested — before
-/// the first engine event lands (mirrors macOS `isStartingDeepAnalyze`).
+/// Shows the running state as soon as a run is requested, before the first engine event.
 fn begin_run(ui: &Rc<DeepUi>) {
     ui.in_flight.set(true);
     ui.run_btn.set_sensitive(false);
@@ -920,8 +958,7 @@ fn begin_run(ui: &Rc<DeepUi>) {
     sync_run_state(ui);
 }
 
-/// Tear down the live cards (crash / cancel / clean exit). Mirrors macOS
-/// A crash mid-run removes the live cards at once.
+/// Tears down the live cards on crash, cancel or clean exit.
 fn end_run(ui: &Rc<DeepUi>) {
     ui.in_flight.set(false);
     ui.starting_card.set_visible(false);
@@ -930,7 +967,6 @@ fn end_run(ui: &Rc<DeepUi>) {
     sync_run_state(ui);
 }
 
-// ─── Event handling ──────────────────────────────────────────────────────────
 
 fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
     match ev {
@@ -1026,12 +1062,25 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
                 fileid_engine::models::license::policy_for(id).is_some()
             });
             if !shown.is_empty() {
+                let recommended = engine_recommended_kind(&shown, catalog.recommended_id.as_deref());
+                if recommended.is_some() {
+                    ENGINE_RECOMMENDED_KIND.with(|cell| cell.set(recommended));
+                }
                 ui.choices.replace(shown);
+                if let Some(kind) = recommended.filter(|_| !ui.user_picked.get()) {
+                    ui.active_kind.set(kind);
+                    ui.skip_check.set_tooltip_text(Some(&skip_tooltip(&active_display(ui))));
+                }
                 render_picker(ui);
                 refresh(ui);
             }
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
+        EngineEvent::BulkActionResult(result) if result.action == "renameFiles" => {
+            ui.apply_status.set_text(&rename_summary(result.succeeded, result.failed, &result.messages));
+            ui.apply_status.set_visible(true);
+            refresh(ui);
+        }
         EngineEvent::Error { kind, .. } if error_ends_deep_run(kind) => end_run(ui),
         EngineEvent::Exited => end_run(ui),
         _ => {}
@@ -1041,10 +1090,17 @@ fn apply_event(ui: &Rc<DeepUi>, ev: &EngineEvent) {
 /// A busy bounce means a run IS going, and a server-format fallback keeps the
 /// run alive on the slower path; neither may tear down the live run.
 pub(crate) fn error_ends_deep_run(kind: &str) -> bool {
-    !matches!(kind, "deep_analyze_already_running" | "vlm_server_payload_rejected")
+    match kind {
+        "deep_analyze_already_running" => false,
+        "deep_load_failed"
+        | "deep_source_changed"
+        | "llama_cpp_missing"
+        | "model_license_not_accepted"
+        | "models_not_installed" => true,
+        _ => kind.starts_with("deep_analyze"),
+    }
 }
 
-// ─── DB-backed refresh (mirror of macOS ReadStore counts) ────────────────────
 
 fn refresh(ui: &Rc<DeepUi>) {
     let active = ui.active_kind.get().to_string();
@@ -1202,7 +1258,6 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
     hbox
 }
 
-// ─── Model picker ────────────────────────────────────────────────────────────
 
 pub fn vlm_runtime_available() -> bool {
     fileid_engine::models::llama_server_available()
@@ -1392,6 +1447,7 @@ fn pick_row(ui: &Rc<DeepUi>, choice: &VlmChoice) -> gtk::Button {
         ui,
         move |_| {
             ui.active_kind.set(key);
+            ui.user_picked.set(true);
             for row in ui.pick_rows.borrow().iter() {
                 let active = row.key == key;
                 if active {
@@ -1431,7 +1487,6 @@ fn model_install_info(key: &str) -> (bool, f64) {
     }
 }
 
-// ─── DB queries (fresh read-only connection, WAL-safe) ───────────────────────
 
 #[derive(Clone, Copy, Default)]
 struct StatusCounts {
@@ -1605,7 +1660,6 @@ fn person_tag_name(parts: &[String], legacy: &str) -> String {
     }
 }
 
-// ─── Static card builders ────────────────────────────────────────────────────
 
 const STARTING_SUBTITLE: &str =
     "Loading the model on this computer. The first description usually appears within 15 seconds.";
@@ -1874,7 +1928,6 @@ fn build_last_card(desc: &gtk::Label, inherited: &gtk::Label, name: &gtk::Label)
     card
 }
 
-// ─── Small widget helpers ────────────────────────────────────────────────────
 
 fn heading(text: &str) -> gtk::Label {
     gtk::Label::builder()
@@ -1909,8 +1962,6 @@ fn value_label(text: &str) -> gtk::Label {
         .build()
 }
 
-/// Show a card with the shared brand spring fading it in (mirrors the macOS
-/// `.spring(response: 0.35–0.4)` reveals).
 fn reveal(card: &gtk::Box) {
     if card.is_visible() {
         return;
@@ -1945,8 +1996,55 @@ mod recommendation_tests {
     const PLENTY: u64 = 200 * 1024 * 1024 * 1024;
 
     #[test]
-    fn low_ram_uses_gemma() {
-        assert_eq!(recommended_vlm_kind(8.0, 6.0, Some(PLENTY)), "gemma_3_4b");
+    fn fit_is_the_engines_memory_rule() {
+        assert!(vlm_fits("gemma_3_4b", 8.0, 6.0, None));
+        assert!(!vlm_fits("qwen2_5_vl_7b", 8.0, 6.0, None), "a 7B model never fits an 8 GB machine");
+        assert!(vlm_fits("qwen2_5_vl_7b", 16.0, 0.0, None), "unknown free memory asks only about installed memory");
+        assert!(!vlm_fits("qwen2_5_vl_7b", 16.0, 3.0, None), "a busy 16 GB machine cannot load it now");
+        assert!(!vlm_fits("qwen2_5_vl_7b", 16.0, 12.0, Some(1024)), "disk still counts");
+        assert!(!vlm_fits("unknown_model", 64.0, 60.0, None));
+    }
+
+    #[test]
+    fn low_ram_default_is_never_terms_gated() {
+        for (total, available) in [(8.0, 6.0), (4.0, 3.0), (15.5, 2.0), (64.0, 1.0)] {
+            let kind = recommended_vlm_kind(total, available, Some(PLENTY));
+            assert!(
+                fileid_engine::models::license::policy_for(kind).is_none(),
+                "{kind} is terms-gated at {total} GB"
+            );
+        }
+        assert_eq!(recommended_vlm_kind(8.0, 6.0, Some(PLENTY)), SMALL_VLM_KIND);
+    }
+
+    fn choice(id: &'static str, terms_required: bool) -> VlmChoice {
+        VlmChoice {
+            id,
+            name: id.to_owned(),
+            license: String::new(),
+            terms_required,
+            resident_gb: 1.0,
+            download_gb: 1.0,
+            installed: false,
+            curated: false,
+            fits: true,
+            measured_secs_per_image: None,
+        }
+    }
+
+    #[test]
+    fn default_follows_the_engines_recommended_id() {
+        let shown = [choice("qwen2_5_vl_7b", false), choice("gemma_3_4b", true), choice(SMALL_VLM_KIND, false)];
+        assert_eq!(engine_recommended_kind(&shown, Some(SMALL_VLM_KIND)), Some(SMALL_VLM_KIND));
+        assert_eq!(engine_recommended_kind(&shown, Some("qwen2_5_vl_7b")), Some("qwen2_5_vl_7b"));
+        assert_eq!(engine_recommended_kind(&shown, None), None);
+        assert_eq!(engine_recommended_kind(&shown, Some("not_offered")), None);
+    }
+
+    #[test]
+    fn engine_recommendation_is_never_a_terms_gated_model() {
+        let shown = [choice("gemma_3_4b", true), choice("qwen2_5_vl_7b", false)];
+        assert_eq!(engine_recommended_kind(&shown, Some("gemma_3_4b")), None);
     }
 
     #[test]
@@ -1967,6 +2065,25 @@ mod recommendation_tests {
             recommended_vlm_kind(48.0, 40.0, Some(PLENTY)),
             "mistral_small_3_2"
         );
+    }
+
+    #[test]
+    fn a_typical_8_gb_pc_gets_the_2b_model_that_loads_now() {
+        assert_eq!(recommended_vlm_kind(8.0, 4.6, Some(PLENTY)), SMALL_VLM_KIND);
+        assert_eq!(recommended_vlm_kind(8.0, 3.7, Some(PLENTY)), SMALLEST_VLM_KIND, "45% of 8 GB is free: only the Q4_K_M loads");
+        assert_eq!(recommended_vlm_kind(8.0, 1.0, Some(PLENTY)), SMALLEST_VLM_KIND, "nothing loads now: the smallest that could ever run");
+        assert!(vlm_fits(SMALLEST_VLM_KIND, 8.0, 3.7, None) && !vlm_fits(SMALL_VLM_KIND, 8.0, 3.7, None));
+    }
+
+    #[test]
+    fn the_hundred_billion_model_leads_only_hosts_that_can_hold_it() {
+        assert!(!vlm_fits(LARGE_VLM_KIND, 64.0, 0.0, None));
+        assert!(vlm_fits(LARGE_VLM_KIND, 96.0, 0.0, None));
+        assert_eq!(recommended_vlm_kind(64.0, 50.0, Some(PLENTY)), "mistral_small_3_2");
+        assert_eq!(recommended_vlm_kind(96.0, 60.0, Some(PLENTY)), "mistral_small_3_2");
+        assert_eq!(recommended_vlm_kind(96.0, 90.0, Some(PLENTY)), LARGE_VLM_KIND);
+        assert_eq!(recommended_vlm_kind(128.0, 100.0, Some(PLENTY)), LARGE_VLM_KIND);
+        assert_eq!(vlm_by_key(LARGE_VLM_KIND).license, "MIT");
     }
 
     #[test]
@@ -2018,6 +2135,9 @@ mod recommendation_tests {
         assert!(!error_ends_deep_run("vlm_server_payload_rejected"));
         assert!(error_ends_deep_run("deep_analyze_failed"));
         assert!(error_ends_deep_run("llama_cpp_missing"));
+        for unrelated in ["prewarm_failed", "list_roots_failed", "folder_access_denied"] {
+            assert!(!error_ends_deep_run(unrelated));
+        }
     }
 
     #[test]

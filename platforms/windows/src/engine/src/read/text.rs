@@ -1,13 +1,33 @@
-/// Safe FTS5 MATCH expression: every whitespace token that contains a letter or
-/// digit becomes a quoted phrase (embedded `"` doubled), implicitly AND-ed.
-/// Punctuation-only tokens are dropped. Empty means "no usable terms" and must
-/// not be passed to MATCH.
+/// Whitespace tokens with a letter or digit become quoted phrases (embedded `"` doubled), AND-ed; punctuation-only
+/// tokens are dropped. Empty means no usable terms and must not reach MATCH.
 pub fn fts_phrase_query(raw: &str) -> String {
     raw.split_whitespace()
         .filter(|token| token.chars().any(char::is_alphanumeric))
         .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `fts_phrase_query` with the last token of every term that holds at least two
+/// letters or digits matched as a prefix (`"img 41" *`), so "IMG_41" finds
+/// "IMG_4181". Terms of one character stay whole words. Empty when no term
+/// qualifies.
+pub fn fts_prefix_query(raw: &str) -> String {
+    let mut any = false;
+    let terms: Vec<String> = raw
+        .split_whitespace()
+        .filter(|token| token.chars().any(char::is_alphanumeric))
+        .map(|token| {
+            let quoted = format!("\"{}\"", token.replace('"', "\"\""));
+            if token.chars().filter(|c| c.is_alphanumeric()).count() >= 2 {
+                any = true;
+                format!("{quoted} *")
+            } else {
+                quoted
+            }
+        })
+        .collect();
+    if any { terms.join(" ") } else { String::new() }
 }
 
 /// Escape `\`, `%` and `_` so the text matches literally under
@@ -35,6 +55,15 @@ mod tests {
         assert_eq!(fts_phrase_query("café 東京"), "\"café\" \"東京\"");
         assert_eq!(fts_phrase_query(" - \" * "), "");
         assert_eq!(fts_phrase_query(""), "");
+    }
+
+    #[test]
+    fn prefix_query_marks_terms_with_two_or_more_letters_or_digits() {
+        assert_eq!(fts_prefix_query("IMG_41"), "\"IMG_41\" *");
+        assert_eq!(fts_prefix_query("beach  4"), "\"beach\" * \"4\"");
+        assert_eq!(fts_prefix_query("a b"), "");
+        assert_eq!(fts_prefix_query(" - \" * "), "");
+        assert_eq!(fts_prefix_query("say \"hi\""), "\"say\" * \"\"\"hi\"\"\" *");
     }
 
     #[test]

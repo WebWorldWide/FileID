@@ -92,8 +92,7 @@ extension View {
     }
 }
 
-/// Gives up keyboard focus held inside the page area. A destroyed page used to
-/// lose it with its views; a hidden one would keep taking keystrokes.
+/// Gives up keyboard focus held inside the page area, so a hidden page does not keep taking keystrokes.
 @MainActor
 final class PageAreaFocus {
     weak var view: NSView?

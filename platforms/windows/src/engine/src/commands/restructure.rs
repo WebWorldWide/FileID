@@ -1,8 +1,4 @@
-//! Restructure tab handlers: plan (classify + propose moves) and apply
-//! (execute on disk + update DB). The actual file-move machinery lives in
-//! `pipeline::restructure_apply`; classification logic lives in
-//! `pipeline::restructure`. These handlers wire app payloads through to
-//! those modules.
+//! Restructure tab handlers: plan (classify + propose moves) and apply (execute on disk + update DB). The move machinery lives in `pipeline::restructure_apply` and classification in `pipeline::restructure`; these handlers wire app payloads through to them.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
@@ -23,27 +19,27 @@ use crate::db::read::restructure::{
 #[cfg(test)]
 use crate::db::read::restructure::unambiguous_person_name;
 use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassification};
-use crate::pipeline::restructure_apply::RestructureApply;
+use crate::pipeline::restructure_apply::{RestructureApply, UnusableNames};
 use crate::pipeline::restructure_feedback;
 use crate::pipeline::restructure_semantic;
 
 const RESTRUCTURE_PREVIEW_CAP: usize = 5_000;
-const LARGE_PLAN_STREAM_THRESHOLD: i64 = 150_000;
 const LARGE_PLAN_CHUNK: usize = 4_096;
 
-/// Above this scoped-file count, planning streams through the scratch-SQLite
-/// rule-cascade path instead of the in-memory semantic (butler) path. The old
-/// 50k default silently denied the entire semantic planner to every real-sized
-/// library — the owner's 71,333-file corpus always got the legacy date-tree
-/// cascade. Measured on that corpus (RTX 5080 box, 2026-07-14): the semantic
-/// path plans in 16 s / 668 MB peak, and `embedding_load_cap` already bounds
-/// the heavy CLIP map per memory tier, so 150k is a comfortable ceiling, not a
-/// cliff. Env-overridable for benchmarking bigger libraries.
+/// Above this scoped-file count, planning streams through the scratch-SQLite rule-cascade path instead of the in-memory semantic (butler) path, which also drops the respect-organized-folders stage. The ceiling follows the memory tier (Low 150,000, Balanced 400,000, High 750,000) because the semantic path costs about 7 KB a file resident. `FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD` overrides it for benchmarking.
+fn large_plan_stream_threshold_for(tier: crate::platform::MemoryTier) -> i64 {
+    match tier {
+        crate::platform::MemoryTier::Low => 150_000,
+        crate::platform::MemoryTier::Balanced => 400_000,
+        crate::platform::MemoryTier::High => 750_000,
+    }
+}
+
 fn large_plan_stream_threshold() -> i64 {
     std::env::var("FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(LARGE_PLAN_STREAM_THRESHOLD)
+        .unwrap_or_else(|| large_plan_stream_threshold_for(crate::platform::memory_tier()))
 }
 const STORED_PLAN_VERSION: u8 = 2;
 
@@ -147,14 +143,7 @@ fn reserve_collision_free_destination(
 }
 
 fn ipc_move_is_noop(move_: &IpcMove) -> bool {
-    roots_equal(&move_.source, &move_.destination)
-}
-
-fn proposed_move_is_noop(move_: &restructure::ProposedMove) -> bool {
-    roots_equal(
-        &move_.source.to_string_lossy(),
-        &move_.destination.to_string_lossy(),
-    )
+    restructure::names_the_same_file(Path::new(&move_.source), Path::new(&move_.destination))
 }
 
 #[cfg(test)]
@@ -181,8 +170,7 @@ fn write_stored_plan_in_with_cancel(
     );
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating restructure plan directory {}", dir.display()))?;
-    // Only one plan is actionable in the UI at a time. Remove stale spools so
-    // repeated planning cannot grow engine state without bound.
+    // Only one plan is actionable in the UI at a time; remove stale spools so repeated planning can't grow engine state without bound.
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -338,11 +326,7 @@ fn inspect_stored_plan(
                 )
             })? {
                 crate::pipeline::restructure_apply::PreflightOutcome::Applicable => {}
-                // Stale rows describe the live corpus changing since planning
-                // (deleted/renamed/re-identified source, a destination that
-                // collided in the meantime) — apply_iter_with re-checks and
-                // skips these gracefully per move at apply time (B4), so one
-                // stale row must not abort every other move in the plan.
+                // Stale rows describe the live corpus changing since planning (deleted/renamed/re-identified source, a destination that collided meanwhile); apply_iter_with re-checks and skips these per move, so one stale row must not abort every other move.
                 crate::pipeline::restructure_apply::PreflightOutcome::Stale(reason) => {
                     tracing::warn!(
                         file_id = move_.file_id,
@@ -358,9 +342,7 @@ fn inspect_stored_plan(
     Ok(Some(tiers))
 }
 
-/// The terminal reply for an apply or undo that stopped before moving anything, sent
-/// ahead of its error so clients waiting on a result (the Mac app's Restructure tab)
-/// release, as the Swift engine does for an unreadable journal or a refused move.
+/// The terminal reply for an apply or undo that stopped before moving anything, sent ahead of its error so clients waiting on a result (the Mac app's Restructure tab) release.
 fn refused_apply_result(failed: usize) -> ipc::RestructureApplyResult {
     ipc::RestructureApplyResult {
         applied: 0,
@@ -505,8 +487,7 @@ fn apply_inline_plan(
             .with_context(|| format!("inline restructure move {} failed preflight", index + 1))?
         {
             crate::pipeline::restructure_apply::PreflightOutcome::Applicable => {}
-            // See the matching comment in inspect_stored_plan: apply_iter_with
-            // re-checks and skips stale rows gracefully at apply time (B4).
+            // See inspect_stored_plan: apply_iter_with skips stale rows at apply time.
             crate::pipeline::restructure_apply::PreflightOutcome::Stale(reason) => {
                 tracing::warn!(
                     file_id = move_.file_id,
@@ -537,28 +518,10 @@ fn folder_tier(
     total: i64,
     top: i64,
 ) -> &'static str {
-    let name = Path::new(folder)
+    let generic = Path::new(folder)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let generic = matches!(
-        name.as_str(),
-        "downloads"
-            | "downloaded"
-            | "desktop"
-            | "unsorted"
-            | "inbox"
-            | "new folder"
-            | "untitled"
-            | "temp"
-            | "tmp"
-            | "misc"
-            | "other"
-            | "stuff"
-            | "things"
-            | "files"
-    );
+        .is_some_and(|name| !name.is_empty() && crate::pipeline::restructure_respect::is_generic_folder_name(name));
     if generic || total <= 2 {
         "Junk"
     } else if roots_equal(folder, library_root) {
@@ -581,20 +544,29 @@ fn persist_rule_chunk(
     }
     let mut insert_move = tx.prepare_cached(
         "INSERT INTO raw_moves
-         (seq,file_id,source,source_folder,destination,category,confidence,reason)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+         (seq,file_id,source,source_folder,destination,category,confidence,reason,content_hash,size_bytes,file_ref,modified_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
     )?;
     let mut insert_stat = tx.prepare_cached(
         "INSERT INTO folder_stats(folder,category,count) VALUES (?1,?2,1)
          ON CONFLICT(folder,category) DO UPDATE SET count=count+1",
     )?;
+    let identities: std::collections::HashMap<i64, restructure::PlannedIdentity> = chunk
+        .iter()
+        .filter_map(|file| file.identity.clone().map(|identity| (file.file_id, identity)))
+        .collect();
     for move_ in classify(chunk, library_root) {
+        let identity = identities.get(&move_.file_id);
         let source_folder = move_
             .source
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_string_lossy()
             .into_owned();
+        insert_stat.execute(rusqlite::params![source_folder, move_.category])?;
+        if move_.is_noop() {
+            continue;
+        }
         insert_move.execute(rusqlite::params![
             *sequence,
             move_.file_id,
@@ -604,18 +576,18 @@ fn persist_rule_chunk(
             move_.category,
             move_.confidence.as_str(),
             move_.reason,
+            identity.and_then(|identity| identity.content_hash.clone()),
+            identity.map(|identity| identity.size_bytes as i64),
+            identity.and_then(|identity| identity.file_ref).map(|file_ref| file_ref as i64),
+            identity.map(|identity| identity.modified_at),
         ])?;
-        insert_stat.execute(rusqlite::params![source_folder, move_.category])?;
         *sequence += 1;
     }
     chunk.clear();
     Ok(())
 }
 
-// An engine kill mid-plan orphans the `{uuid}.planning.sqlite` scratch DB (the
-// `remove_file` at the end of `plan_large_library_in` never runs). The
-// ndjson/tmp sweep in `write_stored_plan_in` executes while the live scratch is
-// still open, so stale scratch files are swept here — before a new one exists.
+// An engine kill mid-plan orphans the `{uuid}.planning.sqlite` scratch DB (the end-of-plan `remove_file` never runs). The sweep in `write_stored_plan_in` runs while the live scratch is open, so stale scratch files are swept here, before a new one exists.
 fn sweep_stale_planning_scratch(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -673,7 +645,11 @@ fn plan_large_library_in_with_cancel(
                  destination TEXT NOT NULL,
                  category TEXT NOT NULL,
                  confidence TEXT NOT NULL,
-                 reason TEXT);
+                 reason TEXT,
+                 content_hash TEXT,
+                 size_bytes INTEGER,
+                 file_ref INTEGER,
+                 modified_at REAL);
              CREATE TABLE folder_stats(
                  folder TEXT NOT NULL,
                  category TEXT NOT NULL,
@@ -693,9 +669,7 @@ fn plan_large_library_in_with_cancel(
                 !cancel.load(std::sync::atomic::Ordering::Relaxed),
                 "restructure planning cancelled"
             );
-            // Keyset-page the shared connection so a million-file plan does not
-            // monopolize the engine's single SQLite mutex for the whole scan.
-            // Each lock holds only while 4,096 compact metadata rows are copied.
+            // Keyset-page the shared connection so a million-file plan doesn't monopolize the single SQLite mutex; each lock holds only while 4,096 compact metadata rows are copied.
             let mut chunk = {
                 let source = db.lock();
                 let mut stmt = source.prepare(PLAN_FILES_PAGE_SQL)?;
@@ -765,7 +739,6 @@ fn plan_large_library_in_with_cancel(
                 "SELECT r.category, COUNT(*) AS n
                   FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
                   WHERE t.tier <> 'Anchor'
-                    AND r.source COLLATE NOCASE <> r.destination
                   GROUP BY r.category ORDER BY n DESC, r.category ASC",
             )?;
             
@@ -781,8 +754,7 @@ fn plan_large_library_in_with_cancel(
         let total_moves: i64 = plan_db.query_row(
             "SELECT COUNT(*) FROM raw_moves r
               JOIN folder_tiers t ON t.folder=r.source_folder
-              WHERE t.tier <> 'Anchor'
-                AND r.source COLLATE NOCASE <> r.destination",
+              WHERE t.tier <> 'Anchor'",
             [],
             |row| row.get(0),
         )?;
@@ -795,8 +767,7 @@ fn plan_large_library_in_with_cancel(
                                   THEN 1 ELSE 0 END),0)
              FROM raw_moves r
              JOIN folder_tiers t ON t.folder=r.source_folder
-             WHERE t.tier <> 'Anchor'
-               AND r.source COLLATE NOCASE <> r.destination",
+             WHERE t.tier <> 'Anchor'",
             [],
             |row| {
                 Ok(RestructureConfidenceCounts {
@@ -824,10 +795,9 @@ fn plan_large_library_in_with_cancel(
             );
             let mut stmt = plan_db.prepare(
                 "SELECT r.file_id,r.source,r.destination,r.category,t.tier,
-                        r.confidence,r.reason
+                        r.confidence,r.reason,r.content_hash,r.size_bytes,r.file_ref,r.modified_at
                  FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
                  WHERE t.tier <> 'Anchor'
-                   AND r.source COLLATE NOCASE <> r.destination
                  ORDER BY r.seq",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -839,7 +809,10 @@ fn plan_large_library_in_with_cancel(
                     tier: Some(row.get(4)?),
                     confidence: row.get(5)?,
                     reason: row.get(6)?,
-                    ..Default::default()
+                    content_hash: row.get(7)?,
+                    size_bytes: row.get::<_, Option<i64>>(8)?.map(|size| size as u64),
+                    file_ref: row.get::<_, Option<i64>>(9)?.map(|file_ref| file_ref as u64),
+                    modified_at: row.get(10)?,
                 })
             })?;
             write_stored_plan_in_with_cancel(
@@ -875,9 +848,7 @@ fn plan_large_library_in_with_cancel(
     result
 }
 
-/// Max embeddings of each modality retained for one restructure plan. Every
-/// tier is bounded: "high memory" cannot mean unbounded when the library can
-/// contain millions of 2 KiB vectors.
+/// Max embeddings of each modality retained for one restructure plan; every tier is bounded, since "high memory" can't mean unbounded with millions of 2 KiB vectors.
 fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
     match tier {
         crate::platform::MemoryTier::Low => 20_000,
@@ -886,10 +857,7 @@ fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
     }
 }
 
-/// Stream the image CLIP embeddings into a map, stopping at `cap` so the heavy
-/// blob transient never exceeds the memory-tier budget. The query streams
-/// row-by-row, so breaking early holds at most `cap` decoded vectors resident.
-/// (016)
+/// Streams the image CLIP embeddings into a map, stopping at `cap` so the heavy blob transient never exceeds the memory-tier budget (row-by-row, so at most `cap` decoded vectors are resident).
 fn load_capped_embeddings(
     conn: &rusqlite::Connection,
     cap: usize,
@@ -926,8 +894,7 @@ fn load_capped_embeddings(
     Ok(embeddings)
 }
 
-/// Load BGE document text embeddings (file_id → 384-d vector) for the doc-content pass.
-/// Not capped: documents are a small fraction of a library and the vectors are 384-d.
+/// Loads BGE document text embeddings (file_id → 384-d vector) for the doc-content pass; uncapped since documents are a small fraction and the vectors are small.
 fn load_text_embeddings(
     conn: &rusqlite::Connection,
     cap: usize,
@@ -987,10 +954,7 @@ async fn stop_cancelled_plan(
     true
 }
 
-/// Walk the `files` table for the picked library root, classify each file,
-/// and emit a `restructurePlan` event with the proposed moves + per-category
-/// counts. The app's Restructure tab consumes this to render the Sankey +
-/// tree-diff.
+/// Walks the `files` table for the picked library root, classifies each file, and emits a `restructurePlan` event with the proposed moves and per-category counts for the Restructure tab's Sankey + tree-diff.
 pub(crate) async fn handle_plan_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1013,9 +977,7 @@ pub(crate) async fn handle_plan_restructure(
     let supports_paged_plans = payload.supports_paged_plans;
     let query_root = library_root.clone();
     let db_for_semantic = std::sync::Arc::clone(&db);
-    // Kept alive past the query/signals spawn_blocking closures (which move `db` and
-    // `db_for_semantic`) so the learn-from-corrections boost can read the feedback
-    // table after the proposal set is built.
+    // Kept alive past the query/signals spawn_blocking closures (which move `db`) so the learn-from-corrections boost can read the feedback table after the proposal set is built.
     let db_for_boost = std::sync::Arc::clone(&db);
     if supports_paged_plans {
         let count_db = std::sync::Arc::clone(&db);
@@ -1132,10 +1094,7 @@ pub(crate) async fn handle_plan_restructure(
                 return;
             }
             Err(err) => {
-                // JoinError = the blocking query task panicked / was aborted.
-                // Emit a terminal error so the Restructure tab's "Computing
-                // plan…" status recovers instead of awaiting forever (mirrors
-                // the face_clustering PAR-111 JoinError handling).
+                // JoinError = the blocking query task panicked / was aborted. Emit a terminal error so the "Computing plan…" status recovers instead of awaiting forever.
                 tracing::warn!(?err, "planRestructure spawn_blocking failed");
                 sink.send(EngineError::event(
                     "plan_restructure_failed",
@@ -1146,17 +1105,7 @@ pub(crate) async fn handle_plan_restructure(
             }
         };
 
-    // Butler P1: semantic + learn-your-style classification for image files that
-    // have a CLIP embedding; everything else (and density-clustering noise)
-    // falls back to the rule cascade. See pipeline/restructure_semantic.rs.
-    //
-    // The CLIP embeddings are the heavy transient here (each ~2 KiB), so cap how
-    // many we load by memory tier: on a low-RAM box an unbounded full-table load
-    // could materialize hundreds of MiB at once. Above Low we keep the prior
-    // behavior (effectively uncapped). Files past the cap simply fall through to
-    // the rule cascade — the same graceful degradation as a file with no
-    // embedding. Tags are then loaded only for the ids we kept, so neither map
-    // grows unbounded under pressure. (016)
+    // Semantic and learn-your-style classification for images with a CLIP embedding (pipeline/restructure_semantic.rs); everything else (and density-clustering noise) falls back to the rule cascade. CLIP embeddings are the heavy transient (~2 KiB each), so the load is capped by memory tier; files past the cap fall through to the rule cascade. Tags are loaded only for the ids kept.
     let embedding_cap = embedding_load_cap(crate::platform::memory_tier());
     let signal_bounds = plan_root_bounds(&library_root);
     let signal_cancel = std::sync::Arc::clone(&cancel);
@@ -1176,9 +1125,7 @@ pub(crate) async fn handle_plan_restructure(
                 load_text_embeddings(&conn, embedding_cap, &signal_bounds)?;
             let mut tags: std::collections::HashMap<i64, Vec<String>> =
                 std::collections::HashMap::new();
-            // DISTINCT so a tag carried under multiple sources for the same
-            // file counts ONCE — otherwise c-TF-IDF tf/df double-counts it and
-            // skews distinctive_terms group naming (#18).
+            // DISTINCT so a tag carried under multiple sources for one file counts ONCE; otherwise c-TF-IDF tf/df double-counts it and skews distinctive_terms group naming.
             let mut tstmt = conn.prepare(
                 "SELECT DISTINCT t.file_id, t.tag FROM tags t
                  JOIN files f ON f.id = t.file_id
@@ -1206,11 +1153,7 @@ pub(crate) async fn handle_plan_restructure(
                     );
                 }
                 let (id, tag) = r?;
-                // Load tags for ALL files, not just embedded images: the R1
-                // non-image semantic pass consults them for documents/video/audio
-                // too (matching the macOS engine, which loads tags unfiltered).
-                // Tags are short strings, so this stays cheap even when the
-                // embedding cap bounds the heavier image set. (RESTRUCTURE.md R1)
+                // Load tags for ALL files, not just embedded images: the non-image semantic pass uses them for documents/video/audio too. Tags are short, so this stays cheap.
                 tags.entry(id).or_default().push(tag);
             }
             Ok((embeddings, tags, text_embeddings))
@@ -1240,9 +1183,7 @@ pub(crate) async fn handle_plan_restructure(
         }
     };
 
-    // Drain (remove) instead of clone: each file_id is a PK consumed once here,
-    // and both maps are dead afterward — moving avoids doubling the ~100 MB of
-    // CLIP blobs transiently on a low-RAM box.
+    // Drain (remove) instead of clone: each file_id is a PK consumed once and both maps are dead afterward, so moving avoids doubling ~100 MB of CLIP blobs on a low-RAM box.
     let identities: std::collections::HashMap<i64, restructure::PlannedIdentity> = files
         .iter()
         .filter_map(|f| f.identity.clone().map(|identity| (f.file_id, identity)))
@@ -1255,12 +1196,7 @@ pub(crate) async fn handle_plan_restructure(
                 file_id: f.file_id,
                 source: f.source.clone(),
                 clip,
-                // Read tags non-destructively (NOT remove): an image the CLIP pass
-                // examined but didn't cluster (a density-noise singleton) falls
-                // through to the non-image pass below, which must still see its
-                // content tags. Tags are short strings, so keeping them in the map
-                // is cheap — only the heavy CLIP blob is drained (above). Matches
-                // macOS, which reads tags via a non-consuming lookup.
+                // Read tags non-destructively: an image the CLIP pass examined but didn't cluster (a density-noise singleton) falls through to the non-image pass, which must still see its tags. Only the heavy CLIP blob is drained.
                 tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
                 time_unix: f.created_unix.unwrap_or(f.modified_unix),
             })
@@ -1269,23 +1205,13 @@ pub(crate) async fn handle_plan_restructure(
 
     let mut proposed = Vec::new();
     let mut moved: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    // Files a semantic pass examined and deliberately left in place (already
-    // home, or well-placed per the stay-put guard). They are claimed exactly
-    // like moved files: the rule cascade must not re-propose date-tree moves
-    // for content the butler judged organized.
+    // Files a semantic pass examined and deliberately left in place (already home, or well-placed per the stay-put guard), claimed like moved files so the rule cascade doesn't re-propose date-tree moves for content the butler judged organized.
     let mut settled: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    // One new-folder-name registry shared across all three semantic passes
-    // (image, document, non-image) — they target the same library_root, so a
-    // shared registry stops two passes minting the same new folder and silently
-    // merging unrelated content into it.
-    let mut used_group_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    // One new-folder-name registry shared across the three semantic passes (image, document, non-image); they target the same library_root, so a shared registry stops two passes minting the same folder and merging unrelated content.
+    let mut used_group_names = restructure_semantic::existing_group_names(library_root_path);
 
-    // Butler P1: image semantic pass (CLIP-embedding content clusters).
     if semantic_files.len() >= 2 {
-        // Junk-folder filter mirrors the doc/non-image passes: a Downloads/
-        // Desktop/temp dump (or an all-digit export artifact) is a place to
-        // organize photos OUT of, never a learn-your-style routing target.
+        // Junk-folder filter mirrors the doc/non-image passes: a Downloads/Desktop/temp dump (or all-digit export artifact) is a place to organize photos OUT of, never a learn-your-style routing target.
         let protos: Vec<_> = restructure_semantic::folder_prototypes(&semantic_files, 4)
             .into_iter()
             .filter(|p| !restructure_semantic::is_junk_prototype_folder(&p.path))
@@ -1297,11 +1223,7 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Butler R3: document-content pass. Cluster documents by their BGE text embedding
-    // (the content), which the scan stored in `text_embeddings`. Far stronger than the
-    // filename-token fallback (owner A/B: nearest-neighbour-same-folder 49%→57%). Docs
-    // WITH an embedding cluster here; docs without (no extractable text) fall through to
-    // the bag-of-words pass below. Runs before it so it claims the text-bearing docs.
+    // Document-content pass: cluster documents by their BGE text embedding from `text_embeddings`, far stronger than the filename-token fallback. Docs without an embedding fall through to the bag-of-words pass below; this runs first so it claims the text-bearing docs.
     if restructure_semantic::non_image_enabled() {
         let doc_files: Vec<restructure_semantic::SemanticFile> = files
             .iter()
@@ -1325,12 +1247,7 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Butler R1: non-image semantic pass. Cluster everything the doc + image passes didn't
-    // claim (video, audio, docs without an extractable-text embedding, and any
-    // embedding-less file) by a filename+tag bag-of-words signature, so a mixed library
-    // groups by content instead of dumping every file into <Year>. Additive + separately
-    // tuned (non_image_profile); the rule cascade below still catches the
-    // remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
+    // Non-image semantic pass: clusters everything the doc and image passes didn't claim (video, audio, docs without an embedding) by a filename+tag bag-of-words signature, so a mixed library groups by content instead of dumping into <Year>. Separately tuned (non_image_profile); the rule cascade catches the remainder. FILEID_RESTRUCTURE_NONIMAGE=0 turns it off.
     if restructure_semantic::non_image_enabled() {
         let non_image_files: Vec<restructure_semantic::SemanticFile> = files
             .iter()
@@ -1351,7 +1268,6 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Rule cascade for everything neither semantic pass claimed or settled.
     let rule_files: Vec<FileForClassify> = files
         .iter()
         .filter(|f| !moved.contains(&f.file_id) && !settled.contains(&f.file_id))
@@ -1362,15 +1278,9 @@ pub(crate) async fn handle_plan_restructure(
         return;
     }
 
-    // Learn-from-corrections: upgrade any planned move toward a folder the user has
-    // previously filed similar files into (the v18 restructure_feedback memory,
-    // written on each apply). Additive — only raises confidence on moves the planner
-    // already produced, never re-routes — so it can't regress the calibrated passes.
-    // Runs on the full proposal set, before the anchor strip preserves the upgraded
-    // confidence into the emitted plan. (R3 → learn-your-style)
+    // Learn-from-corrections: upgrade planned moves toward a folder the user previously filed similar files into (restructure_feedback, written on each apply). Only raises confidence on moves the planner already produced, never re-routes; runs before the anchor strip so the upgraded confidence reaches the emitted plan.
     restructure_feedback::boost(&db_for_boost, &mut proposed);
 
-    // Keep what the user already organized (RESTRUCTURE.md 2026-10-15).
     let mut kept_organized_folders = std::collections::HashSet::new();
     let respect_on = !crate::pipeline::restructure_respect::kill_switch_off();
     if respect_on {
@@ -1380,26 +1290,20 @@ pub(crate) async fn handle_plan_restructure(
         kept_organized_folders = untouched;
     }
 
-    // Engine-authoritative folder classification, computed on the FULL proposal
-    // set so the Keep/Tidy/Reorganize tile counts stay accurate.
     let folder_class = restructure::classify_folders(&proposed, library_root_path);
-    // With the respect stage on, every surviving move is one it intends (a format
-    // correction or a loose-file move), so none of their folders is wholly kept.
+    // With the respect stage on, every surviving move is one it intends (a format correction or loose-file move), so none of their folders is wholly kept.
     let semantic_action_folders: std::collections::HashSet<PathBuf> = proposed
         .iter()
-        .filter(|move_| (respect_on || moved.contains(&move_.file_id)) && !proposed_move_is_noop(move_))
+        .filter(|move_| (respect_on || moved.contains(&move_.file_id)) && !move_.is_noop())
         .filter_map(|move_| move_.source.parent().map(Path::to_path_buf))
         .collect();
     let mut anchor = 0u32;
     let mut mixed = 0u32;
     let mut junk = 0u32;
-    // Index classification by source folder so per-move tiers can be
-    // stamped without re-classifying.
     let mut tier_by_folder: std::collections::HashMap<PathBuf, &'static str> =
         std::collections::HashMap::with_capacity(folder_class.len());
     for f in &folder_class {
-        // A folder with an actionable semantic relocation is not wholly kept in
-        // place, even if its full proposal histogram classifies Anchor.
+        // A folder with an actionable semantic relocation is not wholly kept in place, even if its proposal histogram classifies Anchor.
         let classification = if matches!(f.classification, FolderClassification::Anchor)
             && semantic_action_folders.contains(&f.source_folder)
         {
@@ -1430,16 +1334,7 @@ pub(crate) async fn handle_plan_restructure(
         }
     }
 
-    // Anchor folders are well-organized with clear names; the macOS reference
-    // emits NO proposals for them ("Files inside Anchor folders stay put"), and
-    // the Keep tile (driven by folder_classifications.anchor_folders, counted
-    // just above) tells the user they're left untouched. Drop their moves so the
-    // plan the app applies can never silently relocate a file the UI promised
-    // would stay put — without this, default-selected Anchor rows were applied.
-    // Only exact semantic proposals are exempt. Exempting their whole source
-    // folder also relocated unrelated rule-cascade siblings from an Anchor.
-    // The respect stage already drops every move out of an organized folder
-    // except format corrections, so the strip only runs when it is switched off.
+    // Anchor folders are well-organized with clear names; the macOS reference emits NO proposals for them, and the Keep tile tells the user they're untouched. Drop their moves so the applied plan can never silently relocate a file the UI promised would stay put. Only exact semantic proposals are exempt (exempting their whole source folder also relocated unrelated rule-cascade siblings). The respect stage already drops every move out of an organized folder except format corrections, so the strip only runs when it is off.
     let proposed = if respect_on {
         proposed
     } else {
@@ -1447,7 +1342,7 @@ pub(crate) async fn handle_plan_restructure(
     };
     let proposed: Vec<_> = proposed
         .into_iter()
-        .filter(|move_| !proposed_move_is_noop(move_))
+        .filter(|move_| !move_.is_noop())
         .collect();
     let category_summary = restructure::category_counts(&proposed);
     let mut confidence_tiers = StoredPlanTiers::default();
@@ -1574,9 +1469,7 @@ pub(crate) async fn handle_plan_restructure(
         .await;
 }
 
-/// Apply a previously-planned set of moves on disk + update DB rows.
-/// Path-traversal safe (every destination must canonicalize to inside the
-/// library root); supports symlink mode for non-destructive preview.
+/// Applies a previously-planned set of moves on disk and updates DB rows. Path-traversal safe (every destination must canonicalize inside the library root); supports symlink mode for non-destructive preview.
 pub(crate) async fn handle_undo_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1603,6 +1496,9 @@ pub(crate) async fn handle_undo_restructure(
         Ok(Ok(r)) => {
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(r))))
                 .await;
+        }
+        Ok(Err(err)) if crate::util::user_message::read_only_sentence(&err).is_some() => {
+            send_read_only_apply_refusal(&sink, &err, 1).await;
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "undoRestructure failed");
@@ -1631,6 +1527,43 @@ pub(crate) async fn handle_undo_restructure(
     }
 }
 
+/// The plain reason a file was left in place; one odd name never refuses the rest of the plan.
+fn unusable_names_notice(unusable: &UnusableNames) -> Option<String> {
+    let first = unusable.first.as_deref()?;
+    let shown: String = first.chars().take(60).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let tail = if first.chars().count() > 60 { "…" } else { "" };
+    let (what, them) = if unusable.count == 1 {
+        ("1 file stayed".to_string(), "its name")
+    } else {
+        (format!("{} files stayed", unusable.count), "their names")
+    };
+    Some(format!(
+        "{what} where {} because FileID can't use {them} in a new folder, for example \"{shown}{tail}\". Rename {}, then organize again. The other files were handled as usual.",
+        if unusable.count == 1 { "it is" } else { "they are" },
+        if unusable.count == 1 { "it" } else { "them" },
+    ))
+}
+
+/// A move leaving or entering a read-only drive refuses the whole plan, counted per move.
+fn read_only_moves(moves: &[ipc::RestructureMove]) -> Option<crate::util::read_only::BatchRefusal> {
+    let on_drive = |path: &str| crate::util::read_only::read_only_location(std::path::Path::new(path));
+    let mut first = None;
+    let mut count = 0;
+    for planned in moves {
+        if let Some(name) = on_drive(&planned.source).or_else(|| on_drive(&planned.destination)) {
+            count += 1;
+            first.get_or_insert(name);
+        }
+    }
+    first.map(|name| crate::util::read_only::BatchRefusal { name, read_only: count, total: moves.len() })
+}
+
+async fn send_read_only_apply_refusal(sink: &Sink, error: &anyhow::Error, requested: usize) {
+    let sentence = crate::util::user_message::read_only_sentence(error).unwrap_or_default();
+    sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+    sink.send(EngineError::event("location_read_only", format!("{sentence} Nothing was moved."))).await;
+}
+
 pub(crate) async fn handle_apply_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1638,23 +1571,39 @@ pub(crate) async fn handle_apply_restructure(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let requested = payload.moves.len();
+    if let Err(error) = crate::util::read_only::require_writable(std::path::Path::new(&payload.library_root)) {
+        send_read_only_apply_refusal(&sink, &anyhow::Error::from(error), requested).await;
+        return;
+    }
+    let (payload, refusal) = match tokio::task::spawn_blocking(move || {
+        let refusal = read_only_moves(&payload.moves);
+        (payload, refusal)
+    })
+    .await
+    {
+        Ok(checked) => checked,
+        Err(error) => {
+            tracing::warn!(?error, "applyRestructure read-only check failed");
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+            sink.send(EngineError::event("apply_restructure", "Organize Folders couldn't move the files. Check that the folder is still connected and try again.")).await;
+            return;
+        }
+    };
+    if let Some(refusal) = refusal {
+        sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(refused_apply_result(requested))))).await;
+        sink.send(EngineError::event("location_read_only", format!("{} Nothing was moved.", refusal.sentence()))).await;
+        return;
+    }
     let result = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<ipc::RestructureApplyResult> {
-            // F-C6-013 wiring: inject the operation token the CancelRestructure
-            // dispatch arm sets, so a long apply is actually stoppable. Before
-            // this, the apply built a fresh never-set flag and the cooperative
-            // cancel poll was dead in production. (The flag is reset to false in
-            // the ApplyRestructure dispatch arm so a stale cancel can't pre-stop
-            // a fresh apply.)
+        move || -> anyhow::Result<(ipc::RestructureApplyResult, UnusableNames)> {
+            // Inject the operation token the CancelRestructure dispatch arm sets so a long apply is actually stoppable (the flag is reset to false in the ApplyRestructure arm so a stale cancel can't pre-stop a fresh apply).
             let ipc::ApplyRestructurePayload {
                 library_root,
                 plan_id,
                 moves,
                 use_symlinks,
             } = payload;
-            // A stored plan was approved name-by-name, so a destination that
-            // became occupied fails the move; inline moves get a ` (2)` sibling
-            // like the macOS reference.
+            // A stored plan was approved name-by-name, so a destination that became occupied fails the move; inline moves get a ` (2)` sibling like the macOS reference.
             let apply = RestructureApply::new(
                 db,
                 PathBuf::from(&library_root),
@@ -1681,24 +1630,28 @@ pub(crate) async fn handle_apply_restructure(
                         "[RESTRUCTURE] validated stored-plan bulk eligibility"
                     );
                 }
-                Ok(result)
+                Ok((result, apply.take_unusable_names()))
             } else {
-                // Inline moves are exactly the rows the user reviewed and kept
-                // selected in WinUI, so an Ask-tier row here carries explicit
-                // consent. Only stored/truncated plans need the server-side Ask
-                // exclusion because most of those rows were never displayed.
-                apply_inline_plan(&apply, moves)
+                // Inline moves are exactly the rows the user reviewed and kept selected in WinUI, so an Ask-tier row carries explicit consent. Only stored/truncated plans need the server-side Ask exclusion, since most of those rows were never displayed.
+                let result = apply_inline_plan(&apply, moves)?;
+                Ok((result, apply.take_unusable_names()))
             }
         },
     )
     .await;
 
     match result {
-        Ok(Ok(r)) => {
+        Ok(Ok((r, unusable))) => {
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(
                 Wrap::new(r),
             )))
             .await;
+            if let Some(message) = unusable_names_notice(&unusable) {
+                sink.send(EngineError::event("apply_restructure_skipped", message)).await;
+            }
+        }
+        Ok(Err(err)) if crate::util::user_message::read_only_sentence(&err).is_some() => {
+            send_read_only_apply_refusal(&sink, &err, requested).await;
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");
@@ -1713,10 +1666,7 @@ pub(crate) async fn handle_apply_restructure(
             .await;
         }
         Err(err) => {
-            // JoinError = the apply task panicked / was aborted. Emit a terminal
-            // error so the Restructure tab's "Moving N files…" status recovers
-            // instead of hanging forever (ApplyRestructureAsync has no app-side
-            // timeout; mirrors the face_clustering PAR-111 JoinError handling).
+            // JoinError = the apply task panicked / was aborted. Emit a terminal error so "Moving N files…" recovers (ApplyRestructureAsync has no app-side timeout).
             tracing::warn!(?err, "applyRestructure spawn_blocking failed");
             sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(
                 refused_apply_result(requested),
@@ -1736,32 +1686,23 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    /// A Windows drive-root library ("C:\") must produce a backslash-based
-    /// range that actually brackets backslash-stored paths. The old code
-    /// trimmed the trailing '\' first, leaving "C:" with no separator, chose
-    /// '/', and built a range matching ZERO real files (empty plan scope).
+    /// A Windows drive-root library ("C:\") must produce a backslash-based range that brackets backslash-stored paths; trimming the trailing '\' first left "C:" with no separator, chose '/', and matched ZERO files.
     #[test]
     fn plan_root_bounds_handles_drive_root_backslash() {
         let (root, prefix, upper) = plan_root_bounds("C:\\");
         assert_eq!(root, "C:");
         assert_eq!(prefix, "C:\\", "prefix must use the backslash separator");
-        // A real stored path must fall within [prefix, upper).
         let sample = "C:\\Users\\me\\a.jpg";
         assert!(
             sample.starts_with(&prefix) && sample < upper.as_str(),
             "drive-root range must bracket backslash paths: prefix={prefix} upper={upper}"
         );
-        // A nested root keeps working too.
         let (_, p2, u2) = plan_root_bounds("D:\\Photos\\");
         assert_eq!(p2, "D:\\Photos\\");
         assert!("D:\\Photos\\2020\\x.jpg" >= p2.as_str() && "D:\\Photos\\2020\\x.jpg" < u2.as_str());
     }
 
-    /// The planner SQL must prepare AND run — the old
-    /// `GROUP_CONCAT(DISTINCT name, char(31))` form prepared but failed at run
-    /// with "DISTINCT aggregates must have exactly one argument". This also pins
-    /// the dedup, char(31) separator, failed-row exclusion, and NULL-when-no-faces
-    /// behavior the row reader depends on.
+    /// The planner SQL must prepare AND run (`GROUP_CONCAT(DISTINCT name, char(31))` prepared but failed at run). Also pins the dedup, char(31) separator, failed-row exclusion and NULL-when-no-faces behavior the row reader depends on.
     #[test]
     fn plan_files_sql_runs_and_dedupes_person_names() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1792,16 +1733,13 @@ mod tests {
             .collect();
         rows.sort_by_key(|(id, _, _)| *id);
 
-        // failed=1 (file 3) is excluded; file 1 dedupes Bob+Bob+Alice into two
-        // names joined by char(31); file 2 has no faces → NULL. Compare as a set
-        // (SQLite doesn't guarantee aggregate order across versions).
+        // failed=1 (file 3) is excluded; file 1 dedupes Bob+Bob+Alice into two names joined by char(31); file 2 has no faces → NULL. Compared as a set (SQLite doesn't guarantee aggregate order).
         assert_eq!(rows.len(), 2);
         let mut names: Vec<&str> = rows[0].1.as_deref().unwrap().split('\u{1f}').collect();
         names.sort_unstable();
         assert_eq!(names, ["Alice", "Bob"]);
         assert_eq!(rows[1].1, None);
-        // The smart-rename column must be readable by the row reader (column 12),
-        // which is what makes Windows and macOS lay out the same filenames.
+        // The smart-rename column (12) must be readable by the row reader so Windows and macOS lay out the same filenames.
         assert_eq!(rows[0].2.as_deref(), Some("sunset-over-the-bay"));
         assert_eq!(rows[1].2, None);
     }
@@ -1881,8 +1819,7 @@ mod tests {
         assert_eq!(paged_ids, ids);
     }
 
-    /// Every tier must cap the resident map; larger machines get a larger
-    /// quality sample, never an unbounded full-table allocation.
+    /// Every tier must cap the resident map; larger machines get a larger quality sample, never an unbounded full-table allocation.
     #[test]
     fn embedding_load_cap_is_bounded_on_every_tier() {
         use crate::platform::MemoryTier;
@@ -1893,10 +1830,7 @@ mod tests {
         assert!(high < usize::MAX);
     }
 
-    /// The load streams and stops at the cap, so a large corpus never
-    /// materializes a full-table HashMap under memory pressure. Before the fix
-    /// the load was unconditional (one HashMap holding every row); this asserts
-    /// the cap actually bounds the resident map. (016)
+    /// The load streams and stops at the cap, so a large corpus never materializes a full-table HashMap under memory pressure.
     #[test]
     fn capped_embedding_load_bounds_the_resident_map() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1905,7 +1839,6 @@ mod tests {
              CREATE TABLE clip_embeddings(file_id INTEGER PRIMARY KEY, embedding BLOB);",
         )
         .unwrap();
-        // 100 image rows, each a valid 4-float embedding blob.
         let blob: Vec<u8> = (0..4)
             .flat_map(|i| (i as f32).to_le_bytes())
             .collect();
@@ -1922,12 +1855,10 @@ mod tests {
             .unwrap();
         }
 
-        // A small cap bounds the resident map even though 100 rows qualify.
         let bounds = plan_root_bounds("");
         let capped = load_capped_embeddings(&conn, 10, &bounds).unwrap();
         assert_eq!(capped.len(), 10, "cap must bound the resident map");
 
-        // An effectively-uncapped load (Balanced/High) returns the full table.
         let full = load_capped_embeddings(&conn, usize::MAX, &bounds).unwrap();
         assert_eq!(full.len(), 100, "uncapped load returns every qualifying row");
     }
@@ -2033,12 +1964,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Full paged-plan loop: spool a plan over real files, reopen it by
-    /// planID, and stream it through `apply_iter` — the exact path a
-    /// truncated GUI plan takes when the app applies with planID + empty
-    /// moves. Guards the spool/apply seam the piecewise tests can't.
-    /// Review/Ask rows beyond the bounded preview have not received per-file
-    /// consent, so an engine-owned stored plan may bulk-apply Auto rows only.
+    /// Full paged-plan loop: spool a plan over real files, reopen by planID, and stream through `apply_iter`, the path a truncated GUI plan takes when the app applies with planID + empty moves. Review/Ask rows beyond the bounded preview have no per-file consent, so an engine-owned stored plan may bulk-apply Auto rows only.
     #[test]
     fn stored_plan_bulk_apply_is_auto_only() {
         let root = std::env::temp_dir().join(format!(
@@ -2188,6 +2114,19 @@ mod tests {
     }
 
     #[test]
+    fn a_190k_library_keeps_the_semantic_planner_and_respect_stage_except_on_low_memory() {
+        use crate::platform::MemoryTier;
+        let adlon = 188_881;
+        assert!(adlon <= large_plan_stream_threshold_for(MemoryTier::Balanced));
+        assert!(adlon <= large_plan_stream_threshold_for(MemoryTier::High));
+        assert_eq!(large_plan_stream_threshold_for(MemoryTier::Low), 150_000);
+        assert!(
+            large_plan_stream_threshold_for(MemoryTier::Balanced) < 1_000_000,
+            "a million files still stream through the disk-backed path"
+        );
+    }
+
+    #[test]
     #[ignore = "explicit million-file disk-backed planner regression"]
     fn million_file_large_plan_is_disk_backed_and_preview_bounded() {
         let conn = crate::db::test_support::memory_db();
@@ -2227,9 +2166,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An engine kill mid-plan leaves the `{uuid}.planning.sqlite` scratch DB
-    /// behind (the end-of-plan `remove_file` never runs). The next large plan
-    /// must sweep those orphans, or they accumulate without bound.
+    /// An engine kill mid-plan leaves `{uuid}.planning.sqlite` behind; the next large plan must sweep the orphans or they accumulate without bound.
     #[test]
     fn large_plan_sweeps_stale_planning_scratch() {
         let conn = crate::db::test_support::memory_db();
@@ -2256,6 +2193,27 @@ mod tests {
                 .all(|entry| !entry.path().to_string_lossy().contains("planning.sqlite")),
             "no planning scratch left behind after planning"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stored-plan apply compares each move with the file the plan was built from, so a streamed plan must carry it.
+    #[test]
+    fn a_streamed_plan_keeps_each_files_identity() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref,content_hash,modified_at)
+             VALUES (7,'/library/downloads/a.jpg',7,1234,1.0,'image','jpg',0,99,x'0a0b0c',555.0)",
+            [],
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let dir = std::env::temp_dir().join(format!("fileid-large-identity-{}", uuid::Uuid::new_v4()));
+        let plan = plan_large_library_in(&db, "/library", &dir).unwrap();
+        let moved = plan.moves.iter().find(|m| m.file_id == 7).expect("the file is planned");
+        assert_eq!(moved.size_bytes, Some(1234));
+        assert_eq!(moved.file_ref, Some(99));
+        assert_eq!(moved.content_hash.as_deref(), Some("0a0b0c"));
+        assert_eq!(moved.modified_at, Some(555.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2292,10 +2250,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// F-C6-013 dispatch wiring: `handle_apply_restructure` must honor the
-    /// cancel flag the CancelScan arm sets. Before the wiring it built a fresh
-    /// never-set flag and ignored cancellation entirely — this calls the
-    /// dispatch entry with a pre-set flag and asserts NOTHING moves.
+    /// `handle_apply_restructure` must honor the cancel flag the CancelScan arm sets; calls the dispatch entry with a pre-set flag and asserts NOTHING moves.
     #[tokio::test]
     async fn apply_dispatch_honors_preset_cancel() {
         use std::sync::atomic::AtomicBool;
@@ -2336,7 +2291,6 @@ mod tests {
             use_symlinks: false,
         };
 
-        // Pre-set the cancel flag: a wired dispatch refuses to move anything.
         let cancel = Arc::new(AtomicBool::new(true));
         let (sink, _rx) = Sink::channel_for_test(4);
         handle_apply_restructure(sink, db, payload, cancel).await;
@@ -2347,6 +2301,132 @@ mod tests {
             "no move performed under a pre-set cancel"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_the_whole_plan_when_a_move_leaves_a_read_only_drive() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let base = std::env::temp_dir().join(format!("fileid-apply-ro-{}", uuid::Uuid::new_v4()));
+        let (library, vault) = (base.join("library"), base.join("vault"));
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&vault).unwrap();
+        crate::util::read_only::mark_read_only_for_tests(&vault, "Vault");
+        let conn = crate::db::test_support::memory_db();
+        let mut moves = Vec::new();
+        for (id, folder) in [(1, &library), (2, &vault)] {
+            let source = folder.join(format!("{id}.jpg"));
+            std::fs::write(&source, b"data").unwrap();
+            conn.execute(
+                "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) VALUES (?1, ?2, 0, 4, 0.0, 'image', 'jpg', 0)",
+                rusqlite::params![id, source.to_string_lossy()],
+            )
+            .unwrap();
+            moves.push(ipc::RestructureMove {
+                file_id: id,
+                source: source.to_string_lossy().into_owned(),
+                destination: library.join("Sorted").join(format!("{id}.jpg")).to_string_lossy().into_owned(),
+                category: "Sorted".into(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+                content_hash: None,
+                size_bytes: None,
+                file_ref: None,
+                modified_at: None,
+            });
+        }
+        let payload = ipc::ApplyRestructurePayload { library_root: library.to_string_lossy().into_owned(), plan_id: None, moves, use_symlinks: false };
+        let (sink, mut rx) = Sink::channel_for_test(8);
+        handle_apply_restructure(sink, Arc::new(parking_lot::Mutex::new(conn)), payload, Arc::new(AtomicBool::new(false))).await;
+
+        let (mut counts, mut refusal) = (None, None);
+        while let Ok(event) = rx.try_recv() {
+            match event.payload {
+                EventPayload::RestructureApplyResult(result) => counts = Some((result.inner.applied, result.inner.failed)),
+                EventPayload::Error(error) => refusal = Some((error.inner.kind, error.inner.message)),
+                _ => {}
+            }
+        }
+        assert_eq!(counts, Some((0, 2)));
+        let (kind, message) = refusal.expect("a refusal");
+        assert_eq!(kind, "location_read_only");
+        assert!(message.contains("\u{201c}Vault\u{201d} is a read-only drive") && message.contains("1 of 2 files are on it") && message.ends_with("Nothing was moved."), "{message}");
+        assert!(library.join("1.jpg").exists() && vault.join("2.jpg").exists(), "nothing moved");
+        assert!(!library.join("Sorted").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// One file with a name FileID can't use must not refuse the whole inline plan: the rest move, the odd one stays, and a plain notice says why.
+    // Windows cannot create a file whose name holds a newline, so the fixture exists only on Unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_dispatch_skips_one_unusable_name_and_says_why() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let root = std::env::temp_dir().join(format!("fileid-dispatch-badname-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        let mut moves = Vec::new();
+        for (index, name) in ["one.jpg", "bad\nname.jpg", "two.jpg"].iter().enumerate() {
+            let source = root.join(name);
+            std::fs::write(&source, b"data").unwrap();
+            let file_id = index as i64 + 1;
+            conn.execute(
+                "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, file_ref) \
+                 VALUES (?1, ?2, 0, 4, 0.0, 'image', 'jpg', 0, ?3)",
+                rusqlite::params![file_id, source.to_string_lossy(), crate::platform::file_ref(&source).map(|v| v as i64)],
+            )
+            .unwrap();
+            moves.push(ipc::RestructureMove {
+                file_id,
+                source: source.to_string_lossy().into_owned(),
+                destination: root.join("Sorted").join(name).to_string_lossy().into_owned(),
+                category: "Sorted".into(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+                content_hash: None,
+                size_bytes: None,
+                file_ref: None,
+                modified_at: None,
+            });
+        }
+        let payload = ipc::ApplyRestructurePayload {
+            library_root: root.to_string_lossy().into_owned(),
+            plan_id: None,
+            moves,
+            use_symlinks: false,
+        };
+        let (sink, mut rx) = Sink::channel_for_test(8);
+        handle_apply_restructure(sink, Arc::new(parking_lot::Mutex::new(conn)), payload, Arc::new(AtomicBool::new(false))).await;
+
+        let mut counts = None;
+        let mut notice = None;
+        while let Ok(event) = rx.try_recv() {
+            match event.payload {
+                EventPayload::RestructureApplyResult(result) => counts = Some((result.inner.applied, result.inner.failed)),
+                EventPayload::Error(error) => notice = Some((error.inner.kind, error.inner.message)),
+                _ => {}
+            }
+        }
+        assert_eq!(counts, Some((2, 1)));
+        let (kind, message) = notice.expect("a notice names the skipped file");
+        assert_eq!(kind, "apply_restructure_skipped");
+        assert!(message.starts_with("1 file stayed where it is"), "{message}");
+        assert!(message.contains("\"bad name.jpg\""), "a control character in the name is shown as a space: {message}");
+        assert!(root.join("bad\nname.jpg").exists());
+        assert!(root.join("Sorted/one.jpg").exists() && root.join("Sorted/two.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unusable_name_notice_counts_files() {
+        assert_eq!(unusable_names_notice(&UnusableNames::default()), None);
+        let many = UnusableNames { count: 3, first: Some("a\tb.jpg".into()) };
+        let message = unusable_names_notice(&many).unwrap();
+        assert!(message.starts_with("3 files stayed where they are"), "{message}");
+        assert!(message.contains("Rename them"), "{message}");
     }
 
     #[test]
@@ -2431,13 +2511,7 @@ mod tests {
 
     #[test]
     fn stale_auto_tier_row_is_skipped_not_batch_fatal() {
-        // The headline preflight bug: two Auto-tier moves in the same plan,
-        // one of whose source files was deleted from disk after planning
-        // (a live-corpus race, not plan corruption). Before the preflight
-        // was split into structural-vs-stale outcomes, ANY preflight
-        // failure aborted the whole apply via `?` — zero files moved, even
-        // the untouched sibling row. It must now apply the healthy row and
-        // report exactly the stale one as failed.
+        // Two Auto-tier moves where one source file was deleted after planning (a live-corpus race, not plan corruption). With ANY preflight failure aborting via `?`, zero files moved, even the healthy sibling; it must apply the healthy row and report exactly the stale one as failed.
         let root = std::env::temp_dir().join(format!(
             "fileid-stale-auto-row-{}-{}",
             std::process::id(),
@@ -2491,9 +2565,6 @@ mod tests {
         let (plan_id, _) =
             write_stored_plan_in(&plan_dir, &root_text, moves.into_iter().map(Ok), 2).unwrap();
 
-        // The race: delete the second file's source AFTER the plan was
-        // written, exactly as if the user (or another app) removed it
-        // between planning and clicking Apply.
         std::fs::remove_file(&vanished_source).unwrap();
 
         let apply = RestructureApply::new(
@@ -2668,19 +2739,14 @@ mod tests {
 
     #[test]
     fn desktop_unsorted_and_inbox_are_junk_in_large_plan_tiering() {
-        // Build the paths with the NATIVE separator. Hardcoded "C:\Library\Desktop"
-        // silently mistests on Linux: backslash is a legal filename character
-        // there, so `file_name()` yields the whole string and the junk basename is
-        // never seen — the folder tiers as "Anchor" and the assertion fails for a
-        // reason unrelated to the tiering rule. (The engine is cross-platform and
-        // this suite runs on Linux CI too.)
+        // Build paths with the NATIVE separator: hardcoded "C:\Library\Desktop" mistests on Linux (backslash is a legal filename character, so `file_name()` yields the whole string and the junk basename is never seen). The engine is cross-platform and this suite runs on Linux CI.
         let root = if cfg!(windows) {
             std::path::PathBuf::from(r"C:\Library")
         } else {
             std::path::PathBuf::from("/Library")
         };
         let root_text = root.to_string_lossy();
-        for name in ["Desktop", "Unsorted", "Inbox"] {
+        for name in ["Desktop", "Unsorted", "Inbox", "lib", "Photo Library", "100APPLE", "Screenshots"] {
             let folder = root.join(name);
             assert_eq!(
                 folder_tier(&folder.to_string_lossy(), &root_text, 100, 100),
@@ -2929,12 +2995,7 @@ mod tests {
         write_last(&tampered);
         assert_rejected("duplicate destination");
 
-        // A destination collision that appears after planning describes THIS
-        // ROW's relationship to the live corpus changing, not a corrupt
-        // plan — unlike the structural "duplicate destination" case above
-        // (the plan itself targeting one path twice), preflight must not
-        // abort every other move over it. apply_iter_with's existing
-        // strict-destinations skip (failed += 1; continue) handles it.
+        // A destination collision that appears after planning is a row's relationship to the live corpus changing, not a corrupt plan (unlike the structural "duplicate destination" case above), so preflight must not abort every other move over it; apply_iter_with's strict-destinations skip handles it.
         tampered = original_last.clone();
         std::fs::create_dir_all(root.join("Sorted")).unwrap();
         std::fs::write(&tampered.destination, b"appeared after planning").unwrap();
@@ -3165,5 +3226,44 @@ mod tests {
         assert!(plan.moves.iter().all(|m| m.tier.as_deref() != Some("Anchor")), "{:?}", plan.moves);
         let tiles = plan.folder_classifications.expect("folder tiles");
         assert_eq!(tiles.anchor_folders, 1, "only Event/Photos/RAWs stays as kept");
+    }
+
+    // On a case-insensitive volume `misc/` and `Misc/` are one folder, so the
+    // move is a no-op; on a case-sensitive one they are two and the move is real.
+    #[tokio::test]
+    async fn both_planners_follow_the_volumes_case_rules_for_a_case_only_destination() {
+        let root = std::env::temp_dir().join(format!("fileid-case-planner-{}", uuid::Uuid::new_v4()));
+        let source = root.join("misc").join("a.bin");
+        let destination = root.join("Misc").join("a.bin");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"image").unwrap();
+        let case_insensitive = destination.exists();
+        let conn = crate::db::test_support::memory_db();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, created_at, modified_at, scanned_at, kind, extension, failed)
+             VALUES (1, ?1, 1, 5, 1710504000.0, 1710504000.0, 1710504000.0, 'other', 'bin', 0)",
+            rusqlite::params![source.to_string_lossy()],
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let root_text = root.to_string_lossy().into_owned();
+
+        let large = plan_large_library_in(&db, &root_text, &root.join("plans")).unwrap();
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let payload = ipc::PlanRestructurePayload { library_root: root_text.clone(), supports_paged_plans: false };
+        handle_plan_restructure(sink, db, payload, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let small = loop {
+            match events.recv().await.expect("plan event").payload {
+                EventPayload::RestructurePlan(plan) => break plan.inner,
+                EventPayload::Error(err) => panic!("planning failed: {}", err.inner.message),
+                _ => {}
+            }
+        };
+        let _ = std::fs::remove_dir_all(&root);
+
+        let destinations = |moves: &[IpcMove]| moves.iter().map(|m| m.destination.clone()).collect::<Vec<_>>();
+        let expected = if case_insensitive { Vec::new() } else { vec![destination.to_string_lossy().into_owned()] };
+        assert_eq!(destinations(&small.moves), expected, "small planner, case-insensitive volume: {case_insensitive}");
+        assert_eq!(destinations(&large.moves), expected, "stored planner, case-insensitive volume: {case_insensitive}");
     }
 }

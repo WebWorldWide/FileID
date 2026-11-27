@@ -1,17 +1,11 @@
 import SwiftUI
 
-/// Sankey flow diagram for the Restructure tab. All ribbons render
-/// in one `Canvas`. Layout (sources, destinations, flows, slot Y
-/// positions, cross-highlight indexes) is computed once per data or
-/// geometry change and cached in `layout`. Hover is a single
-/// `.onContinuousHover` that hit-tests by cursor-to-bezier proximity.
+/// Sankey flow diagram for Restructure: one Canvas draws every ribbon. Layout is cached in `layout`; hover is one `.onContinuousHover` that hit-tests by bezier proximity.
 struct SankeyFlowView: View {
     let proposals: [RestructureView.Proposal]
     var onTapSource: (String) -> Void = { _ in }
     var onTapDestination: (String) -> Void = { _ in }
-    /// Tapping either "+ N more folders" rollup — the parent
-    /// scopes the drill-down to the long-tail list rather than the
-    /// literal rollup label.
+    /// Tapping a "+ N more folders" rollup scopes the drill-down to its long-tail list.
     var onTapSourceRollup: ([String]) -> Void = { _ in }
     var onTapDestRollup: ([String]) -> Void = { _ in }
     var hoverBus: RestructureHoverBus
@@ -22,14 +16,13 @@ struct SankeyFlowView: View {
     @State private var cursorPos: CGPoint = .zero
     @State private var cursorActive = false
     @State private var entranceProgress: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let topN = 8
-    private static let otherSourceID = "src:__other__"
-    private static let otherDestID = "dst:__other__"
+    static let otherSourceID = "src:__other__"
+    static let otherDestID = "dst:__other__"
 
-    /// Okabe-Ito CVD-safe palette — 7 distinguishable hues that work for all
-    /// common forms of color-vision deficiency. Applied to destination nodes so
-    /// ribbons answer "what category does this end up in?" (RESTRUCTURE.md §7)
+    /// Okabe-Ito palette, distinguishable under common color-vision deficiencies, for destination nodes (RESTRUCTURE.md §7).
     private static let okabeIto: [Color] = [
         Color(red: 0.000, green: 0.447, blue: 0.698),   // blue      #0072B2
         Color(red: 0.835, green: 0.369, blue: 0.000),   // vermilion #D55E00
@@ -51,10 +44,7 @@ struct SankeyFlowView: View {
         }
     }
 
-    /// Column headers: "FROM (N)" → "TO (M)" with a connecting arrow
-    /// in the middle. Tiny tracking-spaced caps reads as a section
-    /// header, not a label, and the arrow makes the directionality
-    /// of the diagram unmistakable at a glance.
+    /// Column headers: "FROM (N)" → "TO (M)" with an arrow.
     @ViewBuilder
     private var columnHeaderRow: some View {
         let nodeColW: CGFloat = 196
@@ -98,8 +88,7 @@ struct SankeyFlowView: View {
         .padding(.horizontal, 2)
     }
 
-    /// Main diagram area — GeometryReader with the ribbon Canvas +
-    /// node columns + tooltip overlay.
+    /// The ribbon canvas, node columns and tooltip overlay.
     @ViewBuilder
     private var diagramArea: some View {
         GeometryReader { geo in
@@ -110,29 +99,24 @@ struct SankeyFlowView: View {
                 nodeColW ... (totalW - nodeColW)
 
             ZStack(alignment: .topLeading) {
-                // 1. Single Canvas draws every ribbon. One view,
-                // one draw pass per render — orders of magnitude
-                // cheaper than 70 Path views.
+                // One Canvas draws every ribbon: one draw pass per render instead of ~70 Path views.
                 ribbonCanvas(ribbonAreaX: ribbonAreaX, totalH: totalH)
                     .opacity(Double(entranceProgress))
 
-                    // 2. Source column.
                     ForEach(layout.sources) { node in
                         if let slot = layout.srcSlots[node.id] {
                             Button {
                                 if node.id == Self.otherSourceID {
                                     onTapSourceRollup(layout.rollupSourceFolders)
                                 } else {
-                                    // The full path (identityKey), not the basename:
-                                    // same-named folders would otherwise drill into
-                                    // the first match.
+                                    // Full path, not the basename, so same-named folders stay distinct.
                                     onTapSource(node.identityKey)
                                 }
                             } label: {
                                 nodeView(node, slot: slot, isFocused: isNodeFocused(node))
                             }
                             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
-                            .accessibilityLabel("From \(node.label)")
+                            .accessibilityLabel(RestructureSpeech.mapFolder(direction: "From", name: node.label, files: node.count))
                             .accessibilityHint("Shows the files moving out of this folder")
                                 .frame(width: nodeColW)
                                 .position(x: nodeColW / 2, y: slot.midY)
@@ -146,7 +130,6 @@ struct SankeyFlowView: View {
                         }
                     }
 
-                    // 3. Destination column.
                     ForEach(layout.destinations) { node in
                         if let slot = layout.dstSlots[node.id] {
                             Button {
@@ -159,7 +142,7 @@ struct SankeyFlowView: View {
                                 nodeView(node, slot: slot, isFocused: isNodeFocused(node))
                             }
                             .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
-                            .accessibilityLabel("To \(node.label)")
+                            .accessibilityLabel(RestructureSpeech.mapFolder(direction: "To", name: node.label, files: node.count))
                             .accessibilityHint("Shows the files moving into this folder")
                                 .frame(width: nodeColW)
                                 .position(x: totalW - nodeColW / 2,
@@ -174,10 +157,7 @@ struct SankeyFlowView: View {
                         }
                     }
                 }
-                // Single hover detector for the entire ribbon area.
-                // Runs per mousemove, finds the closest ribbon by
-                // proximity to its bezier curve, writes to the bus
-                // only when the answer changes.
+                // One hover detector for the ribbon area; writes to the bus only when the answer changes.
                 .onContinuousHover { phase in
                     handleContinuousHover(phase: phase,
                                            ribbonAreaX: ribbonAreaX,
@@ -190,9 +170,7 @@ struct SankeyFlowView: View {
                     recomputeLayoutIfNeeded(width: newSize.width,
                                               height: newSize.height)
                 }
-                // React to layout-relevant CONTENT, not just count — a
-                // regenerate that yields the same number of proposals but
-                // different files/buckets left the diagram stale.
+                // Watches content, not count: a regenerated plan can have the same size.
                 .onChange(of: proposals) { _, _ in
                     layout = Self.computeLayout(
                         proposals: proposals,
@@ -201,20 +179,17 @@ struct SankeyFlowView: View {
                     )
                     // Replay entrance animation when data changes.
                     entranceProgress = 0
-                    withAnimation(.easeOut(duration: 0.55)) {
+                    withAnimation(reduceMotion ? nil : Theme.springStandard) {
                         entranceProgress = 1
                     }
                 }
-                // Floating tooltip near the cursor when hovering a
-                // ribbon — shows the source folder, destination, and
-                // file count of the ribbon under the pointer.
                 hoverTooltip(geo: geo)
             }
             .frame(height: sankeyHeight)
             .clipped()
             .onAppear {
                 if entranceProgress < 1 {
-                    withAnimation(.easeOut(duration: 0.55)) {
+                    withAnimation(reduceMotion ? nil : Theme.springStandard) {
                         entranceProgress = 1
                     }
                 }
@@ -223,19 +198,15 @@ struct SankeyFlowView: View {
 
     // MARK: - Ribbon canvas
 
-    /// Draw all ribbons in a single Canvas. Hovered ribbon (if any)
-    /// is drawn last so it overlays the others. Non-hovered ribbons
-    /// share the source-node tint at low opacity at rest, lower still
-    /// when something else is hovered.
+    /// Draws all ribbons in one Canvas; the hovered ribbon is drawn last so it overlays the others.
     @ViewBuilder
     private func ribbonCanvas(ribbonAreaX: ClosedRange<CGFloat>,
                                 totalH: CGFloat) -> some View {
-        let hoveredFlowID = hoveredFlowID()
-        let dimAll = hoveredFlowID != nil
+        let traced = layout.highlightedFlowIDs(for: hoverBus.context)
+        let dimAll = !traced.isEmpty
 
         Canvas(opaque: false, rendersAsynchronously: false) { ctx, _ in
-            // Draw non-highlighted ribbons first (under).
-            for flow in layout.flows where flow.id != hoveredFlowID {
+            for flow in layout.flows where !traced.contains(flow.id) {
                 drawRibbon(
                     ctx: ctx,
                     flow: flow,
@@ -243,9 +214,7 @@ struct SankeyFlowView: View {
                     state: dimAll ? .dimmed : .resting
                 )
             }
-            // Highlighted ribbon last so it sits on top.
-            if let id = hoveredFlowID,
-               let flow = layout.flowsByID[id] {
+            for flow in layout.flows where traced.contains(flow.id) {
                 drawRibbon(
                     ctx: ctx,
                     flow: flow,
@@ -254,9 +223,8 @@ struct SankeyFlowView: View {
                 )
             }
         }
-        // Performant ribbon animation: only opacity transitions, no
-        // per-ribbon view diff. Canvas redraws once per state change.
-        .animation(.easeOut(duration: 0.18), value: hoveredFlowID)
+        // Only opacity animates, so the Canvas redraws once per state change.
+        .animation(Theme.quick, value: traced)
     }
 
     private enum RibbonState { case resting, dimmed, highlighted }
@@ -279,8 +247,8 @@ struct SankeyFlowView: View {
         )
         let opacity: CGFloat
         switch state {
-        case .resting:     opacity = 0.18
-        case .dimmed:      opacity = 0.04
+        case .resting:     opacity = 0.42
+        case .dimmed:      opacity = 0.08
         case .highlighted: opacity = 0.95
         }
         let thickness = ribbonThickness(for: flow.count)
@@ -298,8 +266,7 @@ struct SankeyFlowView: View {
     private func ribbonThickness(for count: Int) -> CGFloat {
         let total = max(layout.totalFlowCount, 1)
         let ratio = CGFloat(count) / CGFloat(total)
-        // Cap at 9pt — big flows still dominate proportionally but
-        // can't swallow neighbors at intersection points.
+        // Capped at 9pt so big flows cannot swallow neighbours at crossings.
         return max(1.5, min(9, ratio * lastHeight * 0.5))
     }
 
@@ -319,11 +286,8 @@ struct SankeyFlowView: View {
                     .foregroundStyle(node.tint)
             }
             VStack(alignment: .leading, spacing: 0) {
-                Text(node.label)
-                    .font(Theme.Font.body(12.5, .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                    .foregroundStyle(isRollup ? Theme.text2 : Theme.text1)
+                PathLabel(path: node.label, font: Theme.Font.body(12.5, .semibold),
+                          color: isRollup ? Theme.text2 : Theme.text1)
                 Text("\(node.count) file\(node.count == 1 ? "" : "s")")
                     .font(Theme.Font.body(11.5, .medium).monospacedDigit())
                     .foregroundStyle(Theme.text3)
@@ -333,11 +297,8 @@ struct SankeyFlowView: View {
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(
             Rectangle()
-                // Rollup nodes get a lighter, less assertive
-                // background so they read clearly as
-                // "everything else" rather than competing with the
-                // real first-class folders.
-                .fill(isRollup ? AnyShapeStyle(Color.secondary.opacity(0.06))
+                // Rollup nodes get a lighter background so they read as "everything else".
+                .fill(isRollup ? AnyShapeStyle(Color.white.opacity(0.04))
                                  : AnyShapeStyle(.ultraThinMaterial))
         )
         .overlay(
@@ -347,11 +308,7 @@ struct SankeyFlowView: View {
                     lineWidth: isFocused ? 1.5 : 1
                 )
         )
-        // Subtle scale + tinted glow for the focused node. Resting
-        // shadow shrunk 5 → 2.5pt so adjacent nodes don't bleed into
-        // each other at small gaps. Focused state still gets a
-        // generous 12pt glow because only one node is focused at a
-        // time so there's no neighbor to overlap with.
+        // Focused node gets a 12pt glow. The resting shadow is 2.5pt so adjacent nodes don't bleed together at small gaps.
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .shadow(
             color: isFocused ? node.tint.opacity(0.55) : .black.opacity(0.22),
@@ -361,58 +318,25 @@ struct SankeyFlowView: View {
         .frame(height: slot.height)
         .contentShape(Rectangle())
         .help("\(node.label) · \(node.count) file\(node.count == 1 ? "" : "s") · click to see them")
-        .animation(.easeOut(duration: 0.18), value: isFocused)
+        .animation(Theme.quick, value: isFocused)
     }
 
     // MARK: - Hover handling
 
-    /// What ribbon is currently considered "hovered" — derived from
-    /// the bus, not from a local @State, so external surfaces (cards,
-    /// staysPut rows) can drive the highlight too.
-    private func hoveredFlowID() -> String? {
-        switch hoverBus.context {
-        case .none:
-            return nil
-        case .flow(let folder, let bucket):
-            // Walk the cached flowsByID sparingly — small set.
-            for f in layout.flows where f.sourceFolder == folder
-                                      && f.destBucket == bucket {
-                return f.id
-            }
-            return nil
-        case .sourceFolder, .destBucket, .outcome:
-            // Node + outcome highlights affect MANY ribbons. We
-            // signal via the dimAll path inside ribbonCanvas (resting
-            // ribbons that touch the focused source/bucket/outcome
-            // stay bright; others dim). The single-flow lookup
-            // returns nil so no specific ribbon gets the .highlighted
-            // overlay treatment.
-            return nil
-        }
-    }
-
-    /// Handle continuous mousemove inside the diagram. Finds the
-    /// nearest ribbon's bezier point at the cursor's X, marks that
-    /// ribbon as hovered if the cursor is within `proximity` points
-    /// of the curve. O(F) per move — F < ~70 here, ~µs.
+    /// Marks the ribbon whose bezier at the cursor's X is nearest, if within `proximity` points. O(F) per move with F under about 70.
     private func handleContinuousHover(phase: HoverPhase,
                                          ribbonAreaX: ClosedRange<CGFloat>,
                                          totalW: CGFloat) {
         switch phase {
         case .ended:
-            // Only clear if the bus was holding a flow we set. Don't
-            // stomp a sourceFolder/destBucket hover that came from a
-            // node or an external surface.
+            // Clear only a flow hover; a folder or bucket hover came from a node or another surface.
             cursorActive = false
             if case .flow = hoverBus.context {
                 hoverBus.set(nil)
             }
         case .active(let point):
-            // Only write the cursor @State when actually OVER a ribbon (the
-            // tooltip is their sole reader and only shows over a flow). Writing on
-            // every mouse-move — including empty space and the node columns —
-            // re-evaluated body and re-stroked all ~70 ribbon Paths at move rate.
-            // Only hit-test inside the ribbon strip — node columns own their hover.
+            // The cursor @State is written only over a ribbon: writing on every move re-strokes all ribbon paths.
+            // Only the ribbon strip is hit-tested; node columns own their hover.
             guard ribbonAreaX.contains(point.x) else {
                 cursorActive = false
                 if case .flow = hoverBus.context {
@@ -442,7 +366,7 @@ struct SankeyFlowView: View {
                 }
             }
             if let flow = bestFlow {
-                cursorPos = point      // Only update cursor state over a ribbon
+                cursorPos = point
                 cursorActive = true
                 let next: RestructureHoverContext = .flow(
                     sourceFolder: flow.sourceFolder,
@@ -458,23 +382,19 @@ struct SankeyFlowView: View {
         }
     }
 
-    /// Floating tooltip that follows the cursor when hovering a
-    /// ribbon. Shows source → destination + file count. Pinned to a
-    /// safe position (won't overflow the diagram bounds) and
-    /// pointer-events transparent so it doesn't capture hover.
+    /// Tooltip following the cursor over a ribbon: source, destination and file count. It stays inside the diagram and ignores hits.
     @ViewBuilder
     private func hoverTooltip(geo: GeometryProxy) -> some View {
         if cursorActive,
            case .flow(let folder, let bucket) = hoverBus.context {
-            let count = layout.flows.first(where: {
+            let flow = layout.flows.first(where: {
                 $0.sourceFolder == folder && $0.destBucket == bucket
-            })?.count ?? 0
-            let display = (folder as NSString).lastPathComponent
-            let srcLabel = display.isEmpty ? folder : display
+            })
+            let count = flow?.count ?? 0
+            let srcLabel = flow?.sourceName ?? folder
+            let dstLabel = flow?.destName ?? bucket
             let tooltipW: CGFloat = 240
             let tooltipH: CGFloat = 56
-            // Anchor tooltip slightly above-right of the cursor;
-            // clamp within the diagram bounds.
             let rawX = cursorPos.x + 14
             let rawY = cursorPos.y - tooltipH - 10
             let x = max(8, min(rawX, geo.size.width - tooltipW - 8))
@@ -482,8 +402,7 @@ struct SankeyFlowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text("\(count)")
-                        .font(.system(size: 14, weight: .bold,
-                                       design: .rounded).monospacedDigit())
+                        .font(Theme.Font.body(14, .bold).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                     Text("file\(count == 1 ? "" : "s") moving")
                         .font(Theme.Font.body(12, .semibold))
@@ -497,7 +416,7 @@ struct SankeyFlowView: View {
                     Image(systemName: "arrow.right")
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(Theme.text3)
-                    Text(bucket)
+                    Text(dstLabel)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -521,49 +440,33 @@ struct SankeyFlowView: View {
         }
     }
 
-    /// Y of a horizontal cubic bezier at a given cursor X.
-    /// Control points are pinned at the midpoint horizontally so the
-    /// curve has flat tangents at start/end (matches the rendered
-    /// path). Solved via the cubic bezier parametric formula at
-    /// t = (cursorX - startX) / (endX - startX).
+    /// Y of the bezier at `cursorX`, with flat horizontal tangents at both ends.
     private func bezierY(cursorX: CGFloat,
                            startX: CGFloat, endX: CGFloat,
                            startY: CGFloat, endY: CGFloat) -> CGFloat {
         guard endX != startX else { return (startY + endY) / 2 }
         let t = max(0, min(1, (cursorX - startX) / (endX - startX)))
         let oneMinus = 1 - t
-        // Control points: (startX + dx*0.5, startY) and
-        // (endX - dx*0.5, endY). For a horizontal sweep, the y
-        // component reduces to the standard cubic interpolation
-        // between startY and endY weighted by the bezier basis.
         return (oneMinus * oneMinus * oneMinus) * startY
              + 3 * (oneMinus * oneMinus) * t * startY
              + 3 * oneMinus * (t * t) * endY
              + (t * t * t) * endY
     }
 
-    /// True if a node should glow because of the current bus state.
-    /// Cross-highlight rules:
-    ///   - bus.sourceFolder matches a source node directly, OR
-    ///     matches a destination that this source feeds.
-    ///   - bus.destBucket matches a destination directly, OR matches
-    ///     a source that feeds this destination.
-    ///   - bus.flow lights both endpoints.
-    ///   - bus.outcome lights any node that participates in proposals
-    ///     of that outcome class.
+    /// Whether the hover bus lights this node: the hovered node itself, the nodes it feeds or is fed by, both ends of a flow, or every node in an outcome.
     private func isNodeFocused(_ node: Node) -> Bool {
         switch hoverBus.context {
         case .none:
             return false
         case .sourceFolder(let folder):
-            if node.isSource { return node.identityKey == folder }
-            return layout.destinationsForSource[folder]?.contains(node.identityKey) ?? false
+            if node.isSource { return node.id == layout.sourceNodeID(forFolder: folder) }
+            return layout.highlightedFlowIDs(for: hoverBus.context).contains { layout.flowsByID[$0]?.destID == node.id }
         case .destBucket(let bucket):
-            if !node.isSource { return node.identityKey == bucket }
-            return layout.sourcesForDestination[bucket]?.contains(node.identityKey) ?? false
+            if !node.isSource { return node.id == layout.destNodeID(forBucket: bucket) }
+            return layout.highlightedFlowIDs(for: hoverBus.context).contains { layout.flowsByID[$0]?.sourceID == node.id }
         case .flow(let folder, let bucket):
-            return node.isSource ? node.identityKey == folder
-                                  : node.identityKey == bucket
+            guard let flow = layout.flows.first(where: { $0.sourceFolder == folder && $0.destBucket == bucket }) else { return false }
+            return node.id == (node.isSource ? flow.sourceID : flow.destID)
         case .outcome(let outcome):
             return layout.nodesByOutcome[outcome]?.contains(node.id) ?? false
         }
@@ -571,37 +474,26 @@ struct SankeyFlowView: View {
 
     // MARK: - Layout (cached)
 
-    /// Updates @State layout cache only when geometry changed
-    /// meaningfully. A single-pixel resize won't blow away the cache.
-    /// Non-mutating because @State's wrappedValue setter routes
-    /// writes through SwiftUI's StoredLocation, not through `self`.
+    /// Updates the @State layout cache only when geometry changes meaningfully, so a single-pixel resize doesn't drop it.
     private func recomputeLayoutIfNeeded(width: CGFloat, height: CGFloat) {
         let widthChanged = abs(width - lastWidth) > 1.5
         let heightChanged = abs(height - lastHeight) > 1.5
         if !widthChanged && !heightChanged && layout.isPopulated { return }
         let new = Self.computeLayout(proposals: proposals,
                                        width: width, height: height)
-        // The closure-captured self is a value; assigning to its
-        // @State backing requires us to issue the write through the
-        // .onAppear/.onChange closure body, which DOES have mutating
-        // access to the wrapper. We rely on SwiftUI binding semantics
-        // here.
         layout = new
         lastWidth = width
         lastHeight = height
     }
 
-    /// Pure layout computation. No @State, no SwiftUI — just data
-    /// transformations. Cheap enough to call on every proposals
-    /// change but never hit on the hover path.
-    private static func computeLayout(proposals: [RestructureView.Proposal],
+    /// Pure layout computation, run on proposal changes and never on the hover path.
+    static func computeLayout(proposals: [RestructureView.Proposal],
                                         width: CGFloat,
                                         height: CGFloat) -> Layout {
         guard !proposals.isEmpty, width > 0, height > 0 else {
             return .empty
         }
 
-        // 1. Build raw source/destination tallies.
         struct SrcAccum { var folder: String; var count: Int; var isJunk: Bool }
         var srcAccum: [String: SrcAccum] = [:]
         var dstCount: [String: Int] = [:]
@@ -620,8 +512,7 @@ struct SankeyFlowView: View {
             dstCount[p.bucket, default: 0] += 1
         }
 
-        // 2. Pick top-N visible nodes per column. Long tail rolls up
-        // into a single "Other" placeholder.
+        // The long tail rolls up into one "Other" node per column.
         let allSrcs = srcAccum.values
             .sorted { a, b in a.count != b.count ? a.count > b.count : a.folder < b.folder }
         let visibleSrcs = Array(allSrcs.prefix(topN))
@@ -632,9 +523,7 @@ struct SankeyFlowView: View {
         let visibleDsts = Array(allDsts.prefix(topN))
         let tailDsts = Array(allDsts.dropFirst(topN))
 
-        // Source nodes: neutral secondary tint — they recede visually so the
-        // destination colors (which answer "what does this become?") dominate.
-        // The junk icon (tray.2) still distinguishes junk-folder sources.
+        // Sources use a neutral tint so the destination colors dominate; the tray.2 icon marks junk folders.
         var sources: [Node] = visibleSrcs.map { entry in
             let display = (entry.folder as NSString).lastPathComponent
             return Node(
@@ -659,9 +548,7 @@ struct SankeyFlowView: View {
                 isSource: true
             ))
         }
-        // Destination nodes: Okabe-Ito CVD-safe palette so each category gets a
-        // distinct, accessible color. Ribbons carry this color so the user can
-        // instantly see "what does each ribbon become?" (RESTRUCTURE.md §7)
+        // Destination nodes use the Okabe-Ito CVD-safe palette (RESTRUCTURE.md §7).
         var destinations: [Node] = visibleDsts.enumerated().map { (idx, entry) in
             Node(
                 id: "dst:\(entry.bucket)",
@@ -686,18 +573,14 @@ struct SankeyFlowView: View {
             ))
         }
 
-        // 3. Aggregate flows. Long-tail sources/destinations remap
-        // to the "Other" rollup nodes so every flow has a valid
-        // endpoint pair.
+        // Long-tail endpoints remap to the "Other" nodes so every flow has a valid pair.
         let visibleSrcIDs = Set(sources.map(\.id))
         let visibleDstIDs = Set(destinations.map(\.id))
         struct Bucket { var sourceFolder: String; var destBucket: String;
                          var sourceID: String; var destID: String;
-                         var tint: Color; var count: Int }
+                         var tint: Color; var count: Int; var outcomes: Set<RestructureOutcome> }
         var bucketsByKey: [String: Bucket] = [:]
-        // Tint per destination ID — each destination category has its own
-        // Okabe-Ito color; ribbons carry the destination color so the user
-        // reads "what does this become?" from the ribbon hue.
+        // Ribbons carry their destination's color.
         let tintByDestID: [String: Color] = Dictionary(
             uniqueKeysWithValues: destinations.map { ($0.id, $0.tint) }
         )
@@ -710,8 +593,10 @@ struct SankeyFlowView: View {
                 : otherDestID
             let key = "\(srcID)→\(dstID)"
             let tint = tintByDestID[dstID] ?? .secondary
+            let outcome: RestructureOutcome = p.kind == .dissolved ? .reorganize : .tidy
             if var existing = bucketsByKey[key] {
                 existing.count += 1
+                existing.outcomes.insert(outcome)
                 bucketsByKey[key] = existing
             } else {
                 bucketsByKey[key] = Bucket(
@@ -720,7 +605,8 @@ struct SankeyFlowView: View {
                     sourceID: srcID,
                     destID: dstID,
                     tint: tint,
-                    count: 1
+                    count: 1,
+                    outcomes: [outcome]
                 )
             }
         }
@@ -731,20 +617,18 @@ struct SankeyFlowView: View {
                 sourceFolder: $0.sourceFolder,
                 destBucket: $0.destBucket,
                 tint: $0.tint,
-                count: $0.count
+                count: $0.count,
+                sourceName: $0.sourceID == otherSourceID ? Self.otherFoldersName(tailSrcs.count) : Self.folderName($0.sourceFolder),
+                destName: $0.destID == otherDestID ? Self.otherFoldersName(tailDsts.count) : $0.destBucket,
+                outcomes: $0.outcomes
             )
         }
         let totalFlowCount = flows.reduce(0) { $0 + $1.count }
 
-        // 4. Barycentric ordering — re-sort source/destination columns
-        // so each node sits near the average position of the nodes it
-        // connects to. This is the standard heuristic for cutting
-        // Sankey ribbon crossings; one or two passes is usually
-        // enough. We seed with count-sorted positions, then iterate.
+        // Barycentric ordering reduces ribbon crossings; one or two passes suffice.
         var srcOrder = sources.map(\.id)
         var dstOrder = destinations.map(\.id)
         for _ in 0..<2 {
-            // Source y = weighted avg of destination indices.
             let dstIndex: [String: Int] = Dictionary(
                 uniqueKeysWithValues: dstOrder.enumerated().map { ($1, $0) }
             )
@@ -762,7 +646,6 @@ struct SankeyFlowView: View {
             srcOrder.sort {
                 (srcWeight[$0] ?? 0) < (srcWeight[$1] ?? 0)
             }
-            // Destination y = weighted avg of source indices (with new order).
             let srcIndex: [String: Int] = Dictionary(
                 uniqueKeysWithValues: srcOrder.enumerated().map { ($1, $0) }
             )
@@ -781,7 +664,6 @@ struct SankeyFlowView: View {
                 (dstWeight[$0] ?? 0) < (dstWeight[$1] ?? 0)
             }
         }
-        // Apply ordering.
         let srcMap: [String: Node] = Dictionary(
             uniqueKeysWithValues: sources.map { ($0.id, $0) }
         )
@@ -791,10 +673,7 @@ struct SankeyFlowView: View {
         sources = srcOrder.compactMap { srcMap[$0] }
         destinations = dstOrder.compactMap { dstMap[$0] }
 
-        // Pin "+ N more" rollups to the bottom of their column —
-        // barycentric sort can otherwise place them mid-column,
-        // which reads as a peer of the real folders rather than an
-        // aggregation of the long tail.
+        // Rollups go last in their column; the barycentric sort could leave them mid-column, reading as a real folder.
         if let i = sources.firstIndex(where: { $0.id == otherSourceID }) {
             let rollup = sources.remove(at: i)
             sources.append(rollup)
@@ -804,18 +683,15 @@ struct SankeyFlowView: View {
             destinations.append(rollup)
         }
 
-        // 5. Compute slot Y positions per column.
         let srcSlots = layoutSlots(nodes: sources, totalHeight: height)
         let dstSlots = layoutSlots(nodes: destinations, totalHeight: height)
 
-        // 6. Build a flow-by-id lookup so the hover path doesn't have
-        // to scan the array.
+        // The hover path looks flows up by id instead of scanning.
         let flowsByID = Dictionary(
             uniqueKeysWithValues: flows.map { ($0.id, $0) }
         )
 
-        // 7. Helper indexes for cross-highlight without per-render
-        // O(N) scans of `proposals`.
+        // Cross-highlight indexes, so hover never scans `proposals`.
         var destinationsForSource: [String: Set<String>] = [:]
         var sourcesForDestination: [String: Set<String>] = [:]
         for p in proposals {
@@ -828,8 +704,7 @@ struct SankeyFlowView: View {
                 ? .reorganize : .tidy
             nodesByOutcome[outcome, default: []].insert("src:\(p.sourceFolder)")
             nodesByOutcome[outcome, default: []].insert("dst:\(p.bucket)")
-            // Also include the rollups so when the user hovers an
-            // outcome class the +N rollups light up too.
+            // Rollups light up with their outcome too.
             if !visibleSrcIDs.contains("src:\(p.sourceFolder)") {
                 nodesByOutcome[outcome, default: []].insert(otherSourceID)
             }
@@ -855,23 +730,25 @@ struct SankeyFlowView: View {
         )
     }
 
-    /// Compute proportional slot Y positions for a column. Flexes
-    /// small nodes up to `preferredMin`, scales the rest to fit
-    /// `totalHeight`. The 14pt gap is wider than any node shadow
-    /// radius so adjacent cards' shadows don't bleed into each
-    /// other; the 14pt vertical buffer (`columnVerticalBuffer`)
-    /// reserves room above the first / below the last node for the
-    /// focused-state gold halo to bloom without clipping.
-    private static let columnVerticalBuffer: CGFloat = 14
+    static func folderName(_ folder: String) -> String {
+        let name = (folder as NSString).lastPathComponent
+        return name.isEmpty ? folder : name
+    }
 
-    private static func layoutSlots(nodes: [Node], totalHeight: CGFloat) -> [String: Slot] {
+    static func otherFoldersName(_ count: Int) -> String { "\(count) other folder\(count == 1 ? "" : "s")" }
+
+    private static let columnVerticalBuffer: CGFloat = 14
+    private static let nodeSlotHeight: CGFloat = 44
+    private static let nodeGap: CGFloat = 14
+
+    /// Proportional slot Y positions for a column: small nodes flex up to `preferredMin`, the rest scale to fit. The gaps keep node shadows apart, and the buffer leaves room for the focused halo.
+    static func layoutSlots(nodes: [Node], totalHeight: CGFloat) -> [String: Slot] {
         guard !nodes.isEmpty, totalHeight > 0 else { return [:] }
-        let gap: CGFloat = 14
+        let gap = nodeGap
         let totalCount = nodes.reduce(0) { $0 + $1.count }
-        let preferredMin: CGFloat = 28
-        let absoluteMin: CGFloat = 18
+        let preferredMin = nodeSlotHeight
+        let absoluteMin: CGFloat = 40
         let buffer = columnVerticalBuffer
-        // Effective layout height excludes the top + bottom buffers.
         let layoutHeight = max(0, totalHeight - buffer * 2)
         let availableHeight = max(0, layoutHeight - CGFloat(nodes.count - 1) * gap)
         let absMinTotal = absoluteMin * CGFloat(nodes.count)
@@ -898,6 +775,13 @@ struct SankeyFlowView: View {
             }
         }
         let flexAvailable = max(0, availableHeight - fixedTotal)
+        let floorTotal = preferredMin * CGFloat(nodes.count)
+        if availableHeight >= floorTotal, flexCountSum > 0 {
+            let extra = availableHeight - floorTotal
+            for (i, n) in nodes.enumerated() where heights[i] == 0 {
+                heights[i] = preferredMin + extra * CGFloat(n.count) / CGFloat(flexCountSum)
+            }
+        }
         for (i, n) in nodes.enumerated() {
             if heights[i] == 0 {
                 let h = flexCountSum > 0
@@ -919,10 +803,7 @@ struct SankeyFlowView: View {
             }
         }
         var result: [String: Slot] = [:]
-        // Start at `buffer` so the first node has room above it for a
-        // focused-state shadow halo. Final node's bottom edge will
-        // be at most layoutHeight + buffer = totalHeight - buffer,
-        // leaving the matching buffer at the bottom.
+        // Starting at `buffer` leaves room for the focused halo above the first node and below the last.
         var y: CGFloat = buffer
         for (i, n) in nodes.enumerated() {
             result[n.id] = Slot(topY: y, height: heights[i])
@@ -931,9 +812,13 @@ struct SankeyFlowView: View {
         return result
     }
 
-    private var sankeyHeight: CGFloat {
-        let maxNodes = max(layout.sources.count, layout.destinations.count, 4)
-        return min(580, max(320, CGFloat(maxNodes) * 56))
+    private var sankeyHeight: CGFloat { Self.mapHeight(nodeCount: max(layout.sources.count, layout.destinations.count, 1)) }
+
+    /// Tall enough that every node slot keeps its two label lines and the gap between nodes.
+    static func mapHeight(nodeCount maxNodes: Int) -> CGFloat {
+        let fitsNodes = CGFloat(maxNodes) * (Self.nodeSlotHeight + Self.nodeGap) + 2 * Self.columnVerticalBuffer
+        if maxNodes < 4 { return max(160 + CGFloat(maxNodes) * 40, fitsNodes) }
+        return max(320, fitsNodes)
     }
 
 }

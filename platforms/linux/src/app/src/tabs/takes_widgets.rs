@@ -1,7 +1,3 @@
-// Best Takes pieces (DESIGN_V3_PORT "Best Takes"): a fixed-size shot view that
-// zooms onto a face on the standard spring, the BEST / THIS TRY compare pane
-// and the filmstrip tile.
-//
 // Shots draw through Cairo instead of gtk::Picture because a Picture asks for
 // its texture's natural size, which would blow the 28 px fan thumbnails and the
 // 112 × 76 tiles up to the decoded size.
@@ -157,7 +153,7 @@ impl ComparePane {
             .build();
         let header = v3::hbox(8);
         header.add_css_class("v3-take-head");
-        let title = v3::section("BEST");
+        let title = v3::section_whole("BEST");
         header.append(&title);
         let star = v3::label("★", &["v3-take-star"]);
         star.set_visible(false);
@@ -423,5 +419,20 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
         widget.add_css_class(class);
     } else {
         widget.remove_css_class(class);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn the_take_title_is_never_shortened() {
+        if !crate::display_test::init() {
+            return;
+        }
+        let pane = ComparePane::new();
+        assert_eq!(pane.title.ellipsize(), gtk::pango::EllipsizeMode::None);
     }
 }

@@ -253,8 +253,10 @@ pub enum EventPayload {
     LibraryWiped(Wrap<LibraryWiped>),
     /// Reply to generateVideoThumbnail. `bytes` is a base64-encoded JPEG (aspect-preserved, long
     /// side = the requested maxPixelSize, 192 by default) — a base64 string, NOT a number array.
-    /// `modifiedAt` is echoed from the request so the app can write the bytes under its (path,
-    /// modifiedAt) cache key.
+    /// `bytes` is empty when the engine could not decode a frame (a container it cannot read, a
+    /// missing file), so a waiting app moves on at once instead of timing out. `modifiedAt` is
+    /// echoed from the request so the app can write the bytes under its (path, modifiedAt) cache
+    /// key.
     #[serde(rename = "thumbnailGenerated")]
     ThumbnailGenerated(Wrap<ThumbnailGenerated>),
     #[serde(rename = "catalogResponse")]
@@ -772,7 +774,12 @@ pub struct CatalogRequest {
     /// location is unreachable) or failed, and reports progress in jobs; listFaceReview with queue
     /// refresh reads the counts. pauseJob, resumeJob and cancelJob control it, and an interrupted
     /// run comes back paused and resumes where it stopped. It replies with the job in jobs, or
-    /// status error when no face model is installed.
+    /// status error when no face model is installed. similarGroups (schema 1.29.0) pages the
+    /// Cleanup look-alike groups: images whose perceptual hashes differ by at most similarThreshold
+    /// bits (0 to 16, default 8), chained, with groups that are all byte-identical and a RAW beside
+    /// its own rendered twin left out. Groups come largest first (ties by smallest file id); offset
+    /// (default 0) and limit (1 to 200, default 50) select a page. It replies with similarGroups
+    /// for the page and similarGroupTotal for all of them.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -826,6 +833,14 @@ pub struct CatalogRequest {
     /// only). unlearnNames sends the same entries back after the renames are undone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_edits: Option<Vec<CatalogNameEdit>>,
+    /// similarGroups (schema 1.29.0), autoTakeGroups and takeGroupProposals only: how many groups
+    /// to skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    /// similarGroups only (schema 1.29.0): the most perceptual-hash bits two images may differ by
+    /// and still be look-alikes. Default 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_threshold: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1209,8 +1224,17 @@ pub struct LibraryRoot {
     pub last_scan_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<String>,
+    /// True when the volume holding this location is mounted read-only (or is the owner's protected
+    /// drive). FileID shows and searches such files but refuses every command that would change
+    /// them. Re-read at scan start and on every listRoots; omitted by engines that do not detect it
+    /// (read as false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
+/// recommendedID is the engine's pick among the vision models: the best one that loads with the
+/// memory free right now, else the smallest this machine could ever run. Clients show it as the
+/// default and never apply their own memory rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalog {
@@ -1218,15 +1242,20 @@ pub struct ModelCatalog {
     pub request_id: String,
     #[serde(rename = "physicalMemoryGB")]
     pub physical_memory_gb: f64,
+    #[serde(rename = "availableMemoryMB")]
+    pub available_memory_mb: u64,
     #[serde(rename = "vramMB")]
     pub vram_mb: u64,
+    #[serde(rename = "recommendedID", default, skip_serializing_if = "Option::is_none")]
+    pub recommended_id: Option<String>,
     pub models: Vec<ModelCatalogItem>,
 }
 
 /// status is `curated` for the shipped defaults, `candidate` for catalog entries not yet
 /// benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this
-/// engine can load it on this platform today; fits compares the resident estimate with this
-/// machine's memory.
+/// engine can load it on this platform today; fits means the engine's memory admission could ever
+/// accept it on this machine (installed memory less the system reserve), and fitsNow that it would
+/// be accepted with the memory free right now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalogItem {
@@ -1249,6 +1278,7 @@ pub struct ModelCatalogItem {
     pub runnable: bool,
     pub installed: bool,
     pub fits: bool,
+    pub fits_now: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<ModelBenchmark>,
 }
@@ -1302,6 +1332,22 @@ pub struct ScanProgress {
     pub resident_mb: u64,
     #[serde(rename = "availableMB")]
     pub available_mb: u64,
+    /// Schema 1.30.0. postScan snapshots only: how many files the post-scan pass has to finish in
+    /// all (tags and careful text reads left over from the scan). Left out in other phases and by
+    /// older engines; then total - discovered is not it, so a client that joins mid post-scan has
+    /// no baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scan_owed: Option<u64>,
+    /// Schema 1.30.0. postScan snapshots only: how many of postScanOwed are finished; never above
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scan_done: Option<u64>,
+    /// Schema 1.31.0. postScan snapshots only: left out while the pass adds tags and reads text;
+    /// captureDates while it checks the capture dates of photos and videos in a catalog an older
+    /// version wrote, once per folder. postScanOwed and postScanDone then count those photos and
+    /// videos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_scan_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1361,15 +1407,19 @@ pub struct ScanComplete {
 pub struct EngineError {
     /// Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the
     /// same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact
-    /// strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed |
-    /// model_download_failed | download_tls_pin_failed | pack_not_available |
-    /// face_clustering_failed | unknown_model | unknown | … . `face_clustering_failed` (Windows
-    /// form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy
-    /// `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't
-    /// recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was
-    /// renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial)
-    /// are emitted by the Windows engine; the macOS engine surfaces those conditions through its
-    /// scan-completion flow rather than as distinct error kinds.
+    /// strings. Canonical kinds: location_read_only (a command was refused because its targets sit
+    /// on a read-only volume; the message is the plain sentence to show) | discovery_failed |
+    /// vision_failed | db_failed | model_load_failed | model_download_failed |
+    /// download_tls_pin_failed | pack_not_available | face_clustering_failed | unknown_model |
+    /// unknown | … . `face_clustering_failed` (Windows form) is the canonical face-clustering
+    /// failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it.
+    /// `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH
+    /// engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices
+    /// (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine;
+    /// the macOS engine emits rescan_no_changes too and surfaces the other conditions through its
+    /// scan-completion flow rather than as distinct error kinds. `ocr_accurate_disabled` (Swift
+    /// engine, macOS only) reports that accurate text recognition failed repeatedly and the engine
+    /// fell back to fast recognition.
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1652,7 +1702,7 @@ pub struct ThumbnailGenerated {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<f64>,
-    /// Base64-encoded 192px JPEG.
+    /// Base64-encoded 192px JPEG; empty when no frame could be decoded.
     pub bytes: String,
 }
 
@@ -1677,6 +1727,12 @@ pub struct CatalogResponse {
     pub suggested_take_groups: Option<Vec<CatalogTakeGroupSuggestion>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_groups: Option<Vec<CatalogTakeAutoGroup>>,
+    /// similarGroups only (schema 1.29.0): the requested page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_groups: Option<Vec<CatalogSimilarGroup>>,
+    /// similarGroups only (schema 1.29.0): how many groups there are in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_group_total: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_qualities: Option<Vec<CatalogTakeQuality>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1793,6 +1849,16 @@ pub struct CatalogTakeShot {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_at: Option<f64>,
+}
+
+/// Schema 1.29.0. One group of look-alike images. fileIDs lists at most 2,000 members, ascending;
+/// totalCount is the real size of the group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSimilarGroup {
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+    pub total_count: i64,
 }
 
 /// Model-free score of one shot within its group (relative to the other tries) with short plain

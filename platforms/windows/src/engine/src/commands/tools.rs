@@ -50,7 +50,7 @@ fn cancel_active(request: &ToolRequest) -> Result<ToolResponse> {
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
         bail!("Invalid tools request.")
     }
-    let id = request.operation_id.as_deref().context("Choose a running export")?;
+    let id = request.operation_id.as_deref().context("Choose a running export first.")?;
     let active = active_exports().lock();
     let cancelled = active.get(id).context("No running export matches this request.")?;
     cancelled.store(true, Ordering::Release);
@@ -92,12 +92,59 @@ struct Receipt {
     recovery_published: Option<bool>,
 }
 
+fn export_failure_message(error: &anyhow::Error, folder: Option<&str>, exported: usize, total: usize) -> String {
+    use crate::util::user_message::{io_cause, IoCause};
+    let progress = if exported > 0 {
+        format!(
+            " {exported} of {} {} exported.",
+            crate::util::display::count_noun(total as i64, "file", "files"),
+            if exported == 1 { "was" } else { "were" }
+        )
+    } else {
+        String::new()
+    };
+    let folder = folder.unwrap_or("that folder");
+    match io_cause(error) {
+        Some(IoCause::DiskFull) => format!("There isn’t enough free space in {folder}. Free up space or choose another folder.{progress}"),
+        Some(IoCause::ReadOnly) => format!("{folder} is on a read-only disk, so FileID can’t save there. Choose another folder.{progress}"),
+        Some(IoCause::NameTooLong) => format!("A name in this export is too long (the limit is 255 bytes, about 85 characters of Japanese, Chinese or Korean text). Rename the files and try again.{progress}"),
+        None if error.chain().any(|layer| layer.is::<std::io::Error>()) => {
+            "Export didn’t finish. Some files may already be saved; press Show last export to check.".to_string()
+        }
+        None => error.to_string(),
+    }
+}
+
+/// What the user sees for a failed request: FileID's own sentences pass through, raw OS and database text never does.
+fn user_message(error: &anyhow::Error) -> String {
+    use crate::util::user_message::io_cause;
+    if io_cause(error).is_some() {
+        return export_failure_message(error, None, 0, 0);
+    }
+    for cause in error.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::NotFound => "FileID can’t find that file. Check that its disk is connected.".into(),
+                std::io::ErrorKind::PermissionDenied => "FileID isn’t allowed to read that file. Check its permissions.".into(),
+                _ => "FileID couldn’t read that file. Check that its disk is connected, then try again.".into(),
+            };
+        }
+        if let Some(database) = cause.downcast_ref::<rusqlite::Error>() {
+            return match database {
+                rusqlite::Error::QueryReturnedNoRows => "That file is no longer in your library.".into(),
+                _ => "FileID couldn’t read its library. Quit and reopen FileID.".into(),
+            };
+        }
+    }
+    error.to_string()
+}
+
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: ToolRequest) {
     let id = request.request_id.clone();
     if request.action == "cancel" {
         let response = match cancel_active(&request) {
             Ok(response) => response,
-            Err(error) => response(&id, "error", &error.to_string()),
+            Err(error) => response(&id, "error", &user_message(&error)),
         };
         sink.send(IpcEvent::now(EventPayload::ToolResponse(Wrap::new(response))))
             .await;
@@ -112,8 +159,14 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     .await;
     let response = match result {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => response(&id, "error", &error.to_string()),
-        Err(error) => response(&id, "error", &error.to_string()),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "tools request failed");
+            response(&id, "error", &user_message(&error))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "tools request did not finish");
+            response(&id, "error", "FileID couldn’t finish that. Try again.")
+        }
     };
     sink.send(IpcEvent::now(EventPayload::ToolResponse(Wrap::new(response))))
         .await;
@@ -128,19 +181,28 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
         capabilities: vec![],
     }
 }
-/// The Swift engine's wording in the Mac app's engine (the reference there).
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 const UNSUPPORTED_RECIPE: &str = "Choose files, an output folder, and a supported recipe.";
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 const UNSUPPORTED_RECIPE: &str = "Unsupported export recipe";
 
-fn preview_message(count: usize) -> String {
+fn preview_message(kind: &str, count: usize) -> String {
+    let caveat = match kind {
+        "photo" => Some("Photo outputs strip metadata and normalize to 8-bit SDR."),
+        "video" => Some("Video outputs are 8-bit SDR and leave out camera and location details."),
+        _ => None,
+    };
     if cfg!(all(target_os = "macos", feature = "apple-adapters")) {
-        format!("Creates {count} new file(s). Originals are preserved. Photo outputs strip metadata and normalize to 8-bit SDR.")
+        let base = format!("Creates {}. Originals are preserved.", crate::util::display::count_noun(count as i64, "new file", "new files"));
+        caveat.map_or(base.clone(), |caveat| format!("{base} {caveat}"))
     } else {
-        "Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into()
+        match caveat {
+            Some(_) => "Creates new files. Originals preserved; photo and video exports are 8-bit SDR and strip container metadata.".into(),
+            None => "Creates new files. Originals are preserved.".into(),
+        }
     }
 }
+
 fn capabilities() -> Vec<ToolCapability> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     let video = apple_video::capabilities();
@@ -159,7 +221,6 @@ fn portable_capabilities() -> Vec<ToolCapability> {
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
 }
 
-/// The FFmpeg video export, or the AVFoundation one in the Mac app's engine.
 fn video_preview(recipe: &ToolRecipe, source: &Path) -> Result<String> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     return Ok(crate::apple::media::convert_video(recipe, source, None, &AtomicBool::new(false))?.summary);
@@ -183,13 +244,10 @@ fn video_check(recipe: &ToolRecipe, source: &Path) -> Result<()> {
     #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     video_preview(recipe, source).map(drop)
 }
-/// Writes the video export to the just-created, empty stage; returns the
-/// framing and stabilization summary.
 fn video_export(recipe: &ToolRecipe, source: &Path, (stage, file): (&Path, &File), cancelled: &AtomicBool) -> Result<String> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
         let _ = file;
-        // AVAssetExportSession creates its output; the placeholder is ours and empty.
         if fs::metadata(stage)?.len() != 0 {
             bail!("The staged output is occupied.")
         }
@@ -206,7 +264,6 @@ fn video_export(recipe: &ToolRecipe, source: &Path, (stage, file): (&Path, &File
         Ok(String::new())
     }
 }
-/// The AVFoundation worker verifies its own output before it replies.
 fn video_verify(recipe: &ToolRecipe, source: &Path, stage: &Path) -> Result<()> {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -221,8 +278,7 @@ fn video_verify(recipe: &ToolRecipe, source: &Path, stage: &Path) -> Result<()> 
     }
 }
 
-/// The Swift engine's video export rules and capability text for the Mac
-/// app's engine, which runs the same AVFoundation export.
+/// Video export rules and capability text for the Mac engine's AVFoundation export.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 mod apple_video {
     use crate::ipc::{ToolCapability, ToolRecipe};
@@ -234,7 +290,6 @@ mod apple_video {
         ]
     }
 
-    /// The Swift engine's `MediaTools.supports` for photo, chapters and video.
     pub(super) fn supports(recipe: &ToolRecipe) -> bool {
         let aspect = recipe.video_aspect_ratio.as_deref().unwrap_or("source");
         (1..=8192).contains(&recipe.max_dimension)
@@ -293,6 +348,43 @@ fn supports(recipe: &ToolRecipe) -> bool {
                     .contains(&recipe.video_aspect_ratio.as_deref().unwrap_or("source"))
                 && super::video_export::available()))
 }
+const FINGERPRINT_EDGE: u64 = 1024 * 1024;
+
+/// Identifies a source without reading all of it: its size, modified time and first and last megabyte. Any edit
+/// moves the modified time, so a large video is not read three times per export.
+fn fingerprint(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("Choose a regular file, not a link or folder.")
+    }
+    let modified = metadata.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    fingerprint_of(&mut File::open(path)?, metadata.len(), modified)
+}
+
+fn fingerprint_of<R: Read + Seek>(reader: &mut R, len: u64, modified_nanos: u128) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(len.to_le_bytes());
+    digest.update(modified_nanos.to_le_bytes());
+    let mut bytes = vec![0u8; FINGERPRINT_EDGE as usize];
+    let head = len.min(FINGERPRINT_EDGE);
+    reader.seek(SeekFrom::Start(0))?;
+    reader.read_exact(&mut bytes[..head as usize])?;
+    digest.update(&bytes[..head as usize]);
+    let tail_start = len.saturating_sub(FINGERPRINT_EDGE).max(head);
+    let tail = len - tail_start;
+    if tail > 0 {
+        reader.seek(SeekFrom::Start(tail_start))?;
+        reader.read_exact(&mut bytes[..tail as usize])?;
+        digest.update(&bytes[..tail as usize]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// Operation records written before the fingerprint hold the source's full SHA-256; those still match by content.
+fn source_unchanged(path: &Path, recorded: &str) -> Result<bool> {
+    Ok(fingerprint(path)? == recorded || hash(path)? == recorded)
+}
+
 fn hash(path: &Path) -> Result<String> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -300,8 +392,8 @@ fn hash(path: &Path) -> Result<String> {
     }
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
-    // Heap, not stack: a 1 MiB array on a 2 MiB blocking-pool stack can
-    // overflow, and a stack overflow aborts the whole engine.
+    // Heap, not stack: a 1 MiB array on a 2 MiB blocking-pool stack can overflow, and a stack overflow aborts the whole
+    // engine.
     let mut bytes = vec![0u8; 1024 * 1024];
     loop {
         let n = file.read(&mut bytes)?;
@@ -332,9 +424,8 @@ fn load(conn: &Connection, id: &str) -> Result<(Plan, Vec<Receipt>, String)> {
     Ok((plan, serde_json::from_str(&inverse)?, state))
 }
 
-/// The catalog writer as the Tools actions see it. `Shared` locks for each
-/// short catalog step only, so hashing, probing, encoding and ffmpeg run with
-/// the writer free for scans and other commands.
+/// `Shared` locks per short catalog step only, so hashing, probing, encoding and ffmpeg run with the writer free for
+/// scans and other commands.
 enum Db<'a> {
     Held(&'a mut Connection),
     Shared(&'a Arc<Mutex<Connection>>),
@@ -362,9 +453,18 @@ fn execute_with_move(
     run_action(&mut Db::Held(conn), request, move_file)
 }
 
-/// The export's source still has its catalog row at the previewed path and
-/// the operation is still the one being run; the writer was free while the
-/// output was produced, so a rename, rescan or Undo may have intervened.
+/// An export is catalogued only when it lands inside a library location; one written elsewhere is not the library's file.
+fn output_in_library(conn: &Connection, output: &Path) -> rusqlite::Result<bool> {
+    let output = fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
+    let mut statement = conn.prepare("SELECT path FROM library_roots")?;
+    let roots = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(roots.iter().any(|root| {
+        let root = Path::new(root);
+        output.starts_with(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()))
+    }))
+}
+
+/// The writer was free while the output was produced, so a rename, rescan or Undo may have intervened.
 fn require_unchanged(conn: &Connection, id: &str, item: &Item) -> Result<()> {
     let state: Option<String> = conn
         .query_row("SELECT state FROM catalog_operations WHERE id=?1", [id], |r| r.get(0))
@@ -400,14 +500,14 @@ fn run_action(
             if let Some((id, (_, receipts, _))) = latest {
                 result.operation_id = Some(id);
                 result.outputs = receipts.into_iter().map(|r| r.output).collect();
-                result.message = "Last export operation.".into();
+                result.message = "Showing your last export.".into();
             } else {
                 result.message = "No completed export history.".into();
             }
         }
         "preview" => {
-            let ids = request.file_ids.as_ref().context("Choose files")?;
-            let recipe = request.recipe.as_ref().context("Choose a recipe")?;
+            let ids = request.file_ids.as_ref().context("Choose files first.")?;
+            let recipe = request.recipe.as_ref().context("Choose a recipe first.")?;
             let media = if media_recipes::is_media(&recipe.kind) {
                 media_recipes::validate(recipe)?;
                 Some(media_recipes::runtime().context(media_recipes::UNAVAILABLE)?)
@@ -421,7 +521,7 @@ fn run_action(
             {
                 bail!(UNSUPPORTED_RECIPE)
             }
-            let destination = foundation_standardized(Path::new(request.destination.as_deref().context("Choose an output folder")?));
+            let destination = foundation_standardized(Path::new(request.destination.as_deref().context("Choose an output folder first.")?));
             let destination = destination.as_path();
             read_only::require_source_mutation(destination)?;
             if !destination.is_absolute() || !destination.is_dir() {
@@ -443,7 +543,7 @@ fn run_action(
                 if recipe.kind == "chapters" && chapters.is_empty() {
                     bail!("A selected file has no current chapter markers.")
                 }
-                let source_hash = hash(source_path)?;
+                let source_hash = fingerprint(source_path)?;
                 if recipe.kind == "photo" {
                     validate_image(source_path)?;
                 }
@@ -525,7 +625,7 @@ fn run_action(
             db.with(|conn| Ok(conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,plan_json,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?))?;
             result.outputs = plan.items.into_iter().map(|i| i.output).collect();
             result.operation_id = Some(id);
-            result.message = preview_message(result.outputs.len());
+            result.message = preview_message(&recipe.kind, result.outputs.len());
         }
         "execute" => {
             let id = request.operation_id.as_deref().context("Preview an export first.")?;
@@ -563,7 +663,7 @@ fn run_action(
                 }
                 let output = Path::new(&item.output.output_path);
                 read_only::require_source_mutation(output)?;
-                if hash(Path::new(&item.output.source_path))? != item.source_hash {
+                if !source_unchanged(Path::new(&item.output.source_path), &item.source_hash)? {
                     bail!("A source changed after preview. Preview again.")
                 }
                 if plan.recipe.kind == "video" {
@@ -579,8 +679,8 @@ fn run_action(
             if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
                 bail!("Export cancelled before publication")
             }
-            // Atomic claim: the plan was validated with the writer free, so a
-            // second execute of the same plan may have got here first.
+            // Atomic claim: the plan was validated with the writer free, so a second execute of the same plan may have
+            // got here first.
             let claimed = db.with(|conn| {
                 Ok(conn.execute(
                     "UPDATE catalog_operations SET state='running' WHERE id=?1 AND state='preview' AND inverse_json='[]'",
@@ -652,7 +752,7 @@ fn run_action(
                         if let (Some(runtime), Some(before)) = (&media, &media_source) {
                             media_recipes::verify_stage(runtime.as_ref(), &plan.recipe, before, &stage)?;
                         }
-                        if hash(source)? != item.source_hash {
+                        if !source_unchanged(source, &item.source_hash)? {
                             bail!("A source changed during export; its output was not published")
                         }
                         if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
@@ -675,7 +775,7 @@ fn run_action(
                             bail!("Export cancelled before publication")
                         }
                         db.with(|conn| require_unchanged(conn, id, &item))?;
-                        fs::hard_link(&stage, output)?;
+                        crate::util::file_move::publish_staged(&stage, output)?;
                         let last = receipts.last_mut().context("Missing export receipt")?;
                         last.output.state = "completed".into();
                         last.output.message = match (&media, video_summary.is_empty()) {
@@ -699,11 +799,13 @@ fn run_action(
                         db.with(|conn| {
                             let tx = conn.transaction()?;
                             require_unchanged(&tx, id, &item)?;
-                            tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
-                            let derived = tx.last_insert_rowid();
-                            tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,?3,?4)",params![item.output.file_id,derived,role,recipe_json])?;
-                            if let Some(last) = receipts.last_mut() {
-                                last.derived_id = Some(derived);
+                            if output_in_library(&tx, output)? {
+                                tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
+                                let derived = tx.last_insert_rowid();
+                                tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,?3,?4)",params![item.output.file_id,derived,role,recipe_json])?;
+                                if let Some(last) = receipts.last_mut() {
+                                    last.derived_id = Some(derived);
+                                }
                             }
                             persist(&tx, id, &receipts, "running")?;
                             tx.commit()?;
@@ -719,12 +821,15 @@ fn run_action(
                 Ok(()) => {
                     db.with(|conn| persist(conn, id, &receipts, "completed"))?;
                     result.message =
-                        "Export complete. Undo moves unchanged exports into internal recovery storage.".into();
+                        "Export complete. Undo moves the exported files into FileID’s recovery folder.".into();
                 }
                 Err(error) => {
                     db.with(|conn| persist(conn, id, &receipts, "failed"))?;
+                    tracing::warn!(error = ?error, "export failed");
+                    let exported = receipts.iter().filter(|receipt| receipt.output.state == "completed").count();
+                    let folder = plan.items.first().and_then(|item| Path::new(&item.output.output_path).parent()).map(|parent| parent.display().to_string());
                     result.status = "error".into();
-                    result.message = error.to_string();
+                    result.message = export_failure_message(&error, folder.as_deref(), exported, plan.items.len());
                 }
             }
             result.operation_id = Some(id.into());
@@ -732,7 +837,7 @@ fn run_action(
         }
         "cancel" => return cancel_active(request),
         "undo" => {
-            let id = request.operation_id.as_deref().context("Choose an export operation")?;
+            let id = request.operation_id.as_deref().context("Choose an export first.")?;
             let (_, mut receipts, state) = db.with(|conn| load(conn, id))?;
             for receipt in &receipts {
                 if receipt.output.state != "completed" {
@@ -794,7 +899,7 @@ fn run_action(
                             db.with(|conn| Ok(conn.execute("DELETE FROM files WHERE id=?1", [derived])?))?;
                         }
                         receipts[index].output.state = "undone".into();
-                        receipts[index].output.message = format!("Recoverable at {path}");
+                        receipts[index].output.message = format!("Kept for undo at {path}");
                         db.with(|conn| persist(conn, id, &receipts, &state))?;
                         continue;
                     }
@@ -813,7 +918,7 @@ fn run_action(
                 let expected = receipts[index].hash.clone();
                 let mut published = || -> std::io::Result<()> {
                     receipts[index].recovery_published = Some(true);
-                    receipts[index].output.message = "Undo recovery published; export removal is pending.".into();
+                    receipts[index].output.message = "Undo is finishing. The exported files are being removed.".into();
                     db.with(|conn| persist(conn, id, &receipts, &state)).map_err(std::io::Error::other)?;
                     if hash(&source).map_err(std::io::Error::other)? != expected
                         || hash(&target).map_err(std::io::Error::other)? != expected
@@ -829,18 +934,22 @@ fn run_action(
                     db.with(|conn| Ok(conn.execute("DELETE FROM files WHERE id=?1", [derived])?))?;
                 }
                 receipts[index].output.state = "undone".into();
-                receipts[index].output.message = format!("Recoverable at {}", target.display());
+                receipts[index].output.message = format!("Kept for undo at {}", target.display());
                 db.with(|conn| persist(conn, id, &receipts, &state))?;
             }
             db.with(|conn| persist(conn, id, &receipts, "undone"))?;
             result.operation_id = Some(id.into());
             result.outputs = receipts.into_iter().map(|r| r.output).collect();
-            result.message = "Exports moved to internal recovery storage. Originals are unchanged.".into();
+            result.message = "Exports moved to FileID’s recovery folder. Originals are unchanged.".into();
         }
         _ => bail!("Unsupported tools action."),
     }
     Ok(result)
 }
+
+/// Camera originals reach ~61 MP; 100 MP is the ceiling because decode holds the RGB8 frame (300 MB) next to its RGBA
+/// copy inside the decoder's 512 MiB allocation limit.
+const PHOTO_MAX_PIXELS: u64 = 100_000_000;
 
 fn validate_image(path: &Path) -> Result<()> {
     let format = ImageReader::open(path)?
@@ -848,7 +957,7 @@ fn validate_image(path: &Path) -> Result<()> {
         .format()
         .context("Unknown image format")?;
     if ![ImageFormat::Png, ImageFormat::Jpeg].contains(&format) {
-        bail!("Only single-image PNG and JPEG inputs are supported by this adapter")
+        bail!("Only JPEG and PNG photos can be exported here. For a RAW photo, choose the JPEG.")
     }
     if format == ImageFormat::Png {
         let mut file = File::open(path)?;
@@ -874,14 +983,17 @@ fn validate_image(path: &Path) -> Result<()> {
     }
     let mut decoder = ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
     let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > 32_000_000 {
-        bail!("This adapter currently limits input images to 32 megapixels")
+    if u64::from(width) * u64::from(height) > PHOTO_MAX_PIXELS {
+        bail!("This adapter currently limits input images to 100 megapixels")
     }
-    if decoder.icc_profile()?.is_some() {
-        bail!("This adapter requires untagged sRGB input; use color-managed conversion for embedded ICC profiles")
+    if let Some(bytes) = decoder.icc_profile()?
+        && crate::util::icc::Profile::parse(&bytes).is_none()
+    {
+        bail!(UNSUPPORTED_COLOUR_PROFILE)
     }
     Ok(())
 }
+const UNSUPPORTED_COLOUR_PROFILE: &str = "This photo uses a colour profile FileID can’t convert yet. Export a copy as sRGB from the app that made it, then try again.";
 fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<()> {
     if recipe.kind != "photo" || !supports(recipe) {
         bail!("Unsupported photo recipe.")
@@ -895,6 +1007,7 @@ fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<(
     reader.limits(limits);
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation()?;
+    let profile = decoder.icc_profile()?.and_then(|bytes| crate::util::icc::Profile::parse(&bytes));
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
     if recipe.allow_upscale == Some(true) || image.width().max(image.height()) > recipe.max_dimension {
@@ -904,7 +1017,16 @@ fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<(
             image::imageops::FilterType::Lanczos3,
         );
     }
-    let rgba = image.to_rgba8();
+    let mut rgba = image.to_rgba8();
+    if let Some(profile) = profile {
+        let converter = profile.converter();
+        if !converter.is_identity() {
+            for pixel in rgba.pixels_mut() {
+                let [r, g, b] = converter.pixel([pixel[0], pixel[1], pixel[2]]);
+                *pixel = image::Rgba([r, g, b, pixel[3]]);
+            }
+        }
+    }
     image = if recipe.format == "jpeg" {
         let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
         for (x, y, pixel) in rgba.enumerate_pixels() {
@@ -961,9 +1083,8 @@ fn export_chapters(chapters: &[CatalogChapter], format: &str) -> Result<Vec<u8>>
     Ok(text.into_bytes())
 }
 
-/// The output folder as the Swift engine names it, `URL.standardizedFileURL.path`:
-/// `.` and `..` resolved and, on macOS, a leading `/private` dropped when the rest
-/// exists (`/private/var/folders/…` becomes `/var/folders/…`).
+/// As `URL.standardizedFileURL.path`: `.` and `..` resolved and, on macOS, a leading `/private` dropped when the rest
+/// exists.
 fn foundation_standardized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
@@ -990,6 +1111,40 @@ fn foundation_standardized(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn export_failures_name_the_cause_in_plain_words() {
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull)).context("copying");
+        assert_eq!(
+            super::export_failure_message(&full, Some("/Volumes/Photos"), 1, 6),
+            "There isn’t enough free space in /Volumes/Photos. Free up space or choose another folder. 1 of 6 files was exported."
+        );
+        assert_eq!(
+            super::export_failure_message(&full, Some("/Volumes/Photos"), 0, 1),
+            "There isn’t enough free space in /Volumes/Photos. Free up space or choose another folder."
+        );
+        let read_only = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
+        assert_eq!(
+            super::export_failure_message(&read_only, Some("/Volumes/Disk"), 2, 5),
+            "/Volumes/Disk is on a read-only disk, so FileID can’t save there. Choose another folder. 2 of 5 files were exported."
+        );
+        let other = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        let message = super::export_failure_message(&other, None, 0, 1);
+        assert!(message.starts_with("Export didn’t finish.") && !message.contains("os error"), "{message}");
+        assert_eq!(super::export_failure_message(&anyhow::anyhow!("A source changed after preview. Preview again."), None, 0, 1), "A source changed after preview. Preview again.");
+    }
+
+    #[test]
+    fn preview_message_names_only_the_caveat_of_the_recipe_kind() {
+        let photo = super::preview_message("photo", 2);
+        let video = super::preview_message("video", 1);
+        let trim = super::preview_message("trim", 1);
+        assert!(!video.contains("Photo outputs"), "{video}");
+        assert!(video.contains("ideo"), "{video}");
+        assert!(!trim.contains("SDR") && !trim.contains("hoto"), "{trim}");
+        assert!(trim.contains("Originals"), "{trim}");
+        assert!(photo.contains("hoto"), "{photo}");
+    }
+
+    #[test]
     fn output_folders_are_named_as_foundation_standardizes_them() {
         use std::path::Path;
         assert_eq!(super::foundation_standardized(Path::new("/a/./b/../c")), Path::new("/a/c"));
@@ -998,6 +1153,7 @@ mod tests {
         assert_eq!(super::foundation_standardized(Path::new("/private/tmp")), Path::new("/tmp"));
     }
 
+    use super::media_recipes::tests::{landscape as clip_probe, recipe as media_recipe};
     use super::*;
     struct Fixture {
         root: std::path::PathBuf,
@@ -1014,6 +1170,7 @@ mod tests {
                 .unwrap();
             let conn = crate::db::open_writer(&root.join("catalog.sqlite")).unwrap();
             crate::db::test_support::insert_file(&conn, 1, source.to_str().unwrap(), "image");
+            conn.execute("INSERT INTO library_roots(path,display,added_at) VALUES(?1,'t',0)", [root.to_string_lossy()]).unwrap();
             Self { root, source, conn }
         }
 
@@ -1099,6 +1256,49 @@ mod tests {
         assert_eq!(undone.outputs[0].state, "undone");
     }
 
+    fn write_gray_jpeg(path: &Path, width: u32, height: u32) {
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+            .encode(&vec![128u8; width as usize * height as usize], width, height, image::ExtendedColorType::L8)
+            .unwrap();
+        fs::write(path, encoded).unwrap();
+    }
+
+    #[test]
+    fn a_7008_by_4672_camera_photo_is_exported() {
+        let mut fixture = Fixture::new();
+        write_gray_jpeg(&fixture.source, 7008, 4672);
+        let request = fixture.request("jpeg");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        assert_eq!(preview.status, "ok", "{}", preview.message);
+        let done = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(done.status, "ok", "{}", done.message);
+        let output = image::ImageReader::open(&done.outputs[0].output_path).unwrap().with_guessed_format().unwrap();
+        assert_eq!(output.into_dimensions().unwrap(), (16, 11));
+    }
+
+    #[test]
+    fn a_photo_over_100_megapixels_is_refused() {
+        let mut fixture = Fixture::new();
+        write_gray_jpeg(&fixture.source, 12_000, 8_400);
+        let request = fixture.request("jpeg");
+        let message = execute(&mut fixture.conn, &request).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("100 megapixels"), "{message}");
+    }
+
+    #[test]
+    fn a_photo_in_another_format_is_refused_in_plain_words() {
+        let mut fixture = Fixture::new();
+        let mut gif = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut gif)
+            .encode(&[200u8; 4 * 4 * 4], 4, 4, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        fs::write(&fixture.source, gif).unwrap();
+        let request = fixture.request("jpeg");
+        let message = execute(&mut fixture.conn, &request).err().map(|e| e.to_string()).unwrap_or_default();
+        assert_eq!(message, "Only JPEG and PNG photos can be exported here. For a RAW photo, choose the JPEG.");
+    }
+
     #[test]
     fn preview_refuses_a_photo_that_execute_would_refuse() {
         use image::ImageEncoder;
@@ -1112,9 +1312,102 @@ mod tests {
         let refused = execute(&mut fixture.conn, &request);
         let message = refused.as_ref().map(|r| r.message.clone()).unwrap_or_else(|e| e.to_string());
         assert!(refused.is_err(), "preview accepted a source execute refuses: {message}");
-        assert!(message.contains("ICC"), "{message}");
+        assert!(message.contains("colour profile") && !message.contains("ICC") && !message.contains("adapter"), "{message}");
         let exports = fs::read_dir(&fixture.root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("Export")).count();
         assert_eq!(exports, 0, "nothing was written");
+    }
+
+    #[test]
+    fn a_display_p3_photo_is_exported_converted_to_srgb() {
+        use image::ImageEncoder;
+        let mut fixture = Fixture::new();
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_icc_profile(crate::util::icc::tests::profile(crate::util::icc::tests::DISPLAY_P3)).unwrap();
+        encoder.write_image(&[200u8, 100, 100].repeat(32 * 16), 32, 16, image::ExtendedColorType::Rgb8).unwrap();
+        fs::write(&fixture.source, png).unwrap();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let done = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(done.status, "ok", "{}", done.message);
+        let output = image::open(&done.outputs[0].output_path).unwrap().to_rgba8();
+        let pixel = output.get_pixel(0, 0);
+        assert!(pixel[0] > 205 && pixel[1] < 95, "the P3 red must be re-expressed in sRGB: {pixel:?}");
+    }
+
+    #[test]
+    fn an_unreachable_source_is_explained_in_plain_words() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        fs::remove_file(&fixture.source).unwrap();
+        let missing = execute(&mut fixture.conn, &request).unwrap_err();
+        let message = user_message(&missing);
+        assert!(!message.contains("os error") && !message.contains("No such file"), "{message}");
+        assert!(message.contains("can’t find that file"), "{message}");
+        let mut request = fixture.request("png");
+        request.file_ids = Some(vec![99]);
+        let unknown = execute(&mut fixture.conn, &request).unwrap_err();
+        assert_eq!(user_message(&unknown), "That file is no longer in your library.");
+    }
+
+    struct Counting {
+        position: u64,
+        len: u64,
+        read: u64,
+    }
+    impl Read for Counting {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let n = (buffer.len() as u64).min(self.len - self.position) as usize;
+            buffer[..n].fill(7);
+            self.position += n as u64;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+    impl Seek for Counting {
+        fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+            self.position = match from {
+                SeekFrom::Start(at) => at,
+                SeekFrom::End(back) => (self.len as i64 + back) as u64,
+                SeekFrom::Current(by) => (self.position as i64 + by) as u64,
+            };
+            Ok(self.position)
+        }
+    }
+
+    #[test]
+    fn fingerprinting_a_huge_source_reads_only_its_edges() {
+        let mut huge = Counting { position: 0, len: 4 * 1024 * 1024 * 1024, read: 0 };
+        fingerprint_of(&mut huge, 4 * 1024 * 1024 * 1024, 1).unwrap();
+        assert!(huge.read <= 2 * 1024 * 1024, "read {} bytes", huge.read);
+        let mut small = Counting { position: 0, len: 10, read: 0 };
+        assert_eq!(fingerprint_of(&mut small, 10, 1).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn an_edited_source_changes_its_fingerprint_even_in_the_middle() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("big.bin");
+        fs::write(&path, vec![1u8; 5 * 1024 * 1024]).unwrap();
+        let before = fingerprint(&path).unwrap();
+        assert_eq!(before, fingerprint(&path).unwrap());
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(2 * 1024 * 1024)).unwrap();
+        file.write_all(&[9]).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+        assert_ne!(before, fingerprint(&path).unwrap());
+    }
+
+    #[test]
+    fn a_record_holding_the_full_content_hash_still_matches_its_unchanged_source() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("legacy.bin");
+        fs::write(&path, b"legacy source").unwrap();
+        let (full, short) = (hash(&path).unwrap(), fingerprint(&path).unwrap());
+        assert!(source_unchanged(&path, &full).unwrap());
+        assert!(source_unchanged(&path, &short).unwrap());
+        fs::write(&path, b"legacy sourcf").unwrap();
+        assert!(!source_unchanged(&path, &full).unwrap());
     }
 
     #[test]
@@ -1167,7 +1460,7 @@ mod tests {
                 let history = execute(&mut fixture.conn, &action(None, "history")).unwrap();
                 assert_eq!(history.operation_id, preview.operation_id);
                 assert_eq!(history.outputs[0].state, "undone");
-                assert!(history.outputs[0].message.contains("Recoverable at"));
+                assert!(history.outputs[0].message.contains("Kept for undo at"));
             }
         }
     }
@@ -1182,7 +1475,6 @@ mod tests {
             r#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#
         )
         .is_err());
-        // The Mac app's engine enlarges video conventionally, as the Swift engine does.
         let mac = cfg!(all(target_os = "macos", feature = "apple-adapters"));
         for (kind, format, dimension) in [("chapters", "json", 64), ("video", "mp4", 1920), ("photo", "png", 8193)] {
             assert_eq!(mac && kind == "video", supports(&ToolRecipe {
@@ -1209,6 +1501,35 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn a_photo_export_refuses_video_only_options_and_every_video_choice_it_cannot_honour() {
+        let recipe = |kind: &str, format: &str, dimension: u32, edit: &dyn Fn(&mut ToolRecipe)| {
+            let mut recipe = ToolRecipe {
+                kind: kind.into(),
+                format: format.into(),
+                max_dimension: dimension,
+                allow_upscale: None,
+                video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
+            };
+            edit(&mut recipe);
+            recipe
+        };
+        assert!(supports(&recipe("photo", "png", 64, &|_| {})), "positive control");
+        assert!(!supports(&recipe("photo", "png", 8193, &|_| {})), "8193 px is over the limit");
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_aspect_ratio = Some("9:16".into()))));
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_framing = Some("fit".into()))));
+        assert!(!supports(&recipe("photo", "png", 64, &|r| r.video_stabilization = Some(true))));
+        assert!(!supports(&recipe("chapters", "json", 64, &|r| r.allow_upscale = Some(true))));
+        assert!(!supports(&recipe("video", "mp4", 1920, &|r| r.video_aspect_ratio = Some("10:3".into()))));
+        assert!(!supports(&recipe("video", "mp4", 1920, &|r| r.video_framing = Some("zoom".into()))));
+    }
+
     #[test]
     fn mac_video_plan_cannot_execute_as_chapter_text_on_portable_adapter() {
         let mut fixture = Fixture::new();
@@ -1543,6 +1864,59 @@ mod tests {
         assert_eq!(hash(&fixture.source).unwrap(), original);
     }
 
+    // A leftover stage path that was replaced by a link to the user's file must not be followed and deleted.
+    #[cfg(unix)]
+    #[test]
+    fn restart_cleanup_never_deletes_what_a_stage_path_links_to() {
+        let fixture = Fixture::new();
+        let aliased = fixture.root.join(format!(".FileIDExport-{}.part", uuid::Uuid::new_v4()));
+        std::os::unix::fs::symlink(&fixture.source, &aliased).unwrap();
+        let real = fixture.root.join(format!(".FileIDExport-{}.part", uuid::Uuid::new_v4()));
+        fs::write(&real, b"Partial output").unwrap();
+        let original = hash(&fixture.source).unwrap();
+        let plan = Plan {
+            version: 1,
+            r#type: "export".into(),
+            recipe: ToolRecipe {
+                kind: "photo".into(),
+                format: "png".into(),
+                max_dimension: 16,
+                allow_upscale: None,
+                video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
+            },
+            items: vec![Item {
+                output: ToolOutput {
+                    file_id: 1,
+                    source_path: fixture.source.to_string_lossy().into_owned(),
+                    output_path: fixture.root.join("Export.png").to_string_lossy().into_owned(),
+                    state: "pending".into(),
+                    message: String::new(),
+                },
+                source_hash: original.clone(),
+                chapters: vec![],
+            }],
+            // The link comes first, so it has been looked at by the time the real stage file is gone.
+            stage_paths: Some(vec![aliased.to_string_lossy().into_owned(), real.to_string_lossy().into_owned()]),
+        };
+        fixture.conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES('interrupted',?1,'[]','running',0)",[serde_json::to_string(&plan).unwrap()]).unwrap();
+        recover(&fixture.conn).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while real.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!real.exists(), "the real stage file is cleaned up");
+        assert!(fs::symlink_metadata(&aliased).is_ok_and(|m| m.file_type().is_symlink()), "the link is left alone");
+        assert_eq!(hash(&fixture.source).unwrap(), original, "the user's file is untouched");
+        let state: String = fixture.conn.query_row("SELECT state FROM catalog_operations WHERE id='interrupted'", [], |r| r.get(0)).unwrap();
+        assert_eq!(state, "failed", "an interrupted export is marked failed, not left running");
+    }
+
     struct CrossDeviceUndo {
         copy_error: bool,
         delete_error: bool,
@@ -1581,6 +1955,23 @@ mod tests {
         let id = preview.operation_id.unwrap();
         let exported = execute(&mut fixture.conn, &action(Some(id.clone()), "execute")).unwrap();
         (fixture, id, std::path::PathBuf::from(&exported.outputs[0].output_path))
+    }
+    #[test]
+    fn an_export_outside_every_library_location_is_not_catalogued() {
+        let mut fixture = Fixture::new();
+        fixture.conn.execute("DELETE FROM library_roots", []).unwrap();
+        let request = fixture.request("jpeg");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let id = preview.operation_id.unwrap();
+        let exported = execute(&mut fixture.conn, &action(Some(id.clone()), "execute")).unwrap();
+        assert!(std::path::Path::new(&exported.outputs[0].output_path).is_file());
+        let files: i64 = fixture.conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).unwrap();
+        let assets: i64 = fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets", [], |row| row.get(0)).unwrap();
+        assert_eq!((files, assets), (1, 0));
+        let (_, receipts, _) = load(&fixture.conn, &id).unwrap();
+        assert_eq!(receipts[0].derived_id, None);
+        execute(&mut fixture.conn, &action(Some(id), "undo")).unwrap();
+        assert!(!std::path::Path::new(&exported.outputs[0].output_path).exists());
     }
     #[test]
     fn undo_publication_race_cannot_clobber_even_identical_unowned_bytes() {
@@ -1906,6 +2297,108 @@ mod tests {
         assert_eq!(decoded[0].source_revision, "fixture");
     }
 
+    #[test]
+    fn a_chapter_export_refuses_markers_edited_added_or_deleted_after_its_preview() {
+        let mut fixture = Fixture::new();
+        fixture
+            .conn
+            .execute("INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('gift',1,1,2,'Gift','','r','user',1,1,0)", [])
+            .unwrap();
+        let mut request = fixture.request("vtt");
+        request.recipe.as_mut().unwrap().kind = "chapters".into();
+        let edits = [
+            "UPDATE catalog_chapters SET title='Cake' WHERE id='gift'",
+            "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('song',1,3,4,'Song','','r','user',1,1,0)",
+            "DELETE FROM catalog_chapters WHERE id='song'",
+        ];
+        for edit in edits {
+            let preview = execute(&mut fixture.conn, &request).unwrap();
+            let output = std::path::PathBuf::from(&preview.outputs[0].output_path);
+            fixture.conn.execute(edit, []).unwrap();
+            let message = match execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")) {
+                Ok(result) => {
+                    assert_eq!(result.status, "error", "{edit}");
+                    result.message
+                }
+                Err(error) => error.to_string(),
+            };
+            assert!(message.contains("Chapter markers changed"), "{edit}: {message}");
+            assert!(!output.exists(), "{edit}: nothing is written");
+        }
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let text = fs::read_to_string(&exported.outputs[0].output_path).unwrap();
+        assert!(text.contains("Cake") && !text.contains("Song"), "{text}");
+    }
+
+    /// A JPEG whose EXIF says "rotate 90 degrees clockwise to display" and carries a GPS latitude.
+    fn rotated_jpeg_with_location(path: &Path) {
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_fn(32, 16, |x, _| if x < 8 { image::Rgb([255, 255, 255]) } else { image::Rgb([0, 0, 0]) })
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+            .unwrap();
+        let mut tiff: Vec<u8> = b"II*\0".to_vec();
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(2u16.to_le_bytes());
+        tiff.extend([0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0]);
+        tiff.extend([0x25, 0x88, 4, 0, 1, 0, 0, 0]);
+        tiff.extend(38u32.to_le_bytes());
+        tiff.extend(0u32.to_le_bytes());
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend([1, 0, 2, 0, 2, 0, 0, 0, b'N', 0, 0, 0]);
+        tiff.extend(0u32.to_le_bytes());
+        let mut segment = vec![0xFF, 0xE1];
+        segment.extend(((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        segment.extend(b"Exif\0\0");
+        segment.extend(tiff);
+        let mut bytes = jpeg[..2].to_vec();
+        bytes.extend(segment);
+        bytes.extend(&jpeg[2..]);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_photo_export_applies_the_exif_orientation_and_keeps_no_location() {
+        let mut fixture = Fixture::new();
+        let source = fixture.root.join("Rotated.jpg");
+        rotated_jpeg_with_location(&source);
+        let mut decoder = ImageReader::open(&source).unwrap().with_guessed_format().unwrap().into_decoder().unwrap();
+        assert_eq!(decoder.orientation().unwrap(), image::metadata::Orientation::Rotate90, "the fixture carries its EXIF");
+        fixture.conn.execute("UPDATE files SET path_text=?1 WHERE id=1", [source.to_str().unwrap()]).unwrap();
+        let original = fs::read(&source).unwrap();
+        for format in ["jpeg", "png"] {
+            let request = fixture.request(format);
+            let preview = execute(&mut fixture.conn, &request).unwrap();
+            let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+            assert_eq!(exported.status, "ok", "{}", exported.message);
+            let output = fs::read(&exported.outputs[0].output_path).unwrap();
+            let image = image::load_from_memory(&output).unwrap();
+            assert_eq!((image.width(), image.height()), (8, 16), "{format}: turned upright, then fitted in 16 pixels");
+            let pixels = image.to_rgb8();
+            assert!(pixels.get_pixel(4, 1)[0] > 200 && pixels.get_pixel(4, 14)[0] < 60, "{format}: the white band is turned to the top");
+            assert!(!output.windows(4).any(|window| window == b"Exif"), "{format}: no EXIF block, so no location");
+        }
+        assert_eq!(fs::read(&source).unwrap(), original, "the source keeps its bytes");
+    }
+
+    #[test]
+    fn an_export_stores_the_recipe_it_ran_beside_its_lineage() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let exported = execute(&mut fixture.conn, &action(preview.operation_id, "execute")).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let (original, role, recipe): (i64, String, String) = fixture
+            .conn
+            .query_row("SELECT original_id,role,recipe_json FROM catalog_assets", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((original, role.as_str()), (1, "export"));
+        let stored: serde_json::Value = serde_json::from_str(&recipe).unwrap();
+        assert_eq!(stored, serde_json::to_value(request.recipe.as_ref().unwrap()).unwrap());
+        assert_eq!(serde_json::from_value::<ToolRecipe>(stored).unwrap().max_dimension, 16);
+    }
+
     use media_recipes::{MediaProbe, MediaRuntime};
 
     struct FakeMedia {
@@ -1940,14 +2433,6 @@ mod tests {
         }
     }
 
-    fn clip_probe() -> MediaProbe {
-        MediaProbe {
-            duration: 3.0, video_count: 1, audio_count: 1, other_count: 0, width: 96.0, height: 54.0, rotation: 0,
-            video_codec: Some("h264".into()), audio_codec: Some("aac".into()), video_start: Some(0.0),
-            audio_start: Some(0.0), audio_duration: Some(3.0), hdr: false,
-        }
-    }
-
     fn media_fixture() -> Fixture {
         let fixture = Fixture::new();
         let clip = fixture.root.join("Clip.mov");
@@ -1961,14 +2446,6 @@ mod tests {
 
     fn media_request(fixture: &Fixture, recipe: ToolRecipe) -> ToolRequest {
         ToolRequest { recipe: Some(recipe), ..fixture.request("png") }
-    }
-
-    fn media_recipe(kind: &str, format: &str) -> ToolRecipe {
-        ToolRecipe {
-            kind: kind.into(), format: format.into(), max_dimension: 1920, allow_upscale: None, video_aspect_ratio: None,
-            video_framing: None, video_stabilization: None, trim_start_seconds: None, trim_end_seconds: None, trim_mode: None,
-            rotation_degrees: None,
-        }
     }
 
     fn count(conn: &Connection, sql: &str) -> i64 {
@@ -2080,6 +2557,29 @@ mod tests {
         assert_eq!(leftovers, 0);
         assert_eq!(fs::read(&clip).unwrap(), b"source clip bytes");
     }
+
+    #[test]
+    fn a_killed_exports_writer_sibling_is_removed_with_its_part_file() {
+        let dir = std::env::temp_dir().join(format!("fileid-orphan-stage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let stage = dir.join(".FileIDExport-be29b13a-0000-4000-8000-000000000000.part");
+        let sibling = dir.join(".FileIDExport-be29b13a-0000-4000-8000-000000000000.part.sb-3771399d-ceVlkX");
+        let other_export = dir.join(".FileIDExport-ffffffff-0000-4000-8000-000000000000.part.sb-1");
+        let user_file = dir.join("Clip.mp4");
+        for file in [&stage, &sibling, &other_export, &user_file] {
+            fs::write(file, b"bytes").unwrap();
+        }
+        remove_stage_files(&stage);
+        assert!(!stage.exists() && !sibling.exists(), "the part file and its writer sibling are gone");
+        assert!(other_export.exists() && user_file.exists(), "nothing else in the folder is touched");
+
+        let lone = dir.join(".FileIDExport-aaaaaaaa-0000-4000-8000-000000000000.part");
+        let lone_sibling = dir.join(".FileIDExport-aaaaaaaa-0000-4000-8000-000000000000.part.sb-9");
+        fs::write(&lone_sibling, b"bytes").unwrap();
+        remove_stage_files(&lone);
+        assert!(!lone_sibling.exists(), "the sibling goes even when the part file itself is already gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 pub(crate) fn recover(conn: &Connection) -> Result<()> {
@@ -2117,11 +2617,28 @@ pub(crate) fn recover(conn: &Connection) -> Result<()> {
                 {
                     continue;
                 }
-                if fs::symlink_metadata(stage).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
-                    let _ = fs::remove_file(stage);
-                }
+                remove_stage_files(stage);
             }
         }
     });
     Ok(())
+}
+
+/// Removes a killed export's `.part` file and the `<name>.part.sb-<id>` sibling the Apple media writer keeps beside it.
+fn remove_stage_files(stage: &Path) {
+    let removable = |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink());
+    if removable(stage) {
+        let _ = fs::remove_file(stage);
+    }
+    let (Some(parent), Some(name)) = (stage.parent(), stage.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let sibling_prefix = format!("{name}.sb-");
+    let Ok(entries) = fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_str().is_some_and(|n| n.starts_with(&sibling_prefix)) && removable(&path) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }

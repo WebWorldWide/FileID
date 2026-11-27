@@ -2,9 +2,7 @@
 
 namespace FileID.ViewModels;
 
-/// <summary>Best Takes review rules without any UI: wording, default keep marks and
-/// which files a keep set sends to Trash. Mirrors the Linux takes_model.rs and the
-/// macOS review page (DESIGN_V3_PORT "Best Takes").</summary>
+/// <summary>Best Takes review rules without any UI: wording, default keep marks and which files a keep set sends to Trash.</summary>
 internal static class TakeReviewPolicy
 {
     public static string Noun(CatalogTakeAutoGroup group, int count) =>
@@ -45,7 +43,6 @@ internal static class TakeReviewPolicy
         if (!keep.Remove(primaryFileId)) keep.Add(primaryFileId);
     }
 
-    /// <summary>Every file (RAW and JPEG twins included) of the tries that are not kept.</summary>
     public static IReadOnlyList<long> TrashIds(IReadOnlyList<CatalogTakeQuality> qualities, HashSet<long> keep) =>
         qualities.Where(q => !keep.Contains(q.PrimaryFileID)).SelectMany(q => q.FileIDs).Distinct().OrderBy(id => id).ToArray();
 
@@ -88,7 +85,6 @@ internal static class TakeReviewPolicy
         return $"Moves the other {Noun(group, 2)} to the Trash. You can undo right after. (Return)";
     }
 
-    /// <summary>Tries with at least one file the engine reports as moved.</summary>
     public static int MovedShots(IReadOnlyList<CatalogTakeQuality> doomed, IEnumerable<long> movedFileIds)
     {
         var moved = movedFileIds.ToHashSet();
@@ -108,8 +104,7 @@ internal static class TakeReviewPolicy
 
     public const string SkippedText = "Skipped. It's at the bottom of the list.";
 
-    /// <summary>After a trash that leaves two or more tries, keep those together so the
-    /// group isn't suggested again; null when fewer than two remain.</summary>
+    /// <summary>After a trash that leaves two or more tries, keep those together so the group isn't suggested again; null when fewer than two remain.</summary>
     public static CatalogTakeDecision? KeptTogether(CatalogTakeAutoGroup group, IReadOnlyList<CatalogTakeQuality> qualities, HashSet<long> keep, string decision)
     {
         var kept = qualities.Where(q => keep.Contains(q.PrimaryFileID)).ToArray();
@@ -145,8 +140,6 @@ internal static class TakeReviewPolicy
     public static bool CanRank(string goal, IReadOnlyList<CatalogTakeQuality> qualities) =>
         !string.IsNullOrWhiteSpace(goal) && qualities.Count >= 2;
 
-    /// <summary>Puts "Shows the goal" or "Closest to the goal" in front of each try's reasons after a ranked
-    /// answer, replacing the marks of an earlier answer.</summary>
     public static IReadOnlyList<CatalogTakeQuality> MarkGoal(IReadOnlyList<CatalogTakeQuality> qualities, CatalogTakeGoalRanking? ranking)
     {
         var ranked = ranking is { Status: "ranked" };
@@ -159,8 +152,7 @@ internal static class TakeReviewPolicy
         }).ToArray();
     }
 
-    /// <summary>After a ranked answer the top try is kept in place of the quality pick (only when that pick is
-    /// the sole mark) and takes the focus. Null when the answer does not rank.</summary>
+    /// <summary>After a ranked answer the top try is kept in place of the quality pick (only when that pick is the sole mark) and takes the focus.</summary>
     public static (HashSet<long> Keep, int Focus)? AdoptGoal(IReadOnlyList<CatalogTakeQuality> qualities, HashSet<long> keep, CatalogTakeGoalRanking ranking)
     {
         if (ranking.Status != "ranked" || ranking.Order.Count == 0) return null;
@@ -194,7 +186,6 @@ internal static class TakeReviewPolicy
     public static string ZoomLabel(CatalogTakeAutoGroup group, bool zoomed) =>
         zoomed ? $"Show whole {Noun(group, 1)}" : group.Kind == "photos" ? "Zoom to face" : "Zoom in";
 
-    /// <summary>The largest face × 2.6, or the sharp subject × 1.2, kept inside the frame.</summary>
     public static CatalogTakeBox? ZoomBox(CatalogTakeQuality quality)
     {
         var face = quality.Faces.Count == 0 ? null : quality.Faces.MaxBy(f => f.Width * f.Height);
@@ -208,9 +199,6 @@ internal static class TakeReviewPolicy
         return new CatalogTakeBox(x, y, w, h);
     }
 
-    /// <summary>Scale and offset that centre <paramref name="box"/> (normalized to the picture)
-    /// in a well of <paramref name="wellWidth"/> × <paramref name="wellHeight"/>, for a picture
-    /// laid out centred at <paramref name="shownWidth"/> × <paramref name="shownHeight"/>.</summary>
     public static (double Scale, double X, double Y) ZoomTransform(double wellWidth, double wellHeight, double shownWidth, double shownHeight, CatalogTakeBox? box)
     {
         if (box is null || shownWidth <= 0 || shownHeight <= 0 || box.Width <= 0 || box.Height <= 0) return (1, 0, 0);
@@ -228,7 +216,6 @@ internal static class TakeReviewPolicy
     public static CatalogTakeDecision Decision(CatalogTakeAutoGroup group, string kind) =>
         new(group.GroupKey, kind, group.Shots.SelectMany(s => s.FileIDs).ToArray());
 
-    /// <summary>Best against the focused try, or against the runner-up when the best is focused.</summary>
     public static (int Best, int Other)? ComparePair(IReadOnlyList<CatalogTakeQuality> qualities, long focused)
     {
         var best = Best(qualities);

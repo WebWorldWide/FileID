@@ -80,4 +80,50 @@ struct MediaToolRequestPolicyTests {
         #expect(choice.recipe?.format == "mov", "with both containers taken the choice stays and the engine's refusal is shown")
         #expect(MediaToolChoice.container(ofPath: "/v/notes.txt") == nil)
     }
+    @MainActor
+    @Test func theNothingMatchedLineQuotesTheSearchThatWasSentAndOnlyWhenItSucceeded() {
+        let session = ToolsSession()
+        session.query = "IMG_41"
+        session.searchedQuery = "IMG_41"
+        session.query = "something typed afterwards"
+        session.recordSearchReply(status: "ok")
+        #expect(session.pickFilesNote.contains("“IMG_41”"))
+        session.recordSearchReply(status: "error")
+        #expect(session.pickFilesNote.hasPrefix("Search for files by name"))
+    }
+    @MainActor
+    @Test func anEmptySearchSaysNothingMatchedInsteadOfRepeatingTheIntro() {
+        let session = ToolsSession()
+        #expect(session.pickFilesNote.hasPrefix("Search for files by name"))
+        session.answeredQuery = "IMG_41"
+        #expect(session.pickFilesNote == "Nothing in the library matches “IMG_41”. Try part of a file name or a few words about what’s in it.")
+        session.allHits = [CatalogHit(fileID: 1, path: "/v/a.mov", kind: "video", text: "")]
+        session.applyKindFilter()
+        #expect(session.hits.isEmpty)
+        #expect(session.pickFilesNote.hasPrefix("That search found 1 file, but no photos."))
+    }
+    @MainActor @Test func aVideoSearchKeepsMp4AndMovHitsInVideoMode() {
+        let session = ToolsSession()
+        session.allHits = [
+            CatalogHit(fileID: 1, path: "/v/C0029.mp4", kind: "video", text: ""),
+            CatalogHit(fileID: 2, path: "/v/C0030.MOV", kind: "video", text: ""),
+            CatalogHit(fileID: 3, path: "/v/still.jpg", kind: "image", text: ""),
+        ]
+        session.kind = "video"
+        session.applyKindFilter()
+        #expect(session.hits.map(\.fileID) == [1, 2])
+    }
+
+    @Test func aPreviewSaysWhatExportWillDoInPlainWords() {
+        let photoCaveat = " Photo copies leave out details such as location and use standard 8-bit colors."
+        func plain(_ action: String = "preview", _ status: String = "ok", outputs: Int, kind: String?, _ message: String) -> String {
+            ToolsSession.plainMessage(action: action, status: status, outputs: outputs, recipeKind: kind, message: message)
+        }
+        #expect(plain(outputs: 2, kind: "photo", "Creates 2 new files.") == "Press Export to make 2 new files. Your originals stay as they are." + photoCaveat)
+        #expect(plain(outputs: 1, kind: "photo", "Anything the engine words differently") == "Press Export to make 1 new file. Your original stays as it is." + photoCaveat)
+        #expect(plain(outputs: 1, kind: "video", "Creates 1 new file. Photo outputs normalize to 8-bit SDR.") == "Press Export to make 1 new file. Your original stays as it is.")
+        #expect(plain(outputs: 1, kind: nil, "Creates 1 new file.") == "Press Export to make 1 new file. Your original stays as it is.")
+        #expect(plain("preview", "error", outputs: 0, kind: "photo", "No such file") == "No such file")
+        #expect(plain("execute", "ok", outputs: 1, kind: "photo", "Done") == "Done")
+    }
 }

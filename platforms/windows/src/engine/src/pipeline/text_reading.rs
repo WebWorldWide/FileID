@@ -1,7 +1,4 @@
-//! When a file's text deserves a careful read: the scan's OCR gate and Deep
-//! Analyze's VLM transcription. Mirrors macOS `TextReading.swift` rule for rule
-//! (macOS adds Vision's accurate tier in the scan; this engine's OCR has no
-//! handwriting tier, so the VLM transcription is its handwriting path).
+//! Decides when a file's text deserves a careful read. This engine's OCR has no handwriting tier, so the VLM transcription is its handwriting path.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -43,8 +40,11 @@ pub(crate) fn is_document_shape(width: u32, height: u32, has_camera: bool) -> bo
     (ratio - 11.0 / 8.5).abs() < 0.015 || (ratio - std::f64::consts::SQRT_2).abs() < 0.015
 }
 
-/// Words a character-level reader typically mangles on handwriting: case flips
-/// inside a word, symbols between letters, or five consonants in a row.
+/// Latin, Latin-1, Latin Extended and Latin Extended Additional: the scripts where five consonants in a row means a mangled read. Keep in step with the Mac adapter's TextReading.isLatinLetter.
+fn is_latin_letter(c: char) -> bool {
+    c.is_alphabetic() && (u32::from(c) < 0x0250 || (0x1E00..=0x1EFF).contains(&u32::from(c)))
+}
+
 fn is_garbled_word(raw: &str) -> bool {
     let word = raw.trim_matches(|c: char| ".,:;!?'\"()[]{}".contains(c));
     let chars: Vec<char> = word.chars().collect();
@@ -75,7 +75,7 @@ fn is_garbled_word(raw: &str) -> bool {
                 return true;
             }
         }
-        if char.is_alphabetic() && !"aeiouyAEIOUY".contains(char) {
+        if is_latin_letter(char) && !"aeiouyAEIOUY".contains(char) {
             consonant_run += 1;
             if consonant_run >= 5 {
                 return true;
@@ -124,7 +124,6 @@ pub(crate) fn needs_transcription<S: AsRef<str>>(
     }
 }
 
-/// Parsed transcription, or `None` when the model saw no readable text.
 pub(crate) fn parse_transcription(raw: &str) -> Option<(String, bool)> {
     let mut handwritten = false;
     let mut lines = Vec::new();
@@ -193,6 +192,15 @@ mod tests {
         assert_eq!(garbled(receipt).0, 0);
         assert!(!is_garbled_word("PDFs"));
         assert!(is_garbled_word("denti&t"));
+    }
+
+    #[test]
+    fn printed_non_latin_words_are_not_garbled_for_having_no_vowels() {
+        for word in ["Привет", "Здравствуйте", "Καλημέρα", "東京都渋谷区", "한국어문장"] {
+            assert!(!is_garbled_word(word), "{word}");
+        }
+        assert_eq!(garbled("Квартальный отчёт по продажам\nИтого к оплате").0, 0);
+        assert!(is_garbled_word("Swvbda"));
     }
 
     #[test]

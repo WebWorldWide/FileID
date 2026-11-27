@@ -157,9 +157,14 @@ impl DeepScope {
                 }
             }
         }
-        let resolved = path
-            .canonicalize()
-            .map_err(|_| ScopeError::UnresolvedFile)?;
+        let resolved = match path.canonicalize() {
+            Ok(resolved) => resolved,
+            // A row whose file is gone since the scan is skipped; only an unreadable path stops the run.
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+                return Ok(None);
+            }
+            Err(_) => return Err(ScopeError::UnresolvedFile),
+        };
         self.validate_current_roots()?;
         for folder in &self.excluded {
             if contains_path(&folder.resolved, &resolved)? {
@@ -359,12 +364,7 @@ mod tests {
         assert!(!scope.allows_file(1, &folder).unwrap());
         assert!(scope.allows_file(2, &outside).unwrap());
         assert!(!scope.allows_file(3, &folder.join("offline.png")).unwrap());
-        assert_eq!(
-            scope
-                .allows_file(4, &sibling.join("offline.png"))
-                .unwrap_err(),
-            ScopeError::UnresolvedFile
-        );
+        assert!(!scope.allows_file(4, &sibling.join("offline.png")).unwrap());
         assert_eq!(
             scope.allows_file(5, Path::new("relative.png")).unwrap_err(),
             ScopeError::InvalidFilePath

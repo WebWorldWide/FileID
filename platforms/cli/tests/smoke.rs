@@ -95,35 +95,6 @@ fn duplicate_model_names_are_planned_once() {
     assert_eq!(body["models"].as_array().map(Vec::len), Some(1));
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn runtime_install_json_abort_and_no_source_are_machine_safe() {
-    let abort = command()
-        .args(["--json", "runtime", "install", "--force"])
-        .env(
-            "FILEID_ORT_DYLIB_URL",
-            "https://huggingface.co/fileid/runtime/resolve/main/runtime.tgz",
-        )
-        .env("FILEID_ORT_DYLIB_SHA256", "a".repeat(64))
-        .output()
-        .expect("spawn runtime abort");
-    assert!(abort.status.success());
-    let abort_json = json(&abort);
-    assert_eq!(abort_json["installed"], false);
-    assert_eq!(abort_json["aborted"], true);
-
-    let no_source = command()
-        .args(["--json", "runtime", "install", "--force", "--yes"])
-        .env_remove("FILEID_ORT_DYLIB_URL")
-        .env_remove("FILEID_ORT_DYLIB_SHA256")
-        .output()
-        .expect("spawn runtime no-source");
-    assert!(!no_source.status.success());
-    let no_source_json = json(&no_source);
-    assert_eq!(no_source_json["installed"], false);
-    assert_eq!(no_source_json["error"], "no_source_configured");
-}
-
 #[test]
 fn restricted_model_json_mode_is_single_result_and_noninteractive() {
     let models = unique_dir("restricted-json").join("Models");
@@ -166,7 +137,6 @@ fn scan_then_search_then_info_model_free() {
     .unwrap();
     std::fs::write(corpus.join("hello.txt"), "hello world greetings everyone").unwrap();
 
-    // --- first scan (--json): indexes all three text files ---
     let out = run(&[
         "--db",
         db_s,
@@ -198,7 +168,6 @@ fn scan_then_search_then_info_model_free() {
         "expected text-indexed files"
     );
 
-    // --- second scan: unchanged files are skipped ---
     let out = run(&["--db", db_s, "--json", "scan", corpus.to_str().unwrap()]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("rescan json");
@@ -214,7 +183,6 @@ fn scan_then_search_then_info_model_free() {
         "re-scan should index nothing"
     );
 
-    // --- search for a content word ---
     let out = run(&["--db", db_s, "--json", "search", "aardvark"]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("search json");
@@ -229,7 +197,6 @@ fn scan_then_search_then_info_model_free() {
         .any(|r| ends_with(r["path"].as_str().unwrap_or(""), "alpha.txt"));
     assert!(hit_alpha, "search for 'aardvark' did not return alpha.txt");
 
-    // --- search for a word in a second file ---
     let out = run(&["--db", db_s, "--json", "search", "revenue"]);
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert!(
@@ -241,13 +208,11 @@ fn scan_then_search_then_info_model_free() {
         "search for 'revenue' did not return notes.md"
     );
 
-    // --- search miss returns cleanly with zero results ---
     let out = run(&["--db", db_s, "--json", "search", "zzzznotpresent"]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(v["count"].as_u64(), Some(0), "miss should return 0 results");
 
-    // --- info by path ---
     let alpha = corpus.join("alpha.txt");
     let out = run(&["--db", db_s, "--json", "info", alpha.to_str().unwrap()]);
     assert!(out.status.success());
@@ -257,13 +222,11 @@ fn scan_then_search_then_info_model_free() {
     assert!(v["sizeBytes"].as_i64().unwrap_or(0) > 0);
     let id = v["id"].as_i64().expect("info id");
 
-    // --- info by id ---
     let out = run(&["--db", db_s, "--json", "info", &id.to_string()]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert!(ends_with(v["path"].as_str().unwrap_or(""), "alpha.txt"));
 
-    // --- a same-path replacement with a future scanned_at must not be skipped ---
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute(
@@ -297,14 +260,12 @@ fn scan_then_search_then_info_model_free() {
         );
     }
 
-    // --- restructure --plan over the indexed files ---
     let out = run(&["--db", db_s, "--json", "restructure", "--plan"]);
     assert!(out.status.success(), "restructure --plan failed");
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("plan json");
     assert_eq!(v["fileCount"].as_u64(), Some(3));
     assert!(v["moveCount"].as_u64().unwrap_or(0) >= 1);
 
-    // cleanup (best-effort)
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
 }
@@ -325,7 +286,6 @@ fn models_list_and_dry_run_need_no_network() {
     let models = unique_dir("models");
     let md = models.to_str().unwrap();
 
-    // ── list (--json): the engine model set, nothing installed in an empty dir ──
     let out = run_env(
         &["--no-color", "--json", "models", "list"],
         &[("FILEID_MODELS_DIR", md)],
@@ -392,7 +352,6 @@ fn models_list_and_dry_run_need_no_network() {
         );
     }
 
-    // ── download --all --dry-run: lists repos + total, downloads NOTHING ──
     let out = run_env(
         &[
             "--no-color",
@@ -433,7 +392,6 @@ fn models_list_and_dry_run_need_no_network() {
         "dry-run must not write install sentinels"
     );
 
-    // ── unknown model name is a clean, actionable error (still no network) ──
     let out = run_env(
         &["--no-color", "models", "download", "definitely-not-a-model"],
         &[("FILEID_MODELS_DIR", md)],
@@ -462,15 +420,14 @@ fn models_download_json_abort_emits_json_not_human_text() {
         &[("FILEID_MODELS_DIR", md)],
     );
 
-    // A non-interactive large-set abort stays a clean exit (exit 0), as before.
+    // A non-interactive large-set abort is a clean exit (exit 0).
     assert!(
         out.status.success(),
         "non-interactive --all abort must exit 0: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The contract: under --json, stdout is a JSON object — not "Aborted. (…)".
-    // Before the fix, `json()` (serde parse of stdout) panicked on the human line.
+    // Under --json, stdout must be a JSON object, never the human "Aborted." line.
     let v = json(&out);
     assert_eq!(
         v["command"].as_str(),
@@ -548,7 +505,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // ── search --similar with no CLIP embeddings → clear, non-fatal message ──
     let dup1 = corpus.join("dup1.txt");
     let out = run(&[
         "--db",
@@ -560,8 +516,12 @@ fn apply_dryrun_models_and_similar_model_free() {
         dup1.to_str().unwrap(),
     ]);
     assert!(
-        out.status.success(),
-        "search --similar failed: {}",
+        !out.status.success(),
+        "search --similar must fail when the library has no embeddings"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no CLIP embeddings in this library"),
+        "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
@@ -570,7 +530,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "model-free library has no CLIP embeddings"
     );
 
-    // ── exact dedupe re-hashes same-size files, so it needs no stored hash ──
     let out = run(&[
         "--db",
         db_s,
@@ -600,7 +559,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "expected one exact-duplicate group"
     );
 
-    // ── dedupe --apply --dry-run lists exactly one victim, removes NOTHING ──
     let out = run(&[
         "--db",
         db_s,
@@ -624,7 +582,6 @@ fn apply_dryrun_models_and_similar_model_free() {
     );
     assert_eq!(file_count(&db), 3, "dry-run must not drop DB rows");
 
-    // ── restructure --apply --dry-run prints a plan, moves NOTHING ──
     let out = run(&[
         "--db",
         db_s,
@@ -651,7 +608,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "dry-run must not move files"
     );
 
-    // ── restructure --apply with no --yes on a non-interactive stdin → SAFE abort ──
     let out = run(&["--db", db_s, "--no-color", "restructure", "--apply"]);
     assert!(out.status.success());
     assert!(
@@ -663,7 +619,6 @@ fn apply_dryrun_models_and_similar_model_free() {
         "an aborted apply must not move files"
     );
 
-    // ── scan --models with no models installed → actionable message, no writes ──
     let state = unique_dir("state"); // empty FileID data root → no model sentinels
     let out = run_env(
         &[
@@ -713,11 +668,7 @@ fn apply_dryrun_models_and_similar_model_free() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// Regression: a REAL `restructure --apply --json --yes` must print a single
-/// JSON object and nothing else. Before the fix the `Will move N file(s) into
-/// …:` header and per-move lines were written to stdout ahead of the result
-/// object, so the combined stdout was not parseable as one JSON value. `json()`
-/// parses the whole of stdout, so it panics here if any human preview line leaks.
+/// Regression: a REAL `restructure --apply --json --yes` must print a single JSON object and nothing else. `json()` parses all of stdout, so any leaked human preview line panics.
 #[test]
 fn restructure_apply_json_real_emits_pure_json() {
     let corpus = unique_dir("corpus-rapj");
@@ -765,8 +716,7 @@ fn restructure_apply_json_real_emits_pure_json() {
         "expected ≥1 proposed move so the real apply has work to do"
     );
 
-    // REAL apply in --json mode. stdout MUST be one parseable JSON object;
-    // pre-fix it was `Will move … into …:\n  …\n{json}`, so json() panics.
+    // REAL apply in --json mode: stdout must be one parseable JSON object.
     let out = run(&[
         "--db",
         db_s,
@@ -794,14 +744,7 @@ fn restructure_apply_json_real_emits_pure_json() {
     let _ = std::fs::remove_dir_all(&dbdir);
 }
 
-/// REGRESSION — a REAL `dedupe --apply` (no `--dry-run`) in `--json` mode must
-/// emit exactly ONE JSON value on stdout. Pre-fix the human "Will N file(s)
-/// would …" preview was printed unconditionally before the JSON result, so
-/// stdout was `Will …:\n  victim\n{json}` and `json()` panics. (The `--json`
-/// dry-run already early-returned clean JSON, so only the real-apply path was
-/// unguarded and untested.) `--delete` gives a deterministic, cross-platform
-/// removal; the corrupting preview block is shared by the trash and delete
-/// paths, so this exercises the exact regression with CI-stable post-conditions.
+/// Regression: a REAL `dedupe --apply` (no `--dry-run`) in `--json` mode must emit exactly one JSON value on stdout; the human preview must not leak. `--delete` gives a deterministic, cross-platform removal.
 #[test]
 fn dedupe_apply_json_real_emits_pure_json() {
     let corpus = unique_dir("corpus-dapj");
@@ -857,7 +800,7 @@ fn dedupe_apply_json_real_emits_pure_json() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // THE LOCK: the entire stdout must parse as one JSON value (pre-fix: panic).
+    // The entire stdout must parse as one JSON value.
     let v = json(&out);
     assert_eq!(v["command"].as_str(), Some("dedupe"));
     assert_eq!(v["mode"].as_str(), Some("apply"));
@@ -1214,6 +1157,12 @@ fn partial_scan_commits_results_and_exits_with_code_3() {
         "stdout header must not claim a clean completion: {}",
         stdout(&out)
     );
+    #[cfg(unix)]
+    assert!(
+        stdout(&out).contains("Permission denied"),
+        "the warning must say why the file was skipped: {}",
+        stdout(&out)
+    );
 
     #[cfg(unix)]
     {
@@ -1223,4 +1172,408 @@ fn partial_scan_commits_results_and_exits_with_code_3() {
     #[cfg(windows)]
     drop(_guard);
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_closed_stdout_ends_quietly_instead_of_panicking() {
+    let corpus = unique_dir("corpus-epipe");
+    let dbdir = unique_dir("db-epipe");
+    let db = dbdir.join("lib.sqlite");
+    for index in 0..5 {
+        std::fs::write(corpus.join(format!("note{index}.txt")), "text").unwrap();
+    }
+    let scan = run(&[
+        "--db",
+        db.to_str().unwrap(),
+        "scan",
+        corpus.to_str().unwrap(),
+    ]);
+    assert!(scan.status.success());
+
+    let mut child = command()
+        .args(["--db", db.to_str().unwrap(), "restructure", "--plan"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn fileid binary");
+    drop(child.stdout.take());
+    let out = child.wait_with_output().expect("wait for fileid");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_ne!(out.status.code(), Some(101), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+fn scanned_text_library(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let corpus = unique_dir(&format!("corpus-{tag}"));
+    let dbdir = unique_dir(&format!("db-{tag}"));
+    let db = dbdir.join("lib.sqlite");
+    std::fs::write(
+        corpus.join("report.md"),
+        "# Q3\nquarterly revenue figures\n",
+    )
+    .unwrap();
+    std::fs::write(corpus.join("notes.txt"), "meeting notes and action items\n").unwrap();
+    let scan = run(&[
+        "--db",
+        db.to_str().unwrap(),
+        "scan",
+        corpus.to_str().unwrap(),
+    ]);
+    assert!(scan.status.success());
+    (corpus, dbdir, db)
+}
+
+#[test]
+fn replanning_an_organized_library_proposes_no_moves() {
+    let (corpus, dbdir, db) = scanned_text_library("organized");
+    let db_s = db.to_str().unwrap();
+    let root = corpus.to_str().unwrap();
+
+    let applied = run(&["--db", db_s, "restructure", "--apply", "--yes", root]);
+    assert!(applied.status.success());
+
+    let plan = run(&["--db", db_s, "--json", "restructure", "--plan", root]);
+    assert!(plan.status.success());
+    assert_eq!(
+        json(&plan)["moveCount"].as_u64(),
+        Some(0),
+        "{}",
+        stdout(&plan)
+    );
+
+    let text = run(&["--db", db_s, "--no-color", "restructure", "--plan", root]);
+    assert!(
+        stdout(&text).contains("already organized"),
+        "{}",
+        stdout(&text)
+    );
+
+    let again = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--yes",
+        root,
+    ]);
+    assert!(
+        stdout(&again).contains("already organized"),
+        "{}",
+        stdout(&again)
+    );
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn a_dry_run_names_its_verb() {
+    let (corpus, dbdir, db) = scanned_text_library("verb");
+    let db_s = db.to_str().unwrap();
+    let root = corpus.to_str().unwrap();
+
+    let moves = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        root,
+    ]);
+    assert!(
+        stdout(&moves).contains("DRY RUN — would move 2 file(s) into"),
+        "{}",
+        stdout(&moves)
+    );
+    let links = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        "--symlinks",
+        root,
+    ]);
+    assert!(
+        stdout(&links).contains("DRY RUN — would symlink 2 file(s) into"),
+        "{}",
+        stdout(&links)
+    );
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn restructuring_a_folder_plans_only_files_inside_it() {
+    let (corpus, dbdir, db) = scanned_text_library("scoped-plan");
+    let db_s = db.to_str().unwrap();
+    let elsewhere = unique_dir("corpus-scoped-elsewhere");
+    std::fs::write(
+        elsewhere.join("stray.txt"),
+        "a file in another library folder\n",
+    )
+    .unwrap();
+    let scan = run(&["--db", db_s, "scan", elsewhere.to_str().unwrap()]);
+    assert!(scan.status.success());
+    let root = corpus.to_str().unwrap();
+
+    let plan = run(&["--db", db_s, "--json", "restructure", "--plan", root]);
+    assert!(plan.status.success(), "{}", stdout(&plan));
+    let plan = json(&plan);
+    let canonical_root = std::fs::canonicalize(&corpus).unwrap();
+    for planned in plan["moves"].as_array().unwrap() {
+        let source = planned["source"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(source).starts_with(&canonical_root),
+            "{source} is outside {root}"
+        );
+    }
+    assert_eq!(plan["fileCount"].as_u64(), Some(2));
+
+    let applied = run(&["--db", db_s, "restructure", "--apply", "--yes", root]);
+    assert!(
+        applied.status.success(),
+        "{} {}",
+        stdout(&applied),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(elsewhere.join("stray.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn restructuring_a_folder_with_no_scanned_files_says_so() {
+    let (corpus, dbdir, db) = scanned_text_library("unscanned-root");
+    let db_s = db.to_str().unwrap();
+    let unscanned = unique_dir("corpus-unscanned-root");
+
+    let out = run(&[
+        "--db",
+        db_s,
+        "restructure",
+        "--plan",
+        unscanned.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success());
+    let shown = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(shown.contains("no scanned files are under"), "{shown}");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&unscanned);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn applying_on_a_read_only_drive_refuses_before_listing_any_move() {
+    let (corpus, dbdir, db) = scanned_text_library("readonly-apply");
+    let db_s = db.to_str().unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE files SET path_text = '/Volumes/Adlon/' || replace(path_text, '/', '_')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--yes",
+        "/Volumes/Adlon",
+    ]);
+    let shown = stdout(&out);
+    let refusal = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success());
+    assert!(!shown.contains("Will move"), "{shown}");
+    assert!(refusal.contains("read-only drive"), "{refusal}");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn a_dry_run_on_a_read_only_drive_says_apply_would_be_refused() {
+    let (corpus, dbdir, db) = scanned_text_library("readonly-preview");
+    let db_s = db.to_str().unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE files SET path_text = '/Volumes/Adlon/' || replace(path_text, '/', '_')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let root = "/Volumes/Adlon";
+
+    let text = run(&[
+        "--db",
+        db_s,
+        "--no-color",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        root,
+    ]);
+    let shown = stdout(&text);
+    assert!(
+        shown.contains("read-only drive") && shown.contains("Apply would be refused."),
+        "{shown}"
+    );
+
+    let machine = run(&[
+        "--db",
+        db_s,
+        "--json",
+        "restructure",
+        "--apply",
+        "--dry-run",
+        root,
+    ]);
+    let refused = json(&machine)["applyRefused"].as_str().map(str::to_owned);
+    assert!(refused.is_some_and(|text| text.contains("Apply would be refused.")));
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[test]
+fn dedupe_apply_keeps_the_original_not_the_copy_that_sorts_first() {
+    let corpus = unique_dir("corpus-keeper");
+    let dbdir = unique_dir("db-keeper");
+    let db = dbdir.join("lib.sqlite");
+    std::fs::write(corpus.join("DSC01691.txt"), "the camera original").unwrap();
+    std::fs::write(corpus.join("A dupe-copy-2.txt"), "the camera original").unwrap();
+    let db_s = db.to_str().unwrap();
+    let scan = run(&["--db", db_s, "scan", corpus.to_str().unwrap()]);
+    assert!(scan.status.success());
+    seed_content_hash(&db, "DSC01691.txt", "A dupe-copy-2.txt");
+
+    let applied = run(&[
+        "--db", db_s, "--json", "dedupe", "--exact", "--apply", "--delete", "--yes",
+    ]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+
+    assert!(corpus.join("DSC01691.txt").exists());
+    assert!(!corpus.join("A dupe-copy-2.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+mod without_recoverable_trash {
+    use super::*;
+
+    fn duplicate_pair(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let corpus = unique_dir(&format!("corpus-{tag}"));
+        let dbdir = unique_dir(&format!("db-{tag}"));
+        let db = dbdir.join("lib.sqlite");
+        std::fs::write(corpus.join("one.txt"), "identical body").unwrap();
+        std::fs::write(corpus.join("two.txt"), "identical body").unwrap();
+        let scan = run(&[
+            "--db",
+            db.to_str().unwrap(),
+            "scan",
+            corpus.to_str().unwrap(),
+        ]);
+        assert!(scan.status.success());
+        seed_content_hash(&db, "one.txt", "two.txt");
+        (corpus, dbdir, db)
+    }
+
+    #[test]
+    fn a_refused_apply_exits_non_zero_and_removes_nothing() {
+        let (corpus, dbdir, db) = duplicate_pair("no-trash-apply");
+        let db_s = db.to_str().unwrap();
+
+        let out = run(&[
+            "--db",
+            db_s,
+            "--no-color",
+            "dedupe",
+            "--exact",
+            "--apply",
+            "--yes",
+        ]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Trash is unavailable"));
+        assert!(corpus.join("one.txt").exists() && corpus.join("two.txt").exists());
+
+        let machine = run(&[
+            "--db", db_s, "--json", "dedupe", "--exact", "--apply", "--yes",
+        ]);
+        assert!(!machine.status.success());
+        assert_eq!(json(&machine)["reason"], "trash_unavailable_on_platform");
+
+        let _ = std::fs::remove_dir_all(&corpus);
+        let _ = std::fs::remove_dir_all(&dbdir);
+    }
+
+    #[test]
+    fn a_dry_run_says_the_apply_would_be_refused() {
+        let (corpus, dbdir, db) = duplicate_pair("no-trash-preview");
+        let db_s = db.to_str().unwrap();
+
+        let out = run(&[
+            "--db",
+            db_s,
+            "--no-color",
+            "dedupe",
+            "--exact",
+            "--apply",
+            "--dry-run",
+        ]);
+        assert!(out.status.success());
+        let shown = stdout(&out);
+        assert!(shown.contains("Apply would be refused"), "{shown}");
+        assert!(!shown.contains("Trash/Recycle Bin"), "{shown}");
+
+        let machine = run(&[
+            "--db",
+            db_s,
+            "--json",
+            "dedupe",
+            "--exact",
+            "--apply",
+            "--dry-run",
+        ]);
+        assert!(json(&machine)["applyRefused"].is_string());
+
+        let _ = std::fs::remove_dir_all(&corpus);
+        let _ = std::fs::remove_dir_all(&dbdir);
+    }
+}
+
+#[test]
+fn info_on_an_unknown_path_fails() {
+    let (corpus, dbdir, db) = scanned_text_library("info-unknown");
+    let db_s = db.to_str().unwrap();
+
+    let out = run(&["--db", db_s, "--no-color", "info", "/nonexistent/file.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no indexed file matches"));
+
+    let machine = run(&["--db", db_s, "--json", "info", "/nonexistent/file.txt"]);
+    assert_eq!(machine.status.code(), Some(1));
+    assert_eq!(json(&machine)["error"], "not_found");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
 }

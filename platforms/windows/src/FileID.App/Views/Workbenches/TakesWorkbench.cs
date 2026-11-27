@@ -20,10 +20,7 @@ using Windows.UI;
 
 namespace FileID.Views.Workbenches;
 
-/// <summary>Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated clips by
-/// itself and scores each try without a model. The user checks the starred best try, keeps all, skips,
-/// or moves the rest to Trash with Undo. Groups made by hand live in TakesWorkbench.Manual.cs; the
-/// Goal (optional) ranking panel lives in TakesWorkbench.Goal.cs.</summary>
+/// <summary>The user checks the starred best try, keeps all, skips, or moves the rest to Trash with Undo.</summary>
 internal sealed partial class TakesWorkbench : WorkbenchPanel
 {
     private static readonly TimeSpan TrashUndoWindow = TimeSpan.FromSeconds(10);
@@ -40,6 +37,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     private int _focusedIndex;
     private bool _zoom;
     private bool _rendering;
+    private bool _scoreFailed;
     private bool _loadedOnce;
     private bool _trashing;
     private bool _focusStripWhenReady;
@@ -178,7 +176,12 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         {
             if (_rendering || _groupList.SelectedIndex < 0 || _groupList.SelectedIndex >= _groups.Count) return;
             var group = _groups[_groupList.SelectedIndex];
-            if (_current?.GroupKey == group.GroupKey && _proposalKey is null) return;
+            if (Busy)
+            {
+                RestoreGroupSelection();
+                return;
+            }
+            if (_current?.GroupKey == group.GroupKey && _proposalKey is null && !_scoreFailed) return;
             LeaveManual();
             ClearProposalSelection();
             Run(ct => ScoreAsync(group, focusStrip: false, ct));
@@ -362,6 +365,11 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     protected override void UpdateControls()
     {
+        if (!Busy && _goalRanking)
+        {
+            _goalRanking = false;
+            UpdateGoalControls();
+        }
         RunQueuedManual();
         RunStaleProposals();
         if (!_focusStripWhenReady || _filmstrip.Visibility != Visibility.Visible) return;
@@ -372,8 +380,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
     private bool IsVideo => _current?.Kind == "videos";
 
     private long? BestId => TakeReviewPolicy.Best(_qualities)?.PrimaryFileID;
-
-    // ---- Loading ------------------------------------------------------------
 
     private async Task LoadGroupsAsync(bool keepCurrent, CancellationToken ct)
     {
@@ -530,11 +536,38 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         });
     }
 
+    private void RestoreGroupSelection()
+    {
+        var index = -1;
+        for (var i = 0; i < _groups.Count; i++)
+        {
+            if (_groups[i].GroupKey == _current?.GroupKey) { index = i; break; }
+        }
+        _rendering = true;
+        try { _groupList.SelectedIndex = index; }
+        finally { _rendering = false; }
+    }
+
     private async Task ScoreAsync(CatalogTakeAutoGroup group, bool focusStrip, CancellationToken ct)
     {
         await UI(() => ShowScoring(group), ct);
         var ids = group.Shots.SelectMany(s => s.FileIDs).Take(800).ToArray();
-        var response = await Engine.CatalogAsync(Request("scoreTakes", ids), ct);
+        CatalogResponse response;
+        try
+        {
+            response = await Engine.CatalogAsync(Request("scoreTakes", ids), ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            DebugLog.Warn("TakesWorkbench: scoreTakes failed: " + ex.Message);
+            await UI(() =>
+            {
+                if (_current?.GroupKey != group.GroupKey) return;
+                ShowFailure(group, ex is TimeoutException ? "FileID didn't answer in time. Try again in a moment." : ex.Message);
+                Status.Text = "";
+            }, ct);
+            return;
+        }
         await UI(() =>
         {
             if (_current?.GroupKey != group.GroupKey) return;
@@ -551,8 +584,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
             Status.Text = "";
         }, ct);
     }
-
-    // ---- States ---------------------------------------------------------------
 
     private void ShowNotice()
     {
@@ -588,6 +619,7 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _manualPage.Visibility = Visibility.Collapsed;
         _review.Visibility = Visibility.Visible;
         _scoringText.Text = $"Checking sharpness, faces and exposure in {group.Shots.Count} {TakeReviewPolicy.Noun(group, group.Shots.Count)}…";
+        _scoreFailed = false;
         _scoring.Visibility = Visibility.Visible;
         _failure.Visibility = Visibility.Collapsed;
         _compare.Visibility = Visibility.Collapsed;
@@ -597,6 +629,10 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
 
     private void ShowFailure(CatalogTakeAutoGroup group, string message)
     {
+        _scoreFailed = true;
+        _rendering = true;
+        try { _groupList.SelectedIndex = -1; }
+        finally { _rendering = false; }
         _scoring.Visibility = Visibility.Collapsed;
         _failureTitle.Text = $"Couldn't score these {TakeReviewPolicy.Noun(group, 2)}";
         _failureBody.Text = message;
@@ -634,8 +670,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         UpdateAll();
         ScrollToFocused();
     }
-
-    // ---- Updates --------------------------------------------------------------
 
     private void UpdateAll()
     {
@@ -802,8 +836,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         StopPlayer(_right);
         _right.Root.Visibility = Visibility.Collapsed;
     }
-
-    // ---- Compare panes ----------------------------------------------------------
 
     private ComparePane BuildPane()
     {
@@ -1205,8 +1237,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         SpringEasing.AnimateScalar(pane.Picture, "Translation.Y", (float)y, spring.Response, spring.DampingFraction);
     }
 
-    // ---- Interaction ------------------------------------------------------------
-
     private void OnStripKeyDown(object sender, KeyRoutedEventArgs e)
         => DebugLog.SafeRun("TakesWorkbench.StripKey", () =>
         {
@@ -1299,8 +1329,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         }
     }
 
-    // ---- Toast ----------------------------------------------------------------
-
     private void ShowToast(string text, Func<CancellationToken, Task>? undo, TimeSpan window)
     {
         _toastTimer.Stop();
@@ -1320,12 +1348,12 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         _undoAction = null;
     }
 
-    // ---- Actions --------------------------------------------------------------
-
     private async Task ConfirmTrashAsync()
     {
         if (_current is not { } group || _trashing || Busy || _qualities.Count == 0) return;
         if (TakeReviewPolicy.TrashButton(_qualities, _keep).DisabledReason is not null) return;
+        var confirmedQualities = _qualities;
+        var confirmedKeep = _keep.ToHashSet();
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -1345,14 +1373,22 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
             DebugLog.Warn("TakesWorkbench confirmation unavailable: " + ex.Message);
             return;
         }
-        if (result == ContentDialogResult.Primary) Run(TrashAsync);
+        if (result != ContentDialogResult.Primary) return;
+        if (_current?.GroupKey != group.GroupKey)
+        {
+            ShowToast("This group changed while you were confirming, so nothing was moved. Choose it again.", null, PlainToastWindow);
+            return;
+        }
+        if (Busy)
+        {
+            ShowToast("FileID is busy for a moment. Nothing was moved; try again.", null, PlainToastWindow);
+            return;
+        }
+        Run(ct => TrashAsync(group, confirmedQualities, confirmedKeep, ct));
     }
 
-    private async Task TrashAsync(CancellationToken ct)
+    private async Task TrashAsync(CatalogTakeAutoGroup group, IReadOnlyList<CatalogTakeQuality> qualities, HashSet<long> keep, CancellationToken ct)
     {
-        if (_current is not { } group) return;
-        var qualities = _qualities;
-        var keep = _keep.ToHashSet();
         var ids = TakeReviewPolicy.TrashIds(qualities, keep);
         if (ids.Count == 0) return;
         var doomed = qualities.Where(q => !keep.Contains(q.PrimaryFileID)).ToArray();
@@ -1441,8 +1477,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         await AfterResolveAsync(null, ct);
     }
 
-    // ---- Pieces ---------------------------------------------------------------
-
     private Grid DashedNotice(TextBlock title, TextBlock subtitle)
     {
         var outline = new Microsoft.UI.Xaml.Shapes.Rectangle
@@ -1494,7 +1528,6 @@ internal sealed partial class TakesWorkbench : WorkbenchPanel
         }
         catch (Exception)
         {
-            // Missing font resource: keep the default face.
         }
     }
 

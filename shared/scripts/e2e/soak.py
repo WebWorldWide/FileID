@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Soak test for a FileID engine (the shared Rust engine, the Swift engine, or the Rust engine built with the Apple adapters) on a library that changes under it.
+"""Soak test for a FileID engine (the shared Rust engine, or the Rust engine built with the Apple adapters) on a library that changes under it.
 
-usage: python3 soak.py --engine <binary> --flavor rust|swift|hosted --library <generated library dir> --work <scratch dir>
+usage: python3 soak.py --engine <binary> --flavor rust|hosted --library <generated library dir> --work <scratch dir>
                        [--minutes 45] [--max-rounds N] [--seed S] [--models-dir DIR] [--no-trash]
 
 --library is a directory made by soak_library.py (its <name>.manifest.json sits beside it); it is copied to
 <work>/lib and never changed. <work> must be a scratch folder: the engines get FILEID_DB / FILEID_DATABASE_PATH,
 XDG_DATA_HOME, HOME, FILEID_MODELS_DIR and FILEID_TEST_TRASH_ROOT inside it, so a run never touches a real
-catalog or the real Trash. The engine must be built with the test Trash root (Rust `--features test-trash-root`,
-Swift `-Xswiftc -DFILEID_TEST_TRASH_ROOT`); pass --no-trash to skip the Trash steps for a build without it.
+catalog or the real Trash. The engine must be built with the test Trash root (`--features test-trash-root`); pass --no-trash to skip the
+Trash steps for a build without it.
 
 One long-lived engine ("main") runs every round; a second engine ("victim") on its own small copy is SIGKILLed and
 restarted each round. After every round the script proves: every file not deliberately changed exists with the same
@@ -17,7 +17,7 @@ disk (less a fixed, explained set of files the engine never catalogues); PRAGMA 
 are clean; no unexpected error event kind arrived; the engine log has no panic, fatal or 'database is locked' line;
 the engine still answers healthCheck with the same pid. It records footprint, descriptors, threads, database and WAL
 size per round and flags growth. Exit status 0 only when every invariant held in every round."""
-import argparse, hashlib, json, os, queue, random, re, shutil, signal, sqlite3, statistics, subprocess, sys, threading, time, uuid
+import argparse, hashlib, json, os, queue, random, re, shutil, sqlite3, statistics, subprocess, sys, threading, time, uuid
 
 NOTICE_KINDS = {"rescan_no_changes", "empty_folder", "discovery_partial"}
 BAD_LOG = re.compile(r"panicked at|\bpanic\b|\bfatal\b|database is locked|SQLITE_BUSY|stack overflow|SIGSEGV|abort", re.I)
@@ -104,8 +104,8 @@ class Engine:
             env["FILEID_OCR_WARMUP"] = "0"
         else:
             env.pop("FILEID_OCR_WARMUP", None)
-        env["FILEID_DB" if flavor != "swift" else "FILEID_DATABASE_PATH"] = db
-        env["FILEID_DATABASE_PATH" if flavor != "swift" else "FILEID_DB"] = db
+        env["FILEID_DB"] = db
+        env["FILEID_DATABASE_PATH"] = db
         if not no_trash:
             env["FILEID_TEST_TRASH_ROOT"] = trash_root
         assert db.startswith(os.path.abspath(state)), "database must be inside scratch"
@@ -345,7 +345,6 @@ class Soak:
         self.notes = {}
         self.cycles, self.catchups, self.kills, self.overlap_log, self.heals = [], [], [], [], []
 
-    # ---------- model of the library on disk
     def p(self, rel):
         return os.path.join(self.lib, rel)
 
@@ -382,7 +381,6 @@ class Soak:
             return {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(
                 "SELECT path_text, id, failed, kind, error_message FROM files WHERE path_text LIKE ?", (prefix + "/%",))}
 
-    # ---------- invariants
     def check_disk(self, rnd, model, root, name):
         snap = snapshot(root)
         lost = sorted(set(model) - set(snap))
@@ -393,11 +391,6 @@ class Soak:
                  f"lost={lost[:4]}({len(lost)}) extra={extra[:4]}({len(extra)}) altered={altered[:4]}({len(altered)})")
             return False
         return True
-
-    def never_catalogued(self, path, root):
-        """Swift only: Discovery uses .skipsHiddenFiles, so a file with a dot-prefixed path component under the root is
-        deliberately not catalogued. Such a file must have no visible row (checked by the callers)."""
-        return self.a.flavor == "swift" and any(c.startswith(".") for c in os.path.relpath(path, root).split(os.sep))
 
     @staticmethod
     def tombstone(row):
@@ -411,10 +404,7 @@ class Soak:
         disk = {os.path.join(root, r) for r in model}
         visible = {p for p, v in rows.items() if not self.tombstone(v)}
         stale = sorted(visible - disk)
-        missing = sorted(p for p in disk - visible if os.path.exists(p) and os.path.getsize(p) != 0 and not self.never_catalogued(p, root))
-        hidden_rows = sorted(p for p in visible & disk if self.never_catalogued(p, root))
-        if hidden_rows:
-            fail(rnd, f"{name}: hidden files are not catalogued (swift)", [os.path.relpath(h, root) for h in hidden_rows[:4]])
+        missing = sorted(p for p in disk - visible if os.path.exists(p) and os.path.getsize(p) != 0)
         zero_rows = sorted(p for p in visible & disk if os.path.getsize(p) == 0)
         hidden_present = sorted(p for p, v in rows.items() if self.tombstone(v) and p in disk)
         if first:
@@ -459,7 +449,6 @@ class Soak:
             fail(rnd, "engine log has no panic/fatal/lock lines", new[:3])
         return len(LOGBAD)
 
-    # ---------- steps
     def ids_by_path(self, eng, rels):
         rows = self.db_rows(eng.db, self.lib)
         return {r: rows[self.p(r)][0] for r in rels if self.p(r) in rows}
@@ -470,10 +459,7 @@ class Soak:
         if k != "scanComplete":
             fail(rnd, "scan completes", (k, v))
             return
-        # The Rust engine leaves scanned_at alone for an unchanged file. The Swift engine stamps it on every skipped file
-        # (Discovery.swift bumpScannedAt: the orphan sweep deletes rows with scanned_at < scanStart), so for swift the
-        # check compares every other column, ids included, and requires processedFiles == 0 besides.
-        cols = "id, scanned_at" if self.a.flavor != "swift" else "id, size_bytes, modified_at, kind, content_hash, phash, failed, error_message"
+        cols = "id, scanned_at"
         with ro(eng.db) as c:
             before = {r[0]: r[1:] for r in c.execute(f"SELECT {cols} FROM files WHERE path_text LIKE ?", (self.lib + "/%",))}
         k, v = eng.scan(self.lib)
@@ -485,8 +471,6 @@ class Soak:
         retried = [i for i in changed if i in failed_ids]
         self.retried_failed = len(retried)
         changed = [i for i in changed if i not in failed_ids]
-        if self.a.flavor == "swift" and k == "scanComplete" and v.get("processedFiles"):
-            changed.append(f"processedFiles={v.get('processedFiles')}")
         if k != "scanComplete" or changed:
             self.gate_report(rnd, eng, changed)
             fail(rnd, "rescan analyses nothing new", f"{k} reprocessed={len(changed)} {v}")
@@ -525,7 +509,6 @@ class Soak:
         log("skip-set gate report:", json.dumps(rep))
 
     def mutate(self, rnd, eng):
-        """Change the disk, update the model, rescan and verify the catalog follows."""
         rng = self.rng
         regular = [r for r in sorted(self.model) if self.classify(self.p(r)) == "other" and "Edge/" not in r and os.access(self.p(r), os.W_OK)]
         before_ids = self.ids_by_path(eng, regular)
@@ -746,7 +729,6 @@ class Soak:
         k, v = eng.wait_scan_end(300)
         if k not in ("cancelled", "scanComplete"):
             fail(rnd, "cancelScan ends the scan", (k, v))
-        # pause/resume
         eng.send("startScan", {"rootPath": self.lib, "rescan": True})
         eng.wait(lambda e: kind(e) == "progress", 120)
         eng.send("pauseScan")
@@ -759,13 +741,11 @@ class Soak:
             k, v = eng.wait_scan_end(600)
         if k != "scanComplete":
             fail(rnd, "paused then resumed scan completes", (k, v))
-        # cancel then a normal scan completes with the same catalog
         k, v = eng.scan(self.lib)
         if k != "scanComplete":
             fail(rnd, "scan after cancel completes", (k, v))
 
     def step_overlap(self, rnd, eng):
-        # a mutation during a scan and two scans at once
         rows = self.db_rows(eng.db, self.lib)
         cand = [(p, v[0]) for p, v in rows.items() if not v[1] and "/Edge/" not in p and p[len(self.lib) + 1:] in self.model]
         (p1, i1), = self.rng.sample(cand, 1)
@@ -802,7 +782,6 @@ class Soak:
             fail(rnd, "scan during overlapping commands ends", json.dumps(rec))
         if not got_bulk:
             fail(rnd, "rename during a scan gets its reply", json.dumps(rec))
-        # whichever way it landed, put the name back and rescan
         cur = self.p1_current(eng, p1, newp)
         rel_old = os.path.relpath(p1, self.lib)
         if cur != p1:
@@ -817,7 +796,6 @@ class Soak:
         k, v = eng.scan(self.lib)
         if k != "scanComplete":
             fail(rnd, "scan after overlapping commands completes", (k, v))
-        # a folder deleted while its scan runs
         eph = os.path.join(self.work, "ephemeral")
         shutil.rmtree(eph, ignore_errors=True)
         for rel in sorted(self.model)[::6][:400]:
@@ -875,7 +853,6 @@ class Soak:
             fail(rnd, "malformed burst changed the library", "")
 
 
-    # ---------- hosted flavor: the shared Rust engine with the Apple adapters and real models
     def engine_log_lines(self, eng):
         out = []
         logdir = os.path.join(eng.state, "FileID", "logs")
@@ -908,15 +885,6 @@ class Soak:
             with open(self.p(rel), "wb") as f:
                 f.write(data)
             self.model[rel] = hashlib.sha256(data).hexdigest(); added.append(rel)
-        if self.a.flavor == "swift":
-            # page-shaped pictures: a text read is called for and, until the accurate reader is warm, the careful one is owed
-            for i in range(3):
-                w = self.rng.choice((297, 420, 594))
-                data = lib.png(w, round(w * 2 ** 0.5), self.rng, tweak=self.rng.randrange(1, 1000))
-                rel = f"{d}/page-{i}-{uuid.uuid4().hex[:6]}.png"
-                with open(self.p(rel), "wb") as f:
-                    f.write(data)
-                self.model[rel] = hashlib.sha256(data).hexdigest(); added.append(rel)
         reals = [r for r in sorted(self.model) if r.startswith(self.a.real_dir + "/") and r.lower().endswith(".jpg")]
         for i in range(min(real, len(reals))):
             src = self.rng.choice(reals)
@@ -949,7 +917,6 @@ class Soak:
                              (self.lib + "/%",)).fetchone()[0]
 
     def step_real_first(self, eng):
-        """Scan the real camera files alone, first, and report aggregate throughput, tags per photo and failures."""
         root = self.p(self.a.real_dir)
         if not os.path.isdir(root):
             return
@@ -1121,77 +1088,12 @@ class Soak:
         if owed_end:
             fail(rnd, "the next scan finishes what the after-scan pass owed", owed_end)
         st2 = self.new_file_state(eng, added)
-        # The Swift engine computes CLIP embeddings with the ONNX Runtime, which this Mac does not have, so there is nothing
-        # to check on Swift: its owed work is the RAM++ tags (also ONNX, so never owed here) and the careful text reads.
         if self.a.flavor == "hosted" and st2[1] != st2[0] - st2[3]:
             fail(rnd, "files of a stopped scan get their CLIP embeddings by the next scan", st2)
         rec = dict(round=rnd, saw_postscan=seen_post, stop_result=k, owed_after_stop=owed_after_stop, owed_end=owed_end, new_state=st2)
         self.catchups.append(rec)
         log("catch-up stop:", json.dumps(rec))
         return rec
-
-    def step_catchup_stop_fresh(self, rnd):
-        """Swift: the long-lived engine's accurate text reader is warm after its first scan, so the stop in step_catchup_stop
-        finds nothing owed. A new engine reads page-shaped pictures with the fast reader and owes the careful reads until
-        the accurate reader has compiled (ScanCatchUp waits up to 180 s for it, and not at all with FILEID_OCR_WARMUP=0). A
-        scan stopped at its after-scan phase must leave those reads owed (never dropped), and the next scan must settle
-        them when the reader is warm (the careful bit is checked only with --warm-reader, as everywhere)."""
-        state = os.path.join(self.work, "catchup")
-        shutil.rmtree(state, ignore_errors=True)
-        cl = os.path.join(self.work, "catchup-lib")
-        shutil.rmtree(cl, ignore_errors=True)
-        os.makedirs(cl)
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("soak_library", os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak_library.py"))
-        gen = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(gen)
-        for i in range(12):
-            w = self.rng.choice((297, 420, 594))
-            with open(os.path.join(cl, f"page-{i}.png"), "wb") as f:
-                f.write(gen.png(w, round(w * 2 ** 0.5), self.rng, tweak=self.rng.randrange(1, 1000)))
-        for i in range(6):
-            with open(os.path.join(cl, f"pic-{i}.png"), "wb") as f:
-                f.write(gen.png(160, 120, self.rng, tweak=self.rng.randrange(1, 1000)))
-        v = Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "catchup-engine.log"), self.trash, self.models, self.a.no_trash, "catchup")
-        try:
-            v.drain()
-            v.send("startScan", {"rootPath": cl, "rescan": False})
-            seen_post = True
-            try:
-                v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "postScan", 300)
-            except TimeoutError:
-                seen_post = False
-                fail(rnd, "a fresh engine's scan reaches its after-scan phase", "no postScan phase in 300s")
-            v.send("cancelScan")
-            k, res = v.wait_scan_end(300)
-            with ro(v.db) as c:
-                careful = c.execute("SELECT count(*) FROM scan_catchup c JOIN files f ON f.id=c.file_id WHERE (c.stages & 2) != 0 AND f.failed=0").fetchone()[0]
-                rows = c.execute("SELECT count(*) FROM files WHERE failed=0").fetchone()[0]
-            self.check_db(rnd, v.db, "catch-up stop (fresh engine)")
-            rec = dict(round=rnd, saw_postscan=seen_post, stop_result=k, careful_owed_after_stop=careful, rows=rows)
-            if k not in ("cancelled", "scanComplete"):
-                fail(rnd, "a stop in the after-scan phase of a fresh engine ends the scan", (k, res))
-            if rows != 18:
-                fail(rnd, "files scanned before the stop have rows", rec)
-            if careful == 0 and k == "cancelled":
-                fail(rnd, "a stopped scan leaves the careful text reads it owed", rec)
-            owed, passes = None, 0
-            while passes < 3:
-                passes += 1
-                k2, v2 = v.scan(cl)
-                if k2 != "scanComplete":
-                    fail(rnd, "the scan after a stop completes", (k2, v2))
-                    break
-                owed = self.owed_all(v)
-                if not owed:
-                    break
-            rec.update(owed_end=owed, settling_scans=passes)
-            if owed:
-                fail(rnd, "the scans after a stop finish what the after-scan pass owed", rec)
-            self.catchups.append(rec)
-            log("catch-up stop (fresh engine):", json.dumps(rec))
-        finally:
-            v.close()
 
     def owed_all(self, eng):
         with ro(eng.db) as c:
@@ -1211,22 +1113,11 @@ class Soak:
             v.send("startScan", {"rootPath": self.victim_lib, "rescan": True})
             t = time.time()
             if phase == "load":
-                # the first progress event comes after the stack has loaded; kill while the load is running (the Swift
-                # engine loads nothing for a scan on this Mac, so there this is a kill in discovery and the first batch)
+                # the first progress event comes after the stack has loaded; kill while the load is running
                 end = t + 0.05 + self.rng.random() * 0.65
                 while time.time() < end and v.alive():
                     time.sleep(0.05)
                 killed_at = "after %.1fs" % (time.time() - t)
-            elif phase == "tagging" and self.a.flavor == "swift":
-                # The Swift engine sends its periodic progress from a background-priority timer once a second, and a scan that
-                # keeps every core busy (or a loaded Mac) can finish without one, so waiting for a progress event killed the
-                # engine after the scan was over. The tagging phase change is always sent; kill a moment after it.
-                try:
-                    v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "tagging", 300)
-                    time.sleep(0.3 + self.rng.random() * 2.2)
-                    killed_at = "tagging phase + delay"
-                except TimeoutError:
-                    killed_at = "no tagging phase seen"
             elif phase == "tagging":
                 try:
                     v.wait(lambda e: kind(e) == "progress" and (inner(e).get("processed") or 0) >= 1 and inner(e).get("phase") == "tagging", 120)
@@ -1236,8 +1127,7 @@ class Soak:
             else:
                 try:
                     v.wait(lambda e: kind(e) == "phaseChanged" and inner(e) == "postScan", 300)
-                    # the Swift engine's after-scan phase (orphan sweep, catch-up) is much shorter than the hosted one
-                    time.sleep(self.rng.random() * (0.6 if self.a.flavor == "swift" else 2))
+                    time.sleep(self.rng.random() * 2)
                     killed_at = "postScan"
                 except TimeoutError:
                     killed_at = "no postScan seen"
@@ -1259,7 +1149,7 @@ class Soak:
             rows = self.db_rows(v.db, self.victim_lib)
             disk = {os.path.join(self.victim_lib, r) for r in self.victim_model}
             stale = {p for p, x in rows.items() if not self.tombstone(x)} - disk
-            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
             if stale or uncovered:
                 fail(rnd, f"victim catalog equals its files after the {phase} kill", (len(stale), len(uncovered)))
             with ro(v.db) as c:
@@ -1273,11 +1163,6 @@ class Soak:
             v.close()
 
     def step_heal(self, rnd, cancel_first):
-        if self.a.flavor == "swift":
-            return self.step_crash_recovery_swift(rnd, cancel_first)
-        return self.step_heal_faces(rnd, cancel_first)
-
-    def step_heal_faces(self, rnd, cancel_first):
         """After a SIGKILL during a scan, the first full scan of the folder heals (reprocesses the face-bearing files whose
         crops are missing) and the next scan reprocesses nothing. With cancel_first, the first scan is cancelled and the heal
         must still happen on the following full scan."""
@@ -1368,118 +1253,12 @@ class Soak:
         finally:
             v.close()
 
-    def step_crash_recovery_swift(self, rnd, cancel_first):
-        """The Swift version of the crash-repair check. The Rust engine heals face rows whose crop file a crash never wrote
-        (crash_self_heal_due). The Swift engine promises less, by design: its People tab cuts each face from the source image
-        by its bounding box (PeopleView FaceCropCache), and the crop JPEG it writes after a batch's commit (FaceClustering
-        saveFaceCrop) is only for the describe model, so nothing reprocesses a file for a missing crop. What it promises
-        after a kill is (FileIDEngineMain detectCrashedSessions): the next start turns every 'running' scan session into
-        'crashed' and logs crash_recovery_detected; a batch is committed whole, so the catalog holds complete rows; the next
-        full scan of the folder (also when the first scan after the crash is cancelled) covers every file, and the scans
-        after it reprocess nothing. This checks exactly that on a folder with new files, killed while its scan session was
-        'running'."""
-        state = os.path.join(self.work, "heal")
-        shutil.rmtree(state, ignore_errors=True)
-        hl = os.path.join(self.work, "heal-lib")
-        shutil.rmtree(hl, ignore_errors=True)
-        os.makedirs(hl)
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("soak_library", os.path.join(os.path.dirname(os.path.abspath(__file__)), "soak_library.py"))
-        gen = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(gen)
-
-        def add(count, tag):
-            for i in range(count):
-                with open(os.path.join(hl, f"{tag}-{i}-{uuid.uuid4().hex[:6]}.png"), "wb") as f:
-                    f.write(gen.png(self.rng.choice((96, 160, 240)), self.rng.choice((64, 120, 180)), self.rng, tweak=self.rng.randrange(1, 1000)))
-
-        mk = lambda: Engine(self.a.engine, self.a.flavor, state, os.path.join(self.work, "heal-engine.log"), self.trash, self.models, self.a.no_trash, "heal")
-        add(10, "old")
-        v = mk()
-        try:
-            k, res = v.scan(hl)
-            if k != "scanComplete":
-                fail(rnd, "crash recovery: the first scan completes", (k, res))
-        finally:
-            v.close()
-        # new files give the killed scan real work; the kill waits for the scan's own 'running' row
-        add(60, "new")
-        crash_seen = False
-        for attempt in range(6):
-            v = mk()
-            try:
-                v.drain()
-                v.send("startScan", {"rootPath": hl, "rescan": False})
-                end = time.time() + 30
-                while time.time() < end and v.alive():
-                    with ro(v.db) as c:
-                        if c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]:
-                            break
-                    time.sleep(0.005)
-                time.sleep(self.rng.uniform(0.0, 0.4))
-                v.kill()
-            finally:
-                v.raw.close()
-            with ro(v.db) as c:
-                crash_seen = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0] > 0
-            if crash_seen:
-                break
-            add(20, f"again{attempt}")
-        v = mk()
-        try:
-            with ro(v.db) as c:
-                running = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]
-                crashed = c.execute("SELECT count(*) FROM scan_sessions WHERE status='crashed' AND completed_at IS NOT NULL").fetchone()[0]
-            logged = self.log_count(v, "crash_recovery_detected")
-            rec = dict(round=rnd, cancel_first=cancel_first, crash_row_seen=crash_seen, kill_attempts=attempt + 1, running_after_start=running,
-                       crashed_sessions=crashed, crash_logged=logged)
-            if cancel_first:
-                v.send("startScan", {"rootPath": hl, "rescan": False})
-                time.sleep(0.05)
-                v.send("cancelScan")
-                k, res = v.wait_scan_end(120)
-                rec["first"] = [k, res.get("processedFiles")]
-            k, res = v.scan(hl)
-            rec["full"] = [k, res.get("processedFiles")]
-            k, res = v.scan(hl)
-            rec["next"] = [k, res.get("processedFiles")]
-            k3, res3 = v.scan(hl)
-            rec["next2"] = [k3, res3.get("processedFiles")]
-            self.heals.append(rec)
-            log("crash recovery check:", json.dumps(rec))
-            if not crash_seen:
-                fail(rnd, "the crash check's kill left a running scan session", rec)
-            if running or crashed < 1:
-                fail(rnd, "the next start marks the killed scan session crashed", rec)
-            if crash_seen and not logged:
-                fail(rnd, "the next start logs crash_recovery_detected", rec)
-            if rec["full"][0] != "scanComplete":
-                fail(rnd, "the first full scan after a crash completes", rec)
-            with ro(v.db) as c:
-                failed_rows = c.execute("SELECT count(*) FROM files WHERE failed=1").fetchone()[0]
-                still_running = c.execute("SELECT count(*) FROM scan_sessions WHERE status='running'").fetchone()[0]
-                roots = c.execute("SELECT last_status FROM library_roots WHERE path=?", (hl,)).fetchall()
-            if (rec["next"][1] or 0) > failed_rows or (rec["next2"][1] or 0) > failed_rows:
-                fail(rnd, "the scans after the first full scan reprocess nothing", rec)
-            if still_running or roots != [("completed",)]:
-                fail(rnd, "after the full scan no session is running and the folder reads completed", dict(rec, roots=roots, running=still_running))
-            rows = self.db_rows(v.db, hl)
-            disk = {os.path.join(hl, fn) for fn in os.listdir(hl)}
-            stale = {p for p, x in rows.items() if not self.tombstone(x)} - disk
-            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
-            if stale or uncovered:
-                fail(rnd, "after a crash the catalog equals the folder's files", (len(stale), len(uncovered)))
-            self.check_db(rnd, v.db, "crash recovery")
-        finally:
-            v.close()
-
     def step_victim(self, rnd):
-        if self.a.flavor in ("hosted", "swift"):
+        if self.a.flavor == "hosted":
             return self.step_victim_phase(rnd)
         return self.step_victim_plain(rnd)
 
     def step_victim_plain(self, rnd):
-        """SIGKILL an engine in the middle of a scan, restart it on the same catalog, rescan."""
         v = Engine(self.a.engine, self.a.flavor, os.path.join(self.work, "victim"), os.path.join(self.work, "victim-engine.log"),
                    self.trash, self.models, self.a.no_trash, "victim")
         try:
@@ -1501,7 +1280,7 @@ class Soak:
             stale = {p for p, v in rows.items() if not self.tombstone(v)} - disk
             if stale:
                 fail(rnd, "victim catalog has no rows for missing files", sorted(stale)[:3])
-            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0 and not self.never_catalogued(d, self.victim_lib)]
+            uncovered = [d for d in disk - set(rows) if os.path.getsize(d) != 0]
             if uncovered:
                 fail(rnd, "victim catalog covers its files", len(uncovered))
             k, res = v.scan(self.victim_lib)
@@ -1510,7 +1289,6 @@ class Soak:
         finally:
             v.close()
 
-    # ---------- the rounds
     def round(self, rnd, eng, steps):
         marks = len(LOGBAD)
         timing = {}
@@ -1524,7 +1302,6 @@ class Soak:
                 if not eng.alive():
                     raise
             timing[name] = round(time.time() - t, 1)
-        # invariants
         t0 = time.time()
         self.check_disk(rnd, self.model, self.lib, "library")
         self.check_trash(rnd)
@@ -1571,13 +1348,10 @@ class Soak:
                 ("malformed", lambda: self.step_malformed(rnd, eng)),
                 ("victim-kill", lambda: self.step_victim(rnd)),
             ]
-            if a.flavor in ("hosted", "swift"):
+            if a.flavor == "hosted":
                 if rnd <= 2:
                     steps.append(("crash-heal", lambda: self.step_heal(rnd, cancel_first=(rnd == 2))))
                 steps.insert(3, ("catchup-stop", lambda: self.step_catchup_stop(rnd, eng)))
-            if a.flavor == "swift":
-                steps.insert(4, ("catchup-stop-fresh", lambda: self.step_catchup_stop_fresh(rnd)))
-            if a.flavor == "hosted":
                 if rnd % a.cycle_every == 0 or rnd == 1:
                     steps.insert(4, ("model-cycle", lambda: self.step_model_cycle(rnd, eng)))
             try:
@@ -1589,7 +1363,6 @@ class Soak:
                     eng = self.start_main()
             if (a.max_rounds and rnd >= a.max_rounds) or time.time() > deadline:
                 break
-        # final: SIGKILL the long-lived engine, restart on the same catalog and verify everything again
         log("final: SIGKILL main engine mid-scan, restart on the same catalog")
         eng.send("startScan", {"rootPath": self.lib, "rescan": True})
         time.sleep(1.0)
@@ -1655,7 +1428,7 @@ class Soak:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True)
-    ap.add_argument("--flavor", choices=("rust", "swift", "hosted"), required=True)
+    ap.add_argument("--flavor", choices=("rust", "hosted"), required=True)
     ap.add_argument("--library", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--minutes", type=float, default=45)

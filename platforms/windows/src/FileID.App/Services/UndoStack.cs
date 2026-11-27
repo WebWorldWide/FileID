@@ -1,7 +1,4 @@
-﻿// UndoStack — command facade over the session ChangeLog.
-//
-// Ctrl+Z and the history UI share ordered entries and retryable undo state.
-// History remains local to the current process.
+﻿// Command facade over the session ChangeLog.
 
 using System;
 using System.ComponentModel;
@@ -34,13 +31,10 @@ internal sealed class UndoStack : INotifyPropertyChanged
     public void Push(string label, ChangePage page, Func<Task<bool>> reverse) =>
         ChangeLog.Instance.Push(label, ChangeKind.Other, reverse, page);
 
-    /// <summary>True when <paramref name="page"/> has a change of its own to undo.</summary>
     public bool CanUndoOn(ChangePage page) => ChangeLog.Instance.MostRecentUndoableOn(page) is not null;
 
     public string TopLabelOn(ChangePage page) => ChangeLog.Instance.MostRecentUndoableOn(page)?.Label ?? string.Empty;
 
-    /// <summary>Undoes the newest change made on <paramref name="page"/>,
-    /// leaving newer changes made on other pages alone.</summary>
     public async Task<string?> UndoAsync(ChangePage page)
     {
         var entry = ChangeLog.Instance.MostRecentUndoableOn(page);
@@ -49,8 +43,6 @@ internal sealed class UndoStack : INotifyPropertyChanged
             : null;
     }
 
-    /// <summary>The page whose changes Ctrl+Z undoes while a tab is showing;
-    /// null for tabs that make no undoable changes of their own.</summary>
     public static ChangePage? PageForTab(string? tabId) => tabId switch
     {
         "library" => ChangePage.Library,
@@ -78,12 +70,7 @@ internal sealed class UndoStack : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TopLabel)));
     }
 
-    /// <summary>
-    /// Helper: subscribe to the next `BulkActionResult` whose action
-    /// starts with the given prefix (e.g. "trashFiles:") + push an
-    /// undo entry that calls `reverse(batchId)`. Used by Library +
-    /// Cleanup trash buttons + the People merge flows.
-    /// </summary>
+    /// <summary>Used by Library + Cleanup trash buttons + the People merge flows.</summary>
     public static IDisposable CaptureNextBulkResult(
         string actionPrefix,
         string undoLabel,

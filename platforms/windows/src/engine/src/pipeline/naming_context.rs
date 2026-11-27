@@ -1,7 +1,6 @@
 //! Reviewed evidence a smart name may use, read live and validated again at
-//! commit. Lockstep with macOS `CatalogNamingContext.swift`: anything stale,
-//! ignored, unknown, malformed or incompatible is left out, and a source that
-//! changed on disk fails the load so the namer abstains.
+//! commit. Anything stale, ignored, unknown, malformed or incompatible is left out,
+//! and a source that changed on disk fails the load so the namer abstains.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -51,8 +50,6 @@ pub(crate) fn source_revision(size: i64, modified: Option<f64>) -> String {
     format!("{size}:{}", modified.map(|m| m.to_bits().to_string()).unwrap_or_else(|| "unknown".into()))
 }
 
-/// The revision of the file as it is on disk right now, or `None` when it is
-/// missing, not a regular file or has no usable date.
 fn live_revision(path: &str) -> Option<String> {
     let metadata = std::fs::metadata(Path::new(path)).ok()?;
     if !metadata.is_file() {
@@ -89,7 +86,6 @@ fn is_current(
         && crate::commands::catalog_names::normalized(embedding)
 }
 
-/// `^(person|unknown)([ _-]*[0-9]+)?$`, case-insensitive: a placeholder, not a name.
 fn placeholder(name: &str) -> bool {
     let lower = name.to_lowercase();
     let Some(rest) = lower.strip_prefix("person").or_else(|| lower.strip_prefix("unknown")) else {
@@ -129,9 +125,6 @@ fn titles(conn: &Connection, sql: &str, args: impl rusqlite::Params) -> rusqlite
     rows.collect()
 }
 
-/// Loads the evidence for one file. Fails with [`SourceChanged`] when the
-/// catalog row is gone, has no usable size and date, or no longer matches the
-/// file on disk (a live stat).
 pub(crate) fn load(
     conn: &Connection,
     file_id: i64,
@@ -226,7 +219,6 @@ pub(crate) fn load(
 }
 
 impl NamingContext {
-    /// The short name the reviewed label gives this file, or `None` (abstain).
     pub(crate) fn proposed_name(&self) -> Option<String> {
         let label = self.label.as_ref()?;
         let stem = crate::util::smart_name::readable_stem(&label.text, &self.subjects)?;
@@ -235,8 +227,6 @@ impl NamingContext {
         (key(&stem) != key(&original)).then_some(stem)
     }
 
-    /// Reloads the evidence and fails with [`EvidenceChanged`] unless it is
-    /// exactly what this context holds. Call it inside the writing transaction.
     pub(crate) fn validate(&self, conn: &Connection) -> anyhow::Result<()> {
         match load(conn, self.file_id, self.face_model.as_deref(), &self.processing) {
             Ok(current) if current == *self => Ok(()),
@@ -245,9 +235,7 @@ impl NamingContext {
     }
 }
 
-/// Organize Folders: a file whose reviewed label gives a name uses it in place of
-/// the stored model name; any load failure or abstention keeps the stored name
-/// (macOS `Restructure.swift`, `(try? CatalogNamingContext.load(...))?.proposedName ?? row["vlm_proposed_name"]`).
+/// Organize Folders: a reviewed label's name replaces the stored model name; any load failure or abstention keeps it.
 pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeline::restructure::FileForClassify]) {
     let labelled = match labelled_files(conn, files) {
         Ok(ids) if !ids.is_empty() => ids,
@@ -261,9 +249,7 @@ pub(crate) fn apply_reviewed_names(conn: &Connection, files: &mut [crate::pipeli
     }
 }
 
-/// Files in `files`' id range that can have a reviewed label at all. `load`
-/// reads the file from disk and runs several queries, so a plan over a large
-/// library asks it only about these; the set is wider than `load` accepts.
+/// `load` stats the file and runs several queries, so a plan over a large library asks it only about files that can have a reviewed label at all; this set is wider than `load` accepts.
 fn labelled_files(
     conn: &Connection,
     files: &[crate::pipeline::restructure::FileForClassify],
@@ -280,8 +266,6 @@ fn labelled_files(
     .collect()
 }
 
-/// The selected face space: the installed weights' identity and this
-/// engine's processing namespace.
 pub(crate) fn selected_space() -> (Option<String>, &'static str) {
     (crate::commands::face_refresh::current_model(), crate::commands::face_refresh::processing())
 }

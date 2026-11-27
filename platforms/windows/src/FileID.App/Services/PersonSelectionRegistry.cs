@@ -1,8 +1,6 @@
 ﻿namespace FileID.Services;
 
-/// <summary>The people Chat means by "this person" and "these people" (macOS PeopleView
-/// publishSelection): the person open in People's detail view, otherwise the people checked
-/// for merging. People publishes; Chat reads it into ChatContext.personIDs.</summary>
+/// <summary>The people Chat means by "this person" and "these people": the person open in People's detail view, otherwise the people checked for merging.</summary>
 internal sealed class PersonSelectionRegistry
 {
     public const int MaxPeople = 50;

@@ -1,7 +1,3 @@
-//! IPC command handlers, split by domain. Each submodule owns a coherent
-//! group of `handle_*` functions; the dispatcher in `server::handle_line`
-//! pattern-matches the inbound command and calls the relevant handler here.
-
 pub(crate) mod bulk;
 pub(crate) mod deep_analyze;
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
@@ -21,10 +17,18 @@ pub(crate) mod person_merge;
 pub(crate) mod hardware;
 pub(crate) mod prewarm;
 pub(crate) mod restructure;
+#[cfg(test)]
+mod restructure_plan_counts_tests;
 pub(crate) mod scan;
+#[cfg(test)]
+mod scan_cancel_tests;
+#[cfg(test)]
+mod terminal_flood_tests;
 pub(crate) mod thumbnail;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
+#[cfg(test)]
+mod trash_batch_tests;
 pub(crate) mod journal_import;
 pub(crate) mod path_moves;
 pub(crate) mod wipe;
@@ -33,18 +37,23 @@ pub mod catalog;
 pub(crate) mod catalog_search;
 pub(crate) mod catalog_retrieval;
 pub(crate) mod catalog_names;
+pub(crate) mod catalog_similar;
 
 pub mod catalog_takes;
 pub mod catalog_take_auto;
 pub(crate) mod take_goal;
 mod catalog_take_suggestions;
 pub(crate) mod take_grouping;
+pub(crate) mod timeout_retry;
 
 pub mod chat;
 mod chat_search;
+pub(crate) mod chat_commands;
 pub(crate) mod chat_intent;
 pub(crate) mod chat_facts;
 mod chat_actions;
+#[cfg(test)]
+mod chat_answers_tests;
 mod chat_selection;
 pub mod tools;
 pub mod models;
@@ -52,13 +61,11 @@ pub mod roots;
 pub mod benchmark;
 pub mod timeline;
 mod timeline_media;
-// The Mac app's engine exports and analyses video with AVFoundation instead.
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) mod video_export;
 mod media_recipes;
 
-/// Whether FileID's vetted FFmpeg runtime is installed (macOS video frames need it).
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(not(windows))]
 pub(crate) fn ffmpeg_runtime_available() -> bool {
     video_export::available()
 }

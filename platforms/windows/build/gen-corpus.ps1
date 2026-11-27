@@ -32,7 +32,6 @@ if ($Clean -and (Test-Path $OutDir)) {
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-# Mix percentages (must sum to 100).
 $mix = @(
     @{ ext='.jpg';  pct=60 },
     @{ ext='.png';  pct=20 },
@@ -54,8 +53,6 @@ function Write-Jpg([string]$path, [int]$idx) {
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
-        $hue = ($idx * 17) % 360
-        # cheap deterministic color from index
         $r = ($idx * 13) % 256
         $gn = ($idx * 29) % 256
         $b = ($idx * 41) % 256
@@ -140,7 +137,6 @@ function Write-Docx([string]$path, [int]$idx) {
     }
 }
 
-# Build the extension picker by expanding each entry's pct into a flat array.
 $picker = @()
 foreach ($entry in $mix) { 1..$entry.pct | ForEach-Object { $picker += $entry.ext } }
 

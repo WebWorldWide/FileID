@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import FileIDShared
+import FileIDModelInfo
 
 struct ExactDuplicateSnapshot: Sendable {
     let groups: [DuplicateGroup]
@@ -9,13 +10,44 @@ struct ExactDuplicateSnapshot: Sendable {
     let skipped: Int
     var capped = false
     var cancelled = false
+    var unshownClasses = 0
+    var unshownPotentialBytes: Int64 = 0
 }
 
 enum ExactDuplicateVerifier {
     static let candidateCap = 5_000
-    static let readBudgetBytes: Int64 = 64 * 1024 * 1024 * 1024
+    static let readBudgetBytes: Int64 = 16 * 1024 * 1024 * 1024
+    static let maxFileBytes: Int64 = 2 * 1024 * 1024 * 1024
+    static let minFileBytes: Int64 = 1024
+    static let sidecarExtensions = ["xmp", "aae", "thm", "json", "xml", "txt", "plist", "dop", "pp3", "sidecar"]
+    static var eligibleSQL: String {
+        let list = sidecarExtensions.map { "'\($0)'" }.joined(separator: ",")
+        return "size_bytes >= \(minFileBytes) AND LOWER(extension) NOT IN (\(list))"
+    }
     static let groupCap = 200
     static let memberCap = 500
+
+    struct Totals: Sendable, Equatable {
+        var groups: Int
+        var extra: Int
+        var bytes: Int64
+    }
+
+    /// The SQL totals cover every stored group; once the byte check drops or splits some of the groups already loaded, the totals move by what those groups lost, so the header, the per-group badges and the freed-space figure agree without another query.
+    static func adjustedTotals(base: Totals, stored: [DuplicateGroup], current: [DuplicateGroup]) -> Totals {
+        func extra(_ gs: [DuplicateGroup]) -> Int { gs.reduce(0) { $0 + max(0, $1.totalFileCount - 1) } }
+        func bytes(_ gs: [DuplicateGroup]) -> Int64 { gs.reduce(0) { $0 + $1.reclaimableBytes } }
+        return Totals(
+            groups: max(0, base.groups - stored.count + current.count),
+            extra: max(0, base.extra - extra(stored) + extra(current)),
+            bytes: max(0, base.bytes - bytes(stored) + bytes(current)))
+    }
+
+    static func unshownNotice(classes: Int, bytes: Int64) -> String {
+        guard classes > 0 else { return "" }
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return " \(classes.formatted()) more set\(classes == 1 ? "" : "s") of same-size files \(classes == 1 ? "isn’t" : "aren’t") listed yet; up to \(size) more could be freed."
+    }
 
     private struct Key: Hashable {
         let digest: Data
@@ -57,7 +89,8 @@ enum ExactDuplicateVerifier {
         attributes: .concurrent)
 
     static func verify(
-        candidates: [FileRow], candidateCount: Int, inputPartial: Bool
+        candidates: [FileRow], candidateCount: Int, inputPartial: Bool,
+        unshownClasses: Int = 0, unshownPotentialBytes: Int64 = 0
     ) async -> ExactDuplicateSnapshot {
         let cancel = CancelFlag()
         return await withTaskCancellationHandler {
@@ -113,8 +146,97 @@ enum ExactDuplicateVerifier {
                     partial: inputPartial || skipped > 0 || groupTruncated || memberTruncated,
                     candidateCount: candidateCount,
                     skipped: skipped,
-                    capped: inputPartial || groupTruncated || memberTruncated))
+                    capped: inputPartial || groupTruncated || memberTruncated,
+                    unshownClasses: unshownClasses,
+                    unshownPotentialBytes: unshownPotentialBytes))
             }
+            }
+        } onCancel: {
+            cancel.set()
+        }
+    }
+
+    struct VerifyUpdate: Sendable {
+        var groups: [DuplicateGroup]
+        var unverified: Set<Int64>
+        var done: Int
+        var total: Int
+        var skipped = 0
+        var finished = false
+        var cancelled = false
+    }
+
+    /// Re-reads the groups the stored hashes produced. Cheapest groups go first so most of the list settles at once; a group whose copies are too large to read, or that would pass the read budget, keeps its stored-hash match (`unverified`) after an edge-sample check, and the Trash step re-hashes it anyway. `onUpdate` is called off the main thread about twice a second.
+    static func verifyStored(
+        _ stored: [DuplicateGroup], fullReadLimit: Int64 = maxFileBytes, budget: Int64 = readBudgetBytes,
+        onUpdate: @escaping @Sendable (VerifyUpdate) -> Void
+    ) async -> VerifyUpdate {
+        let cancel = CancelFlag()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    var result: [[DuplicateGroup]] = stored.map { [$0] }
+                    var unverified = Set<Int64>()
+                    var skipped = 0
+                    var spent: Int64 = 0
+                    var lastEmit = Date()
+                    let order = stored.indices.sorted {
+                        let l = stored[$0].files.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                        let r = stored[$1].files.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                        return l != r ? l < r : $0 < $1
+                    }
+                    func snapshot(done: Int, finished: Bool, cancelled: Bool = false) -> VerifyUpdate {
+                        VerifyUpdate(
+                            groups: result.flatMap { $0 }, unverified: unverified, done: done, total: stored.count,
+                            skipped: skipped, finished: finished, cancelled: cancelled)
+                    }
+                    for (done, index) in order.enumerated() {
+                        if cancel.isSet { return continuation.resume(returning: snapshot(done: done, finished: false, cancelled: true)) }
+                        let group = stored[index]
+                        let size = group.files.first?.sizeBytes ?? 0
+                        let readBytes = size * Int64(group.files.count)
+                        let readsWhole = size <= fullReadLimit && spent + readBytes <= budget
+                        var buckets: [Key: [Prefiltered]] = [:]
+                        for file in group.files {
+                            guard let sampled = prefilter(for: file) else { skipped += 1; continue }
+                            buckets[Key(digest: sampled.prefilter, size: file.sizeBytes), default: []].append(sampled)
+                        }
+                        var rebuilt: [DuplicateGroup] = []
+                        for members in buckets.values where members.count > 1 {
+                            if readsWhole {
+                                var byDigest: [Key: [FileRow]] = [:]
+                                for member in members {
+                                    guard let digest = fullDigest(for: member) else { skipped += 1; continue }
+                                    byDigest[Key(digest: digest, size: member.file.sizeBytes), default: []].append(member.file)
+                                }
+                                for (key, files) in byDigest where files.count > 1 {
+                                    let whole = files.count == group.files.count
+                                    let count = whole ? group.totalFileCount : files.count
+                                    rebuilt.append(DuplicateGroup(
+                                        id: groupID(key.digest), files: files.sorted(by: keeperComesFirst),
+                                        totalFileCount: count, totalBytes: Int64(count) * key.size))
+                                }
+                            } else {
+                                let files = members.map(\.file).sorted(by: keeperComesFirst)
+                                let count = files.count == group.files.count ? group.totalFileCount : files.count
+                                let rebuiltGroup = DuplicateGroup(
+                                    id: group.id &+ Int64(rebuilt.count), files: files,
+                                    totalFileCount: count, totalBytes: Int64(count) * size)
+                                unverified.insert(rebuiltGroup.id)
+                                rebuilt.append(rebuiltGroup)
+                            }
+                        }
+                        if readsWhole { spent += readBytes }
+                        rebuilt.sort { $0.id < $1.id }
+                        result[index] = rebuilt
+                        if Date().timeIntervalSince(lastEmit) > 0.5 {
+                            lastEmit = Date()
+                            onUpdate(snapshot(done: done + 1, finished: false))
+                        }
+                    }
+                    trimCache()
+                    continuation.resume(returning: snapshot(done: stored.count, finished: true))
+                }
             }
         } onCancel: {
             cancel.set()
@@ -186,19 +308,7 @@ enum ExactDuplicateVerifier {
         for key in oldest { cacheState.values.removeValue(forKey: key) }
     }
 
-    static func matchesImmediately(
-        keeper: URL, victim: URL, expectedSize: Int64
-    ) async -> ExactFileDigest.CacheKey? {
-        await withCheckedContinuation { continuation in
-            destructiveQueue.async {
-                let match = ExactFileDigest.matchWithIdentity(
-                    first: keeper, second: victim, expectedSize: expectedSize)
-                continuation.resume(returning: match?.second)
-            }
-        }
-    }
-
-    private static func keeperComesFirst(_ lhs: FileRow, _ rhs: FileRow) -> Bool {
+    static func keeperComesFirst(_ lhs: FileRow, _ rhs: FileRow) -> Bool {
         let la = lhs.aesthetic ?? 0
         let ra = rhs.aesthetic ?? 0
         if la != ra { return la > ra }
@@ -212,7 +322,7 @@ enum ExactDuplicateVerifier {
         return lhs.pathText < rhs.pathText
     }
 
-    private static func groupID(_ digest: Data) -> Int64 {
+    static func groupID(_ digest: Data) -> Int64 {
         var value: UInt64 = 0
         for (index, byte) in digest.prefix(8).enumerated() {
             value |= UInt64(byte) << (8 * index)
@@ -236,7 +346,10 @@ struct DuplicateTrashOutcome: Sendable {
     var trashed: [(id: Int64, size: Int64)] = []
     var verificationFailed = 0
     var protectedLocation = 0
+    /// The read-only drive that refused the batch, so the summary can name it.
+    var readOnlyDrive: String?
     var failed = 0
+    var failureMessage: String?
     var batchID: String?
     var engineUnavailable = false
     var timedOut = false
@@ -251,6 +364,13 @@ extension ExactDuplicateVerifier {
     static func trashThroughEngine(_ work: [DuplicateTrashItem], engine: EngineClient,
                                    progress: (@MainActor @Sendable (String) -> Void)? = nil) async -> DuplicateTrashOutcome {
         var outcome = DuplicateTrashOutcome()
+        // A batch with any target on a read-only drive is refused whole before a single byte is hashed.
+        if let refusal = ReadOnlyLocations.batchRefusal(work.map(\.url)) {
+            outcome.protectedLocation = work.count
+            outcome.readOnlyDrive = refusal.drive
+            outcome.failureMessage = refusal.errorDescription
+            return outcome
+        }
         progress?("Checking copies")
         let evidence = await withTaskGroup(of: (Int64, ExactTrashIdentity?, Bool).self) { group -> [(Int64, ExactTrashIdentity?, Bool)] in
             var results: [(Int64, ExactTrashIdentity?, Bool)] = []
@@ -300,13 +420,34 @@ extension ExactDuplicateVerifier {
         SpotlightIndexer.deindex(ids: outcome.trashed.map(\.id))
         for refusal in result.messages where !refusal.ok {
             switch trashRefusal(refusal) {
-            case "protected": outcome.protectedLocation += 1
+            case "protected":
+                outcome.protectedLocation += 1
+                if outcome.readOnlyDrive == nil, let text = refusal.message, text.contains("is a read-only drive"),
+                   let open = text.firstIndex(of: "\u{201C}"), let close = text.firstIndex(of: "\u{201D}"), open < close {
+                    outcome.readOnlyDrive = String(text[text.index(after: open)..<close])
+                }
             case "changed": outcome.verificationFailed += 1
-            default: outcome.failed += 1
+            default:
+                outcome.failed += 1
+                if outcome.failureMessage == nil, let text = refusal.message, !text.isEmpty, !Sidebar.looksTechnical(text) { outcome.failureMessage = text }
             }
         }
         outcome.batchID = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         return outcome
+    }
+
+    nonisolated static func protectedSummary(_ outcome: DuplicateTrashOutcome) -> String {
+        if let drive = outcome.readOnlyDrive { return ReadOnlyLocations.sentence(forDrive: drive) }
+        return "\(outcome.protectedLocation.formatted()) \(outcome.protectedLocation == 1 ? "is" : "are") in a managed media library, such as a Photos library, so FileID can’t change \(outcome.protectedLocation == 1 ? "it" : "them")"
+    }
+
+    /// Why a batch that moved nothing says so plainly: the card must not show a success for an empty move.
+    nonisolated static func nothingMovedSummary(_ outcome: DuplicateTrashOutcome, skippedAsChanged: Int) -> String {
+        var reasons: [String] = []
+        if skippedAsChanged > 0 { reasons.append("\(skippedAsChanged.formatted()) changed since the scan, so FileID left \(skippedAsChanged == 1 ? "it" : "them") alone") }
+        if outcome.protectedLocation > 0 { reasons.append(protectedSummary(outcome)) }
+        if outcome.failed > 0 { reasons.append(outcome.failureMessage ?? "\(outcome.failed.formatted()) couldn’t be moved to the Trash") }
+        return reasons.isEmpty ? "Nothing was moved to the Trash. Your files are untouched." : "Nothing was moved to the Trash: " + reasons.joined(separator: "; ") + ". Your files are untouched."
     }
 
     /// The helper's reason code; a helper that sends none is read from its fixed
@@ -314,7 +455,7 @@ extension ExactDuplicateVerifier {
     nonisolated static func trashRefusal(_ item: BulkActionItem) -> String {
         if let reason = item.reason { return reason }
         let text = item.message ?? ""
-        if text.hasPrefix("This file belongs to a managed media library") || text.hasPrefix("This location is read-only") {
+        if text.hasPrefix("This file belongs to a managed media library") || text.contains("is a read-only drive") {
             return "protected"
         }
         if text.hasPrefix("File changed since") || text.hasSuffix("Nothing was moved.") { return "changed" }
@@ -326,8 +467,8 @@ extension ExactDuplicateVerifier {
     @MainActor
     static func undoTrash(batchID: String, engine: EngineClient) async -> (restored: Int, message: String?) {
         let signal = engine.bulkActionResultSignal
-        guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, "FileID is still getting ready. Try again in a moment.") }
+        guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, HelperGate.unsentNote(engine)) }
         let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", commandID: engine.lastSentCommandID, timeout: 300)
-        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn't finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
+        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn’t finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
     }
 }

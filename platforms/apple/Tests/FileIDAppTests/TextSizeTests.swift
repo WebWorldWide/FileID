@@ -59,6 +59,8 @@ struct TextSizeTests {
         #expect(standard.name == 17 && standard.chip == 18 && standard.meta == 15 && standard.badge == 17)
         let heights = TextSize.allCases.map { TileTextMetrics($0).captionHeight }
         #expect(heights == heights.sorted())
+        #expect(standard.captionHeight(includingChips: false) == 46, "an untagged listing drops the 22 pt chip row")
+        #expect(standard.captionHeight(includingChips: true) == standard.captionHeight)
         for textSize in TextSize.allCases {
             let metrics = TileTextMetrics(textSize)
             #expect(metrics.name >= textSize.scaled(13) * 1.2)

@@ -84,7 +84,6 @@ impl MapView {
         let hint = v3::meta("Hover a folder or ribbon to trace its files. Click to see the exact list.");
         body.append(&hint);
 
-        // ── Map ────────────────────────────────────────────────────────────
         let map = v3::vbox(8);
         let header = v3::hbox(8);
         let from_count = v3::label("", &["v3-map-head"]);
@@ -105,7 +104,6 @@ impl MapView {
         overlay.add_overlay(&nodes);
         map.append(&overlay);
 
-        // ── Tree ───────────────────────────────────────────────────────────
         let tree = v3::vbox(10);
         let tree_head = v3::hbox(8);
         tree_head.append(&v3::label("Show", &["v3-output-label"]));
@@ -371,13 +369,24 @@ impl MapView {
         }
         match best {
             Some((_, flow)) => {
-                let source = v3::file_name(&flow.source_folder);
+                let label = |nodes: &[Node], id: &str, fallback: String| {
+                    nodes.iter().find(|n| n.id == id).map_or(fallback, |n| n.label.clone())
+                };
+                let rolled_up = flow.source_id == super::restructure_map_layout::OTHER_SOURCE
+                    || flow.dest_id == super::restructure_map_layout::OTHER_DEST;
+                let source = label(&layout.sources, &flow.source_id, v3::file_name(&flow.source_folder));
+                let dest = label(&layout.dests, &flow.dest_id, flow.bucket.clone());
                 self.overlay.set_tooltip_text(Some(&format!(
-                    "{source} → {}\n{}",
-                    flow.bucket,
+                    "{source} → {dest}\n{}",
                     super::restructure_model::plural(flow.count, "file")
                 )));
-                self.bus.set(Some(Hover::Flow(flow.source_folder.clone(), flow.bucket.clone())));
+                if rolled_up {
+                    if matches!(self.bus.current(), Some(Hover::Flow(..))) {
+                        self.bus.set(None);
+                    }
+                } else {
+                    self.bus.set(Some(Hover::Flow(flow.source_folder.clone(), flow.bucket.clone())));
+                }
             }
             None => {
                 self.overlay.set_tooltip_text(None);

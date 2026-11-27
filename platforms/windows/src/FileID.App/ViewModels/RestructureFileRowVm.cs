@@ -1,8 +1,5 @@
 ﻿// Per-file row inside a Restructure recommendation card's expand-in-place list
-// (and the "see all" drill-down). Mirrors macOS RestructureView.proposalRow:
-// a checkbox + file glyph + filename + "from <folder>" subtitle. IsSelected
-// flows back to RestructureView via SelectionChanged so the apply count and the
-// actual applied move set never diverge.
+// IsSelected flows back to RestructureView via SelectionChanged so the apply count and the actual applied move set never diverge.
 
 using System;
 using System.ComponentModel;
@@ -15,8 +12,6 @@ internal sealed class RestructureFileRowVm : INotifyPropertyChanged
 {
     public required RestructureMove Move { get; init; }
 
-    /// <summary>Raised whenever IsSelected flips so the owning view recomputes
-    /// the apply count + button state. Set once at construction.</summary>
     public Action<RestructureFileRowVm>? SelectionChanged { get; init; }
 
     public long FileId => Move.FileId;
@@ -51,7 +46,6 @@ internal sealed class RestructureFileRowVm : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
-    // Segoe MDL2 Assets glyph code points, mirroring macOS fileIcon(forFilename:).
     // Built from an int so the source stays pure ASCII (no embedded PUA chars).
     private static string GlyphFor(string name)
     {

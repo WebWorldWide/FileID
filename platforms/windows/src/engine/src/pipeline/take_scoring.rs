@@ -1,7 +1,6 @@
 //! Model-free Best Takes scoring: subject sharpness, motion blur, exposure,
 //! faces/eyes/framing and, for clips, steadiness and action. Pure functions on
-//! 8-bit luma; mirror of the macOS `TakeScoring.swift` with the same
-//! thresholds, weights and reasons. Change both together.
+//! 8-bit luma.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -58,7 +57,6 @@ pub struct Luma {
 }
 
 impl Luma {
-    /// BT.601 integer luma, (77 R + 150 G + 29 B) >> 8, from packed RGB8.
     pub fn from_rgb(rgb: &[u8], width: usize, height: usize) -> Self {
         let pixels = rgb
             .as_chunks::<3>().0.iter()
@@ -77,8 +75,6 @@ pub struct Box2 {
     pub height: f64,
 }
 
-/// One detected face, top-left origin, normalized to the frame. `quality` and
-/// `eyes_open` are 0…1 when the detector can judge them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Face {
@@ -101,7 +97,6 @@ pub struct VideoSignals {
     pub peak_seconds: f64,
 }
 
-/// Per-file measurements, cached in `take_quality.signals_json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Signals {
@@ -121,8 +116,6 @@ pub struct Signals {
     pub video: Option<VideoSignals>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub people: Option<Vec<Box2>>,
-    /// Long side of the image the faces were found on, when tiles of a larger
-    /// decode found them; face sizes are judged at that scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_long_side: Option<usize>,
 }
@@ -326,8 +319,7 @@ pub struct Tile {
 
 /// Wide group shots: faces 15–30 px across at the analysis size go unseen.
 /// Look again in tiles only when the frame is large and the first pass found
-/// no faces, a face too small for an eyes check, or more people than faces
-/// (Swift `TakeScoring.wantsTiles`).
+/// no faces, a face too small for an eyes check, or more people than faces.
 pub fn wants_tiles(source_long_side: u32, width: usize, height: usize, faces: &[Face], people: Option<&[Box2]>) -> bool {
     if source_long_side < TILE_LONG_SIDE {
         return false;
@@ -336,7 +328,6 @@ pub fn wants_tiles(source_long_side: u32, width: usize, height: usize, faces: &[
     faces.is_empty() || small || people.map_or(0, <[Box2]>::len) > faces.len()
 }
 
-/// Overlapping grid cells of a `width`×`height` image, top-left origin.
 pub fn tiles(width: usize, height: usize) -> Vec<Tile> {
     let (tw, th) = (width as f64 / TILE_GRID as f64, height as f64 / TILE_GRID as f64);
     let mut out = Vec::with_capacity(TILE_GRID * TILE_GRID);
@@ -352,7 +343,6 @@ pub fn tiles(width: usize, height: usize) -> Vec<Tile> {
     out
 }
 
-/// A face found inside `tile`, normalized to the whole `width`×`height` image.
 pub fn placing(face: &Face, tile: &Tile, width: usize, height: usize) -> Face {
     let (w, h) = (width as f64, height as f64);
     Face {
@@ -395,8 +385,6 @@ pub fn merge_faces(base: &[Face], tiled: &[Face]) -> Vec<Face> {
     kept
 }
 
-/// Faces big enough to judge, largest first: at least `MIN_FACE_PIXELS` on the
-/// short side and a quarter of the largest face's area.
 pub fn primary_faces(faces: &[Face], width: usize, height: usize, scale: f64) -> Vec<Face> {
     let mut sized: Vec<Face> = faces.iter().filter(|f| face_pixels(f, width, height, scale) >= MIN_FACE_PIXELS).cloned().collect();
     sized.sort_by(|a, b| {
@@ -407,7 +395,6 @@ pub fn primary_faces(faces: &[Face], width: usize, height: usize, scale: f64) ->
     sized.into_iter().filter(|f| f.width * f.height >= 0.25 * largest).collect()
 }
 
-/// Box-averaged downsample to `long_side` on the long edge.
 pub fn downsample(image: &Luma, long_side: usize) -> Luma {
     let scale = image.width.max(image.height) as f64 / long_side as f64;
     if scale <= 1.0 {
@@ -434,8 +421,6 @@ pub fn downsample(image: &Luma, long_side: usize) -> Luma {
     Luma { width: w, height: h, pixels: out }
 }
 
-/// Camera shift between two frames (integer search within ±`MOTION_SEARCH`)
-/// and the mean absolute difference left after removing it, 0…1.
 pub fn shift(a: &Luma, b: &Luma) -> (i32, i32, f64) {
     let r = MOTION_SEARCH;
     if a.width != b.width || a.height != b.height || a.width as i32 <= 2 * r || a.height as i32 <= 2 * r {
@@ -470,7 +455,6 @@ pub fn anchor_times(duration: f64, count: usize, pair_gap: f64) -> Vec<f64> {
     (0..count).map(|i| round4(usable * (i as f64 + 0.5) / count as f64)).collect()
 }
 
-/// Clip signals from frame pairs taken a fraction of a second apart.
 pub fn video_signals(pairs: &[(f64, Luma, Luma)], duration: f64) -> Option<Signals> {
     let mut best: Option<Signals> = None;
     let (mut shakes, mut actions) = (Vec::new(), Vec::new());

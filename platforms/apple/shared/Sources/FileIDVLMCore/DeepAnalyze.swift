@@ -36,7 +36,6 @@ public actor DeepAnalyze {
     private var loadedKind: AIModelKind?
     private var cancelRequested: Bool = false
     private var currentAnalysisTask: Task<AnalysisResult, Never>?
-    /// Keyed so a finishing prewarm only drops its own handle, never a concurrent one's.
     private var prewarmTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Single-flight handle for an in-progress model load. A
@@ -91,7 +90,6 @@ public actor DeepAnalyze {
         return 512
     }
 
-    /// Asks for tags in the caption reply instead of a second image pass.
     nonisolated static func mergedTagsEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         environment["FILEID_VLM_MERGED_TAGS"] != "0"
     }
@@ -170,7 +168,6 @@ public actor DeepAnalyze {
         if gate.bail() { task.cancel() }
     }
     public func clearCancel()   { cancelRequested = false }
-    /// Stops only the generation in flight; a batch around it keeps going.
     package func cancelCurrentAnalysis() { currentAnalysisTask?.cancel() }
     public func isCancelled() -> Bool { cancelRequested }
 
@@ -277,7 +274,6 @@ public actor DeepAnalyze {
 
     var activePrewarmCount: Int { prewarmTasks.count }
 
-    /// True while a model download or prewarm is running.
     public var hasActivePrewarm: Bool { !prewarmTasks.isEmpty }
 
     /// Idefics3 and SmolVLM tile images at a fixed size and crash on any other.
@@ -407,6 +403,7 @@ public actor DeepAnalyze {
         ScanModelResidency.shared.releaseForOtherModel()
         let totalMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
         let requestedMB = UInt64((kind.ramBudgetGB * 1024).rounded(.up))
+        // Free memory is the engine's check, made when it reserves the load; this one only refuses a model over the Mac's budget.
         if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: totalMB, requestedMB: requestedMB) {
             loadState = .failed(reason)
             throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
@@ -472,11 +469,6 @@ public actor DeepAnalyze {
                 .appending(component: kind.sourceRepo)
             guard MLXKernels.available else { throw MLXKernelsUnavailable() }
             Memory.cacheLimit = Self.mlxCacheLimitMB(for: kind) * 1_048_576
-            // Checked after the download so busy memory delays loading, not fetching.
-            let initialAvailableMB = UInt64(max(0, Hardware.availableMemoryMB()))
-            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: initialAvailableMB, requestedMB: requestedMB) {
-                throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
-            }
             let waitingMessage = "Waiting for memory and processing capacity…"
             loadState = .loading(progress: 0.99, message: waitingMessage)
             progress?(0.99, waitingMessage, 0, 0)
@@ -484,10 +476,6 @@ public actor DeepAnalyze {
                 ResourceScheduler.Demand(memoryMB: requestedMB, cpuUnits: 1, ioUnits: 1),
                 priority: .interactive
             )
-            let availableMB = UInt64(max(0, Hardware.availableMemoryMB()))
-            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: availableMB, requestedMB: requestedMB) {
-                throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
-            }
             let loaded: ModelContainer
             let downloader = LocalVLMDownloader(repo: kind.sourceRepo, directory: modelDirectory)
             if kind.supportsVision {
@@ -590,7 +578,6 @@ public actor DeepAnalyze {
     private var parkedKind: AIModelKind?
     package var isParked: Bool { parkedKind != nil && container == nil }
 
-    /// Reloads a parked model before use; a no-op otherwise.
     func ensureResident() async throws {
         // Starting a use invalidates any pending park before the first await, so an
         // idle unload can't free the weights between this check and the caller's lease.
@@ -708,7 +695,6 @@ public actor DeepAnalyze {
         let trimChars = CharacterSet(charactersIn: "\"'.").union(.whitespacesAndNewlines)
         for piece in raw.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == ";" }) {
             let lowered = piece.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            // Strip leading list markers, then surrounding quotes/punctuation.
             let noLead = String(lowered.unicodeScalars.drop(while: { leadingMarkers.contains($0) }))
             let stripped = noLead.trimmingCharacters(in: trimChars)
             if stripped.isEmpty || stripped.count > 40 { continue }
@@ -721,7 +707,6 @@ public actor DeepAnalyze {
         return out
     }
 
-    /// Describe one video moment from 2–8 ordered frames sampled at `times`.
     package func analyzeMomentSequence(imageURLs: [URL], times: [Double]) async -> AnalysisResult {
         let request = TimelineMomentAnalysis.request(times: times)
         return await analyzeSequence(imageURLs: imageURLs, times: times, prompt: request.prompt, labels: request.labels)
@@ -1373,7 +1358,6 @@ public actor DeepAnalyze {
     private static func parseSections(_ rawOutput: String) -> AnalysisResult {
         var description = rawOutput
         var name: String? = nil
-        // Look for "DESCRIPTION:" + "FILENAME:" markers.
         if let dRange = rawOutput.range(of: "DESCRIPTION:", options: .caseInsensitive) {
             let afterD = rawOutput[dRange.upperBound...]
             if let fRange = afterD.range(of: "FILENAME:", options: .caseInsensitive) {
@@ -1501,19 +1485,16 @@ public actor DeepAnalyze {
         // 3. split_whitespace().join("-") — drops leading/trailing/runs of spaces.
         let collapsedRuns = cleaned.split(whereSeparator: { $0 == " " })
         var out = collapsedRuns.joined(separator: "-")
-        // 4. Collapse repeated '-' → single '-'.
         while out.contains("--") {
             out = out.replacingOccurrences(of: "--", with: "-")
         }
-        // 5. Cap at 80 chars; don't end mid-word (truncate at last '-').
         if out.count > 80 {
             out = String(out.prefix(80))
             if let idx = out.lastIndex(of: "-") {
                 out = String(out[..<idx])
             }
         }
-        // 6. Empty → literal "untitled" (NOT nil); callers flatMap over a
-        //    non-nil value so the signature stays String?.
+        // Empty → literal "untitled" (NOT nil); callers flatMap over a non-nil value, so the signature stays String?.
         return out.isEmpty ? "untitled" : out
     }
 
@@ -1521,25 +1502,70 @@ public actor DeepAnalyze {
     /// so they ALWAYS land. The model treats the "use these names" hint as
     /// optional, so the names often never reach the FILENAME even when injected
     /// into the prompt. Each person's first-name token — lowercase
-    /// ASCII-alphanumeric, ≥2 chars, deduped against words already in the name and
+    /// ASCII-alphanumeric after folding Latin-1 / Latin Extended-A accents, ≥2 chars, deduped against words already in the name and
     /// against each other, capped at 3 sorted alphabetically — is prefixed, then
     /// the whole thing is re-sanitized. Byte-faithful with the Rust engine's
     /// `apply_person_prefix`. (item 3)
     static func applyPersonPrefix(_ name: String?, faceNames: [String]) -> String? {
         guard let name, !name.isEmpty else { return name }
-        let existing = Set(
-            name.lowercased().split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }.map(String.init))
+        let existing = Set(foldPrefixText(name.lowercased(), otherIsSeparator: true)
+            .split(separator: " ").map(String.init))
         var tokens: [String] = []
         for display in faceNames {
-            guard let firstWord = display.split(separator: " ").first else { continue }
-            let token = String(firstWord).lowercased()
-                .filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+            guard let firstWord = display.split(whereSeparator: { $0.isWhitespace }).first else { continue }
+            let token = foldPrefixText(String(firstWord).lowercased(), otherIsSeparator: false)
             guard token.count >= 2, !existing.contains(token), !tokens.contains(token) else { continue }
             tokens.append(token)
         }
         guard !tokens.isEmpty else { return name }
         let prefix = tokens.sorted().prefix(3).joined(separator: " ")
         return sanitize(filename: "\(prefix) \(name)") ?? name
+    }
+
+    /// Mirror of the Rust `fold_prefix_text`: scalar by scalar so a decomposed accent is not one grapheme.
+    static func foldPrefixText(_ lowered: String, otherIsSeparator: Bool) -> String {
+        var out = ""
+        for scalar in lowered.unicodeScalars {
+            if scalar.isASCII, scalar.properties.isAlphabetic || (scalar.value >= 0x30 && scalar.value <= 0x39) {
+                out.unicodeScalars.append(scalar)
+            } else if let folded = foldLatinLetter(scalar) {
+                out += folded
+            } else if scalar.value >= 0x300 && scalar.value <= 0x36F {
+                continue
+            } else if otherIsSeparator {
+                out += " "
+            }
+        }
+        return out
+    }
+
+    static func foldLatinLetter(_ scalar: Unicode.Scalar) -> String? {
+        switch String(scalar) {
+        case "à", "á", "â", "ã", "ä", "å", "ā", "ă", "ą": return "a"
+        case "ç", "ć", "ĉ", "ċ", "č": return "c"
+        case "ð", "ď", "đ": return "d"
+        case "è", "é", "ê", "ë", "ē", "ĕ", "ė", "ę", "ě": return "e"
+        case "ĝ", "ğ", "ġ", "ģ": return "g"
+        case "ĥ", "ħ": return "h"
+        case "ì", "í", "î", "ï", "ĩ", "ī", "ĭ", "į", "ı": return "i"
+        case "ĵ": return "j"
+        case "ķ": return "k"
+        case "ĺ", "ļ", "ľ", "ŀ", "ł": return "l"
+        case "ñ", "ń", "ņ", "ň": return "n"
+        case "ò", "ó", "ô", "õ", "ö", "ø", "ō", "ŏ", "ő": return "o"
+        case "ŕ", "ŗ", "ř": return "r"
+        case "ś", "ŝ", "ş", "š": return "s"
+        case "ţ", "ť", "ŧ": return "t"
+        case "ù", "ú", "û", "ü", "ũ", "ū", "ŭ", "ů", "ű", "ų": return "u"
+        case "ŵ": return "w"
+        case "ý", "ÿ", "ŷ": return "y"
+        case "ź", "ż", "ž": return "z"
+        case "æ": return "ae"
+        case "œ": return "oe"
+        case "ß": return "ss"
+        case "þ": return "th"
+        default: return nil
+        }
     }
 
     // MARK: - Self-heal old model dirs

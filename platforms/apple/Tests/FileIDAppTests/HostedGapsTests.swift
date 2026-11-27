@@ -5,17 +5,27 @@ import FileIDShared
 
 @Suite("Sidebar and status after a fall back")
 struct HostedGapsTests {
-    @Test("no area is lit while Settings is open")
-    func settingsLightsNoArea() {
-        #expect(Sidebar.highlightedArea(activeTab: .settings) == nil)
-        #expect(Sidebar.highlightedArea(activeTab: .library) == .browse)
-        #expect(Sidebar.highlightedArea(activeTab: .takes) == .analyze)
-        #expect(Sidebar.highlightedArea(activeTab: .restructure) == .act)
+    @Test("Settings keeps the area the person was last in lit; every other page lights its own")
+    func settingsKeepsTheLastArea() {
+        #expect(Sidebar.areaShown(activeTab: .settings, lastUsed: .act) == .act)
+        #expect(Sidebar.areaShown(activeTab: .settings, lastUsed: .browse) == .browse)
+        #expect(Sidebar.areaShown(activeTab: .library, lastUsed: .act) == .browse)
+        #expect(Sidebar.areaShown(activeTab: .takes, lastUsed: .browse) == .analyze)
+        #expect(Sidebar.areaShown(activeTab: .restructure, lastUsed: .browse) == .act)
     }
 
-    @Test("the generic card is not raised for the fall back to the Swift engine")
-    func fallbackRaisesNoCard() {
-        #expect(!Sidebar.showsErrorCard("engine_fallback"))
+    @Test("the last area survives a relaunch")
+    func lastAreaIsStored() throws {
+        let suite = "fileid.lastarea.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        #expect(MainWindow.Area.lastUsed(defaults: defaults) == .browse)
+        defaults.set(MainWindow.Area.act.rawValue, forKey: MainWindow.Area.lastUsedKey)
+        #expect(MainWindow.Area.lastUsed(defaults: defaults) == .act)
+    }
+
+    @Test("the generic card is raised for everything but a stopped folder plan")
+    func genericCardKinds() {
         #expect(Sidebar.showsErrorCard("engine_exited"))
         #expect(Sidebar.showsErrorCard("scan_failed"))
         #expect(Sidebar.showsErrorCard("something_new"))

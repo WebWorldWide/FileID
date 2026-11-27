@@ -1,25 +1,5 @@
-﻿// ChangeLog — the session-wide record of every applied file mutation
-// (renames, trash, restructure applies, people merges, tag writes), each
-// with an inverse-action closure so the user can undo anything they didn't
-// mean before closing the app.
-//
-// Supersedes UndoStack's bounded pop-and-drop LIFO as the storage layer;
-// UndoStack remains as a facade over this log so Ctrl+Z and the Library
-// undo pill keep their exact semantics. Differences from the old stack:
-//   - Entries are never silently dropped: an undo failure marks the entry
-//     UndoFailed (with the reason) and leaves it visible for retry.
-//   - Undone entries stay in the list as a session activity record.
-//   - Reverse capacity is 500 (vs 16); overflowing entries lose only their
-//     reverse closure (→ NotUndoable "history limit"), not their history line.
-//   - A new Restructure entry marks older Restructure entries NotUndoable:
-//     the engine keeps a single truncate-per-batch inverse-move journal, so
-//     only the latest apply is engine-undoable.
-//
-// Threading: Push arrives from EngineClient PropertyChanged handlers (the
-// untrusted engine-event path) while reads/undo run on the UI thread — all
-// list access is under _gate; reverse closures run OUTSIDE the lock
-// (mirrors UndoStack's APP-1 note). Session-only by design, matching the
-// macOS app's session-scoped Undo.
+﻿// Session-only record of applied file mutations, each with an inverse closure for undo.
+// Push arrives from engine-event handlers while reads and undo run on the UI thread, so list access is under _gate and reverse closures run outside the lock.
 
 using System;
 using System.Collections.Generic;
@@ -39,8 +19,7 @@ internal enum ChangeKind
     Other,
 }
 
-/// <summary>The page a change was made on. Each page's own Undo acts only
-/// on its newest change; the Recent changes list still shows them all.</summary>
+/// <summary>Each page's own Undo acts only on its newest change; the Recent changes list still shows them all.</summary>
 internal enum ChangePage
 {
     Unspecified,
@@ -98,7 +77,6 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
     }
 
     private string? _statusDetail;
-    /// <summary>Human-readable reason for UndoFailed / NotUndoable.</summary>
     public string? StatusDetail
     {
         get => _statusDetail;
@@ -155,12 +133,9 @@ internal sealed class ChangeLog : INotifyPropertyChanged
 
     private const int ReverseCapacity = 500;
     private readonly object _gate = new();
-    // Newest first.
     private readonly LinkedList<ChangeLogEntry> _entries = new();
     private bool _undoInFlight;
 
-    /// <summary>Entries still undoable — drives the close-confirm gate and
-    /// the shell badge.</summary>
     public int UndoableCount
     {
         get
@@ -177,9 +152,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Entries whose outcome is still pending at close time. A failed
-    /// undo remains pending because it can be retried, and an in-flight undo
-    /// remains pending until its terminal result is known.</summary>
+    /// <summary>A failed undo remains pending because it can be retried, and an in-flight undo remains pending until its terminal result is known.</summary>
     public int PendingCount
     {
         get
@@ -190,6 +163,23 @@ internal sealed class ChangeLog : INotifyPropertyChanged
                 foreach (var e in _entries)
                 {
                     if (IsPending(e.Status)) n++;
+                }
+                return n;
+            }
+        }
+    }
+
+    /// <summary>Entries whose undo is running right now; only these block closing the window.</summary>
+    public int ActiveUndoCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var n = 0;
+                foreach (var e in _entries)
+                {
+                    if (e.Status == ChangeStatus.Undoing) n++;
                 }
                 return n;
             }
@@ -219,8 +209,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    /// <summary>The newest undoable change made on <paramref name="page"/>,
-    /// skipping newer changes made on other pages.</summary>
     public ChangeLogEntry? MostRecentUndoableOn(ChangePage page)
     {
         lock (_gate)
@@ -234,9 +222,6 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Stable copy for rendering, newest first. Entry Status may
-    /// still change after the snapshot (entries notify their own
-    /// PropertyChanged).</summary>
     public IReadOnlyList<ChangeLogEntry> Snapshot()
     {
         lock (_gate)
@@ -257,8 +242,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         {
             if (kind == ChangeKind.Restructure)
             {
-                // The engine's restructure_undo journal is truncated at each
-                // apply — only the latest batch can be replayed.
+                // The engine's restructure_undo journal is truncated at each apply — only the latest batch can be replayed.
                 foreach (var e in _entries)
                 {
                     if (e.Kind != ChangeKind.Restructure) continue;
@@ -295,15 +279,10 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         return entry;
     }
 
-    /// <summary>Run the entry's inverse action. Returns true on success.
-    /// Failure marks the entry UndoFailed with the reason and re-arms the
-    /// closure so the user can retry (e.g. after closing an Explorer window
-    /// that locked the file).</summary>
+    /// <summary>Failure marks the entry UndoFailed with the reason and re-arms the closure so the user can retry (e.g. after closing an Explorer window that locked the file).</summary>
     public Task<bool> UndoAsync(ChangeLogEntry entry)
         => UndoCoreAsync(entry, retryFailed: false);
 
-    /// <summary>Retry a failed undo without exposing a transient Undoable state
-    /// that another global undo could consume first.</summary>
     public Task<bool> RetryAsync(ChangeLogEntry entry)
         => UndoCoreAsync(entry, retryFailed: true);
 
@@ -387,14 +366,14 @@ internal sealed class ChangeLog : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
-    /// <summary>Coarse "something changed" signal for views; re-snapshot on
-    /// the dispatcher when it fires (it may arrive off the UI thread).</summary>
+    /// <summary>Coarse "something changed" signal for views; re-snapshot on the dispatcher when it fires (it may arrive off the UI thread).</summary>
     public event EventHandler? Changed;
 
     private void OnChanged()
     {
         RaisePropertyChanged(nameof(UndoableCount));
         RaisePropertyChanged(nameof(PendingCount));
+        RaisePropertyChanged(nameof(ActiveUndoCount));
         RaisePropertyChanged(nameof(IsUndoInFlight));
         RaisePropertyChanged(nameof(Count));
 

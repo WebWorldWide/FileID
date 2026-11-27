@@ -35,8 +35,6 @@ fn encoded(format: image::ImageFormat) -> Vec<u8> {
     out.into_inner()
 }
 
-/// Little-endian TIFF with IFD0 (orientation, GPS IFD, SubIFD) and an
-/// embedded JPEG preview, the shape of most camera RAWs.
 fn tiff_raw(preview: &[u8]) -> Vec<u8> {
     let mut out = b"II*\0".to_vec();
     out.extend_from_slice(&8u32.to_le_bytes());
@@ -57,7 +55,6 @@ fn tiff_raw(preview: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&0u32.to_le_bytes());
     out.resize(120, 0);
-    // GPS IFD: latitude ref + rational latitude with a zero denominator.
     out.extend_from_slice(&2u16.to_le_bytes());
     out.extend_from_slice(&[1, 0, 2, 0, 2, 0, 0, 0, b'N', 0, 0, 0]);
     out.extend_from_slice(&[2, 0, 5, 0, 3, 0, 0, 0, 140, 0, 0, 0]);
@@ -221,7 +218,6 @@ fn seeds(heavy: bool) -> Vec<(Kind, Vec<u8>)> {
             }
             _ => continue,
         };
-        // A copy of the head is enough to reach every header and preview.
         let mut head = Vec::new();
         if let Ok(file) = std::fs::File::open(&path) {
             let _ = std::io::Read::read_to_end(&mut std::io::Read::take(file, 4 * 1024 * 1024), &mut head);

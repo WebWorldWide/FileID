@@ -1,7 +1,4 @@
-//! Pure timeline logic shared by the portable timeline worker. Mirrors the
-//! macOS reference (`TimelineSignalAnalysis`, `TimelineMomentAnalysis`,
-//! `TimelineChapterSuggestions`) so both engines propose the same windows,
-//! samples and draft chapters from the same evidence.
+//! Pure timeline logic: the windows, samples and chapters proposed for a video.
 
 use crate::ipc::CatalogChapter;
 use anyhow::Result;
@@ -55,8 +52,6 @@ struct MomentResponse {
     moments: Vec<RawMoment>,
 }
 
-/// Mean absolute luma difference between two equally sized grayscale
-/// signatures, normalized to 0…1.
 pub fn change_score(lhs: &[u8], rhs: &[u8]) -> f64 {
     if lhs.len() != rhs.len() || lhs.is_empty() {
         return 0.0;
@@ -65,9 +60,6 @@ pub fn change_score(lhs: &[u8], rhs: &[u8]) -> f64 {
     total as f64 / (lhs.len() as f64 * 255.0)
 }
 
-/// Turns consecutive 1 fps grayscale signatures into change signals. The
-/// first frame of a chunk compares against `previous`, the last signature of
-/// the preceding chunk, so chunk boundaries do not hide a cut.
 pub fn signals_from_frames(frames: &[(f64, Vec<u8>)], previous: Option<&[u8]>) -> Vec<Signal> {
     let mut result = Vec::with_capacity(frames.len());
     let mut last = previous;
@@ -97,8 +89,6 @@ fn valid_signals(signals: &[Signal], duration: f64, minimum: f64) -> Vec<Signal>
     valid
 }
 
-/// One representative sample per interval: the strongest change peak when it
-/// is far enough from the previous sample, otherwise the interval boundary.
 pub fn sample_times(duration: f64, interval_seconds: f64, signals: &[Signal]) -> Vec<f64> {
     if !duration.is_finite() || duration <= 0.0 || !interval_seconds.is_finite() || interval_seconds <= 0.0 {
         return vec![];
@@ -132,8 +122,6 @@ pub fn sample_times(duration: f64, interval_seconds: f64, signals: &[Signal]) ->
     result
 }
 
-/// Overlapping four-second windows of eight frames; the strongest change peak
-/// in each window replaces its nearest non-initial frame.
 pub fn windows(duration: f64, signals: &[Signal]) -> Vec<Window> {
     if !duration.is_finite() || duration <= 0.0 || duration > MAX_DURATION_SECONDS {
         return vec![];
@@ -244,7 +232,6 @@ fn frame_range(start: f64, end: f64, times: &[f64]) -> Option<(i64, i64)> {
     indices.then_some((start as i64, end as i64))
 }
 
-/// Nearest frame to a timestamp the model quoted, within half a second of the sampled range.
 pub fn frame_index(seconds: f64, times: &[f64]) -> Option<usize> {
     let (first, last) = (*times.first()?, *times.last()?);
     if !seconds.is_finite() || seconds < first - 0.5 || seconds > last + 0.5 {
@@ -253,8 +240,7 @@ pub fn frame_index(seconds: f64, times: &[f64]) -> Option<usize> {
     (0..times.len()).min_by(|&a, &b| (times[a] - seconds).abs().total_cmp(&(times[b] - seconds).abs()))
 }
 
-/// Indices of frames with strictly increasing timestamps. Low-fps sources
-/// decode the same frame for neighbouring requests; the model sees each once.
+/// Low-fps sources decode the same frame for neighbouring requests; the model sees each once.
 pub fn distinct_frame_indices(times: &[f64], window: &Window) -> Result<Vec<usize>> {
     let ordered = times.windows(2).all(|pair| pair[0] <= pair[1]);
     let bounded = times.iter().all(|t| t.is_finite() && *t >= window.start && *t <= window.end);
@@ -373,9 +359,9 @@ fn concise_title(text: &str) -> String {
 }
 
 pub const CHAPTER_SUGGESTION_PREFIX: &str = "timeline-chapter-suggestion-v1/";
+/// Captions written once per detected scene rather than once per sampling interval.
+pub const SCENE_VERSION_PREFIX: &str = "timeline-scene-v1/";
 
-/// Draft chapters at confirmed caption transitions: a caption unlike its
-/// predecessor and like its successor starts a new chapter.
 pub fn chapter_suggestions(
     file_id: i64,
     source_revision: &str,
@@ -388,12 +374,19 @@ pub fn chapter_suggestions(
         .filter(|c| c.seconds.is_finite() && c.seconds >= 0.0 && !c.text.trim().is_empty())
         .collect();
     ordered.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
-    if ordered.len() < 3 || !duration.is_finite() || duration <= 0.0 {
+    let by_scene = frame_model_version.starts_with(SCENE_VERSION_PREFIX);
+    if ordered.len() < if by_scene { 2 } else { 3 } || !duration.is_finite() || duration <= 0.0 {
         return vec![];
     }
-    let boundaries: Vec<usize> = (1..ordered.len() - 1)
-        .filter(|&i| similarity(&ordered[i - 1].text, &ordered[i].text) < 0.12 && similarity(&ordered[i].text, &ordered[i + 1].text) >= 0.35)
-        .collect();
+    // A scene caption already stands for a whole scene, so a new chapter starts wherever the picture changes; sampled
+    // captions need the next caption to confirm the change.
+    let boundaries: Vec<usize> = if by_scene {
+        (1..ordered.len()).filter(|&i| similarity(&ordered[i - 1].text, &ordered[i].text) < 0.35).collect()
+    } else {
+        (1..ordered.len() - 1)
+            .filter(|&i| similarity(&ordered[i - 1].text, &ordered[i].text) < 0.12 && similarity(&ordered[i].text, &ordered[i + 1].text) >= 0.35)
+            .collect()
+    };
     if boundaries.is_empty() {
         return vec![];
     }
@@ -443,7 +436,6 @@ pub fn speech_chunks(duration: f64, chunk_seconds: f64) -> Vec<(f64, f64)> {
     let mut start = 0.0;
     while start < duration {
         let end = duration.min(start + chunk_seconds);
-        // Fold a sliver shorter than a second into the previous chunk.
         if end - start < 1.0 && !chunks.is_empty() {
             if let Some(last) = chunks.last_mut() {
                 *last = (last.0, end);

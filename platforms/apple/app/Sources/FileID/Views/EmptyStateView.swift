@@ -1,7 +1,4 @@
-// Shared empty / awaiting-data state. Every primary tab gets the same
-// visual rhythm: large icon, title2 bold heading, callout body, optional
-// primary action below. Single source of truth for empty-state styling
-// matches Apple's HIG (consistency across primary destinations).
+// Shared empty / awaiting-data state used by every primary tab.
 import SwiftUI
 
 struct EmptyStateView: View {
@@ -11,6 +8,8 @@ struct EmptyStateView: View {
     var primaryAction: (label: String, run: () -> Void)? = nil
     /// Optional second line of body text, rendered slightly muted.
     var secondaryMessage: String? = nil
+    /// Shown with a spinner where the action would be, while the work it would start runs.
+    var progressLabel: String? = nil
 
     var body: some View {
         VStack(spacing: 14) {
@@ -24,24 +23,29 @@ struct EmptyStateView: View {
                 .font(Theme.Font.body(13.5))
                 .foregroundStyle(Theme.text3)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 480)
+                .frame(maxWidth: 420)
                 .fixedSize(horizontal: false, vertical: true)
             if let secondary = secondaryMessage {
                 Text(secondary)
                     .font(Theme.Font.body(13.5))
                     .foregroundStyle(Theme.text3)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 480)
+                    .frame(maxWidth: 420)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if let progressLabel {
+                ProgressView(progressLabel)
+                    .padding(.top, 6)
             }
             if let action = primaryAction {
                 Button(action.label, action: action.run)
-                    .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                    .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .padding(.top, 6)
             }
         }
         .padding(.horizontal, 40)
-        .padding(.top, 48)
-        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.vertical, 24)
+        .padding(.bottom, 56)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

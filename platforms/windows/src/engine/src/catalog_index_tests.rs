@@ -315,10 +315,42 @@ fn coalesced_jobs_pause_resume_cancel_and_restart_without_writer_lock() {
     CatalogIndex::recover(&index.writer.lock()).unwrap();
     assert_eq!(state(&index), "paused");
     index.state.lock().cache = None;
-    assert!(index.search(&seed()).is_err());
-    index.control(&control("resumeJob")).unwrap();
+    index.search(&seed()).expect("a job paused by a restart resumes when a search needs it");
     wait(&index);
     assert_eq!(state(&index), "completed");
+    index.shutdown();
+}
+#[test]
+fn a_search_resumes_a_job_stopped_by_a_quit_mid_build() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index
+        .writer
+        .lock()
+        .execute(
+            "UPDATE catalog_jobs SET state='paused',error='Visual index preparation cancelled' WHERE id=?1",
+            [CatalogIndex::job_id()],
+        )
+        .unwrap();
+    index.state.lock().cache = None;
+    index.search(&seed()).expect("a job the engine stopped resumes when a search needs it");
+    wait(&index);
+    assert_eq!(state(&index), "completed");
+    index.shutdown();
+}
+#[test]
+fn a_search_does_not_resume_a_job_the_user_paused() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index
+        .writer
+        .lock()
+        .execute("UPDATE catalog_jobs SET state='paused',error=NULL WHERE id=?1", [CatalogIndex::job_id()])
+        .unwrap();
+    index.state.lock().cache = None;
+    let error = index.search(&seed()).unwrap_err();
+    assert_eq!(error.to_string(), PAUSED_BY_USER_MESSAGE);
+    assert_eq!(state(&index), "paused");
     index.shutdown();
 }
 #[test]
@@ -652,7 +684,7 @@ fn capture_window_reaches_files_beyond_the_ranked_hundred() {
     assert!(hits.iter().all(|hit| hit.file_id >= 380));
 }
 #[test]
-fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good() {
+fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good_without_counting_it_strong() {
     let directory = Directory(std::env::temp_dir().join(format!("fileid-catalog-strength-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir(&directory.0).unwrap();
     let path = directory.0.join("catalog.sqlite");
@@ -684,11 +716,11 @@ fn text_search_puts_good_matches_first_and_keyword_evidence_makes_a_file_good() 
     let strong = ids("strong");
     let weak: std::collections::HashSet<i64> = ids("order").into_iter().filter(|id| !strong.contains(id)).collect();
     assert_eq!(found.weak, Some(weak));
-    assert_eq!(found.response.message.as_deref(), Some("3 good matches, 1 weaker."));
+    assert_eq!(found.response.message.as_deref(), Some("3 matches (3 strong visual), 1 weaker."));
     let hybrid = request(serde_json::json!({"requestID":"h","action":"search","query":"dog","searchMode":"hybrid","queryVector":query,"embeddingModel":clip_space::model_id(),"limit":10,"resultScope":"files"}));
     let mixed = index.judged(&hybrid, &|_| None).unwrap();
     assert_eq!(mixed.weak, Some(std::collections::HashSet::new()));
-    assert_eq!(mixed.response.message.as_deref(), Some("4 good matches."));
+    assert_eq!(mixed.response.message.as_deref(), Some("4 matches (3 strong visual)."));
     let seeded = index.judged(&request(serde_json::json!({"requestID":"f","action":"search","searchMode":"semantic","fileID":1})), &|_| None).unwrap();
     assert!(seeded.weak.is_none());
     assert_eq!(seeded.response.message.as_deref(), Some("Visual similarity results."));
@@ -796,6 +828,45 @@ fn a_change_that_returns_to_the_indexed_vector_needs_no_extra_entry() {
     assert_eq!(seeded_ids(&index), vec![2, 3]);
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(index.manifest_path()).unwrap()).unwrap();
     assert!(manifest.delta_hash.is_none());
+    index.close();
+}
+
+#[test]
+fn a_rolled_back_vector_write_does_not_advance_the_index_checkpoint() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    let built = index.state.lock().cache.clone().unwrap();
+    let before = revision(&index.writer.lock()).unwrap();
+    assert_eq!(built.revision, before);
+    {
+        let conn = index.writer.lock();
+        let tx = conn.unchecked_transaction().unwrap();
+        let moved = vector(1).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        tx.execute("UPDATE clip_embeddings SET embedding=?1 WHERE file_id=2", [&moved]).unwrap();
+        tx.execute("DELETE FROM clip_embeddings WHERE file_id=3", []).unwrap();
+        assert_ne!(revision(&tx).unwrap(), before, "the writer sees its own uncommitted change");
+        assert_eq!(revision(&db::open_read(&index.database).unwrap()).unwrap(), before, "a reader never sees it");
+        drop(tx);
+    }
+    assert_eq!(revision(&index.writer.lock()).unwrap(), before);
+    let logged: i64 = index
+        .writer
+        .lock()
+        .query_row("SELECT COUNT(*) FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1", [before.generation], |row| row.get(0))
+        .unwrap();
+    assert_eq!(logged, 0, "the rolled-back write leaves nothing in the change log");
+    let response = index.search(&seed()).unwrap();
+    assert_eq!(response.status, "ok", "the index is still current, so no re-index starts");
+    assert_eq!(response.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), vec![2, 3]);
+    let cache = index.state.lock().cache.clone().unwrap();
+    assert!(Arc::ptr_eq(&cache.graph, &built.graph) && cache.pending() == 0 && cache.revision == before);
+
+    index.writer.lock().execute("DELETE FROM files WHERE id=2", []).unwrap();
+    ready(&index);
+    let advanced = index.state.lock().cache.clone().unwrap();
+    assert_eq!(advanced.revision.generation, before.generation + 1, "a later committed write is the next step, not a replay");
+    assert!(Arc::ptr_eq(&advanced.graph, &built.graph), "it rides beside the graph instead of forcing a rebuild");
+    assert_eq!(seeded_ids(&index), vec![3]);
     index.close();
 }
 
@@ -1022,8 +1093,30 @@ fn a_catalog_past_the_exact_limit_still_answers_with_keyword_rows_while_the_grap
     index.shutdown();
 }
 
-/// Index build and exact-scan times on a generated catalog:
-/// `cargo test --release exact_scan_and_build_times -- --ignored --nocapture`.
+#[test]
+fn a_paused_index_job_still_gives_hybrid_search_its_keyword_rows_on_a_catalog_past_the_exact_limit() {
+    let (_directory, index) = fixture();
+    index.exact_max.store(2, Ordering::Relaxed);
+    index
+        .writer
+        .lock()
+        .execute(
+            "INSERT OR REPLACE INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES(?1,'catalogIndex','[]','{}','paused',1,0,0)",
+            [CatalogIndex::job_id()],
+        )
+        .unwrap();
+    let hybrid = request(
+        serde_json::json!({"requestID":"hybrid","action":"search","searchMode":"hybrid","query":"birthday","queryVector":vector(0),"embeddingModel":clip_space::model_id()}),
+    );
+    let response = index.search(&hybrid).unwrap();
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.hits.len(), 1);
+    let message = response.message.unwrap();
+    assert!(message.starts_with("Keyword results only"), "{message}");
+    assert!(message.contains(PAUSED_BY_USER_MESSAGE), "{message}");
+    index.shutdown();
+}
+
 #[test]
 #[ignore = "timing run on generated vectors"]
 fn exact_scan_and_build_times() {
@@ -1064,4 +1157,29 @@ fn exact_scan_and_build_times() {
         println!("{count} vectors: first search (exact) {exact:?}, build finished {built:?} after it started, search on the graph {graph:?}; hits {} / {}", cold.hits.len(), warm.hits.len());
         index.shutdown();
     }
+}
+
+#[test]
+fn a_file_dated_in_the_future_is_not_found_by_a_date_range_that_starts_after_today() {
+    let (_directory, index) = fixture();
+    ready(&index);
+    index.writer.lock().execute("UPDATE files SET created_at=4000000000 WHERE id=2", []).unwrap();
+    let mut late = seed();
+    late.captured_from = Some(3_000_000_000.0);
+    assert!(index.search(&late).unwrap().hits.is_empty());
+}
+#[test]
+fn the_keyword_half_of_a_hybrid_search_comes_back_once_and_its_failure_is_not_an_empty_list() {
+    let hit = |file_id| CatalogHit { file_id, path: String::new(), kind: "image".into(), text: String::new(), evidence_id: None, start_seconds: None, page: None, selection_match: None };
+    let mut keyword = Vec::new();
+    let mut job = Some(std::thread::spawn(move || Ok(vec![hit(7)])));
+    finish_keyword(&mut keyword, &mut job).unwrap();
+    assert_eq!(keyword.iter().map(|hit| hit.file_id).collect::<Vec<_>>(), [7]);
+    assert!(job.is_none(), "the job is consumed");
+    finish_keyword(&mut keyword, &mut job).unwrap();
+    assert_eq!(keyword.len(), 1, "asking again keeps what came back");
+    let mut failing = Some(std::thread::spawn(|| -> Result<Vec<CatalogHit>> { bail!("the keyword index is unreadable") }));
+    assert!(finish_keyword(&mut keyword, &mut failing).is_err());
+    let mut panicking = Some(std::thread::spawn(|| -> Result<Vec<CatalogHit>> { panic!("boom") }));
+    assert!(finish_keyword(&mut keyword, &mut panicking).is_err());
 }

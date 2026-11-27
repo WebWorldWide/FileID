@@ -1,19 +1,4 @@
-//! `fileid dedupe [--exact|--similar]` — list duplicate / near-duplicate
-//! groups. The default listing (and any `--dry-run`) is read-only; `--apply`
-//! removes the redundant copies — trashing via `shell::trash` (or unlinking
-//! with `--delete`) — behind a confirmation that requires `--yes` on a
-//! non-interactive stdin.
-//!
-//! - `--exact`   fully SHA-256 re-hashes same-size candidates (byte-identical files),
-//!   so it works on any indexed library and stored hash recipes never matter.
-//! - `--similar` groups by perceptual-hash Hamming distance (default ≤ 8,
-//!   mirroring the engine's near-dup threshold). `--threshold` overrides it.
-//!   Similar groups are transitively chained, so `--similar --apply` can
-//!   over-delete; it is gated behind an explicit `--yes` (see `apply_run`).
-//!
-//! Perceptual hashes are written by the full engine scan pipeline; the CLI's
-//! model-free `scan` does not compute them, so on a CLI-only-indexed library
-//! `--similar` reports "no … in DB" until a full engine scan has run.
+//! Perceptual hashes come only from the engine's full scan; the model-free CLI `scan` does not compute them, so `--similar` reports nothing until an engine scan has run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +14,8 @@ use crate::context::{Ctx, display_path, file_size_i64, print_json};
 
 use fileid_engine::read::dupes::{self, ExactCaps, MAX_SIMILAR_THRESHOLD};
 
+pub const DEFAULT_SIMILAR_THRESHOLD: u32 = 8;
+
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub fn run(
     ctx: &Ctx,
@@ -42,7 +29,6 @@ pub fn run(
 ) -> Result<()> {
     ctx.require_db_exists()?;
 
-    // Default to exact when neither flag is given.
     let (do_exact, do_similar) = if !exact && !similar {
         (true, false)
     } else {
@@ -54,7 +40,6 @@ pub fn run(
         );
     }
 
-    // `--apply` (and a bare `--dry-run` preview) take the destructive path.
     if apply || dry_run {
         return apply_run(ctx, do_exact, do_similar, threshold, dry_run, delete, yes);
     }
@@ -88,8 +73,6 @@ pub fn run(
     Ok(())
 }
 
-// ---- exact (content_hash) ----------------------------------------------------
-
 /// Files and bytes one pass may re-hash: the listing reports anything beyond as
 /// partial; `--apply` refuses to act on a partial set.
 const EXACT_CAPS: ExactCaps = ExactCaps {
@@ -99,7 +82,7 @@ const EXACT_CAPS: ExactCaps = ExactCaps {
 
 struct ExactGroup {
     hash: String,
-    files: Vec<(String, i64)>, // (path, size)
+    files: Vec<(String, i64)>,
 }
 
 /// How much of the candidate set a bounded listing pass left unverified.
@@ -217,10 +200,8 @@ fn exact_json(groups: &[ExactGroup], skipped: usize, partial: ListingPartial) ->
     })
 }
 
-// ---- near-duplicate (phash Hamming) -----------------------------------------
-
 struct SimilarGroup {
-    files: Vec<(i64, String, i64)>, // (id, path, size)
+    files: Vec<(i64, String, i64)>,
 }
 
 fn similar_groups(
@@ -319,8 +300,6 @@ fn similar_json(groups: &Option<Vec<SimilarGroup>>, threshold: u32) -> serde_jso
     }
 }
 
-// ---- apply (remove duplicates) ----------------------------------------------
-
 /// One file slated for removal (the non-kept members of a duplicate group).
 struct Victim {
     id: i64,
@@ -364,10 +343,7 @@ fn apply_run(
 ) -> Result<()> {
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
-    // Destructive apply acts on exactly one signal. Default exact (byte-
-    // identical) — the safest; `--similar` opts into perceptual near-dups.
-    // Reject an explicit both-flags apply rather than silently dropping
-    // --similar — they select different victim sets.
+    // Apply acts on one signal (exact by default); both flags are rejected because they select different victim sets.
     if do_exact && do_similar {
         anyhow::bail!(
             "dedupe --apply: choose one of --exact or --similar (they select different victim sets)"
@@ -420,8 +396,19 @@ fn apply_run(
         return Ok(());
     }
 
+    ensure_victims_mutable(&victims)?;
+    let swept = sweep_leftover_quarantines(&victims);
+    if swept > 0 {
+        ctx.progress(&format!(
+            "  restored {swept} file(s) left under a quarantine name by an interrupted dedupe."
+        ));
+    }
+
+    let trash_refused = !delete && trash_unavailable_on_this_platform();
     let method = if delete {
         "delete permanently"
+    } else if trash_refused {
+        "be removed"
     } else {
         "move to Trash/Recycle Bin"
     };
@@ -429,6 +416,7 @@ fn apply_run(
         print_json(&serde_json::json!({
             "command": "dedupe", "mode": "apply", "dryRun": true, "available": true,
             "method": if delete { "delete" } else { "trash" },
+            "applyRefused": trash_refused.then_some(TRASH_UNAVAILABLE),
             "removeCount": victims.len(),
             "reclaimBytes": total_bytes,
             "remove": victims.iter().map(|v| serde_json::json!({
@@ -438,14 +426,9 @@ fn apply_run(
         return Ok(());
     }
 
-    // Human preview only. In `--json` mode stdout must stay a single JSON value
-    // (the apply result is emitted below); the `--json` dry-run already returned
-    // its payload above, so reaching here under `--json` means a real apply —
-    // suppress the preview lines that would otherwise corrupt the JSON output.
+    // Human preview only: under `--json` stdout must stay one JSON value.
     if !ctx.json {
         println!(
-            // The template already carries the verb, so the old "Will" prefix
-            // produced "Will N file(s) would move to Trash".
             "{}{} file(s) {} {} ({} reclaimable):",
             if dry_run {
                 format!("{} ", ctx.bold("DRY RUN —"))
@@ -467,16 +450,17 @@ fn apply_run(
     }
 
     if dry_run {
+        if trash_refused {
+            println!(
+                "{}",
+                ctx.bold(&format!("Apply would be refused: {TRASH_UNAVAILABLE}."))
+            );
+        }
         ctx.progress(&format!("  {}", ctx.dim("dry run — nothing was removed.")));
         return Ok(());
     }
 
-    // `--similar` groups are built by TRANSITIVE chaining of perceptual-hash
-    // neighbors: A~B and B~C put {A, B, C} in one group even when A and C are
-    // not alike, so a single component can grow large and `--apply` would mark
-    // all-but-one of it for removal — an over-delete hazard the byte-identical
-    // `--exact` path does not have. Require an explicit `--yes` here (never an
-    // interactive guess, never a non-TTY auto-proceed), after a loud warning.
+    // `--similar` groups chain transitively (A~B and B~C put A and C together), so apply can over-delete: require an explicit `--yes`, never a non-TTY auto-proceed.
     if use_similar {
         if !ctx.json {
             println!();
@@ -515,24 +499,15 @@ fn apply_run(
         }
     }
 
-    if !delete && trash_unavailable_on_this_platform() {
+    if trash_refused {
         if ctx.json {
             print_json(&serde_json::json!({
                 "command": "dedupe", "mode": "apply", "aborted": true,
                 "reason": "trash_unavailable_on_platform",
-                "message": "recoverable trash is unavailable for the Rust engine on this platform; re-run with --delete for permanent removal",
+                "message": TRASH_UNAVAILABLE,
             }));
-        } else {
-            println!(
-                "{} Recoverable Trash is unavailable for the Rust engine on this platform.",
-                ctx.bold("Refusing:")
-            );
-            println!(
-                "  Re-run with {} only if you want permanent deletion.",
-                ctx.bold("--delete")
-            );
         }
-        return Ok(());
+        anyhow::bail!(TRASH_UNAVAILABLE);
     }
 
     let prompt = format!(
@@ -577,7 +552,14 @@ fn apply_run(
             "failed": result.failed,
             "unsupported": result.unsupported,
             "reclaimBytes": result.reclaimed,
+            "catalogUpdated": result.catalog_error.is_none(),
+            "catalogError": result.catalog_error,
         }));
+        if let Some(error) = &result.catalog_error {
+            anyhow::bail!(
+                "dedupe: files were removed but the catalog was not updated ({error}); rescan to clear stale rows"
+            );
+        }
         if result.failed > 0 || result.unsupported > 0 {
             anyhow::bail!(
                 "dedupe: {} file(s) failed to remove",
@@ -604,6 +586,13 @@ fn apply_run(
             ctx.dim("Trash is unavailable here — re-run with --delete to remove permanently.")
         );
     }
+    if let Some(error) = &result.catalog_error {
+        println!(
+            "  {} the catalog was not updated ({error}); rescan to clear the stale rows.",
+            ctx.bold("Warning:")
+        );
+        anyhow::bail!("dedupe: files were removed but the catalog was not updated");
+    }
     if result.failed > 0 || result.unsupported > 0 {
         anyhow::bail!(
             "dedupe: {} file(s) failed to remove",
@@ -618,7 +607,10 @@ struct ApplyResult {
     failed: usize,
     unsupported: usize,
     reclaimed: i64,
+    catalog_error: Option<String>,
 }
+
+const TRASH_UNAVAILABLE: &str = "recoverable Trash is unavailable for the Rust engine on this platform; re-run with --delete for permanent removal";
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
 fn trash_unavailable_on_this_platform() -> bool {
@@ -644,6 +636,7 @@ fn remove_victim_groups(
         failed: 0,
         unsupported: 0,
         reclaimed: 0,
+        catalog_error: None,
     };
     let mut removed_ids = Vec::new();
 
@@ -675,6 +668,13 @@ fn remove_victim_groups(
         }
     }
 
+    if let Err(error) = forget_removed_rows(conn, removed_ids) {
+        result.catalog_error = Some(format!("{error:#}"));
+    }
+    Ok(result)
+}
+
+fn forget_removed_rows(conn: &mut rusqlite::Connection, removed_ids: Vec<i64>) -> Result<()> {
     let tx = conn.transaction()?;
     let persons = fileid_engine::db::person_counts::persons_of_files(&tx, &removed_ids)?;
     for id in removed_ids {
@@ -682,7 +682,7 @@ fn remove_victim_groups(
     }
     fileid_engine::db::person_counts::reconcile(&tx, &persons)?;
     tx.commit()?;
-    Ok(result)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -698,6 +698,13 @@ fn remove_quarantined_victim(
     delete: bool,
 ) -> RemovalOutcome {
     let original = Path::new(&victim.path);
+    if let Err(error) = fileid_engine::util::read_only::require_source_mutation(original) {
+        eprintln!(
+            "dedupe: not touching {}: {error}",
+            display_path(original.to_string_lossy().as_ref())
+        );
+        return RemovalOutcome::Failed;
+    }
     let quarantine = match quarantine(original) {
         Ok(path) => path,
         Err(error) => {
@@ -764,10 +771,7 @@ fn remove_quarantined_victim(
     }
 
     let trash_path = original.to_path_buf();
-    let removed = fileid_engine::shell::trash::trash(std::slice::from_ref(&trash_path))
-        .into_iter()
-        .next()
-        .unwrap_or(false);
+    let removed = trash_one(&trash_path);
     if removed {
         RemovalOutcome::Removed
     } else if trash_unavailable_on_this_platform() {
@@ -775,6 +779,114 @@ fn remove_quarantined_victim(
     } else {
         RemovalOutcome::Failed
     }
+}
+
+fn ensure_victims_mutable(victims: &[&Victim]) -> Result<()> {
+    use fileid_engine::util::read_only::{require_all_writable, require_source_mutation};
+    require_all_writable(victims.iter().map(|victim| Path::new(&victim.path)))
+        .map_err(|refusal| anyhow::anyhow!(refusal.sentence()))?;
+    let mut refused = 0usize;
+    let mut first = None;
+    for victim in victims {
+        if let Err(error) = require_source_mutation(Path::new(&victim.path)) {
+            refused += 1;
+            first.get_or_insert(error.to_string());
+        }
+    }
+    if let Some(reason) = first {
+        anyhow::bail!(
+            "{reason} {refused} of {} files are in a protected location, so nothing was changed.",
+            victims.len()
+        );
+    }
+    Ok(())
+}
+
+const QUARANTINE_MARKER: &str = ".fileid-quarantine-";
+
+/// Puts back files an interrupted run left under their hidden quarantine name, when the original name is free.
+fn sweep_leftover_quarantines(victims: &[&Victim]) -> usize {
+    let mut dirs: Vec<PathBuf> = victims
+        .iter()
+        .filter_map(|victim| Path::new(&victim.path).parent().map(Path::to_path_buf))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs.iter().map(|dir| sweep_quarantines_in(dir)).sum()
+}
+
+fn sweep_quarantines_in(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let own_pid = std::process::id().to_string();
+    let mut restored = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(body) = name.strip_prefix('.') else {
+            continue;
+        };
+        let Some((original_name, suffix)) = body.rsplit_once(QUARANTINE_MARKER) else {
+            continue;
+        };
+        let mut parts = suffix.split('-');
+        let (Some(pid), Some(seq), None) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if original_name.is_empty()
+            || pid == own_pid
+            || !pid.bytes().all(|b| b.is_ascii_digit())
+            || !seq.bytes().all(|b| b.is_ascii_digit())
+            || !entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            continue;
+        }
+        let original = dir.join(original_name);
+        match fileid_engine::util::rename_no_replace(&entry.path(), &original) {
+            Ok(()) => restored += 1,
+            Err(error) => eprintln!(
+                "dedupe: could not restore {} ({error}); it stays under its quarantine name",
+                display_path(entry.path().to_string_lossy().as_ref())
+            ),
+        }
+    }
+    restored
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn trash_one(path: &Path) -> bool {
+    match fileid_engine::shell::trash::trash_path(path) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("{}", trash_failure_line(path, &error));
+            false
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn trash_one(path: &Path) -> bool {
+    fileid_engine::shell::trash::trash(std::slice::from_ref(&path.to_path_buf()))
+        .into_iter()
+        .next()
+        .unwrap_or(false)
+}
+
+#[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
+fn trash_failure_line(path: &Path, error: &anyhow::Error) -> String {
+    let chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+    let mut line = format!(
+        "dedupe: could not move {} to the Trash: {chain}",
+        display_path(path.to_string_lossy().as_ref())
+    );
+    if chain.contains("another filesystem") {
+        line.push_str(" (re-run with --delete to remove files on this drive permanently)");
+    }
+    line
 }
 
 fn quarantine(original: &Path) -> std::io::Result<PathBuf> {
@@ -839,10 +951,10 @@ fn exact_group_still_matches(guard: &ExactGroupGuard, victims: &[Victim]) -> boo
         })
 }
 
-/// Exact-duplicate victims: every byte-identical copy beyond the first
-/// (kept) one. Keeper = lexicographically-first path (deterministic).
+/// Exact-duplicate victims: every byte-identical copy except the original, which stays.
 fn exact_victims(conn: &rusqlite::Connection) -> Result<VictimSet> {
-    let buckets = exact_buckets(conn)?;
+    let mut buckets = exact_buckets(conn)?;
+    dupes::put_originals_first(conn, &mut buckets)?;
     let groups = buckets
         .into_iter()
         .map(|group| {
@@ -921,6 +1033,23 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cross_filesystem_trash_failure_names_the_reason_and_suggests_delete() {
+        let error =
+            anyhow::anyhow!("EXDEV").context("Trash is on another filesystem from this file");
+        let line = trash_failure_line(Path::new("/mnt/data/a.jpg"), &error);
+        assert!(
+            line.contains("another filesystem") && line.contains("EXDEV"),
+            "{line}"
+        );
+        assert!(line.contains("--delete"), "{line}");
+        let other = trash_failure_line(Path::new("/x/a.jpg"), &anyhow::anyhow!("denied"));
+        assert!(
+            other.contains("denied") && !other.contains("--delete"),
+            "{other}"
+        );
+    }
+
     use super::*;
 
     fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
@@ -961,6 +1090,78 @@ mod tests {
             bytes.push(0);
         }
         bytes
+    }
+
+    #[test]
+    fn delete_inside_a_managed_media_bundle_is_refused_and_leaves_the_file() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-dedupe-bundle-{}.photoslibrary",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let keeper = root.join("a.bin");
+        let victim_path = root.join("b.bin");
+        std::fs::write(&keeper, b"original").unwrap();
+        std::fs::write(&victim_path, b"original").unwrap();
+        let guard = ExactGroupGuard {
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            size: 8,
+            hash: exact_file_sha256(&keeper, 8).unwrap(),
+        };
+        let victim = Victim {
+            id: 1,
+            path: victim_path.to_string_lossy().into_owned(),
+            size: 8,
+            planned_phash: None,
+        };
+        assert!(ensure_victims_mutable(&[&victim]).is_err());
+        assert_eq!(
+            remove_quarantined_victim(&victim, Some(&guard), true),
+            RemovalOutcome::Failed
+        );
+        assert_eq!(std::fs::read(&victim_path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn leftover_quarantine_files_are_restored_when_the_name_is_free() {
+        let dir = std::env::temp_dir().join(format!("fileid-dedupe-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".lost.jpg.fileid-quarantine-1-0"), b"x").unwrap();
+        std::fs::write(dir.join(".taken.jpg.fileid-quarantine-1-1"), b"y").unwrap();
+        std::fs::write(dir.join("taken.jpg"), b"z").unwrap();
+        assert_eq!(sweep_quarantines_in(&dir), 1);
+        assert_eq!(std::fs::read(dir.join("lost.jpg")).unwrap(), b"x");
+        assert!(dir.join(".taken.jpg.fileid-quarantine-1-1").exists());
+        assert_eq!(std::fs::read(dir.join("taken.jpg")).unwrap(), b"z");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn catalog_failure_after_removal_is_reported_not_propagated() {
+        let keeper = temp_file("dbfail-keeper", b"original");
+        let victim_path = temp_file("dbfail-victim", b"original");
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let group = VictimGroup {
+            exact_guard: Some(ExactGroupGuard {
+                keeper_path: keeper.to_string_lossy().into_owned(),
+                size: 8,
+                hash: exact_file_sha256(&keeper, 8).unwrap(),
+            }),
+            similar_guard: None,
+            victims: vec![Victim {
+                id: 1,
+                path: victim_path.to_string_lossy().into_owned(),
+                size: 8,
+                planned_phash: None,
+            }],
+        };
+        let result = remove_victim_groups(&mut conn, &[group], true).unwrap();
+        assert_eq!(result.removed, 1);
+        assert!(result.catalog_error.is_some());
+        assert!(!victim_path.exists());
+        let _ = std::fs::remove_file(keeper);
     }
 
     #[test]
@@ -1087,6 +1288,55 @@ mod tests {
         );
         let _ = std::fs::remove_file(keeper);
         let _ = std::fs::remove_file(victim_path);
+    }
+
+    #[test]
+    fn removing_a_copy_recounts_the_people_on_it() {
+        let keeper = temp_file("recount-keeper", b"original");
+        let victim_path = temp_file("recount-victim", b"original");
+        let hash = exact_file_sha256(&keeper, 8).unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files \
+             (id, path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension) \
+             VALUES (1, ?1, 1, 8, 0, 0, 'image', 'jpg'), (2, ?2, 2, 8, 0, 0, 'image', 'jpg')",
+            params![keeper.to_string_lossy(), victim_path.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,2,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[]'),(2,2,1,X'00','[]'),(3,2,2,X'00','[]');",
+        )
+        .unwrap();
+        let groups = vec![VictimGroup {
+            exact_guard: Some(ExactGroupGuard {
+                keeper_path: keeper.to_string_lossy().into_owned(),
+                size: 8,
+                hash,
+            }),
+            similar_guard: None,
+            victims: vec![Victim {
+                id: 2,
+                path: victim_path.to_string_lossy().into_owned(),
+                size: 8,
+                planned_phash: None,
+            }],
+        }];
+
+        let result = remove_victim_groups(&mut conn, &groups, true).unwrap();
+
+        assert_eq!(result.removed, 1);
+        let mut stmt = conn
+            .prepare("SELECT id, file_count, representative_face_id FROM persons ORDER BY id")
+            .unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(persons, vec![(1, 1, Some(1)), (2, 0, None)]);
+        let _ = std::fs::remove_file(keeper);
     }
 
     #[test]

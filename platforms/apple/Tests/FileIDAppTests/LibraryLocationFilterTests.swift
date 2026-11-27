@@ -20,6 +20,12 @@ struct OfflineRootsTests {
         #expect(!roots.isOffline("/elsewhere/c.jpg"))
     }
 
+    @Test func theSidebarCanNotRescanWhenEveryLocationIsOffline() {
+        #expect(OfflineRoots.allOffline([root(1, "/Volumes/A", online: false), root(2, "/Volumes/B", online: false)]))
+        #expect(!OfflineRoots.allOffline([root(1, "/Volumes/A", online: false), root(2, "/Users/me", online: true)]))
+        #expect(!OfflineRoots.allOffline([]))
+    }
+
     @Test func theMostSpecificLocationDecides() {
         let roots = OfflineRoots([root(1, "/Volumes/NAS", online: false), root(2, "/Volumes/NAS/Synced", online: true)])
         #expect(roots.isOffline("/Volumes/NAS/Old/a.jpg"))
@@ -57,6 +63,13 @@ struct CaptureWindowTests {
         #expect(request.capturedFrom == nil && request.capturedTo == nil)
         #expect(request.action == "search" && request.query == "beach")
         #expect(window.summary(calendar: utc, locale: Locale(identifier: "en_US")) == "Any date")
+    }
+
+    @Test func aSearchWithAVectorRanksLikeLibraryAndChat() {
+        let word = CaptureWindow().searchRequest(id: "r", query: "beach", calendar: utc)
+        #expect(word.searchMode == nil && word.queryVector == nil && word.embeddingModel == nil)
+        let hybrid = CaptureWindow().searchRequest(id: "r", query: "beach", vector: [0.5, 0.5], calendar: utc)
+        #expect(hybrid.searchMode == "hybrid" && hybrid.queryVector == [0.5, 0.5] && hybrid.embeddingModel == CLIPEmbeddingSpace.modelID)
     }
 
     @Test func boundsCoverWholeDays() {

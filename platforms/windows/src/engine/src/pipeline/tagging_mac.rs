@@ -1,19 +1,11 @@
-//! Stage 5 (convergence): the scan's per-file work when the Mac app hosts the
-//! engine. Rust keeps the orchestration (discovery, decoder threads, workers,
-//! admission, the DB writer); FileIDAppleKit decodes and runs Vision, the text
-//! read, CLIP and RAM++, and each kind's stored result follows the Swift
-//! engine's `Tagging.processFile`, so a library scanned by either engine reads
-//! the same. Faces are stored as the Swift scan stores them (Vision boxes,
-//! quality and the clustering hold, no vectors yet) and get their vectors in the
-//! Mac face space later; this path never writes `rust-align112-v1` faces.
-//! `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
+//! The scan's per-file work when the Mac app hosts the engine. //! Vision faces are stored without vectors (box, quality, clustering hold) and get their vectors in the Mac face space later; this path never writes `rust-align112-v1` faces. `FILEID_APPLE_SCAN=0` falls back to the portable pipeline.
 
 use super::{
     composite_hashes, load_bge_text, load_pool, local_unix_seconds_to_year, maybe_emit_stats, open_image_file,
-    claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, Arc,
+    claim_twin, parse_exif_fields, record_stage, resize_rgb_quality, resolve_pool_size, sha256_bytes, twin_reuse_enabled, video_capture_fields, Arc,
     DiscoveredFile, Duration, ExifFields, FileKind, Instant, LegacyHashes, MobileClipImage, ModelStack, Ordering,
-    PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES,
-    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US,
+    PreDecoded, TaggedFile, TwinClaim, TwinRegistry, VisionFace, STATS_CLIP_US, STATS_DECODED_FILES, STATS_RAMPLUS_US,
+    STATS_DECODE_US, STATS_OCR_RAN, STATS_OCR_US, STATS_TOTAL_US, STATS_TWIN_REUSED, STATS_VISION_US, TIMED_OUT_MESSAGE,
 };
 use crate::apple::scan;
 use crate::pipeline::catch_up;
@@ -21,14 +13,16 @@ use crate::pipeline::audio_meta::AudioTags;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-/// The Swift engine's `Tagging.storedTextChars`.
+/// Cap on the document text stored per file.
 const STORED_TEXT_CHARS: usize = 256 * 1024;
-/// `DocText.embeddingChars`: the BGE input.
+/// Cap on the document text fed to BGE.
 const EMBEDDING_CHARS: usize = 4000;
 const VIDEO_KEYFRAME_EDGE: u32 = 512;
 const VIDEO_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(6);
 const DECODE_FAILED: &str = "Could not decode image";
-const VISION_TIMEOUT: &str = "Vision pass timed out (will retry next scan)";
+const CUT_OFF_IMAGE: &str = "The image file is cut off: it ends before the picture does";
+const PERMISSION_DENIED: &str = "FileID isn't allowed to read this file";
+const WENT_MISSING: &str = "The file went missing while FileID was reading it (will retry next scan)";
 const PDF_OPEN_FAILED: &str = "Could not open PDF (will retry next scan)";
 
 pub(super) fn enabled() -> bool {
@@ -36,7 +30,6 @@ pub(super) fn enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("FILEID_APPLE_SCAN").map_or(true, |v| v.trim() != "0"))
 }
 
-/// What the decoder thread hands the worker besides the shared fields.
 pub(crate) struct Frame {
     image: Option<Arc<scan::Image>>,
     audio: AudioTags,
@@ -46,19 +39,18 @@ pub(crate) struct Frame {
 static CLIP_READY: AtomicBool = AtomicBool::new(false);
 static RAM_PLUS_READY: AtomicBool = AtomicBool::new(false);
 
-/// Runs under `ADAPTER_MODELS`' lock once no stack, catch-up pass or timeline
-/// encoder holds the adapter models.
 pub(crate) fn unload_adapters() {
     CLIP_READY.store(false, Ordering::Release);
     RAM_PLUS_READY.store(false, Ordering::Release);
     scan::unload_models();
 }
 
-/// The models this path runs: CLIP and RAM++ on MLX through the adapter (CLIP
-/// falls back to ONNX Runtime when MLX cannot load), BGE through ONNX Runtime.
+/// The models this path runs: CLIP and RAM++ on MLX through the adapter (both
+/// fall back to the shared ONNX engine when MLX cannot load, RAM++ only when the
+/// installed memory allows it), BGE through the shared ONNX engine.
 /// Face models stay unloaded: faces come from Vision.
-pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> ModelStack {
-    let pool_size = if runtime_available { resolve_pool_size(worker_count) } else { 1 };
+pub(super) fn model_stack(worker_count: usize) -> ModelStack {
+    let pool_size = resolve_pool_size(worker_count);
     let (adapters, adapter_hold) = crate::pipeline::scan_models::ADAPTER_MODELS.hold(
         || {
             let clip = crate::models::mobileclip::default_weights_path()
@@ -85,18 +77,55 @@ pub(super) fn model_stack(worker_count: usize, runtime_available: bool) -> Model
     CLIP_READY.store(clip, Ordering::Release);
     RAM_PLUS_READY.store(ram_plus, Ordering::Release);
     tracing::info!(clip, ram_plus, "[TAGGING] Mac scan adapters (MLX)");
-    let mobileclip_pool = (!clip && runtime_available)
+    let mobileclip_pool = (!clip)
         .then(|| load_pool("MobileCLIP", pool_size, crate::models::mobileclip::default_weights_path(), |p| MobileClipImage::load(p)))
         .flatten();
+    let ram_plus_pool = (!ram_plus).then(tract_ram_plus_pool).flatten();
     ModelStack {
-        bge_text: if runtime_available { load_bge_text() } else { None },
+        bge_text: load_bge_text(),
         mobileclip_pool,
+        ram_plus: ram_plus_pool,
         pool_size,
         apple_scan: true,
         apple_clip: clip,
         adapter_hold,
         ..ModelStack::empty()
     }
+}
+
+/// RAM++ on tract, one session: the MLX load failed (no Metal, `FILEID_RAMPLUS_BACKEND=onnx`), and the installed memory holds the f32 graph.
+fn tract_ram_plus_pool() -> Option<Vec<parking_lot::Mutex<crate::models::ram_plus::RamPlusTagger>>> {
+    let tags = crate::models::ram_plus::default_tags_path().ok().filter(|tags| tags.is_file())?;
+    let installed_gb = crate::platform::physical_memory_gb();
+    if !crate::platform::ram_plus_fits_in_memory(installed_gb) {
+        tracing::warn!(model = "RAM++", installed_gb = format!("{installed_gb:.1}"), min_gb = crate::platform::RAM_PLUS_MIN_TOTAL_GB, "MLX RAM++ unavailable and too little installed memory for the tract copy; tags come from Vision only");
+        return None;
+    }
+    let pool = load_pool("RAM++", 1, crate::models::ram_plus::default_onnx_path(), |onnx| crate::models::ram_plus::RamPlusTagger::load(onnx, tags.clone()));
+    if pool.is_some() {
+        tracing::info!(model = "RAM++", "MLX RAM++ unavailable; tagging with the tract copy");
+    }
+    pool
+}
+
+fn ram_plus_ready(models: &ModelStack) -> bool {
+    RAM_PLUS_READY.load(Ordering::Acquire) || models.ram_plus.is_some()
+}
+
+/// RAM++ tags of one image: the adapter's (which agrees them with Vision) or, when MLX is out, the tract copy's.
+fn ram_plus_tags(image: &scan::Image, pass: &scan::PrimaryPass, models: &ModelStack) -> Vec<(String, f32)> {
+    if RAM_PLUS_READY.load(Ordering::Acquire) {
+        return image.ram_plus_tags(Some(pass)).unwrap_or_default();
+    }
+    let Some(pool) = models.ram_plus.as_ref() else { return Vec::new() };
+    let Some((rgb, width, height)) = image.rgb() else { return Vec::new() };
+    let started = Instant::now();
+    let tags = crate::models::ram_plus::RamPlusTagger::preprocess_tensor(&rgb, width, height)
+        .and_then(|chw| crate::models::checkout(pool, 0).tag_prepared(chw))
+        .map_err(|error| tracing::warn!(?error, "RAM++ (tract) failed"))
+        .unwrap_or_default();
+    record_stage(&STATS_RAMPLUS_US, started);
+    super::without_people_words(tags, pass.face_count == 0)
 }
 
 fn read_for_hash(file: &DiscoveredFile, legacy: bool) -> (Option<Vec<u8>>, Option<[u8; 32]>, Option<LegacyHashes>) {
@@ -121,27 +150,38 @@ fn read_for_hash(file: &DiscoveredFile, legacy: bool) -> (Option<Vec<u8>>, Optio
     (None, hash, legacy)
 }
 
-/// `DocText.extract` trimming and cap over any extractor's output.
+/// An image the decoder gave up on is unreadable for the reason the operating system gives when it is opened: a file
+/// FileID may not read, or one that vanished (renamed, deleted, volume unplugged) is not a damaged image. The "will
+/// retry" wording keeps a vanished file out of the Unreadable count and in the next scan.
+fn decode_failure(path: &Path) -> &'static str {
+    match std::fs::File::open(crate::util::path_safety::to_extended_length(path)) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => PERMISSION_DENIED,
+        Err(error) if went_missing(&error) => WENT_MISSING,
+        _ => DECODE_FAILED,
+    }
+}
+
+fn went_missing(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || matches!(error.raw_os_error(), Some(libc::ENXIO | libc::ENODEV | libc::EIO | libc::ENOTDIR))
+}
+
 fn stored_text(text: Option<String>) -> Option<String> {
     let trimmed = text?.trim().to_string();
     (!trimmed.is_empty()).then(|| trimmed.chars().take(STORED_TEXT_CHARS).collect())
 }
 
-/// Reads, hashes and decodes one file on a decoder thread. A byte-identical
-/// copy of an image that is already analyzed, or being analyzed, is hashed
-/// only: the writer copies the twin's rows (pipeline/twin_reuse.rs).
 pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinRegistry>, from_decoder: bool) -> PreDecoded {
     let started = Instant::now();
     let (bytes, content_hash, legacy_hashes) = read_for_hash(&file, legacy);
-    // `bytes` is present only for a full SHA-256, the one identity worth sharing.
     let twin = match (content_hash, file.kind, twins, bytes.as_deref()) {
         (Some(hash), FileKind::Image, Some(twins), Some(_)) if twin_reuse_enabled() => claim_twin(twins, hash, from_decoder),
         _ => TwinClaim::None,
     };
     let awaits_twin = matches!(twin, TwinClaim::Ready | TwinClaim::Pending(_));
-    // The copy keeps its own capture time for its date and Year tag.
     let exif = match bytes.as_deref() {
         Some(bytes) if awaits_twin => Some(parse_exif_fields(bytes).unwrap_or((None, None, None, None))),
+        _ if file.kind == FileKind::Video && !file.online_only => video_capture_fields(&file.path),
         _ => None,
     };
     let mut frame = Frame { image: None, audio: AudioTags::default(), large_pdf: false };
@@ -150,9 +190,12 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinR
     if !file.online_only {
         match file.kind {
             FileKind::Image if awaits_twin => {}
+            FileKind::Image if bytes.as_deref().is_some_and(crate::util::jpeg_complete::is_cut_off) => {
+                decoded = Some(Err(anyhow::anyhow!(CUT_OFF_IMAGE)));
+            }
             FileKind::Image => match scan::decode_image(&file.path, file.size_bytes) {
                 Some(image) => frame.image = Some(Arc::new(image)),
-                None => decoded = Some(Err(anyhow::anyhow!(DECODE_FAILED))),
+                None => decoded = Some(Err(anyhow::anyhow!(decode_failure(&file.path)))),
             },
             FileKind::Video => {
                 frame.image = scan::video_keyframe(&file.path, VIDEO_KEYFRAME_EDGE, VIDEO_KEYFRAME_TIMEOUT).map(Arc::new);
@@ -192,7 +235,6 @@ pub(super) fn predecode(file: DiscoveredFile, legacy: bool, twins: Option<&TwinR
     }
 }
 
-/// `Tagging.lightweightAesthetic` over the working image's size.
 fn aesthetic(width: u32, height: u32, size_bytes: u64) -> f64 {
     let megapixels = f64::from(width) * f64::from(height) / 1_000_000.0;
     let size_score = (size_bytes as f64 / 1_048_576.0 / 5.0).min(1.0);
@@ -204,7 +246,7 @@ fn aesthetic(width: u32, height: u32, size_bytes: u64) -> f64 {
 /// camera family.
 fn extra_tags(created: Option<f64>, camera: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(year) = created.and_then(local_unix_seconds_to_year)
+    if let Some(year) = created.and_then(|t| crate::util::not_in_the_future(t, crate::util::unix_now())).and_then(local_unix_seconds_to_year)
         && year > 1990
         && year < 2100
     {
@@ -248,14 +290,11 @@ fn clip_embedding(image: &scan::Image, models: &ModelStack) -> Option<Vec<f32>> 
     model.embed(&resized).map_err(|error| tracing::warn!(?error, "MobileCLIP embed failed")).ok()
 }
 
-/// `Tagging.processFile` for one file.
 pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) -> TaggedFile {
     let started = Instant::now();
     let PreDecoded { file, decoded, doc_text, content_hash, legacy_hashes, exif, twin, mac, .. } = predecoded;
     let frame = mac.unwrap_or(Frame { image: None, audio: AudioTags::default(), large_pdf: false });
     let mut row = TaggedFile::bare(&file);
-    // A cloud placeholder is catalogued from its metadata only (reading it
-    // would download it), as the portable pipeline does.
     if file.online_only {
         row.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return row;
@@ -275,11 +314,17 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
         FileKind::Video => {
             row.tags = vec![("Video".into(), None)];
             row.tags_evaluated = true;
+            if let Some(captured) = exif.and_then(|fields| fields.3) {
+                row.created_unix = Some(captured);
+                row.captured_from_exif = true;
+            }
             if let Some(image) = frame.image {
                 let models = models.clone();
                 let clip_started = Instant::now();
                 row.clip_embedding = blocking(move || clip_embedding(&image, &models)).await.flatten();
                 row.clip_ms = clip_started.elapsed().as_secs_f64() * 1000.0;
+            } else {
+                row.text_stage_done = true;
             }
         }
         FileKind::Pdf => pdf_row(&mut row, &file, doc_text, frame.large_pdf, models).await,
@@ -321,8 +366,7 @@ pub(super) async fn process(predecoded: PreDecoded, models: &Arc<ModelStack>) ->
     row
 }
 
-/// A copy of an analyzed image, as the Swift engine's `Tagging.twinCopy`
-/// builds it: the twin's model output (copied by the writer, with the camera
+/// A copy of an analyzed image: the twin's model output (copied by the writer, with the camera
 /// and location the same bytes carry) under this file's own dates and Year tag.
 fn twin_row(row: &mut TaggedFile, file: &DiscoveredFile, exif: Option<ExifFields>) {
     let captured = exif.and_then(|(_, _, _, captured)| captured);
@@ -336,7 +380,6 @@ fn twin_row(row: &mut TaggedFile, file: &DiscoveredFile, exif: Option<ExifFields
     row.reuse_twin = true;
 }
 
-/// Document keywords and the BGE embedding, as `Tagging.processDoc` stores them.
 async fn document_text(row: &mut TaggedFile, text: Option<String>, models: &Arc<ModelStack>) {
     let Some(text) = text else { return };
     for (label, score) in crate::util::keywords::extract(&text) {
@@ -413,11 +456,12 @@ async fn image_row(
     // Deferred (the default): the row gets the classifier's tags now and the
     // catch-up pass adds RAM++'s after the main pass, so the scan runs at the
     // classifier's speed. `FILEID_RAMPLUS_INLINE=1` keeps RAM++ in the scan.
-    let ram_ready = RAM_PLUS_READY.load(Ordering::Acquire);
+    let ram_ready = ram_plus_ready(models);
     let deferred = ram_ready && catch_up::ram_plus_deferred(true);
+    let ram_models = models.clone();
     let analysis = blocking(move || {
         let pass = image.primary_pass().filter(|pass| pass.complete)?;
-        let ram = if ram_ready && !deferred { image.ram_plus_tags(Some(&pass)).unwrap_or_default() } else { Vec::new() };
+        let ram = if ram_ready && !deferred { ram_plus_tags(&image, &pass, &ram_models) } else { Vec::new() };
         let text_tags: Vec<String> = pass.classify_tags.iter().cloned().chain(ram.iter().map(|(tag, _)| tag.clone())).collect();
         let read = image.text_read(&pass.classify_tags, &text_tags, has_camera).unwrap_or_default();
         Some((pass, ram, read, text_tags, image.dhash()))
@@ -430,7 +474,7 @@ async fn image_row(
     STATS_CLIP_US.fetch_add(clip_elapsed.as_micros() as u64, Ordering::Relaxed);
     let Some((pass, ram, read, text_tags, dhash)) = analysis else {
         row.failed = true;
-        row.error_message = Some(VISION_TIMEOUT.into());
+        row.error_message = Some(TIMED_OUT_MESSAGE.into());
         return;
     };
     if read.ran {
@@ -484,7 +528,7 @@ async fn image_row(
 /// The Mac scan's decoder, RAM++ and text read behind the catch-up pass.
 /// Holds the stack so the adapter's RAM++ stays loaded until the catch-up ends.
 pub(super) struct CatchUp {
-    pub(super) _models: Arc<ModelStack>,
+    pub(super) models: Arc<ModelStack>,
 }
 
 impl CatchUp {
@@ -497,19 +541,24 @@ impl CatchUp {
 impl catch_up::Analyzer for CatchUp {
     fn ready(&self, phase: catch_up::Phase) -> bool {
         match phase {
-            catch_up::Phase::Tags => RAM_PLUS_READY.load(Ordering::Acquire),
+            catch_up::Phase::Tags => ram_plus_ready(&self.models),
             catch_up::Phase::CarefulText => scan::ocr_ready(),
         }
     }
 
     fn parallelism(&self) -> usize {
-        4
+        std::env::var("FILEID_CATCHUP_WORKERS").ok().and_then(|value| value.parse().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(4)
+    }
+
+    fn batch(&self) -> usize {
+        self.parallelism() * 6
     }
 
     fn ready_wait(&self, phase: catch_up::Phase) -> Duration {
         let warming = std::env::var("FILEID_OCR_WARMUP").ok().is_none_or(|value| value != "0");
         match phase {
-            catch_up::Phase::CarefulText if warming => Duration::from_secs(180),
+            // Wait only for a reader that is still compiling; one paused after failures stays paused for minutes.
+            catch_up::Phase::CarefulText if warming && !scan::ocr_warmed() => Duration::from_secs(180),
             _ => Duration::ZERO,
         }
     }
@@ -542,9 +591,8 @@ impl catch_up::Analyzer for CatchUp {
                     face_count: file.face_count.max(0) as usize,
                     faces: Vec::new(),
                 };
-                let ram = image.ram_plus_tags(Some(&pass)).unwrap_or_default();
-                // A marker the Swift engine wrote carries no extras: work them
-                // out as the scan does, from the capture time or the file's birth.
+                let ram = ram_plus_tags(&image, &pass, &self.models);
+                // A marker written by the Swift engine carries no extras; derive them from the capture time or the file's birth.
                 let extras = context.x.clone().unwrap_or_else(|| {
                     let born = std::fs::metadata(&file.path).ok().and_then(|meta| meta.created().ok()).and_then(crate::util::catalog_unix_seconds);
                     extra_tags(image.info.captured_at.or(born), image.info.camera_model.as_deref())
@@ -565,6 +613,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_image_the_decoder_gave_up_on_is_reported_for_the_reason_the_file_cannot_be_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fileid-decode-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.jpg");
+        std::fs::write(&broken, b"not a jpeg").unwrap();
+        assert_eq!(decode_failure(&broken), DECODE_FAILED);
+        assert_eq!(decode_failure(&dir.join("missing.jpg")), WENT_MISSING);
+        assert!(!decode_failure(&dir.join("missing.jpg")).contains("decode"), "a vanished file is not a damaged image");
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::File::open(&broken).is_err();
+        if denied {
+            assert_eq!(decode_failure(&broken), PERMISSION_DENIED);
+        }
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_video_row_takes_the_container_creation_time_not_the_file_system_time() {
+        let dir = std::env::temp_dir().join(format!("fileid-video-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("C0029.mp4");
+        std::fs::write(&clip, crate::util::video_creation_date::tests::synthetic_mp4(1_791_128_655)).unwrap();
+        let copied_on = 1_795_118_879.0;
+        let file = DiscoveredFile {
+            path: clip,
+            kind: FileKind::Video,
+            size_bytes: 4_000,
+            modified_unix: copied_on,
+            created_unix: Some(copied_on),
+            online_only: false,
+            file_ref: None,
+            moved_from_known_row: false,
+        };
+        let row = process(predecode(file, false, None, false), &Arc::new(ModelStack::empty())).await;
+        assert_eq!(row.created_unix, Some(1_791_128_655.0));
+        assert!(row.captured_from_exif, "the writer must replace the file-system date with the capture date");
+        assert!(row.text_stage_done, "a clip that gave no frame is recorded as attempted so a rescan does not walk it again");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn aesthetic_matches_the_swift_proxy() {
         assert!((aesthetic(1536, 1024, 5 * 1_048_576) - (0.5 + 0.5 * (1536.0 * 1024.0 / 1e6 / 12.0))).abs() < 1e-12);
         assert!((aesthetic(6000, 4000, 50 * 1_048_576) - 1.0).abs() < 1e-12);
@@ -572,7 +663,6 @@ mod tests {
 
     #[test]
     fn extra_tags_follow_tagging_swift() {
-        // 2024-06-01T12:00:00Z
         let tags = extra_tags(Some(1_717_243_200.0), Some("ILCE-7M3 Sony"));
         assert_eq!(tags, vec!["Year_2024".to_string(), "Sony".to_string()]);
         assert!(extra_tags(Some(100.0), Some("Mystery Cam")).is_empty());
@@ -586,14 +676,12 @@ mod tests {
             kind: FileKind::Image,
             size_bytes: 10,
             modified_unix: 5.0,
-            // 2019-07-01T12:00:00Z
             created_unix: Some(1_561_982_400.0),
             online_only: false,
             file_ref: None,
             moved_from_known_row: false,
         };
         let mut row = TaggedFile::bare(&file);
-        // 2024-06-01T12:00:00Z
         twin_row(&mut row, &file, Some((Some("iPhone 15".into()), Some(1.0), Some(2.0), Some(1_717_243_200.0))));
         assert!(row.reuse_twin && row.captured_from_exif);
         assert_eq!(row.created_unix, Some(1_717_243_200.0));

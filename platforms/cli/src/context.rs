@@ -1,5 +1,3 @@
-//! Run context: global flags + output helpers shared by every subcommand.
-
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -8,11 +6,8 @@ pub use fileid_engine::read::text::escape_like;
 pub use fileid_engine::util::display::{file_size_i64, truncate};
 use fileid_engine::util::path_safety::strip_extended_length;
 
-/// Resolved global flags, threaded through every command handler.
 pub struct Ctx {
-    /// Emit machine-readable JSON instead of human tables.
     pub json: bool,
-    /// Suppress progress + non-essential chrome.
     pub quiet: bool,
     /// ANSI color is allowed on stdout (color permitted AND stdout is a TTY).
     pub color: bool,
@@ -30,19 +25,9 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// Resolve the database path. Precedence:
-    ///   1. `--db <path>`
-    ///   2. `$FILEID_DB`
-    ///   3. `$CFFIXED_USER_HOME/fileid.sqlite` (parity with the macOS app's
-    ///      sandbox-root env var; convenient for isolating a test library)
-    ///   4. (macOS only) `~/Library/Application Support/FileID/fileid.sqlite`
-    ///      if it exists — the location the macOS Swift app writes its library
-    ///      to, so `fileid` "just works" against the desktop app on a Mac.
-    ///   5. `fileid_engine::paths::db_path()` — the engine's canonical
-    ///      location (honors `$XDG_DATA_HOME` / `%LOCALAPPDATA%`). On Windows
-    ///      and Linux this is the same file the desktop app reads/writes; on
-    ///      macOS the Swift app uses (4) instead (the engine defaults to the
-    ///      XDG `~/.local/share/FileID` path there), which is why (4) wins.
+    /// Resolve the database path: `--db`, `$FILEID_DB`, `$CFFIXED_USER_HOME/fileid.sqlite`,
+    /// then on macOS the desktop app's library if it exists, else the engine default.
+    /// The macOS app writes to its own library path, not the engine's XDG path, so it wins over the default.
     pub fn resolve(
         db_flag: Option<PathBuf>,
         json: bool,
@@ -77,10 +62,9 @@ impl Ctx {
         })
     }
 
-    /// Interactive yes/no gate for destructive actions. SAFE by construction:
-    /// returns true only on an explicit `--yes` (`assume_yes`) or a typed
-    /// `y`/`yes` at a TTY. A non-interactive stdin (pipe/CI) without `--yes`
-    /// returns false — we never apply on a guess.
+    /// Interactive yes/no gate for destructive actions. Returns true only on an
+    /// explicit `--yes` (`assume_yes`) or a typed `y`/`yes` at a TTY; a
+    /// non-interactive stdin without `--yes` returns false.
     pub fn confirm(&self, prompt: &str, assume_yes: bool) -> bool {
         use std::io::Write as _;
         if assume_yes {
@@ -124,9 +108,8 @@ impl Ctx {
         }
     }
 
-    /// Brand gold (`#FFCC00` ≈ xterm 220) — used to mark required models and
-    /// other identity accents. Pad text to its column width BEFORE wrapping, so
-    /// the invisible escape bytes never throw off `{:<width}` alignment.
+    /// Brand gold (`#FFCC00` ≈ xterm 220). Pad text to its column width before
+    /// wrapping, so the invisible escape bytes never throw off `{:<width}` alignment.
     pub fn gold(&self, s: &str) -> String {
         let s = terminal_text(s);
         if self.color {
@@ -136,7 +119,6 @@ impl Ctx {
         }
     }
 
-    /// Green accent — used for the "installed" state.
     pub fn green(&self, s: &str) -> String {
         let s = terminal_text(s);
         if self.color {
@@ -166,13 +148,7 @@ fn nonempty_env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The macOS Swift app's library location
-/// (`~/Library/Application Support/FileID/fileid.sqlite`), but only when it
-/// already exists. The Swift front-end writes there — NOT to the engine's XDG
-/// default (`~/.local/share/FileID`) — so on a Mac we prefer it when present,
-/// letting read commands resolve the desktop app's real library without an
-/// explicit `--db`. Returns `None` off macOS, leaving Win/Linux on the engine
-/// default unchanged.
+/// The macOS desktop app's library, used only when it exists. `None` off macOS.
 #[cfg(target_os = "macos")]
 fn macos_app_db() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -233,7 +209,6 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
     .flatten()
 }
 
-/// Print a JSON value to stdout (pretty when on a TTY-less pipe is fine too).
 pub fn print_json(value: &serde_json::Value) {
     println!(
         "{}",
@@ -241,17 +216,24 @@ pub fn print_json(value: &serde_json::Value) {
     );
 }
 
-/// Compact a path for table display: keep it absolute but collapse `$HOME`.
 pub fn display_path(p: &str) -> String {
     for name in ["HOME", "USERPROFILE"] {
-        if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
-            let home = home.to_string_lossy();
-            if let Some(rest) = p.strip_prefix(home.as_ref()) {
-                return terminal_text(&format!("~{rest}"));
-            }
+        if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty())
+            && let Some(shown) = tilde_path(p, &home.to_string_lossy())
+        {
+            return terminal_text(&shown);
         }
     }
     terminal_text(p)
+}
+
+fn tilde_path(p: &str, home: &str) -> Option<String> {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return None;
+    }
+    let rest = p.strip_prefix(home)?;
+    (rest.is_empty() || rest.starts_with(['/', '\\'])).then(|| format!("~{rest}"))
 }
 
 /// Neutralize control characters before data-derived text reaches a terminal.
@@ -307,6 +289,19 @@ fn terminal_output(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tilde_replaces_home_only_at_a_path_component_boundary() {
+        assert_eq!(tilde_path("/home/al/x", "/home/al").as_deref(), Some("~/x"));
+        assert_eq!(tilde_path("/home/al", "/home/al/").as_deref(), Some("~"));
+        assert_eq!(tilde_path("/home/alice/x", "/home/al"), None);
+        assert_eq!(tilde_path("/home/x", "/"), None);
+        assert_eq!(
+            tilde_path("C:\\Users\\Al\\a", "C:\\Users\\Al").as_deref(),
+            Some("~\\a")
+        );
+        assert_eq!(tilde_path("C:\\Users\\Alan\\a", "C:\\Users\\Al"), None);
+    }
+
     use super::*;
     use rusqlite::Connection;
 
@@ -353,8 +348,7 @@ mod tests {
 
     #[test]
     fn basename_underscore_is_literal_not_a_wildcard() {
-        // Only a look-alike is indexed; the named file is absent. The old
-        // unescaped `LIKE '%/report_2023.pdf'` resolved this wrong file.
+        // Only a look-alike is indexed; an unescaped `_` wildcard would wrongly match it.
         let conn = db_with(&[(1, "/seed/reportX2023.pdf")]);
         assert_eq!(resolve_file_id(&conn, "report_2023.pdf"), None);
 

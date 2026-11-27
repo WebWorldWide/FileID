@@ -1,16 +1,4 @@
-//! `fileid scan` — model-free library indexer.
-//!
-//! Walks a directory, writes a `files` row per regular file, and extracts
-//! plain-text content (`.txt`/`.md`/source code/…) into `doc_text` so FTS
-//! search works with no ML models loaded. The `doc_fts` index is maintained
-//! automatically by the engine's v15 AFTER-INSERT triggers.
-//!
-//! What this DOESN'T do (documented follow-on, routes through the engine's
-//! `startScan` once models are installed): image tags (RAM++), CLIP
-//! embeddings, face detection/clustering, perceptual hashes, content hashes,
-//! and binary-document text extraction (.docx/.pdf). The CLI is intentionally
-//! non-destructive to those columns — it UPSERTs and preserves any ML data a
-//! prior full engine scan wrote.
+//! Model-free library indexer: writes `files` rows and plain-text `doc_text` so FTS works with no ML models. ML columns (tags, CLIP, faces, hashes) are never cleared, so a prior full engine scan's data survives.
 
 use std::io::{IsTerminal, Write as _};
 use std::path::Path;
@@ -96,6 +84,38 @@ fn prefix_upper_bound(prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn keep_walk_entry(entry: &walkdir::DirEntry) -> bool {
+    use fileid_engine::pipeline::discovery::{
+        is_ambiguous_build_directory, is_build_marker, is_noise_directory, is_noise_file,
+    };
+    if entry.depth() == 0 {
+        return true;
+    }
+    let name = entry.file_name().to_string_lossy();
+    let file_type = entry.file_type();
+    if file_type.is_dir() {
+        if is_noise_directory(&name) {
+            return false;
+        }
+        if is_ambiguous_build_directory(&name) {
+            let has_marker = entry.path().parent().is_some_and(|parent| {
+                std::fs::read_dir(parent).is_ok_and(|entries| {
+                    entries.flatten().any(|sibling| {
+                        sibling.file_type().is_ok_and(|t| t.is_file())
+                            && is_build_marker(&sibling.file_name().to_string_lossy())
+                    })
+                })
+            });
+            return !has_marker;
+        }
+        true
+    } else if file_type.is_file() {
+        !is_noise_file(&name)
+    } else {
+        true
+    }
 }
 
 fn mark_existing_row_failed(
@@ -250,13 +270,7 @@ fn commit_batch(
                         invalidate_file
                             .execute(params![file_id, i64::from(text.is_some())])
                             .context("invalidate stale derived file metadata")?;
-                        // Only automatic tags are cleared on re-index — never
-                        // user-authored ones — even when the file's identity
-                        // (inode) changed at the same path (a replacement). This
-                        // mirrors the engine reference (dbwriter deletes only
-                        // source='auto'); an atomic-save editor that rewrites a
-                        // file to a new inode must not silently wipe the user's
-                        // manual tags.
+                        // Only automatic tags are cleared on re-index, never user tags, even when the inode changes at the same path (atomic-save editors); mirrors the engine's source='auto' delete.
                         delete_auto_tags
                             .execute(params![file_id])
                             .context("clear stale automatic tags")?;
@@ -293,6 +307,22 @@ fn commit_batch(
 }
 
 pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
+    let outcome = scan_folder(ctx, root, rescan);
+    if outcome.is_err()
+        && let Ok(root_abs) = std::fs::canonicalize(root)
+        && let Ok(conn) = fileid_engine::db::open_writer(&ctx.db)
+    {
+        let _ = fileid_engine::scan_session::record_library_root_finished(
+            &conn,
+            &root_abs,
+            now_unix(),
+            "failed",
+        );
+    }
+    outcome
+}
+
+fn scan_folder(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let root_abs = std::fs::canonicalize(root)
         .with_context(|| format!("resolving scan root {}", root.display()))?;
     if !root_abs.is_dir() {
@@ -303,6 +333,8 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         .with_context(|| format!("opening library db at {}", ctx.db.display()))?;
     let now = now_unix();
     let started = Instant::now();
+    fileid_engine::scan_session::record_library_root_started(&conn, &root_abs, now, None)
+        .context("recording the scanned folder")?;
 
     // Live carriage-return progress only when stderr is a TTY (and not
     // --quiet/--json); otherwise fall back to coarse, non-spammy lines.
@@ -326,7 +358,12 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         )
         .context("prepare existing-row probe")?;
 
-    for entry in WalkDir::new(&root_abs).follow_links(false) {
+    let mut non_unicode_skipped: u64 = 0;
+    for entry in WalkDir::new(&root_abs)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(keep_walk_entry)
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -348,6 +385,10 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             continue;
         }
         let path = entry.path();
+        if fileid_engine::pipeline::discovery::is_non_unicode_path(path) {
+            non_unicode_skipped += 1;
+            continue;
+        }
         let meta = match std::fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -374,7 +415,6 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                 // `path_text` (stored_path) — not the raw `\\?\` walk
                 // path, which would miss the existing row and leave stale content.
                 path: std::path::PathBuf::from(stored_path(path)),
-                file_ref: fileid_engine::platform::file_ref(path),
             }));
             // Respect the same batch-flush bound as the main path so a tree of
             // mostly-empty files can't grow the batch without limit.
@@ -462,7 +502,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                         .context("mark unreadable existing file content as failed")?;
                     }
                     if warnings.len() < 5 {
-                        warnings.push(error.to_string());
+                        warnings.push(format!("{error:#}"));
                     }
                     continue;
                 }
@@ -526,9 +566,29 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             "{batch_raced} empty file(s) changed while FileID was reading the folder. Scan again to pick them up."
         ));
     }
-    if failed == 0 {
-        soft_hide_missing_rows(&conn, &root_abs, now)?;
+    if non_unicode_skipped > 0 && warnings.len() < 5 {
+        warnings.push(format!(
+            "{non_unicode_skipped} file(s) with names that are not valid Unicode were skipped."
+        ));
     }
+    if failed == 0 {
+        if fileid_engine::scan_session::scan_root_reachable(&root_abs) {
+            soft_hide_missing_rows(&conn, &root_abs, now)?;
+        } else if warnings.len() < 5 {
+            warnings.push(
+                "The scan root is empty or not mounted, so indexed files under it were kept."
+                    .to_string(),
+            );
+        }
+    }
+
+    fileid_engine::scan_session::record_library_root_finished(
+        &conn,
+        &root_abs,
+        now_unix(),
+        if failed == 0 { "completed" } else { "failed" },
+    )
+    .context("recording the scan result")?;
 
     if live {
         let _ = write!(std::io::stderr(), "\r\x1b[K");
@@ -578,9 +638,9 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         println!("  Duration:     {secs:.2}s{rate}");
         if failed > 0 {
             println!("  Failed:       {failed}");
-            for warning in &warnings {
-                println!("    {}", terminal_text(warning));
-            }
+        }
+        for warning in &warnings {
+            println!("  Note:         {}", terminal_text(warning));
         }
         if indexed > 0 {
             println!("  Search it:    {}", ctx.bold("fileid search \"<words>\""));
@@ -604,12 +664,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     Ok(())
 }
 
-/// A scan whose results committed successfully but which skipped unreadable
-/// files or directories. Surfaced as its own error type so `main` can exit
-/// with the dedicated partial code (3, rsync-style) instead of hard failure —
-/// on a real corpus a locked file or ACL-restricted folder is routine, and a
-/// wrapper keying on the exit code must be able to tell "index is usable,
-/// some files were missed" apart from "the scan itself failed".
+/// Committed scan that skipped unreadable files or directories. `main` maps it to exit code 3 (rsync-style) so scripts can tell a usable partial index from a failed scan.
 #[derive(Debug)]
 pub struct PartialScan {
     pub failed: u64,
@@ -659,7 +714,6 @@ fn extract_plaintext(ext: &str, size: u64, path: &Path) -> Result<Option<String>
 fn is_plaintext_ext(ext: &str) -> bool {
     matches!(
         ext,
-        // prose / markup
         "txt" | "md" | "markdown" | "rst" | "org" | "adoc" | "tex" | "bib"
             | "log" | "csv" | "tsv" | "json" | "yaml" | "yml" | "toml" | "ini"
             | "cfg" | "conf" | "xml" | "html" | "htm" | "css" | "svg"
@@ -1053,7 +1107,6 @@ mod tests {
         let (temp, root, ctx) = test_layout("zero-byte-race");
         let path = root.join("race.txt");
         std::fs::write(&path, b"").unwrap();
-        let observed_ref = fileid_engine::platform::file_ref(&path);
         let mut conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
         conn.execute(
             "INSERT INTO files(path_text, path_hash, size_bytes, scanned_at, kind, extension) \
@@ -1062,10 +1115,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&path, "grew after discovery").unwrap();
-        let mut batch = vec![ScanRecord::Zero(ZeroByteObservation {
-            path: path.clone(),
-            file_ref: observed_ref,
-        })];
+        let mut batch = vec![ScanRecord::Zero(ZeroByteObservation { path: path.clone() })];
         let result = commit_batch(&mut conn, &mut batch, 2.0).unwrap();
         assert_eq!(result, (0, 0, 1));
         let state: (i64, i64, f64) = conn
@@ -1076,6 +1126,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, (20, 0, 1.0));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn a_changed_file_drops_its_faces_and_recounts_its_people() {
+        let (temp, root, ctx) = test_layout("changed-faces");
+        let photo = root.join("photo.jpg");
+        std::fs::write(&photo, b"edited photo").unwrap();
+        let mut conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        conn.execute(
+            "INSERT INTO files(id, path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES (1, ?1, 1, 5, 1, 'image', 'jpg'), (2, '/elsewhere/other.jpg', 2, 5, 1, 'image', 'jpg')",
+            params![stored_path(&photo)],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO persons(id,created_at,representative_face_id,file_count) VALUES(1,0,1,2),(2,0,3,1);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[]'),(2,2,1,X'00','[]'),(3,1,2,X'00','[]');",
+        )
+        .unwrap();
+        let path_text = stored_path(&photo);
+        let mut batch = vec![ScanRecord::Changed {
+            path_hash: stable_path_hash(&path_text),
+            path_text,
+            size: 12,
+            created: None,
+            modified: 3.0,
+            kind: "image",
+            extension: "jpg".into(),
+            authoritative_text: false,
+            text: None,
+            file_ref: fileid_engine::platform::file_ref(&photo),
+            invalidate_derived: true,
+        }];
+
+        commit_batch(&mut conn, &mut batch, 2.0).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT id, file_count, representative_face_id FROM persons ORDER BY id")
+            .unwrap();
+        let persons: Vec<(i64, i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(persons, vec![(1, 1, Some(2)), (2, 0, None)]);
+        drop(stmt);
         drop(conn);
         std::fs::remove_dir_all(temp).unwrap();
     }
@@ -1105,10 +1203,7 @@ mod tests {
         )
         .unwrap();
         let mut batch = vec![
-            ScanRecord::Zero(ZeroByteObservation {
-                path: zero.clone(),
-                file_ref: fileid_engine::platform::file_ref(&zero),
-            }),
+            ScanRecord::Zero(ZeroByteObservation { path: zero.clone() }),
             ScanRecord::Seen {
                 path_text: stored_path(&regular),
                 file_ref: fileid_engine::platform::file_ref(&regular),
@@ -1181,6 +1276,93 @@ mod tests {
             )
             .unwrap();
         assert_eq!((missing, active), (1, 0));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_skips_noise_directories_and_dotfiles_like_the_engine() {
+        let (temp, root, ctx) = test_layout("noise");
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("node_modules/dup.txt"), "same").unwrap();
+        std::fs::write(root.join(".git/dup.txt"), "same").unwrap();
+        std::fs::write(root.join(".hidden.txt"), "same").unwrap();
+        std::fs::write(root.join("real.txt"), "same").unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let paths: Vec<String> = conn
+            .prepare("SELECT path_text FROM files")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(paths, vec![stored_path(&root.join("real.txt"))]);
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_lists_the_folder_as_a_library_location_and_stamps_its_result() {
+        let (temp, root, ctx) = test_layout("location");
+        std::fs::write(root.join("note.txt"), "text").unwrap();
+        run(&ctx, &root, false).unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let rows: Vec<(String, Option<f64>, Option<String>)> = conn
+            .prepare("SELECT path, last_scan_at, last_status FROM library_roots")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, canonical.to_string_lossy());
+        assert!(rows[0].1.is_some());
+        assert_eq!(rows[0].2.as_deref(), Some("completed"));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn a_scan_that_errors_marks_the_location_failed() {
+        let (temp, root, ctx) = test_layout("errored");
+        std::fs::write(root.join("note.txt"), "text").unwrap();
+        run(&ctx, &root, false).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::write(&root, "now a file").unwrap();
+        assert!(run(&ctx, &root, false).is_err());
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let status: String = conn
+            .query_row("SELECT last_status FROM library_roots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "failed");
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_of_an_emptied_root_keeps_the_indexed_rows() {
+        let (temp, root, ctx) = test_layout("emptied");
+        let file = root.join("kept.txt");
+        std::fs::write(&file, "kept").unwrap();
+        let key = stored_path(&file);
+        run(&ctx, &root, false).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let failed: i64 = conn
+            .query_row(
+                "SELECT failed FROM files WHERE path_text = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed, 0);
         drop(conn);
         std::fs::remove_dir_all(temp).unwrap();
     }

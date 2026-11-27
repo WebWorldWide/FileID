@@ -51,7 +51,6 @@ function Winget-Ensure($id, $probe) {
 
 Info "FileID dev bootstrap (Windows). Repo: $RepoRoot"
 
-# --- Scriptable toolchain ---------------------------------------------------
 Winget-Ensure "Git.Git" "git"
 Winget-Ensure "Rustlang.Rustup" "rustc"          # Rust engine (cargo)
 Winget-Ensure "Python.Python.3.11" "py"          # RAM++ export tooling
@@ -69,7 +68,6 @@ if (-not (Have cargo)) {
   if (Test-Path $cargoBin) { $env:Path = "$cargoBin;$env:Path" }
 }
 
-# --- RAM++ export venv (pinned) --------------------------------------------
 if (-not $SkipExportVenv) {
   $venv = Join-Path $RepoRoot ".venv-ramplus"
   $req = Join-Path $Scripts "requirements-ramplus.txt"
@@ -88,7 +86,6 @@ if (-not $SkipExportVenv) {
   Ok "RAM++ export venv ready"
 }
 
-# --- GUI-gated tools (printed, not auto-run unless asked) -------------------
 $vsArgs = '--add Microsoft.VisualStudio.Workload.ManagedDesktop ' +
           '--add Microsoft.VisualStudio.ComponentGroup.WindowsAppSDK.Cs ' +
           '--includeRecommended'

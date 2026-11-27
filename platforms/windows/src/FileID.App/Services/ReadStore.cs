@@ -1,20 +1,5 @@
-﻿// ReadStore — app-side read-only SQLite access.
-//
-// The engine owns the writer connection (rusqlite, single-threaded by
-// design — see platforms/apple/CLAUDE.md and engine/src/db/mod.rs). The
-// app reads through ephemeral read-only connections that ride the same
-// WAL the engine writes, getting consistent snapshots without contending
-// with the writer.
-//
-// FTS5 search: matches `Database.swift`'s `searchFiles` 1:1. The same
-// match expression syntax (whitespace-separated terms with optional
-// leading/trailing wildcards). CLIP semantic search dot-products the
-// query embedding against `clip_embeddings.vector` (BLOB of float32
-// little-endian, L2-normalized — same on-disk format as macOS).
-//
-// Lifetime: one instance per FileID.App process. `Open()` is async so
-// the call site can await schema validation without blocking the UI
-// thread. `Dispose()` closes the underlying connection.
+﻿// Read-only SQLite access for the app. The engine owns the writer; the app reads through ephemeral read-only connections on the same WAL for consistent snapshots.
+// CLIP semantic search dot-products the query embedding against `clip_embeddings.vector` (little-endian float32 BLOB, L2-normalized).
 
 using System;
 using System.Collections.Generic;
@@ -37,11 +22,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    /// <summary>Humanized last error from <see cref="OpenAsync"/> — a DB-open
-    /// timeout, permission denial, lock, or corruption. Null when the store
-    /// opened cleanly (or is still waiting for the engine's first-scan DB).
-    /// Callers (LibraryViewModel / search) bind/read this to surface a
-    /// dismissible message instead of an indistinguishable silent-empty grid.</summary>
+    /// <summary>Humanized last error from OpenAsync — a DB-open timeout, permission denial, lock, or corruption.</summary>
     private string? _lastOpenError;
     public string? LastOpenError
     {
@@ -69,7 +50,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
 
     private volatile ViewModels.LibraryScope? _scope;
 
-    /// <summary>The location the Library lists, counts and pages; null for "All locations".</summary>
     public ViewModels.LibraryScope? Scope
     {
         get => _scope;
@@ -93,20 +73,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             {
                 return;
             }
-            // First-launch guard: the engine creates the DB on first scan.
-            // Until then the file doesn't exist; trying to open ReadOnly
-            // would throw. Stay closed until the engine has written rows.
-            // File.Exists wrapped — invalid-char paths or denied
-            // ACL on the parent dir would otherwise throw.
-            // offload File.Exists to the thread pool. On network
-            // shares or slow USB sticks this sync call can block the UI
-            // for hundreds of ms; the cost on a local SSD is < 1 ms so
-            // there's no downside to always going async here.
+            // Stay closed until the engine has created the DB on first scan (opening a missing file read-only throws). File.Exists is wrapped because invalid-char paths or a denied parent ACL would throw.
             var dbPath = _dbPath;
-            // cap the File.Exists call. On a disconnected SMB
-            // share, the system-call can stall for 30+ seconds before
-            // returning. We'd rather treat it as "DB not present" after
-            // a few seconds than freeze startup.
+            // Capped: on a disconnected SMB share File.Exists can stall 30+ seconds, so treat it as "DB not present" after 5 s.
             bool dbExists;
             using (var existsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
@@ -122,11 +91,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    // A 5s stall on the DB path is an actionable degradation
-                    // (disconnected SMB share / unplugged USB), not the silent
-                    // first-launch "DB not yet created" case — surface it so the
-                    // caller shows a dismissible "drive unreachable" message
-                    // rather than an indistinguishable empty grid.
+                    // A stall (disconnected SMB share, unplugged USB) differs from the silent first-launch case, so surface it for a dismissible "drive unreachable" message.
                     DebugLog.Warn($"ReadStore.OpenAsync: File.Exists timed out for {PathRedactor.Redact(dbPath)}; treating as missing.");
                     LastOpenError = "FileID couldn't reach the library folder (the drive may be disconnected or slow). Check the drive is connected and try again.";
                     return;
@@ -134,8 +99,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             }
             if (!dbExists)
             {
-                // Genuine first-launch: the engine hasn't created the DB yet.
-                // Stay silent (no error) — this is an expected transient state.
                 return;
             }
             SqliteConnection? conn = null;
@@ -143,9 +106,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             {
                 conn = new SqliteConnection(_connString);
                 await conn.OpenAsync(ct).ConfigureAwait(false);
-                // Match the engine's PRAGMA shape so reads see the same cache /
-                // mmap behavior as the writer (these are no-ops on read-only,
-                // but documented for parity).
+                // Same PRAGMA shape as the engine's connection (no-ops on read-only).
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = "PRAGMA query_only = ON;";
@@ -162,11 +123,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             }
             catch (Exception ex)
             {
-                // DB open / first-PRAGMA failure: locked (BUSY), permission
-                // denied (CANTOPEN), corrupt image, full disk, IO error. These
-                // used to propagate raw and get swallowed by the caller's bare
-                // catch — surface a humanized, actionable message AND rethrow so
-                // an awaiting caller still observes the failure.
+                // DB open / first-PRAGMA failure: locked (BUSY), permission denied (CANTOPEN), corrupt image, full disk, IO error.
                 conn?.Dispose();
                 LastOpenError = SqliteErrorTranslator.Humanize(ex);
                 DebugLog.Warn($"ReadStore.OpenAsync: open failed for {PathRedactor.Redact(_dbPath)}: {ex.Message}");
@@ -179,10 +136,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         }
     }
 
-    /// <summary>
-    /// FTS5-backed full-text search over filename + OCR text. Uses the
-    /// same match-expression shape as macOS — whitespace-joined terms.
-    /// </summary>
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
         string query, int limit, CancellationToken ct, string? kind = null)
     {
@@ -203,9 +156,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var seen = new HashSet<long>();
             using var cmd = _connection.CreateCommand();
 
-            // NFC-normalize first (macOS parity): SQLite LIKE compares bytes,
-            // and path_search stores the NFC form (v16) so an NFC query
-            // matches Mac/NAS-synced NFD names too.
+            // NFC-normalize: SQLite LIKE compares bytes and path_search stores the NFC form, so an NFC query also matches NFD names synced from a Mac or NAS.
             var escapedSearch = trimmedSearch
                 .Normalize(NormalizationForm.FormC)
                 .Replace("\\", "\\\\")
@@ -214,7 +165,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var like = $"%{escapedSearch}%";
             var match = BuildMatchExpression(trimmedSearch);
             var hasMatch = !string.IsNullOrEmpty(match);
-            // PAR-116: filter kind in SQL (before LIMIT) so a kind-restricted grid fills.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
             var scope = _scope;
             kindClause += ScopeClause("f.path_text", scope);
@@ -268,11 +218,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>
-    /// Most-recently-scanned files as a fallback when the search box is empty
-    /// (or when CLIP isn't installed yet). scanned_at DESC puts freshly scanned
-    /// files at the TOP (macOS parity); id DESC breaks sub-second ties.
-    /// </summary>
     public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct, string? kind = null, int offset = 0)
     {
         if (_connection == null) return Array.Empty<FileRow>();
@@ -282,11 +227,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return Array.Empty<FileRow>();
             var rows = new List<FileRow>(limit);
             using var cmd = _connection.CreateCommand();
-            // PAR-116: filter kind in SQL (before LIMIT). `failed = 0` is the
-            // BASE predicate (matches SearchAsync / SemanticSearchAsync and the
-            // macOS reference) so files the engine flagged failed (corrupt /
-            // unreadable / permission-denied) don't leak into the default grid as
-            // broken placeholder tiles and inflate the count-vs-grid mismatch.
+            // Files the engine flagged failed (corrupt, unreadable, denied) stay out of the default grid and counts.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND kind = $kind";
             var scope = _scope;
             var scopeClause = ScopeClause("path_text", scope);
@@ -311,13 +252,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>
-    /// CLIP semantic search: dot-product the L2-normalized query embedding
-    /// against every `clip_embeddings.vector`, take the top-`limit`. The
-    /// embedding rows are pre-normalized so cosine similarity == dot product.
-    /// cut: scans every embedding (acceptable up to ~50K files);
-    /// swaps in an HNSW or IVF index if benchmarks demand it.
-    /// </summary>
+    /// <summary>CLIP semantic search: dot-product of the L2-normalized query embedding against `clip_embeddings.vector`, top-`limit`. Embedding rows are pre-normalized so cosine similarity == dot product. Scans every embedding (acceptable up to ~50K files).</summary>
     public async Task<IReadOnlyList<FileRowWithScore>> SemanticSearchAsync(
         float[] queryEmbedding, int limit, CancellationToken ct, string? kind = null)
     {
@@ -331,10 +266,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return Array.Empty<FileRowWithScore>();
             var heap = new PriorityQueue<FileRowWithScore, float>(limit);
             using var cmd = _connection.CreateCommand();
-            // PAR-117: exclude failed files — a corrupt file with a stale CLIP
-            // embedding must not surface in semantic results. PAR-116: filter by
-            // kind in SQL so a kind-restricted grid isn't under-filled by the
-            // post-fetch C# filter.
+            // A failed file with a stale CLIP embedding must not surface in semantic results.
             var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
             var scope = _scope;
             var scopeClause = ScopeClause("f.path_text", scope);
@@ -354,18 +286,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
                 var blob = (byte[])reader.GetValue(9);
-                // Skip dimension-mismatched/corrupt embeddings instead of
-                // scoring them 0 and occupying a result slot — parity with the
-                // macOS reference guard (#15).
                 if (blob.Length != queryEmbedding.Length * 4) continue;
                 float score = DotProduct(queryEmbedding, blob);
-                // Materialize the FileRow (GROUP_CONCAT split + List + record)
-                // only for rows the bounded top-K heap actually retains — the
-                // vast majority of embedding rows are discarded, so ReadRow on
-                // every row was pure Gen0 churn. SimilarFilesAsync already heaps
-                // ids and fetches survivors afterward; mirror that here. Reading
-                // by column index stays valid until the next ReadAsync, so a lazy
-                // materialize inside the enqueue branches is byte-identical.
+                // Column reads by index stay valid until the next ReadAsync, so a lazy materialize in the enqueue branches is safe.
                 if (heap.Count < limit)
                 {
                     heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
@@ -376,7 +299,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                     heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
             }
-            // Heap holds best `limit` ordered worst→best; reverse to best→worst.
             var sorted = new List<FileRowWithScore>(heap.Count);
             while (heap.Count > 0)
             {
@@ -388,10 +310,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>
-    /// Fetch similar files by finding the seed file's embedding and ranking others by cosine similarity.
-    /// Matches macOS similarFiles(toFileID:limit:) exactly.
-    /// </summary>
     public async Task<IReadOnlyList<FileRow>> SimilarFilesAsync(long seedId, int limit, CancellationToken ct)
     {
         if (_connection == null)
@@ -403,7 +321,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         {
             if (_connection == null) return Array.Empty<FileRow>();
 
-            // 1. Get seed embedding
             float[]? seedVec = null;
             using (var cmd = _connection.CreateCommand())
             {
@@ -421,7 +338,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 return Array.Empty<FileRow>();
             }
 
-            // 2. Fetch all other embeddings and calculate cosine similarity
             var heap = new PriorityQueue<long, float>(limit);
             using (var cmd = _connection.CreateCommand())
             {
@@ -436,7 +352,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 {
                     var fid = reader.GetInt64(0);
                     var blob = (byte[])reader.GetValue(1);
-                    // Skip dimension-mismatched embeddings (parity w/ macOS, #15).
                     if (blob.Length != seedVec.Length * 4) continue;
                     float score = DotProduct(seedVec, blob);
 
@@ -452,7 +367,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 }
             }
 
-            // 3. Extract the best IDs in descending order
             var topIDs = new List<long>(heap.Count);
             while (heap.Count > 0)
             {
@@ -465,14 +379,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 return Array.Empty<FileRow>();
             }
 
-            // 4. Fetch file rows for those IDs in the ranked order
             return await RowsInOrderLockedAsync(_connection, topIDs, ct).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
     }
 
-    /// <summary>Library rows for <paramref name="ids"/>, in that order. Ids
-    /// that are gone, failed, or outside the current location are left out.</summary>
+    /// <summary>Library rows for ids, in that order.</summary>
     public async Task<IReadOnlyList<FileRow>> RowsByIdsAsync(IReadOnlyList<long> ids, CancellationToken ct)
     {
         if (_connection == null || ids.Count == 0) return Array.Empty<FileRow>();
@@ -527,11 +439,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         return rows;
     }
 
-    /// <summary>enumerate files that have a VLM-proposed name
-    /// pending. Powers the Deep Analyze "Pending renames (N)" pill so
-    /// the user can bulk-apply the VLM's suggestions without manually
-    /// walking the library. Mirrors the Files schema's
-    /// <c>vlm_proposed_name</c> column.</summary>
+    /// <summary>Powers the Deep Analyze "Pending renames (N)" pill so the user can bulk-apply the VLM's suggestions without manually walking the library.</summary>
     public async Task<IReadOnlyList<ProposedRenameRow>> PendingProposedRenamesAsync(
         int limit, CancellationToken ct)
     {
@@ -565,10 +473,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>Item 5: keyword tag → file ids carrying it, for the "Apply
-    /// tags" action. Grouped by tag so each distinct tag is written once across
-    /// all its files via a single applyTags command (call count bounded by the
-    /// number of distinct tags, not files).</summary>
     public async Task<IReadOnlyDictionary<string, List<long>>> KeywordTagFileIdsAsync(CancellationToken ct)
     {
         var map = new Dictionary<string, List<long>>(StringComparer.Ordinal);
@@ -597,10 +501,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>Item 5: named-person display name → file ids containing them,
-    /// for the "Apply people as tags" action. Skips Unknown / unnamed clusters.
-    /// Display name mirrors the engine's format_person_ref (title+first, else
-    /// first, else title, else legacy name).</summary>
     public async Task<IReadOnlyDictionary<string, List<long>>> NamedPersonFileIdsAsync(CancellationToken ct)
     {
         var map = new Dictionary<string, List<long>>(StringComparer.Ordinal);
@@ -674,10 +574,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         }
     }
 
-    /// <summary>Item 5: the person's name for file tagging — the non-empty
-    /// [title, first, middle, last, suffix] joined by single spaces, else the legacy
-    /// `name`. Byte-faithful with the macOS `ReadStore.personTagName` so a person is
-    /// tagged identically on both platforms.</summary>
+    /// <summary>Person tag names are formatted identically on every platform.</summary>
     internal static string FormatPersonTagName(string? title, string? first, string? middle,
                                               string? last, string? suffix, string? legacy)
     {
@@ -691,9 +588,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         return (legacy ?? "").Trim();
     }
 
-    /// <summary>count of files with a VLM-proposed name pending.
-    /// Cheap (COUNT(*) on indexed/sparse column); polled by the Deep
-    /// Analyze pill to know whether to show it.</summary>
     public async Task<int> PendingProposedRenameCountAsync(CancellationToken ct)
     {
         if (_connection == null) return 0;
@@ -710,12 +604,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>
-    /// Distinct file kinds present in the library — drives the kind filter
-    /// segmented control in the Library tab.
-    /// </summary>
-    /// <summary>Library Selected pane details (macOS LibrarySelectedPane): camera,
-    /// captured date (created, else modified), caption and confirmed people.</summary>
     public async Task<FileDetails?> FileDetailsAsync(long fileId, CancellationToken ct)
     {
         if (_connection == null) return null;
@@ -766,8 +654,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>Path, size and pending suggested name for each file still in the catalog,
-    /// for Chat actions that re-check files before changing them.</summary>
     public async Task<IReadOnlyDictionary<long, ChatFileRow>> FilesByIdAsync(IReadOnlyCollection<long> ids, CancellationToken ct)
     {
         var rows = new Dictionary<long, ChatFileRow>();
@@ -798,7 +684,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>A person's stored name parts, so Chat can put a name back after renaming.</summary>
     public async Task<PersonNameRow?> PersonNameAsync(long personId, CancellationToken ct)
     {
         if (_connection == null) return null;
@@ -817,12 +702,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
-    /// <summary>Most spans read per lane; the timeline merges them to its pixel width anyway.</summary>
     internal const int TimelineSpanLimit = 5000;
 
-    /// <summary>Search &amp; Moments Examined and Speech lanes (GTK moments_timeline.rs
-    /// read_coverage): sampled or verified coverage that is not speech, and current
-    /// speech passages. A catalog without these tables gives empty lanes.</summary>
     public async Task<TimelineTracks> TimelineTracksAsync(long fileId, CancellationToken ct)
     {
         if (_connection == null) return TimelineTracks.Empty;
@@ -895,20 +776,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
 
     private static FileRow ReadRow(SqliteDataReader reader)
     {
-        // Optional 8th column (auto-tags, pipe-delimited via
-        // GROUP_CONCAT). Queries that don't project tags get
-        // FieldCount=7 and Tags stays null; the Library card binding
-        // hides the chip strip when Tags is null/empty.
         System.Collections.Generic.IReadOnlyList<string>? tags = null;
         if (reader.FieldCount > 7 && !reader.IsDBNull(7))
         {
             var raw = reader.GetString(7);
             if (!string.IsNullOrEmpty(raw))
             {
-                // Drop generic/medium RAM++ tags that read as noise on a card
-                // (mirrors ram_plus.rs SUPPRESSED_TAGS) so libraries scanned
-                // before the engine-side filter don't surface them. The file
-                // *is* a photo; faces are surfaced by the People tab.
                 var parts = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
                 var kept = new System.Collections.Generic.List<string>(parts.Length);
                 foreach (var p in parts)
@@ -923,10 +796,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 tags = kept;
             }
         }
-        // Optional 9th column: vlm_proposed_name (smart-rename
-        // proposal from Deep Analyze). When present the Library card
-        // shows it in gold below the filename, matching macOS
-        // LibraryView.swift's golden smartName affordance.
         string? proposedName = null;
         if (reader.FieldCount > 8 && !reader.IsDBNull(8))
         {
@@ -951,9 +820,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         {
             return string.Empty;
         }
-        // Quote-wrap each term and append `*` so partial matches hit. FTS5
-        // syntax: " ".join('"foo"*', '"bar"*'). Drop tokens shorter than 2
-        // chars to avoid degenerate explosion of matches.
+        // Drop tokens shorter than 2 characters; they match almost everything.
         var parts = new List<string>();
         foreach (var raw in query.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -1003,13 +870,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        // Quiesce in-flight reads before freeing the native connection. Every
-        // read holds `_gate` for the whole time it touches `_connection`, so
-        // acquiring it here guarantees no thread-pool read is mid-query against
-        // the connection we're about to Dispose — otherwise the close frees it
-        // out from under the reader, a use-after-dispose native crash (mirror of
-        // macOS ReadStore). Reads ConfigureAwait(false) throughout and
-        // never re-enter the gate, so this can't self-deadlock.
+        // Wait on _gate to quiesce in-flight reads: every read holds it while using _connection, so disposing without it could free the connection mid-query. Reads never re-enter the gate, so this cannot self-deadlock.
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -1026,8 +887,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        // Sync mirror of DisposeAsync: block until any in-flight read releases
-        // the gate before freeing the native connection (see DisposeAsync).
         _gate.Wait();
         try
         {
@@ -1059,7 +918,6 @@ internal sealed record ChatFileRow(long Id, string Path, string Kind, long SizeB
 
 internal sealed record PersonNameRow(string? Title, string? First, string? Middle, string? Last, string? Suffix, string? Name, bool IsUnknown);
 
-/// <summary>Examined and Speech spans (seconds) for one video's timeline.</summary>
 internal sealed record TimelineTracks(
     System.Collections.Generic.IReadOnlyList<(double Start, double End)> Examined,
     System.Collections.Generic.IReadOnlyList<(double Start, double End)> Speech)
@@ -1074,8 +932,6 @@ internal sealed record FileDetails(
     System.Collections.Generic.IReadOnlyList<string> People,
     bool CaptionInherited = false);
 
-/// <summary>one row of pending VLM-proposed rename, used to seed
-/// the Deep Analyze "Pending renames" bulk-apply sheet.</summary>
 internal sealed record ProposedRenameRow(
     long Id,
     string Path,

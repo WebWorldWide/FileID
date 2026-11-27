@@ -1,33 +1,12 @@
-﻿// LavaLampBackground — three blurred ellipses drifting under a translucent
-// overlay. The user's favorite touch; the visual signature of FileID.
+﻿// LavaLampBackground — three radial-gradient ellipses drifting behind the UI, the app's visual signature (matches macOS).
 //
-// Built on Microsoft.UI.Composition (no Win2D). `CanvasAnimatedControl`
-// fast-fails in CoreMessagingXP (exception 0xC000027B) on Windows 11
-// build 26200+; Composition is the correct primitive anyway —
-// GPU-accelerated, vsync-driven by DWM, no extra render target.
+// Built on Microsoft.UI.Composition rather than Win2D: CanvasAnimatedControl fast-fails in CoreMessagingXP
+// (0xC000027B) on Windows 11 build 26200+, and a Gaussian blur effect would need Win2D too. A radial gradient
+// gives the same soft falloff in hardware.
 //
-// Falloff shape: radial gradient. Microsoft.UI.Composition's effect graph
-// would need a Win2D `IGraphicsEffect` source for GaussianBlurEffect,
-// which would re-introduce the CoreMessagingXP fault. The radial gradient
-// is a true hardware-rendered soft falloff that reads near-identical.
-//
-// Design:
-//   * Three SpriteVisuals (gold, orange, dark) sized to a generous max
-//     diameter. CompositionRadialGradientBrush gives each one a soft
-//     falloff from `color @ centerOpacity` to `color @ 0` at the edge —
-//     visually equivalent to a sharp-edged ellipse + gaussian blur, but
-//     done entirely with hardware compositing.
-//   * Position animates via Vector3KeyFrameAnimation on Visual.Offset.
-//     Each ellipse uses sin/cos with the macOS time multipliers
-//     (0.20/0.23, 0.15/0.18, 0.10/0.12).
-//   * The whole composition lives behind everything else (ZIndex
-//     equivalent: stacked first in MainWindow's Grid).
-//   * Pause when occluded: XamlRoot.Changed + IsHostVisible.
-//   * Reduced motion: halve the time multipliers (animations slow down).
-//   * Transparency effects off / high contrast: solid Bg1, no wax
-//     (macOS Reduce Transparency parity).
-//
-// 1:1 visual reference: platforms/apple/app/Sources/FileID/Theme/LavaLampBackground.swift.
+// Each ellipse drifts on sin/cos paths with the macOS time multipliers (0.20/0.23, 0.15/0.18, 0.10/0.12).
+// Animation pauses while the host is occluded, runs at half rate under reduced motion, and is replaced by a
+// solid Bg1 when transparency effects are off or high contrast is on.
 
 using System;
 using System.Numerics;
@@ -82,9 +61,7 @@ public sealed class LavaLampBackground : Control
         {
             root.Changed -= OnXamlRootChanged;
         }
-        // Stop + release the resize-debounce timer so no Tick fires post-unload
-        // and the timer stops rooting the control (#25). OnSizeChanged recreates
-        // it lazily on the next resize, so a control reload stays correct.
+        // Stop the debounce timer so no Tick fires after unload; OnSizeChanged recreates it on the next resize.
         _resizeDebounce?.Stop();
         _resizeDebounce = null;
         StopAnimations();
@@ -106,10 +83,7 @@ public sealed class LavaLampBackground : Control
     {
         if (_root is null) return;
         _root.Size = new Vector2((float)ActualWidth, (float)ActualHeight);
-        // Debounce 100 ms so a fast resize drag doesn't thrash 3
-        // ExpressionAnimations 30+ times per second. The Vector2 size on
-        // _root above takes effect immediately (visuals don't blur);
-        // only the sin/cos amplitudes need the restart.
+        // Debounce so a resize drag does not restart the three expression animations 30+ times a second.
         if (_resizeDebounce is null)
         {
             _resizeDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
@@ -117,10 +91,7 @@ public sealed class LavaLampBackground : Control
             {
                 _resizeDebounce!.Stop();
                 StopAnimations();
-                // Restart through ApplyVisibility so visibility stays the
-                // single source of truth — an unconditional StartAnimations()
-                // would resume drift while occluded/minimized, defeating the
-                // XamlRoot.IsHostVisible occlusion pause.
+                // Restart via ApplyVisibility: StartAnimations() alone would resume drift while occluded.
                 ApplyVisibility();
             };
         }
@@ -133,10 +104,8 @@ public sealed class LavaLampBackground : Control
 
     private void OnReducedMotionChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        // The rate scale is only read inside StartAnimations(); a restart
-        // applies the new value. Marshal to the UI thread (the OS fires this
-        // off-thread) and route the restart through ApplyVisibility so we
-        // don't resume drift while occluded.
+        // The rate scale is read in StartAnimations(), so restart. The OS fires this off-thread; going through
+        // ApplyVisibility avoids resuming drift while occluded.
         DispatcherQueue.TryEnqueue(() =>
         {
             StopAnimations();
@@ -184,13 +153,10 @@ public sealed class LavaLampBackground : Control
         _root = compositor.CreateSpriteVisual();
         _root.Size = new Vector2((float)Math.Max(1, ActualWidth), (float)Math.Max(1, ActualHeight));
 
-        // Solid base: #141414 (Color(white: 0.08) on macOS).
         _baseBrush = compositor.CreateColorBrush(
             ResolveColor("LavaLampBaseColor", Color.FromArgb(0xFF, 0x14, 0x14, 0x14)));
         _root.Brush = _baseBrush;
 
-        // Three soft-edge ellipses. The size is the max diameter the
-        // composition needs; the radial brush handles the falloff.
         _goldVisual = CreateEllipseVisual(compositor, 800f,
             ResolveColor("LavaLampGoldEllipseColor", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00)),
             centerOpacity: 0.40f);
@@ -201,12 +167,19 @@ public sealed class LavaLampBackground : Control
             ResolveColor("LavaLampDarkEllipseColor", Color.FromArgb(0xFF, 0x0D, 0x0D, 0x0D)),
             centerOpacity: 0.55f);
 
+        CenterVisual(_goldVisual, _root.Size);
+        CenterVisual(_orangeVisual, _root.Size);
+        CenterVisual(_darkVisual, _root.Size);
+
         _root.Children.InsertAtTop(_goldVisual);
         _root.Children.InsertAtTop(_orangeVisual);
         _root.Children.InsertAtTop(_darkVisual);
 
         ElementCompositionPreview.SetElementChildVisual(this, _root);
     }
+
+    private static void CenterVisual(SpriteVisual visual, Vector2 parent)
+        => visual.Offset = new Vector3(parent.X * 0.5f - visual.Size.X * 0.5f, parent.Y * 0.5f - visual.Size.Y * 0.5f, 0f);
 
     private static SpriteVisual CreateEllipseVisual(Compositor c, float diameter, Color color, float centerOpacity)
     {
@@ -231,9 +204,7 @@ public sealed class LavaLampBackground : Control
         var height = _root.Size.Y;
         if (width <= 0 || height <= 0) return;
 
-        // Reduced-motion: halve the time rate (longer-period animations
-        // → slower drift; the loop still runs so the screen never feels
-        // dead).
+        // Reduced motion doubles the periods (slower drift); the loop still runs so the screen never feels dead.
         float rateScale = ReducedMotion.Instance.IsReduced ? 2f : 1f;
 
         AnimateOffset(compositor, _goldVisual, 800f, width, height,
@@ -265,25 +236,14 @@ public sealed class LavaLampBackground : Control
     {
         if (visual is null) return;
         visual.StopAnimation("Offset");
-        // Phase oscillators live on Properties; stop them too so the
-        // ExpressionAnimation doesn't keep evaluating against drifting
-        // phase values after we re-enter StartAnimations on resize.
+        // The phase oscillators live on Properties; stop them too or they keep evaluating after a restart.
         visual.Properties.StopAnimation("xPhase");
         visual.Properties.StopAnimation("yPhase");
     }
 
     /// <summary>
-    /// Animates a SpriteVisual's Offset using two parallel scalar phase
-    /// oscillators (xPhase, yPhase) on a CompositionPropertySet, fed
-    /// through an ExpressionAnimation that computes
-    /// <c>Sin(xPhase) * xSwing</c> / <c>Cos(yPhase) * ySwing</c>.
-    ///
-    /// This is true GPU-continuous motion: the compositor evaluates the
-    /// expression every vsync, so the visual moves along a perfect sine
-    /// curve at 60 Hz / 120 Hz / whatever the display runs. The previous
-    /// implementation sampled sin/cos into 30 keyframes and let
-    /// Composition piecewise-linearly interpolate between them — visible
-    /// chop, especially on slow drifts where each segment lasts ~1 sec.
+    /// Drives the visual's Offset from two looping phase scalars (xPhase, yPhase) through an ExpressionAnimation computing
+    /// <c>Sin(xPhase) * xSwing</c> and <c>Cos(yPhase) * ySwing</c>. The compositor evaluates it every vsync, so motion is smooth at any refresh rate.
     /// </summary>
     private static void AnimateOffset(
         Compositor compositor,
@@ -302,9 +262,7 @@ public sealed class LavaLampBackground : Control
         var xSwing = parentWidth * xAmplitude;
         var ySwing = parentHeight * yAmplitude;
 
-        // Drive two scalar phase variables 0 → 2π over xPeriod / yPeriod.
-        // CompositionPropertySet survives the lifetime of the visual; we
-        // attach it to the visual's Properties so disposal is automatic.
+        // The phases run 0 to 2π over each period and live on the visual's Properties, so they are released with it.
         var props = visual.Properties;
         props.InsertScalar("xPhase", 0f);
         props.InsertScalar("yPhase", 0f);
@@ -314,8 +272,7 @@ public sealed class LavaLampBackground : Control
         var xPhaseAnim = compositor.CreateScalarKeyFrameAnimation();
         xPhaseAnim.Duration = xPeriod;
         xPhaseAnim.IterationBehavior = AnimationIterationBehavior.Forever;
-        // Linear ease so dPhase/dt is constant — Sin(linearly-ticking
-        // phase) gives a perfect sine wave.
+        // Linear easing keeps dPhase/dt constant, so Sin(phase) is a true sine wave.
         var linear = compositor.CreateLinearEasingFunction();
         xPhaseAnim.InsertKeyFrame(0f, 0f, linear);
         xPhaseAnim.InsertKeyFrame(1f, twoPi, linear);

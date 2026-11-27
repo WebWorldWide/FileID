@@ -97,7 +97,9 @@ fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
 #[ignore = "requires Xvfb/display and FILEID_ENGINE pointing to an offline built real engine; run alone"]
 fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     assert!(Path::new(&std::env::var("FILEID_ENGINE").expect("FILEID_ENGINE required")).is_file());
-    adw::init().unwrap();
+    if !crate::display_test::init() {
+        return;
+    }
     workbenches::run_review_regressions();
     let fixture = std::env::temp_dir().join(super::workbench_state::request_id());
     let old_xdg = std::env::var_os("XDG_DATA_HOME");
@@ -188,7 +190,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();
         conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-index-job','catalogIndex','[1]','{}','paused',0,'Synthetic paused index; no model inference ran',0,0)",[]).unwrap();
     }
-    wait(|| text(&catalog).contains("Catalog index") && text(&catalog).contains("Paused"));
+    wait(|| text(&catalog).contains("Search index") && text(&catalog).contains("Paused"));
     job_buttons(&catalog)
         .into_iter()
         .find(|b| b.label().as_deref() == Some("Cancel"))
@@ -239,7 +241,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| text(&tools).contains("photo-fixture - Export.png"));
     button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
-        wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
+        wait(|| text(&tools).contains("Exports moved to FileID’s recovery folder"));
         assert!(!photo_export.exists());
     } else {
         assert!(!button(&tools, "Undo").is_sensitive());
@@ -261,7 +263,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .contains("Reviewed marker"));
     button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
-        wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
+        wait(|| text(&tools).contains("Exports moved to FileID’s recovery folder"));
         assert!(!chapter_export.exists());
     } else {
         assert!(chapter_export.is_file());

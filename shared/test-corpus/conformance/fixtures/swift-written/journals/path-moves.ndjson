@@ -1,0 +1,16 @@
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/DCIM\/100MSDCF\/DSC00001.JPG","fileRef":221971011,"fileID":1,"id":"8CAF9190-9674-411E-9E0D-2A75FD8BBC18","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Photos\/2026\/2026-10-04\/DSC00001.JPG"}}
+{"done":"8CAF9190-9674-411E-9E0D-2A75FD8BBC18"}
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/DCIM\/100MSDCF\/DSC00002.JPG","fileRef":221971012,"fileID":2,"id":"CFBFCEB9-2D2C-407F-9E4A-DD5DFAD93671","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Photos\/2026\/2026-10-04\/DSC00002.JPG"}}
+{"done":"CFBFCEB9-2D2C-407F-9E4A-DD5DFAD93671"}
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/DCIM\/100MSDCF\/DSC00003.JPG","fileRef":221971013,"fileID":3,"id":"33EB2D3F-AD87-4BCF-9901-FC1D2CDB851B","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Photos\/2026\/2026-10-04\/DSC00003.JPG"}}
+{"done":"33EB2D3F-AD87-4BCF-9901-FC1D2CDB851B"}
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/DCIM\/100MSDCF\/DSC00004.JPG","fileRef":221971014,"fileID":4,"id":"0671A5F2-F5FF-45FB-855E-8B8DFB35D04B","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Photos\/2026\/2026-10-04\/DSC00004.JPG"}}
+{"done":"0671A5F2-F5FF-45FB-855E-8B8DFB35D04B"}
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/DCIM\/100MSDCF\/DSC00005.JPG","fileRef":221971015,"fileID":5,"id":"5A810D67-D3A1-4311-834F-EC8655FABD1E","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Photos\/2026\/2026-10-04\/DSC00005.JPG"}}
+{"done":"5A810D67-D3A1-4311-834F-EC8655FABD1E"}
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D1.ARW","fileRef":221971022,"fileID":13,"id":"E0D00F29-001A-4F62-ACC2-14F5855A3712","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D1.ARW"}}
+{"done":"E0D00F29-001A-4F62-ACC2-14F5855A3712"}
+{"intent":{"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D2.ARW","fileRef":221971023,"fileID":14,"id":"E1B83574-D4D0-4B16-AD3C-1DAC428944A9","to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D2.ARW"}}
+{"done":"E1B83574-D4D0-4B16-AD3C-1DAC428944A9"}
+{"intent":{"to":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Kyle Baseball Game 9-19-26\/Photos\/RAWs\/D3.ARW","fileID":15,"fileRef":221971024,"from":"\/private\/tmp\/fileid-conformance-fixture\/swift-written-restructure-apply\/tree\/Kyle Baseball Game 9-19-26\/Photos\/JPEGs\/D3.ARW","id":"EB8B2BF7-916D-4978-9355-D442F7D540B3"}}
+{"done":"EB8B2BF7-916D-4978-9355-D442F7D540B3"}

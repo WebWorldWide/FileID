@@ -1,0 +1,1 @@
+{"files":[{"path":"config.json","sha256":"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},{"path":"weights\/model.safetensors","sha256":"7b9ff384da5c007afd262427a2f95c90a8babdc3de4a249368e376e4d1b98a8a","size":12}],"revision":"9c4f5209e57b31f4b9dfba735de3fb983739c9cc","version":1}

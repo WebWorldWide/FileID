@@ -1,5 +1,4 @@
-// Search & Moments capture-date window: From / To buttons under the search
-// mode, each opening a calendar. Sent as `capturedFrom` / `capturedTo`.
+// Sent as `capturedFrom` / `capturedTo`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

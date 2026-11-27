@@ -102,7 +102,7 @@ def search_sample(engine, query, index):
 
 def run_trial(args, directory, number):
     started = time.perf_counter()
-    engine = Engine(args.engine.resolve(), directory, swift=args.runtime == "swift")
+    engine = Engine(args.engine.resolve(), directory)
     try:
         engine.wait("ready")
         ready_ms = (time.perf_counter() - started) * 1000
@@ -129,7 +129,7 @@ def run_trial(args, directory, number):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", type=Path, required=True)
-    parser.add_argument("--runtime", choices=["swift", "rust"], required=True)
+    parser.add_argument("--runtime", choices=["rust"], default="rust")
     parser.add_argument("--files", type=int, default=100_000)
     parser.add_argument("--requests", type=int, default=100, help="Warm samples per trial (10..10000)")
     parser.add_argument("--trials", type=int, default=3, help="Fresh engine processes (1..20)")
@@ -170,7 +170,7 @@ def benchmark(args):
         directory = Path(temporary)
         if any(directory.iterdir()):
             raise RuntimeError("Refusing fixture directory reuse")
-        engine = Engine(args.engine.resolve(), directory, swift=args.runtime == "swift")
+        engine = Engine(args.engine.resolve(), directory)
         try:
             engine.wait("ready")
         finally:

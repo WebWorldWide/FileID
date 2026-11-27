@@ -166,7 +166,6 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// A GtkRevealer whose slide runs on the standard spring.
     pub struct SpringRevealer(ObjectSubclass<imp::SpringRevealer>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
@@ -238,7 +237,6 @@ impl SpringRevealer {
 }
 
 glib::wrapper! {
-    /// Scales its child about the centre on the tight spring (selection).
     pub struct SpringScale(ObjectSubclass<imp::SpringScale>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
@@ -304,7 +302,9 @@ mod tests {
     #[test]
     #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
     fn revealer_opens_to_its_child_and_closes_to_nothing() {
-        adw::init().unwrap();
+        if !crate::display_test::init() {
+            return;
+        }
         let child = gtk::Label::new(Some("pane"));
         child.set_size_request(300, 40);
         let revealer = SpringRevealer::with_child(Slide::Left, &child);

@@ -185,6 +185,12 @@ public enum ModelManifest {
             approxBytes: 13_500_000_000,
             license: "Apache-2.0"),
         VLMRepoPin(
+            repo: "mlx-community/Qwen3.5-122B-A10B-4bit",
+            kind: "qwen3_5_122b",
+            revision: "e9c67b08899964be5fdd069bb1b4bc8907fe68f5",
+            approxBytes: 69_593_636_939,
+            license: "Apache-2.0"),
+        VLMRepoPin(
             repo: "mlx-community/paligemma-3b-mix-448-8bit",
             kind: "paligemma_3b",
             revision: "ce201f8b4b2c2793d4e18d3d44355b49ddff257c",

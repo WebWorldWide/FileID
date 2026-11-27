@@ -1,7 +1,6 @@
-// Stage 5: Vision for the scan. The primary pass and the OCR tiers run the Swift
-// engine's VisionWorker and TextReading (FileIDImaging), and the text read and
-// the scanned-PDF read follow Tagging.processImage / processPDF step for step,
-// so the Rust host stores the same tags, faces and text as the Swift engine.
+// Vision for the scan. The primary pass and the OCR tiers run VisionWorker and
+// TextReading (FileIDImaging); the text read and the scanned-PDF read decide
+// which tier to run.
 import CoreGraphics
 import Foundation
 import FileIDImaging
@@ -10,7 +9,7 @@ enum ScanVision {
     static let docHints: Set<String> = ["document", "text", "screenshot", "receipt", "presentation", "menu", "sign"]
     private static let maxPDFRenderPixels: CGFloat = 50_000_000
 
-    /// `DBWriter.bboxArea` over the stored "x,y,w,h" text.
+    /// Area of a stored "x,y,w,h" box.
     static func bboxArea(_ s: String) -> Double {
         let parts = s.split(separator: ",").compactMap { Double($0) }
         guard parts.count == 4 else { return 0 }
@@ -40,7 +39,7 @@ enum ScanVision {
         ]
     }
 
-    /// The text read of `Tagging.processImage`: a fast read when the classifier,
+    /// The text read: a fast read when the classifier,
     /// the tags or the page shape suggest text, then the accurate tier when
     /// `TextReading` says the fast read missed or mangled it.
     static func textRead(_ image: CGImage, classifyTags: [String], tags: [String], hasCamera: Bool) -> [String: Any] {
@@ -74,7 +73,7 @@ enum ScanVision {
         return result
     }
 
-    /// The image-only PDF branch of `Tagging.processPDF`: up to three pages
+    /// The image-only PDF read: up to three pages
     /// rendered at 2x (clamped to 50 MP) and read with both tiers.
     static func scannedPDF(path: String) -> [String: Any] {
         guard let pdf = CGPDFDocument(URL(fileURLWithPath: path) as CFURL) else { return ["opened": false] }
@@ -158,4 +157,14 @@ public func fileid_apple_ocr_warmup() {
 @_cdecl("fileid_apple_ocr_ready")
 public func fileid_apple_ocr_ready() -> Bool {
     AccurateOCRWarmup.shared.isReady && AccurateOCRBreaker.shared.allowed
+}
+
+@_cdecl("fileid_apple_ocr_warmed")
+public func fileid_apple_ocr_warmed() -> Bool {
+    AccurateOCRWarmup.shared.isReady
+}
+
+@_cdecl("fileid_apple_ocr_paused")
+public func fileid_apple_ocr_paused() -> Bool {
+    AccurateOCRBreaker.shared.paused
 }

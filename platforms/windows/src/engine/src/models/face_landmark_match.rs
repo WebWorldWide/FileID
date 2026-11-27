@@ -1,11 +1,6 @@
-//! Which detected landmark set belongs to a stored face box, as the macOS
-//! engine decides it (`FaceLandmarkMatch.swift`, `FaceBBox.parseNormalized`,
-//! `FaceClustering.parseBBox`). The Mac pipeline aligns a face only when one
-//! Vision landmark detection overlaps its stored box clearly; a nearby,
-//! displaced or ambiguous detection falls back to the padded box crop.
-//!
-//! Rectangles are normalized to the decoded image with a bottom-left origin,
-//! like Vision's `boundingBox`.
+//! Which detected landmark set belongs to a stored face box. A face is aligned only when one detection clearly overlaps
+//! its stored box; otherwise it falls back to the padded box crop. Rects are normalized with a bottom-left origin, like
+//! Vision's `boundingBox`.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NormRect {
@@ -42,9 +37,6 @@ impl NormRect {
     }
 }
 
-/// `FaceLandmarkMatch.index`: the candidate covering `stored` with IoU ≥ 0.5 and
-/// centres within 0.35 of the smaller box, unless a second such candidate comes
-/// within 0.1 IoU of the best.
 pub fn index(stored: &NormRect, candidates: &[NormRect]) -> Option<usize> {
     if !stored.valid() {
         return None;
@@ -79,10 +71,8 @@ pub fn index(stored: &NormRect, candidates: &[NormRect]) -> Option<usize> {
     Some(best.0)
 }
 
-/// `FaceBBox.parseNormalized`: a stored face box as a normalized bottom-left
-/// rectangle on the upright decoded image. macOS stores Vision's CSV
-/// `x,y,w,h`; the portable pipeline stores JSON pixels with a top-left origin
-/// (rotated into the upright frame for EXIF orientations 2–8).
+/// A stored box as a normalized bottom-left rect on the upright image. macOS stores Vision's CSV `x,y,w,h`; the
+/// portable pipeline stores JSON pixels, top-left origin (rotated for EXIF orientations 2–8).
 pub fn parse_normalized(text: &str, image_width: u32, image_height: u32, orientation: u8) -> Option<NormRect> {
     let text = text.trim();
     if text.is_empty() {
@@ -102,8 +92,6 @@ pub fn parse_normalized(text: &str, image_width: u32, image_height: u32, orienta
     Some(NormRect::new(parts[0], parts[1], parts[2], parts[3]))
 }
 
-/// Swift's `Double(Substring)`: no surrounding whitespace, no leading `+`
-/// quirks beyond what Rust's float grammar accepts.
 fn swift_double(text: &str) -> Option<f64> {
     if text.is_empty() || text.trim() != text {
         return None;
@@ -165,9 +153,8 @@ fn parse_json(text: &str, image_width: u32, image_height: u32, orientation: u8) 
     Some(NormRect::new(min_x, 1.0 - max_y, max_x - min_x, max_y - min_y))
 }
 
-/// Pixel rectangle (top-left origin, integral) of the padded crop the macOS
-/// engine embeds when no landmarks match (`FaceClustering.cropFaceCGImage`):
-/// 15% padding clamped to the frame, then `CGRect.integral`. `None` below 8 px.
+/// The padded crop embedded when no landmarks match: 15% padding
+/// clamped to the frame, then `CGRect.integral`; `None` below 8 px.
 pub fn padded_crop_rect(text: &str, image_width: u32, image_height: u32, orientation: u8) -> Option<[i64; 4]> {
     let b = parse_normalized(text, image_width, image_height, orientation)?;
     let pad = 0.15;
@@ -270,7 +257,6 @@ mod tests {
         fixture.padded_crops
     }
 
-    /// Same rects as the Swift engine's `cropFaceCGImage` (FaceLandmarkMatchTests).
     #[test]
     fn shared_padded_crops_match_swift() {
         let cases = padded_fixtures();

@@ -121,6 +121,7 @@ final class ToolsSession {
     var message = "Choose files and a folder to save to. Exports are new files; your originals stay as they are."
     var pending = ""
     var pendingAction = ""
+    var pendingRecipeKind: String?
     var searchID = ""
     var operationID: String?
     var outputs: [ToolOutput] = []
@@ -134,9 +135,53 @@ final class ToolsSession {
         return kind == "photo" ? FileTypes.images.contains(ext) : FileTypes.videos.contains(ext)
     }
 
+    static let exportablePhotoExtensions: Set<String> = ["jpg", "jpeg", "png"]
+
+    /// Photo exports take JPEG and PNG only, so a RAW or HEIC hit is listed but cannot be chosen.
+    func canChoose(_ hit: CatalogHit) -> Bool {
+        kind != "photo" || Self.exportablePhotoExtensions.contains(URL(fileURLWithPath: hit.path).pathExtension.lowercased())
+    }
+
+    var chooseableHits: [CatalogHit] { hits.filter(canChoose) }
+
     func applyKindFilter() {
         hits = allHits.filter(fitsKind)
-        selection.formIntersection(hits.map(\.fileID))
+        selection.formIntersection(chooseableHits.map(\.fileID))
+    }
+
+    /// A failed export that wrote nothing is not an export; only a reply that worked, or left a finished file behind, locks Export until the plan changes.
+    nonisolated static func exportCounts(status: String, outputs: [ToolOutput]) -> Bool {
+        status == "ok" || outputs.contains { $0.state == "completed" }
+    }
+
+    /// A successful preview says what Export will do in plain words; the engine's sentence ("new files",
+    /// "8-bit SDR") stays for everything else. The photo caveat follows the recipe kind that was sent, not the engine's wording.
+    nonisolated static func plainMessage(action: String, status: String, outputs: Int, recipeKind: String?, message: String) -> String {
+        guard action == "preview", status == "ok", outputs > 0 else { return message }
+        let plain = outputs == 1 ? "Press Export to make 1 new file. Your original stays as it is."
+                                 : "Press Export to make \(Plural.noun(outputs, "new file", "new files")). Your originals stay as they are."
+        return recipeKind == "photo" ? plain + " Photo copies leave out details such as location and use standard 8-bit colors." : plain
+    }
+
+    /// The query sent with the search still waiting for its reply.
+    var searchedQuery = ""
+    /// The query the last successful search reply answered; nil before the first search or after a failed one.
+    var answeredQuery: String?
+
+    func recordSearchReply(status: String) {
+        answeredQuery = status == "ok" ? searchedQuery : nil
+    }
+
+    /// The line under the search field when no result fits the mode: the intro before a search,
+    /// "nothing matches" after an empty one, and how to switch modes when the results are of the other kind.
+    var pickFilesNote: String {
+        if !allHits.isEmpty {
+            return "That search found \(allHits.count.formatted()) file\(allHits.count == 1 ? "" : "s"), but no \(kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again."
+        }
+        if let answeredQuery, !answeredQuery.isEmpty {
+            return "Nothing in the library matches “\(answeredQuery)”. Try part of a file name or a few words about what’s in it."
+        }
+        return "Search for files by name or by what’s in them, then tick the ones to export. Exports are new files; your originals stay as they are."
     }
 
     var selectedPaths: [String] { hits.filter { selection.contains($0.fileID) }.map(\.path) }
@@ -160,8 +205,8 @@ final class ToolsSession {
         pending = ""
         pendingAction = ""
         message = action == "execute"
-            ? "FileID's helper stopped during the export. Some files may already be saved; press Show last export to check."
-            : "FileID's helper stopped before this finished. Try again."
+            ? "FileID’s helper stopped during the export. Some files may already be saved; press Show last export to check."
+            : "FileID’s helper stopped before this finished. Try again."
     }
 }
 
@@ -170,6 +215,7 @@ struct ToolsWorkbench: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var session: ToolsSession
     var inline = false
+    @State private var rootWidth: CGFloat = 0
     @State private var previewImage: NSImage?
     @State private var player: AVPlayer?
     @State private var clock = PlayheadClock()
@@ -206,7 +252,7 @@ struct ToolsWorkbench: View {
                 .overlay(alignment: .bottom) { Hairline() }
             }
             HStack(spacing: 0) {
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 16) {
                         recipePanel
                         outputPanel
@@ -217,12 +263,13 @@ struct ToolsWorkbench: View {
                 .focusSection()
                 VHairline()
                 previewPane
-                    .frame(width: 380)
+                    .frame(width: rootWidth > 0 && rootWidth < 860 ? 320 : 380)
                     .background(Theme.pane, ignoresSafeAreaEdges: [])
                     .focusSection()
             }
         }
         .frame(minWidth: inline ? nil : 900, minHeight: inline ? nil : 650)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rootWidth = $0 }
         .tint(Theme.gold)
         .onAppear {
             consume(); consumeSearch()
@@ -280,20 +327,19 @@ struct ToolsWorkbench: View {
                 Button("Find", action: search)
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(busy || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help(session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type part of a file name or what's in it first" : "Search the library")
+                    .help(session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type part of a file name or what’s in it first" : "Search the library")
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
             .disabled(busy)
             if session.hits.isEmpty {
-                MetaText(session.allHits.isEmpty
-                         ? "Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are."
-                         : "That search found \(session.allHits.count.formatted()) file\(session.allHits.count == 1 ? "" : "s"), but no \(session.kind == "photo" ? "photos" : "videos"). Switch between Photo and Video above, or search again.")
+                MetaText(session.pickFilesNote)
                     .padding(.horizontal, 14).padding(.bottom, 12)
             } else {
                 Hairline()
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(session.hits, id: \.fileID) { hit in
                         let url = URL(fileURLWithPath: hit.path)
+                        let chooseable = session.canChoose(hit)
                         Toggle(isOn: Binding(get: { session.selection.contains(hit.fileID) }, set: { value in
                             if value { session.selection.insert(hit.fileID) } else { session.selection.remove(hit.fileID) }
                             invalidate()
@@ -302,11 +348,12 @@ struct ToolsWorkbench: View {
                                 Text(url.lastPathComponent).font(Theme.Font.mono(12)).foregroundStyle(Theme.text1)
                                     .lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 8)
-                                Text(url.deletingLastPathComponent().lastPathComponent).font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                                Text(chooseable ? url.deletingLastPathComponent().lastPathComponent : "Can’t be exported here. Choose the JPEG.").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                                     .lineLimit(1).truncationMode(.head)
                             }
                         }
                         .toggleStyle(DSCheckboxToggleStyle())
+                        .disabled(!chooseable)
                         .padding(.horizontal, 14)
                         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
                         .help(hit.path)
@@ -314,10 +361,10 @@ struct ToolsWorkbench: View {
                 }
                 .disabled(busy)
                 PanelFooter {
-                    MetaText("\(session.selection.count) of \(session.hits.count) chosen", size: 12)
+                    MetaText("\(session.selection.count) of \(session.chooseableHits.count) chosen", size: 12)
                     Spacer()
-                    Button(session.selection.count == session.hits.count ? "Select none" : "Select all") {
-                        session.selection = session.selection.count == session.hits.count ? [] : Set(session.hits.map(\.fileID))
+                    Button(session.selection.count == session.chooseableHits.count ? "Select none" : "Select all") {
+                        session.selection = session.selection.count == session.chooseableHits.count ? [] : Set(session.chooseableHits.map(\.fileID))
                         invalidate()
                     }
                     .buttonStyle(.dsGhost)
@@ -359,7 +406,7 @@ struct ToolsWorkbench: View {
                 if session.kind == "photo" {
                     optionRow("Longest side") {
                         DSNumberField(placeholder: "Longest side in pixels", value: $session.maxDimension, format: .number.grouping(.never), width: 90)
-                        MetaText("pixels wide (up to 8192)", size: 12)
+                        MetaText("pixels (up to 8192)", size: 12)
                             .help("The longer edge of the picture, in pixels (px)")
                     }
                 }
@@ -370,31 +417,28 @@ struct ToolsWorkbench: View {
                     optionRow("Resolution") {
                         SegmentedBar(selection: $session.maxDimension, options: [(1280, "720p"), (1920, "1080p"), (3840, "4K")])
                     }
-                    optionRow("Frame", alignment: .top) {
+                    let framingNote = session.videoFraming == "auto" && session.videoAspectRatio != "source"
+                        ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group can’t fit. Clips up to ten minutes. Review the exported framing."
+                        : "Fits the full picture inside the frame and pads the empty space."
+                    optionRow("Frame", alignment: .top, note: session.videoAspectRatio == "source" ? framingNote : nil) {
                         AspectTiles(selection: $session.videoAspectRatio)
                     }
                     if session.videoAspectRatio != "source" {
-                        optionRow("Framing") {
+                        optionRow("Framing", note: framingNote) {
                             SegmentedBar(selection: $session.videoFraming, options: [("fit", "Fit full picture"), ("auto", "Follow people")])
                         }
                     }
-                    note(session.videoFraming == "auto" && session.videoAspectRatio != "source"
-                         ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group can't fit. Clips up to ten minutes. Review the exported framing."
-                         : "Fits the full picture inside the frame and pads the empty space.")
-                    optionRow("") {
+                    optionRow("", note: session.videoStabilization
+                              ? "Corrects estimated shake with up to 12% zoom to cover the edges. Clips up to ten minutes and 60 fps. Review the result." : nil) {
                         Toggle("Stabilize shaky video", isOn: $session.videoStabilization).toggleStyle(DSToggleStyle())
                             .font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
                     }
-                    if session.videoStabilization {
-                        note("Corrects estimated shake with up to 12% zoom to cover the edges. Clips up to ten minutes and 60 fps. Review the result.")
-                    }
                 }
                 if session.kind == "photo" || session.exportsVideo {
-                    optionRow("") {
+                    optionRow("", note: "Enlarging adds pixels, not detail.") {
                         Toggle("Enlarge smaller media to this size", isOn: $session.allowUpscale).toggleStyle(DSToggleStyle())
                             .font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
                     }
-                    note("Enlarging adds pixels, not detail.")
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
@@ -419,27 +463,24 @@ struct ToolsWorkbench: View {
         case "trim":
             trimRow("Start", value: $session.media.trimStart)
             trimRow("End", value: $session.media.trimEnd)
-            optionRow("Cut") {
+            optionRow("Cut", note: session.media.trimMode == "exact"
+                      ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren’t supported yet."
+                      : "Copies the video without re-compressing it. The new file may start a little before your start time.") {
                 SegmentedBar(selection: $session.media.trimMode, options: [("keyframe", "Fast cut"), ("exact", "Exact cut")])
                     .help("Fast cut copies the video and starts at the nearest keyframe. Exact cut re-encodes to H.264.")
             }
-            note(session.media.trimMode == "exact"
-                 ? "Re-compresses the video into an MP4 so the cut lands on the exact frame. HDR videos aren't supported yet."
-                 : "Copies the video without re-compressing it. The new file may start a little before your start time.")
         case "remux":
-            note("Saves the same video and sound as the other kind of file (MP4 or MOV) without re-compressing, so quality is unchanged. The kind a file already is is greyed out.")
+            optionRow("", note: "Saves the same video and sound as the other kind of file (MP4 or MOV) without re-compressing, so quality is unchanged. The kind a file already is is greyed out.") { EmptyView() }
         case "audio":
-            note("Saves the soundtrack as an M4A audio file. Videos without sound can't be used.")
+            optionRow("", note: "Saves the soundtrack as an M4A audio file. Videos without sound can’t be used.") { EmptyView() }
         case "proxy":
-            optionRow("Size") {
+            optionRow("Size", note: "A small MP4 copy for quick previews, linked to its original. Smaller videos aren’t enlarged.") {
                 SegmentedBar(selection: $session.media.proxySide, options: [(640, "640 pixels"), (960, "960 pixels")])
             }
-            note("A small MP4 copy for quick previews, linked to its original. Smaller videos aren't enlarged.")
         default:
-            optionRow("Turn") {
+            optionRow("Turn", note: "Changes which way up the picture is shown, without re-compressing it.") {
                 SegmentedBar(selection: $session.media.rotation, options: MediaToolChoice.rotations)
             }
-            note("Changes which way up the picture is shown, without re-compressing it.")
         }
     }
 
@@ -451,7 +492,7 @@ struct ToolsWorkbench: View {
             Button("Set from playhead") { value.wrappedValue = (clock.seconds * 100).rounded() / 100 }
                 .buttonStyle(.dsGhost)
                 .disabled(player == nil)
-                .help(player == nil ? "Tick a video that can play here first" : "Use the player's current time")
+                .help(player == nil ? "Tick a video that can play here first" : "Use the player’s current time")
         }
     }
 
@@ -474,21 +515,16 @@ struct ToolsWorkbench: View {
         }
     }
 
-    private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, @ViewBuilder content: () -> Content) -> some View {
-        HStack(alignment: alignment, spacing: 12) {
+    /// A note rides inside its row, so it lines up with the row's controls whether the label sits beside them or above.
+    private func optionRow<Content: View>(_ label: String, alignment: VerticalAlignment = .center, note: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        let row = HStack(alignment: alignment, spacing: 12) { content() }
+        return OptionRowLayout(labelColumn: Theme.Font.scaled(92), topAligned: alignment == .top, hasLabel: !label.isEmpty) {
             Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
-                .frame(width: 92, alignment: .leading)
-                .padding(.top, alignment == .top ? 6 : 0)
                 .accessibilityHidden(label.isEmpty)
-            content()
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func note(_ text: String) -> some View {
-        HStack(spacing: 12) {
-            Color.clear.frame(width: 92, height: 1)
-            Text(text).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+            ScrollView(.horizontal, showsIndicators: false) { row }
+            if let note {
+                Text(note).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -519,9 +555,11 @@ struct ToolsWorkbench: View {
                 Spacer()
                 if busy { IndeterminateBar().frame(width: 60) }
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
+            .frame(minHeight: Theme.Metrics.hitTarget)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.top, Theme.Metrics.pageInsetY)
             Hairline()
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     ZStack {
                         Color.black.opacity(0.35)
@@ -572,7 +610,7 @@ struct ToolsWorkbench: View {
                 .padding(14)
             }
             Hairline()
-            VStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Button("Preview") {
                         send(ToolRequest(requestID: UUID().uuidString, action: "preview",
@@ -603,7 +641,7 @@ struct ToolsWorkbench: View {
                             send(ToolRequest(requestID: UUID().uuidString, action: "undo", destination: session.destination,
                                              operationID: session.operationID, destinationBookmark: session.destinationBookmark))
                         }
-                        .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.controlLarge))
+                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                         .disabled(session.operationID == nil || !session.outputs.contains(where: { $0.state == "completed" }) || !session.destinationAccessReady || busy)
                         .help(session.outputs.contains(where: { $0.state == "completed" }) ? "Move the files this export created to Trash" : "Nothing exported yet")
                     }
@@ -636,7 +674,7 @@ struct ToolsWorkbench: View {
                 .rotationEffect(.degrees(angle))
                 .frame(width: geo.size.width, height: geo.size.height)
         }
-        .animation(Theme.reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: angle)
+        .animation(Theme.spring, value: angle)
     }
 
     private var summaryLine: String {
@@ -668,6 +706,7 @@ struct ToolsWorkbench: View {
         session.searchID = ""
         var seen = Set<Int64>()
         session.allHits = result.hits.filter { seen.insert($0.fileID).inserted }
+        session.recordSearchReply(status: result.status)
         session.selection.removeAll()
         session.applyKindFilter()
         invalidate()
@@ -695,7 +734,7 @@ struct ToolsWorkbench: View {
                 session.destinationBookmark = authorizedBookmark
                 #if FILEID_APP_STORE
                 if authorizedBookmark == nil {
-                    session.message = "FileID couldn't get permission to save in that folder. Choose it again."
+                    session.message = "FileID couldn’t get permission to save in that folder. Choose it again."
                 }
                 #endif
                 invalidate()
@@ -730,7 +769,7 @@ struct ToolsWorkbench: View {
         }
         switch session.kind {
         case "video": return "Makes a new MP4 at the size and shape you choose. Your original video stays as it is."
-        case "chapters": return "Saves a video's chapters as a file other apps can read."
+        case "chapters": return "Saves a video’s chapters as a file other apps can read."
         default: return "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is."
         }
     }
@@ -738,18 +777,20 @@ struct ToolsWorkbench: View {
     private func search() {
         guard session.pending.isEmpty else { return }
         session.searchID = UUID().uuidString
-        if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = "FileID is still getting ready. Try again in a moment." }
+        session.searchedQuery = session.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = HelperGate.unsentNote(engine) }
     }
     private func send(_ request: ToolRequest) {
-        session.pending = request.requestID; session.pendingAction = request.action
+        session.pending = request.requestID; session.pendingAction = request.action; session.pendingRecipeKind = request.recipe?.kind
         session.pendingEngineGeneration = engine.engineResetSignal
         session.searchID = ""
-        if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = "FileID is still getting ready. Try again in a moment." }
+        if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = HelperGate.unsentNote(engine) }
     }
     private func consume() {
         guard !session.pending.isEmpty, let response = engine.toolResponses[session.pending] else { return }
-        let action = session.pendingAction; session.pending = ""; session.pendingAction = ""
-        session.message = response.message
+        let action = session.pendingAction, recipeKind = session.pendingRecipeKind
+        session.pending = ""; session.pendingAction = ""; session.pendingRecipeKind = nil
+        session.message = ToolsSession.plainMessage(action: action, status: response.status, outputs: response.outputs.count, recipeKind: recipeKind, message: response.message)
         if action == "capabilities" {
             session.capabilities = response.capabilities
             if !MediaToolChoice.available(response.capabilities).contains(where: { $0.0 == session.media.tool }) { session.media.tool = "export" }
@@ -757,7 +798,7 @@ struct ToolsWorkbench: View {
         }
         if action == "history", response.status == "ok" { session.operationID = response.operationID; session.executed = response.operationID != nil }
         if action == "preview", response.status == "ok" { session.operationID = response.operationID; session.executed = false }
-        if action == "execute" { session.executed = true }
+        if action == "execute" { session.executed = ToolsSession.exportCounts(status: response.status, outputs: response.outputs) }
         if action == "undo", response.status == "ok" { session.operationID = nil; session.executed = false }
         withAnimation(Theme.springStandard) { session.outputs = response.outputs }
     }
@@ -798,5 +839,69 @@ private struct ToolOutputRow: View {
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
         .help(output.outputPath)
         .accessibilityElement(children: .combine)
+    }
+}
+
+
+/// Label, controls and an optional note. The label sits beside the controls when both fit and above them otherwise;
+/// the subviews are the label, the controls in a horizontal scroller, and the note.
+struct OptionRowLayout: Layout {
+    var labelColumn: CGFloat
+    var topAligned = false
+    var hasLabel = true
+    var spacing: CGFloat = 12
+    var noteSpacing: CGFloat = 4
+
+    private func isBeside(width: CGFloat, subviews: Subviews) -> Bool {
+        width >= labelColumn + spacing + subviews[1].sizeThatFits(.unspecified).width
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideal = labelColumn + spacing + subviews[1].sizeThatFits(.unspecified).width
+        let width = proposal.width ?? ideal
+        let note = subviews.count > 2 ? subviews[2] : nil
+        if isBeside(width: width, subviews: subviews) {
+            let rowHeight = subviews[1].sizeThatFits(.unspecified).height
+            let titleHeight = subviews[0].sizeThatFits(.unspecified).height + (topAligned ? 6 : 0)
+            let noteHeight = note.map { $0.sizeThatFits(ProposedViewSize(width: width - labelColumn - spacing, height: nil)).height + noteSpacing } ?? 0
+            return CGSize(width: width, height: max(rowHeight, titleHeight) + noteHeight)
+        }
+        var height: CGFloat = 0
+        if hasLabel { height += subviews[0].sizeThatFits(.unspecified).height + noteSpacing }
+        height += subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+        if let note { height += note.sizeThatFits(ProposedViewSize(width: width, height: nil)).height + noteSpacing }
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let note = subviews.count > 2 ? subviews[2] : nil
+        if isBeside(width: bounds.width, subviews: subviews) {
+            let row = subviews[1].sizeThatFits(.unspecified)
+            let title = subviews[0].sizeThatFits(.unspecified)
+            let titleBlock = title.height + (topAligned ? 6 : 0)
+            let top = bounds.minY
+            let rowY = top + (topAligned ? 0 : max(0, (titleBlock - row.height) / 2))
+            let titleY = top + (topAligned ? 6 : max(0, (row.height - title.height) / 2))
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: titleY), proposal: ProposedViewSize(width: labelColumn, height: nil))
+            subviews[1].place(at: CGPoint(x: bounds.minX + labelColumn + spacing, y: rowY), proposal: ProposedViewSize(row))
+            if let note {
+                let x = bounds.minX + labelColumn + spacing
+                note.place(at: CGPoint(x: x, y: top + max(row.height, titleBlock) + noteSpacing),
+                           proposal: ProposedViewSize(width: bounds.width - labelColumn - spacing, height: nil))
+            }
+            return
+        }
+        var y = bounds.minY
+        if hasLabel {
+            let title = subviews[0].sizeThatFits(.unspecified)
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(title))
+            y += title.height + noteSpacing
+        }
+        let scroller = subviews[1].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        subviews[1].place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(width: bounds.width, height: scroller.height))
+        y += scroller.height
+        if let note {
+            note.place(at: CGPoint(x: bounds.minX, y: y + noteSpacing), proposal: ProposedViewSize(width: bounds.width, height: nil))
+        }
     }
 }

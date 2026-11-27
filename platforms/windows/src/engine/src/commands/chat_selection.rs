@@ -1,7 +1,5 @@
-//! Exact-match questions over the files the user attached to a chat send
-//! (`ChatRequest.scopeFileIDs`): rank the selection by stored evidence, then let
-//! the installed vision model check the likely ones with a strict yes/no/unsure
-//! question. Mirrors macOS `ChatSelection.swift`; the shared cases live in
+//! Exact-match questions over the files attached to a chat send (`ChatRequest.scopeFileIDs`): rank by stored evidence,
+//! then let the installed vision model check the likely ones with a strict yes/no/unsure question. Fixture:
 //! `shared/test-corpus/chat-selection.json`.
 
 use std::collections::{HashMap, HashSet};
@@ -19,7 +17,6 @@ use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatRequest};
 
 pub(crate) const MAX_SCOPE: usize = 2000;
-/// Every file of a selection this small is checked, whatever its evidence score.
 pub(crate) const VERIFY_LIMIT: usize = 60;
 pub(crate) const EVIDENCE_SHOWN: usize = 20;
 const CHECK_TOKENS: u32 = 96;
@@ -50,7 +47,6 @@ const STOP: &[&str] = &[
     "shows", "showing", "clearly", "exactly",
 ];
 
-/// The thing to look for, without "show me the one where" and similar lead-ins.
 pub(crate) fn criteria(text: &str) -> String {
     let mut rest = text.trim().trim_end_matches(['?', '.', '!', ' ']).trim().to_owned();
     let mut phrases = LEADING.to_vec();
@@ -87,7 +83,6 @@ fn tokens(text: &str) -> Vec<String> {
     text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect()
 }
 
-/// Known people the criteria name, by whole-word name match.
 pub(crate) fn named_people(criteria: &str, known: &KnownPeople) -> Vec<(i64, Vec<String>)> {
     let words = tokens(criteria);
     let mut named = Vec::new();
@@ -100,8 +95,6 @@ pub(crate) fn named_people(criteria: &str, known: &KnownPeople) -> Vec<(i64, Vec
     named
 }
 
-/// Stemmed content words with the word as written, without stop words or the
-/// named people's names.
 pub(crate) fn content_terms(criteria: &str, named: &[(i64, Vec<String>)]) -> Vec<(String, String)> {
     let names: HashSet<&str> = named.iter().flat_map(|(_, name)| name.iter().map(String::as_str)).collect();
     let mut seen = HashSet::new();
@@ -145,8 +138,6 @@ fn has_content(words: &[String]) -> bool {
     words.iter().any(|word| tokens(word).iter().any(|token| !STOP.contains(&token.as_str())))
 }
 
-/// The request split into its parts: a lead noun phrase, then each "with …",
-/// "in …" or "…ing …" phrase and each clause after "and", "who" or a comma.
 pub(crate) fn parts(criteria: &str) -> Vec<Vec<String>> {
     let words: Vec<&str> = criteria.split_whitespace().collect();
     let mut parts: Vec<Vec<String>> = Vec::new();
@@ -205,8 +196,7 @@ pub(crate) fn parts(criteria: &str) -> Vec<Vec<String>> {
     parts
 }
 
-/// The separate checks a request implies: the lead noun phrase joined to each
-/// later part. Empty when the request is one idea; at most `MAX_CHECKS`.
+/// Empty when the request is one idea; at most `MAX_CHECKS`.
 pub(crate) fn checks(criteria: &str) -> Vec<String> {
     let mut checks: Vec<Vec<String>> = Vec::new();
     let mut head: Vec<String> = Vec::new();
@@ -236,9 +226,7 @@ pub(crate) struct Candidate {
     pub id: i64,
     pub path: String,
     pub kind: String,
-    /// Tags, description and file name.
     pub evidence: String,
-    /// CLIP cosine between the query and the picture, when both exist.
     pub clip: Option<f64>,
     pub people: Vec<i64>,
 }
@@ -254,8 +242,7 @@ pub(crate) struct Ranked {
     pub people: bool,
 }
 
-/// Candidates best first; ties keep selection order. Scores are rounded to four
-/// decimals so both engines order the same inputs identically.
+/// Ties keep selection order. Scores are rounded to four decimals so both engines order the same inputs identically.
 pub(crate) fn rank(candidates: Vec<Candidate>, criteria: &str, known: &KnownPeople) -> Vec<Ranked> {
     let named = named_people(criteria, known);
     let words = content_terms(criteria, &named);
@@ -289,7 +276,6 @@ pub(crate) fn rank(candidates: Vec<Candidate>, criteria: &str, known: &KnownPeop
     ranked.into_iter().map(|(_, ranked)| ranked).collect()
 }
 
-/// Why an unchecked file is where it is.
 pub(crate) fn evidence_reason(ranked: &Ranked) -> String {
     let words = (!ranked.matched.is_empty()).then(|| format!("ags or description mention {}", ranked.matched.join(", ")));
     match (words, ranked.people) {
@@ -310,14 +296,11 @@ pub(crate) fn check_prompt(criteria: &str) -> String {
     )
 }
 
-/// Models under this resident size get the main-subject confirmation.
 const SMALL_MODEL_GB: f64 = 4.0;
 
-/// The second question for a photo that passed the first. Small models say yes
-/// to almost any "is it visible" question, so they are asked whether it is what
-/// the photo is of; larger models take that literally and reject good matches,
-/// so they are asked whether it is clearly shown, counting when the request
-/// gives a number.
+/// Small models say yes to almost any "is it visible" question, so they are asked whether it is what the photo is of;
+/// larger models take that literally and reject good matches, so they are asked whether it is clearly shown, counting
+/// when the request gives a number.
 pub(crate) fn confirm_prompt(criteria: &str, small: bool) -> String {
     let wanted = serde_json::to_string(criteria).unwrap_or_else(|_| "\"\"".into());
     let question = if small {
@@ -332,14 +315,10 @@ pub(crate) fn confirm_prompt(criteria: &str, small: bool) -> String {
     )
 }
 
-/// The confirming prompts after a first "yes": the whole request, then each of
-/// its parts.
 pub(crate) fn confirm_prompts(criteria: &str, small: bool) -> Vec<String> {
     std::iter::once(criteria.to_owned()).chain(checks(criteria)).map(|item| confirm_prompt(&item, small)).collect()
 }
 
-/// Whether a model gets the main-subject confirmation: catalog models under
-/// `SMALL_MODEL_GB` resident.
 pub(crate) fn is_small(model: &str) -> bool {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     if crate::apple::vlm::model_spec(model).is_ok() {
@@ -348,8 +327,6 @@ pub(crate) fn is_small(model: &str) -> bool {
     crate::models::catalog::find(model).is_some_and(|entry| entry.estimated_resident_gb < SMALL_MODEL_GB)
 }
 
-/// A match needs the first check and every confirmation to say yes. A
-/// confirmation that says no makes it a no; one that is unclear makes it unsure.
 pub(crate) fn combine(first: (Verdict, String), confirmations: &[Verdict]) -> (Verdict, String) {
     if first.0 != Verdict::Yes {
         return first;
@@ -370,8 +347,7 @@ pub(crate) enum Verdict {
     Unsure,
 }
 
-/// Strict reading of the model's reply: anything but a JSON object with a
-/// known answer is unsure, and unsure never counts as a match.
+/// Anything but a JSON object with a known answer is unsure, and unsure never counts as a match.
 pub(crate) fn parse_verdict(raw: &str) -> (Verdict, String) {
     #[derive(serde::Deserialize)]
     struct Wire {
@@ -473,7 +449,6 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f64> {
     (na > 0.0 && nb > 0.0).then(|| dot / (na.sqrt() * nb.sqrt()))
 }
 
-/// The selection's photos and videos in selection order, with their evidence.
 /// Nothing outside `scope` is read.
 pub(crate) fn load(conn: &Connection, scope: &[i64], root: Option<&super::roots::RootScope>, query: Option<(&[f32], &str)>) -> Result<Vec<Candidate>> {
     let ids = serde_json::to_string(scope)?;
@@ -547,7 +522,6 @@ pub(crate) fn hit(ranked: &Ranked, verdict: &str, reason: String) -> CatalogHit 
     }
 }
 
-/// Evidence-only answer: the best unchecked files, all unsure.
 pub(crate) fn unchecked(prepared: &Prepared, why: Unchecked) -> (String, Vec<CatalogHit>) {
     let kinds: Vec<&str> = prepared.ranked.iter().map(|ranked| ranked.kind.as_str()).collect();
     let total = prepared.ranked.len();
@@ -558,7 +532,6 @@ pub(crate) fn unchecked(prepared: &Prepared, why: Unchecked) -> (String, Vec<Cat
     (evidence_message(hits.len(), total, &noun(&kinds, total), why), hits)
 }
 
-/// Results so far: matches, then the unsure ones, each in evidence order.
 pub(crate) fn ordered(results: &[(Ranked, Verdict, String)]) -> Vec<CatalogHit> {
     let yes = results.iter().filter(|(_, verdict, _)| *verdict == Verdict::Yes).map(|(ranked, _, reason)| hit(ranked, "yes", reason.clone()));
     let unsure = results.iter().filter(|(_, verdict, _)| *verdict == Verdict::Unsure).map(|(ranked, _, reason)| hit(ranked, "unsure", reason.clone()));
@@ -583,8 +556,7 @@ fn bounded_copy(path: &Path) -> Result<Removing> {
     Ok(Removing(out))
 }
 
-/// Where a selected video's frame comes from: the vetted FFmpeg runtime the
-/// user installs. A trait so tests can stand in for it without FFmpeg.
+/// A trait so tests can stand in for the vetted FFmpeg runtime.
 pub(crate) trait FrameSource: Send + Sync {
     fn available(&self) -> bool;
     fn probe(&self, path: &Path, cancel: &AtomicBool) -> Result<super::video_export::AnalysisProbe>;
@@ -605,7 +577,6 @@ impl FrameSource for Vetted {
     }
 }
 
-/// The Mac app's engine looks at a video through AVFoundation, as the Swift engine does.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 impl FrameSource for Vetted {
     fn available(&self) -> bool {
@@ -627,7 +598,6 @@ impl FrameSource for Vetted {
 
 const NO_VIDEO_RUNTIME: &str = "Videos aren't checked frame by frame on this computer yet.";
 
-/// The middle frame of a video, bounded to `CHECK_SIDE`, as the Swift engine looks at it.
 fn middle_frame(source: &dyn FrameSource, path: &Path, cancel: &AtomicBool) -> Result<Removing> {
     let probe = source.probe(path, cancel)?;
     if !probe.duration.is_finite() || probe.duration <= 0.0 {
@@ -644,8 +614,6 @@ fn middle_frame(source: &dyn FrameSource, path: &Path, cancel: &AtomicBool) -> R
     Ok(Removing(out))
 }
 
-/// Checks the likely files with the resident vision model, emitting results as
-/// they arrive. Returns the verdicts and whether the model started.
 pub(crate) async fn check<F, Fut>(model: &str, prepared: &Prepared, cancel: Arc<AtomicBool>, progress: F) -> (Vec<(Ranked, Verdict, String)>, bool)
 where
     F: FnMut(Vec<(Ranked, Verdict, String)>, usize) -> Fut,
@@ -677,7 +645,6 @@ where
     (results, true)
 }
 
-/// The per-file loop of `check`, with the model (`ask`) and the video decoder injected.
 async fn run_checks<F, Fut, A, AFut>(
     prepared: &Prepared,
     cancel: &Arc<AtomicBool>,
@@ -751,9 +718,7 @@ where
     (results, ok)
 }
 
-/// `check` on the Swift engine's MLX model: the original file is decoded the
-/// Swift way (672 px bound, a video's middle frame) and asked with
-/// `benchmarkPass`, as `ChatSelection.check` does.
+/// `check` on the MLX model: images decoded to a 672 px bound, a video's middle frame, asked with `benchmarkPass`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 async fn check_mlx<F, Fut>(model: &str, prepared: &Prepared, cancel: Arc<AtomicBool>, mut progress: F) -> (Vec<(Ranked, Verdict, String)>, bool)
 where
@@ -811,19 +776,22 @@ where
     (results, true)
 }
 
-/// Selection checks prefer an installed small Qwen3-VL (on the Mac, 2B with the
-/// main-subject confirmation was more precise and about twice as fast as 4B on
-/// held-out questions), then the larger ones; resident sizes from the catalog.
+/// Without a usable requested model, prefers an installed small Qwen3-VL (on the Mac, 2B with the main-subject
+/// confirmation was more precise and ~2× faster than 4B on held-out questions), then the larger ones.
 #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
 const CHECK_LADDER: [(&str, f64); 3] = [("qwen3_vl_2b_instruct_gguf_q8_0", 3.22), ("qwen3_vl_8b", 7.71), ("qwen3_vl_4b", 4.43)];
-/// The Mac app's engine runs the Swift engine's MLX models, with its budgets.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 const CHECK_LADDER: [(&str, f64); 3] = [("qwen3_vl_2b", 3.0), ("qwen3_vl_8b", 8.5), ("qwen3_vl_4b", 5.0)];
 
-/// The model a selection check uses: the first installed model of the ladder
-/// that fits the memory free now, else the requested or preferred one.
-pub(crate) fn check_model(available_gb: f64, installed: impl Fn(&str) -> bool, fallback: Option<String>) -> Option<String> {
-    CHECK_LADDER.iter().find(|(kind, gb)| *gb <= available_gb && installed(kind)).map(|(kind, _)| (*kind).to_owned()).or(fallback)
+/// The model the chat is set to answers first (the footer promises the same AI as Describe Files) when it is installed
+/// and fits the memory free now; the ladder picks when it does not.
+pub(crate) fn check_model(available_gb: f64, installed: impl Fn(&str) -> bool, requested: Option<String>) -> Option<String> {
+    let fits = |kind: &str| CHECK_LADDER.iter().find(|(name, _)| *name == kind).is_none_or(|(_, gb)| *gb <= available_gb);
+    requested
+        .clone()
+        .filter(|kind| installed(kind) && fits(kind))
+        .or_else(|| CHECK_LADDER.iter().find(|(kind, gb)| *gb <= available_gb && installed(kind)).map(|(kind, _)| (*kind).to_owned()))
+        .or(requested)
 }
 
 pub(crate) fn query_vector(request: &ChatRequest, text: &str) -> Option<(Vec<f32>, String)> {
@@ -840,7 +808,6 @@ pub(crate) fn query_vector(request: &ChatRequest, text: &str) -> Option<(Vec<f32
         .map(|vector| (vector, model.to_owned()))
 }
 
-/// The answer without a model, from the request's own query vector only.
 pub(crate) fn evidence_answer(conn: &Connection, request: &ChatRequest) -> Result<(String, Vec<CatalogHit>)> {
     let query = request.query_vector.as_deref().filter(|vector| crate::models::clip_space::valid(vector)).zip(request.embedding_model.as_deref());
     let prepared = prepare(conn, request, query)?;
@@ -1031,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn check_model_prefers_an_installed_small_qwen_then_the_largest_that_fits() {
+    fn check_model_uses_the_requested_model_then_a_small_qwen_then_the_largest_that_fits() {
         let small = CHECK_LADDER[0].0;
         let all = |kind: &str| [small, "qwen3_vl_4b", "qwen3_vl_8b"].contains(&kind);
         let large = |kind: &str| kind == "qwen3_vl_4b" || kind == "qwen3_vl_8b";
@@ -1039,6 +1006,9 @@ mod tests {
         assert_eq!(check_model(2.0, all, Some("gemma_3_4b".into())).as_deref(), Some("gemma_3_4b"));
         assert_eq!(check_model(16.0, large, None).as_deref(), Some("qwen3_vl_8b"));
         assert_eq!(check_model(6.0, large, None).as_deref(), Some("qwen3_vl_4b"));
+        assert_eq!(check_model(16.0, all, Some("qwen3_vl_4b".into())).as_deref(), Some("qwen3_vl_4b"));
+        assert_eq!(check_model(16.0, all, Some("qwen3_vl_8b".into())).as_deref(), Some("qwen3_vl_8b"));
+        assert_eq!(check_model(4.0, all, Some("qwen3_vl_8b".into())).as_deref(), Some(small));
         assert_eq!(check_model(16.0, |_| false, None), None);
         assert!(is_small(CHECK_LADDER[0].0));
     }
@@ -1193,7 +1163,6 @@ mod tests {
         Ranked { id, path: format!("/fixture/{id}.mp4"), kind: "video".into(), score: 0.0, matched: vec![], clip: false, people: false }
     }
 
-    /// Runs the loop over `ranked`; returns the verdicts and the (width, height) of every image the model saw.
     fn run(ranked: Vec<Ranked>, stub: Stub, cancel: Arc<AtomicBool>) -> (Vec<(i64, Verdict, String)>, Vec<(u32, u32)>, Arc<Stub>) {
         let prepared = Prepared { criteria: "a dog".into(), ranked };
         let stub = Arc::new(stub);

@@ -1,9 +1,4 @@
 ﻿// PeopleViewModel — backs the People tab cluster grid.
-//
-// Each cluster has a representative face image, a member count, an
-// optional person name (set by the user), and a list of file IDs that
-// contain faces in this cluster. The view shows them as cards in a wrap
-// layout; tapping a card opens the PersonDetailSheet.
 
 using System;
 using System.Collections.Generic;
@@ -25,19 +20,10 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private readonly DispatcherQueue _ui;
     private bool _isLoading;
     private string? _errorMessage;
-    // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
     private bool _isSelectMode;
     private bool _disposed;
-    /// <summary>Cancelled in <see cref="Dispose"/> so any RefreshAsync running
-    /// on a thread-pool thread unwinds before the view's connection state
-    /// is torn down.</summary>
+    /// <summary>Cancelled in Dispose so any RefreshAsync running on a thread-pool thread unwinds before the view's connection state is torn down.</summary>
     private readonly CancellationTokenSource _disposalCts = new();
-    // Refresh coordination (mirrors LibraryViewModel A4/A5): every RefreshAsync
-    // bumps _refreshGen and captures it; ApplyOnUi discards a result a newer
-    // refresh has superseded, so a slow earlier load (e.g. a pre-merge DB read
-    // enqueued by a faceClusteringComplete event) can't apply last and re-add a
-    // merged-away cluster. _activeLoads keeps the spinner on until the LAST load
-    // finishes, so an earlier finally no longer clears it prematurely.
     private long _refreshGen;
     private int _activeLoads;
 
@@ -57,8 +43,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 
     public ObservableCollection<PersonCluster> Clusters { get; } = new();
 
-    /// <summary>FEAT-CRIT-1: when true, cluster cards show a checkbox
-    /// overlay and the bulk-action toolbar replaces the page header.</summary>
     public bool IsSelectMode
     {
         get => _isSelectMode;
@@ -66,7 +50,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         {
             if (_isSelectMode == value) return;
             _isSelectMode = value;
-            // Leaving select mode clears every selection.
             if (!value)
             {
                 foreach (var c in Clusters) c.IsSelected = false;
@@ -76,7 +59,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>FEAT-CRIT-1: count of currently-selected cluster cards.</summary>
     public int SelectedCount
     {
         get
@@ -87,7 +69,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>FEAT-CRIT-1: cluster IDs of every selected card, in order.</summary>
     public IReadOnlyList<long> SelectedClusterIds
     {
         get
@@ -129,9 +110,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _activeLoads);
         try
         {
-            // Linked token created inside the try: a Dispose() race after the
-            // _disposed check makes _disposalCts.Token throw ObjectDisposedException,
-            // caught below as a clean teardown no-op instead of escaping to the caller.
+            // Created inside the try so a Dispose() race becomes a clean teardown no-op instead of an ObjectDisposedException escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
@@ -143,11 +122,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         catch (ObjectDisposedException) { /* expected during teardown */ }
         catch (Exception ex)
         {
-            // ConfigureAwait(false) above resumes this continuation on a
-            // thread-pool thread; IsLoading/ErrorMessage raise PropertyChanged that
-            // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so they
-            // must be marshaled to the captured UI thread — else a native fast-fail
-            // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
+            // ConfigureAwait(false) above resumes this continuation on a thread-pool thread; IsLoading/ErrorMessage raise PropertyChanged that drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so they must be marshaled to the captured UI thread — else a native fast-fail (RPC_E_WRONG_THREAD).
             OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
         }
         finally
@@ -159,7 +134,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 
     private List<PersonCluster> LoadClusters(CancellationToken ct)
     {
-        // First-launch guard: the engine creates the DB on first scan.
         if (!File.Exists(_dbPath))
         {
             return new List<PersonCluster>();
@@ -172,11 +146,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         using var conn = new SqliteConnection(connString);
         conn.Open();
         using var cmd = conn.CreateCommand();
-        // Cluster shape: face_prints (one row per detected face) joins
-        // persons (one row per cluster). Display name = explicit `name`
-        // (legacy free-form) → `first_name` (v5 structured) → fallback
-        // "Person N". Anchor face = the face_prints row with the highest
-        // quality score in the cluster — picked via subquery so it's stable.
+        // Anchor face = the face_prints row with the highest quality score in the cluster — picked via subquery so it's stable.
         bool hideUnknown = false;
         try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
         cmd.CommandText = ClusterQuery(hideUnknown);
@@ -239,9 +209,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 
     private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
     {
-        // Drop results from a refresh a newer one has already superseded — checked
-        // on the UI thread right before the swap so it also catches a refresh that
-        // started during the dispatch gap. Mirrors LibraryViewModel.ApplyOnUi.
+        // Drop results superseded by a newer refresh; checked on the UI thread right before the swap so a refresh started during the dispatch gap is caught too.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
@@ -257,11 +225,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
-    /// catch/finally run on a thread-pool thread (Task.Run + ConfigureAwait(false)),
-    /// so raising IsLoading/ErrorMessage PropertyChanged there would drive x:Bind
-    /// XAML writes off the UI thread — a native fast-fail. No-op when already on the
-    /// UI thread. Mirrors LibraryViewModel.OnUi.
+    /// <summary>Marshal a UI-affined mutation onto the captured dispatcher.</summary>
     private void OnUi(Action action)
     {
         if (_ui.HasThreadAccess) action();
@@ -274,18 +238,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(SelectedCount));
     }
 
-    /// <summary>Reconcile <paramref name="clusters"/> to match <paramref name="rows"/>
-    /// by <see cref="PersonCluster.ClusterId"/>, in place (mirrors
-    /// <c>LibraryViewModel.MergeById</c>). The old Clear+Add raised a
-    /// CollectionChanged.Reset ~1 Hz during a scan, re-realizing the whole
-    /// ItemsRepeater, full-res-decoding every anchor face again, and discarding
-    /// the user's in-flight multi-select state. Surviving clusters whose anchor
-    /// face is unchanged keep their existing instance (and its IsSelected +
-    /// already-decoded AnchorImage); only genuine deltas emit Add/Remove. A
-    /// cluster whose anchor face changed is replaced so its OneTime AnchorImage /
-    /// Caption bindings re-realize against the fresh crop. Static +
-    /// collection-only so it carries no UI-thread affinity beyond the
-    /// ObservableCollection it mutates.</summary>
+    /// <summary>Surviving clusters whose anchor face is unchanged keep their existing instance (and its IsSelected + already-decoded AnchorImage); only genuine deltas emit Add/Remove.</summary>
     internal static void MergeByClusterId(
         ObservableCollection<PersonCluster> clusters,
         IReadOnlyList<PersonCluster> rows)
@@ -299,9 +252,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         var existingById = new Dictionary<int, PersonCluster>(clusters.Count);
         foreach (var c in clusters) existingById[c.ClusterId] = c;
 
-        // `reused` tracks the surviving instances we keep by reference, so step 1
-        // can drop the old instance of a cluster whose anchor face changed (its
-        // ClusterId survives but we're replacing it with the fresh one).
         var desired = new List<PersonCluster>(rows.Count);
         var nextIds = new HashSet<int>(rows.Count);
         var reused = new HashSet<PersonCluster>();
@@ -314,11 +264,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 && keep.DisplayName == fresh.DisplayName
                 && keep.AnchorCacheRevision == fresh.AnchorCacheRevision)
             {
-                // Reuse the instance (preserving IsSelected + the decoded
-                // AnchorImage) ONLY when nothing visible changed. The Caption is a
-                // OneTime x:Bind over the init-only DisplayName/MemberCount, so a
-                // rename or a member-count change must take the FRESH instance to
-                // re-render — otherwise the card shows a stale name/count.
+                // The Caption is a OneTime x:Bind over the init-only DisplayName/MemberCount, so a rename or a member-count change must take the FRESH instance to re-render — otherwise the card shows a stale name/count.
                 reused.Add(keep);
                 desired.Add(keep);
             }
@@ -328,14 +274,11 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // 1) Remove any existing cluster we're not reusing by reference — both
-        //    genuinely-gone ids and replaced-instance survivors.
         for (int i = clusters.Count - 1; i >= 0; i--)
         {
             if (!reused.Contains(clusters[i])) clusters.RemoveAt(i);
         }
 
-        // 2) Align order to `desired` via Remove+Insert of the instance.
         for (int j = 0; j < desired.Count; j++)
         {
             var want = desired[j];
@@ -375,7 +318,6 @@ internal sealed class PersonCluster : INotifyPropertyChanged
         ? $"Person #{ClusterId} ({MemberCount} faces)"
         : $"{DisplayName} ({MemberCount} faces)";
 
-    // FEAT-CRIT-1: per-card selection state for People multi-select.
     private bool _isSelected;
     public bool IsSelected
     {
@@ -391,15 +333,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
 
     private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _cachedAnchorImage;
     private bool _anchorImageResolved;
-    /// <summary>
-    /// BitmapImage of the per-face JPEG written by the engine after
-    /// ArcFace embed. Lazily constructed once + cached so the binding
-    /// doesn't rebuild it on every refresh (which would flicker / loop).
-    /// Null if the file doesn't exist or AnchorFaceId is 0.
-    /// DecodePixelWidth caps the decode at the ~120px card display size so a
-    /// full-res face JPEG isn't decoded for a thumbnail (mirrors
-    /// MergeSuggestionVm.ResolveFace).
-    /// </summary>
+    /// <summary>Lazily constructed once + cached so the binding doesn't rebuild it on every refresh (which would flicker / loop).</summary>
     public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? AnchorImage
     {
         get
@@ -410,9 +344,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             try
             {
                 var path = BuildCropPath(AnchorFaceId);
-                // The load already looked at the crop off the UI thread and
-                // folded the answer into AnchorCacheRevision; only an instance
-                // built without one has to ask the disk here.
+                // The load already looked at the crop off the UI thread and folded the answer into AnchorCacheRevision; only an instance built without one has to ask the disk here.
                 var presence = CropPresence(AnchorCacheRevision);
                 if (presence == false) return null;
                 if (presence is null && !System.IO.File.Exists(path)) return null;
@@ -423,9 +355,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
                     _cachedAnchorImage = shared;
                     return shared;
                 }
-                // IgnoreImageCache stays on for the first decode because the
-                // engine rewrites a crop in place under the same file name;
-                // s_anchorImages then shares that decode for the same revision.
+                // IgnoreImageCache stays on for the first decode because the engine rewrites a crop in place under the same file name; s_anchorImages then shares that decode for the same revision.
                 _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
                 {
                     DecodePixelWidth = 120,
@@ -450,8 +380,6 @@ internal sealed class PersonCluster : INotifyPropertyChanged
     // Read and written only from the UI thread (the AnchorImage binding).
     private static readonly Dictionary<string, Microsoft.UI.Xaml.Media.Imaging.BitmapImage> s_anchorImages = new(StringComparer.Ordinal);
 
-    /// <summary>What <see cref="ReadCropRevision"/> recorded about the crop
-    /// file: true = it was there, false = it was not, null = unknown.</summary>
     internal static bool? CropPresence(string? revision)
     {
         if (string.IsNullOrEmpty(revision)) return null;
@@ -460,9 +388,6 @@ internal sealed class PersonCluster : INotifyPropertyChanged
         return true;
     }
 
-    /// <summary>Resolve the absolute path of the per-face JPEG the engine
-    /// writes after ArcFace embed. Pure-function helper so test code can
-    /// assert the path shape without depending on the cache state.</summary>
     public static string BuildCropPath(long faceId) =>
         System.IO.Path.Combine(Services.AppPaths.Root, "face_crops", $"{faceId}.jpg");
 
@@ -488,20 +413,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             : $"{DisplayName} · {MemberCount}";
 }
 
-/// <summary>
-/// Backs one row of the Suggested-merges sheet. Wraps an IPC
-/// <see cref="FileID.IpcSchema.MergeSuggestion"/> and exposes display strings,
-/// the two anchor-face thumbnails (lazily built + cached on the UI thread,
-/// same pattern as <see cref="PersonCluster.AnchorImage"/>), and a resolved
-/// flag that dims the row + disables its buttons once the user has acted.
-///
-/// Rendering through this VM + a DataTemplate is deliberate: the template
-/// resolves {ThemeResource} brushes natively and the ItemsRepeater recycles
-/// containers, so the sheet never indexes theme brushes off
-/// Application.Resources (KeyNotFoundException) nor rebuilds sibling UIElement
-/// subtrees per engine event (layout-pass fast-fail) — the two crashes the
-/// prior imperative BuildRow path hit.
-/// </summary>
+/// <summary>Rendering through this VM + a DataTemplate is deliberate: the template resolves {ThemeResource} brushes natively and the ItemsRepeater recycles containers, so the sheet never indexes theme brushes off Application.Resources (KeyNotFoundException) nor rebuilds sibling UIElement subtrees per engine event (layout-pass fast-fail) — the two crashes the prior imperative BuildRow path hit.</summary>
 internal sealed class MergeSuggestionVm : INotifyPropertyChanged
 {
     public required FileID.IpcSchema.MergeSuggestion Model { get; init; }
@@ -525,10 +437,7 @@ internal sealed class MergeSuggestionVm : INotifyPropertyChanged
     public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? DestFaceImage
         => ResolveFace(Model.DestinationAnchorFaceId, ref _destFaceImage, ref _destFaceResolved);
 
-    // Lazily build + cache the per-face JPEG. Constructed during x:Bind
-    // evaluation on the UI thread; File.Exists/try-guarded so a missing or
-    // corrupt crop degrades to the placeholder Border instead of throwing.
-    // DecodePixelWidth caps the decode at the 80px display size.
+    // Constructed during x:Bind evaluation on the UI thread; File.Exists/try-guarded so a missing or corrupt crop degrades to the placeholder Border instead of throwing.
     private static Microsoft.UI.Xaml.Media.Imaging.BitmapImage? ResolveFace(
         long faceId,
         ref Microsoft.UI.Xaml.Media.Imaging.BitmapImage? cache,
@@ -555,8 +464,6 @@ internal sealed class MergeSuggestionVm : INotifyPropertyChanged
     }
 
     private bool _isResolved;
-    /// <summary>True once the user has merged or marked-different this pair;
-    /// dims the row and disables both action buttons.</summary>
     public bool IsResolved
     {
         get => _isResolved;
@@ -573,9 +480,7 @@ internal sealed class MergeSuggestionVm : INotifyPropertyChanged
     public bool ActionsEnabled => !_isResolved && !_isBusy;
 
     private bool _isBusy;
-    /// <summary>True while an engine merge/different action is in flight for
-    /// this pair; disables both action buttons so a second click can't
-    /// double-apply during the up-to-30s engine await.</summary>
+    /// <summary>True while an engine merge/different action is in flight for this pair; disables both action buttons so a second click can't double-apply during the up-to-30s engine await.</summary>
     public bool IsBusy
     {
         get => _isBusy;

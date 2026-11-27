@@ -57,14 +57,13 @@
     ]
   },
   {
-    "name": "files-video-thumbnail-undecodable-emits-nothing",
-    "description": "generateVideoThumbnail for a file that is not a decodable video emits neither thumbnailGenerated nor an error; the app keeps its placeholder.",
+    "name": "files-video-thumbnail-undecodable-answers-empty",
+    "description": "generateVideoThumbnail for a file that is not a decodable video emits no error and answers one thumbnailGenerated with empty bytes, so the app shows its icon at once instead of waiting.",
     "tree": [
       {"path": "clip.mp4", "content": "not a video"}
     ],
     "steps": [
-      {"label": "request", "command": {"generateVideoThumbnail": {"path": "{path:clip.mp4}", "modifiedAt": 1.5}}},
-      {"label": "next reply", "command": {"embedTextQuery": {"query": "after the thumbnail", "queryID": "after"}}, "await": "clipTextEmbedding", "filter": {"queryID": "after"}, "abortOnError": true, "collect": {"thumbnailGenerated": {"$tol": "count", "value": 0}}}
+      {"label": "request", "command": {"generateVideoThumbnail": {"path": "{path:clip.mp4}", "modifiedAt": 1.5}}, "await": "thumbnailGenerated", "abortOnError": true, "timeout": 30, "collect": {"thumbnailGenerated": {"$tol": "count", "value": 1}}}
     ]
   }
 ]

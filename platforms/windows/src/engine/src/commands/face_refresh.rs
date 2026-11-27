@@ -1,12 +1,11 @@
-//! Durable face refresh backlog: a `faceRefresh` catalog job that re-embeds
-//! faces whose stored vector is missing or from another model, processing or
-//! file version, one model/processing namespace at a time. Mirror of the macOS
-//! `FaceRefreshJob.swift`; keep states, SQL and messages in step.
+//! Durable face refresh backlog: a `faceRefresh` catalog job re-embedding faces whose stored vector is missing or from
+//! another model, processing or file version, one namespace at a time.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -15,14 +14,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::face_review::page;
 use crate::ipc::sink::Sink;
-use crate::ipc::{CatalogJob, CatalogRequest, CatalogResponse, EventPayload, FaceRefreshStatus, FaceReviewPage, IpcEvent, Wrap};
+use crate::ipc::{CatalogRequest, CatalogResponse, EventPayload, FaceRefreshStatus, FaceReviewPage, IpcEvent, Wrap};
 
 pub const JOB_ID: &str = "face-refresh";
 pub const JOB_KIND: &str = "faceRefresh";
-/// What this engine's own face pipeline produces (YuNet landmarks, 112 px alignment).
 pub const PORTABLE_PROCESSING: &str = "rust-align112-v1";
-/// The macOS namespaces (Vision landmarks and the Swift alignment), as
-/// `FaceCacheProvenance.processingVersion` names them.
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
 pub const MAC_PROCESSING: &str = "macos-landmark-overlap-v3-orientation";
 #[cfg_attr(not(all(target_os = "macos", feature = "apple-adapters")), allow(dead_code))]
@@ -56,9 +52,8 @@ const OUTDATED: &str = "FROM face_prints fp JOIN files f ON f.id=fp.file_id LEFT
        OR fp.processing_version IS NULL OR fp.processing_version<>?2 OR fp.source_revision IS NULL OR r.revision IS NULL \
        OR fp.source_revision<>r.revision)";
 
-/// The face space this platform keeps People in. The engine the Mac app hosts
-/// keeps the Swift engine's namespace, so a Swift catalog shows no refresh
-/// backlog; elsewhere it is the portable pipeline's.
+/// The Mac-hosted engine keeps the namespace the retired Swift engine used, so older catalogs show no refresh backlog;
+/// elsewhere the portable pipeline's.
 pub(crate) fn processing() -> &'static str {
     #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
     {
@@ -70,13 +65,10 @@ pub(crate) fn processing() -> &'static str {
     }
 }
 
-/// Whether this engine can compute vectors in `processing()`: the portable
-/// pipeline, or the app-hosted engine with the Vision adapters (`apple::faces`).
 pub(crate) fn refresh_supported() -> bool {
     processing() == PORTABLE_PROCESSING || cfg!(all(target_os = "macos", feature = "apple-adapters"))
 }
 
-/// The installed SFace weights' identity, cached by path, size and mtime.
 pub(crate) fn current_model() -> Option<String> {
     static CACHE: Mutex<Option<(PathBuf, u64, std::time::SystemTime, String)>> = Mutex::new(None);
     let path = crate::models::sface::default_weights_path().ok()?;
@@ -99,8 +91,118 @@ pub(crate) fn current_model() -> Option<String> {
     Some(model)
 }
 
+/// A scan inserts faces with empty vectors and embeds them afterwards; those are waiting to be grouped, not saved by an earlier version.
+const NOT_YET_EMBEDDED: &str = "AND NOT (length(fp.print_data)=0 AND length(COALESCE(fp.arcface_embedding,X''))=0 AND fp.embedding_model IS NULL)";
+
+/// Left in the crop folder once every crop carries the upright stamp, so later runs skip the walk.
+const CROPS_VERIFIED: &str = ".upright-stamped";
+
+struct OldCrops {
+    scanned_at: f64,
+    faces: HashSet<i64>,
+}
+
+type CropSpace = (PathBuf, String, String);
+
+/// Looking at every crop file costs seconds on a large catalog and the answer only shrinks, so one scan serves the
+/// whole run of the engine.
+static OLD_CROPS: LazyLock<Mutex<HashMap<CropSpace, OldCrops>>> = LazyLock::new(Mutex::default);
+
+const ELIGIBLE_FACES: &str = "FROM face_prints fp JOIN files f ON f.id=fp.file_id JOIN catalog_revisions r ON r.file_id=fp.file_id \
+     WHERE f.failed=0 AND length(fp.arcface_embedding)=512 AND fp.embedding_model=?1 AND fp.processing_version=?2 \
+       AND fp.source_revision=r.revision";
+
+fn crop_space(faces_dir: &Path, model: &str, processing: &str) -> CropSpace {
+    (faces_dir.to_path_buf(), model.to_string(), processing.to_string())
+}
+
+fn scan_old_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
+    let mut statement = conn.prepare(&format!("SELECT fp.id {ELIGIBLE_FACES} ORDER BY fp.id"))?;
+    let faces: Vec<i64> = statement.query_map(params![model, processing], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(faces
+        .into_iter()
+        .filter(|face| {
+            let crop = faces_dir.join(format!("{face}.jpg"));
+            crop.is_file() && !crate::util::face_crop_stamp::is_stamped(&crop)
+        })
+        .collect())
+}
+
+fn json_ids(ids: &[i64]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
+}
+
+/// Faces whose refresh failed because the photo no longer matches the catalog. Updating cannot help until a rescan
+/// reads the photo again, so they are not counted as outdated meanwhile.
+fn unrefreshable_faces(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<Vec<i64>> {
+    let mut statement = conn.prepare(
+        "SELECT b.face_id, f.path_text, f.size_bytes, f.modified_at FROM face_refresh_backlog b \
+         JOIN face_prints fp ON fp.id=b.face_id JOIN files f ON f.id=fp.file_id \
+         WHERE b.embedding_model=?1 AND b.processing_version=?2 AND b.state='failed' AND b.reason='source_changed'",
+    )?;
+    let rows = statement.query_map(params![model, processing], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<f64>>(3)?))
+    })?;
+    let mut faces = Vec::new();
+    for row in rows {
+        let (face, path, size, modified) = row?;
+        if !stat_matches(Path::new(&path), size, modified) {
+            faces.push(face);
+        }
+    }
+    Ok(faces)
+}
+
+/// Mac crops without the upright stamp may be sideways, and their vectors were embedded from those crops. Refreshing a
+/// face rewrites its crop with the stamp, which takes it out of this set.
+fn stale_crops(conn: &Connection, model: &str, processing: &str, faces_dir: &Path) -> rusqlite::Result<Vec<i64>> {
+    if !processing.starts_with(super::face_clustering_mac::MAC_PREFIX) || faces_dir.join(CROPS_VERIFIED).exists() {
+        return Ok(Vec::new());
+    }
+    let mut cache = OLD_CROPS.lock();
+    let scan = match cache.entry(crop_space(faces_dir, model, processing)) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let faces: HashSet<i64> = scan_old_crops(conn, model, processing, faces_dir)?.into_iter().collect();
+            if faces.is_empty() {
+                let _ = std::fs::write(faces_dir.join(CROPS_VERIFIED), b"");
+            }
+            entry.insert(OldCrops { scanned_at: now(), faces })
+        }
+    };
+    let unrefreshable: HashSet<i64> = unrefreshable_faces(conn, model, processing)?.into_iter().collect();
+    let mut statement = conn.prepare(&format!(
+        "SELECT fp.id {ELIGIBLE_FACES} \
+           AND NOT EXISTS (SELECT 1 FROM face_refresh_backlog b WHERE b.face_id=fp.id AND b.embedding_model=?1 \
+                             AND b.processing_version=?2 AND b.state='done' AND b.updated_at>=?3) ORDER BY fp.id"
+    ))?;
+    let faces = statement.query_map(params![model, processing, scan.scanned_at], |row| row.get::<_, i64>(0))?;
+    let mut stale = Vec::new();
+    for face in faces {
+        let face = face?;
+        if scan.faces.contains(&face) && !unrefreshable.contains(&face) {
+            stale.push(face);
+        }
+    }
+    Ok(stale)
+}
+
+fn outdated_in(conn: &Connection, model: &str, processing: &str, faces_dir: Option<&Path>) -> rusqlite::Result<i64> {
+    let stale = match faces_dir {
+        Some(dir) => stale_crops(conn, model, processing, dir)?.len() as i64,
+        None => 0,
+    };
+    let unrefreshable = json_ids(&unrefreshable_faces(conn, model, processing)?);
+    let counted: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) {OUTDATED} {NOT_YET_EMBEDDED} AND fp.id NOT IN (SELECT value FROM json_each(?3))"),
+        params![model, processing, unrefreshable],
+        |row| row.get(0),
+    )?;
+    Ok(counted + stale)
+}
+
 pub(crate) fn outdated(conn: &Connection, model: &str, processing: &str) -> rusqlite::Result<i64> {
-    conn.query_row(&format!("SELECT COUNT(*) {OUTDATED}"), params![model, processing], |row| row.get(0))
+    outdated_in(conn, model, processing, crate::paths::faces_dir().ok().as_deref())
 }
 
 pub(crate) fn status(conn: &Connection, model: Option<&str>, processing: &str) -> rusqlite::Result<FaceRefreshStatus> {
@@ -167,23 +269,25 @@ pub fn recover(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_job(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
-        .optional()?
-        .is_some_and(|kind| kind == JOB_KIND))
-}
-
-pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
-    Ok(super::catalog::jobs(conn)?.into_iter().filter(|job| job.kind == JOB_KIND).collect())
-}
-
-/// Seeds the backlog for one namespace and queues the job.
 pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) -> rusqlite::Result<()> {
+    seed_in(conn, model, processing, at, crate::paths::faces_dir().ok().as_deref())
+}
+
+fn seed_in(conn: &Connection, model: &str, processing: &str, at: f64, faces_dir: Option<&Path>) -> rusqlite::Result<()> {
+    if let Some(dir) = faces_dir {
+        OLD_CROPS.lock().remove(&crop_space(dir, model, processing));
+        let stale = json_ids(&stale_crops(conn, model, processing, dir)?);
+        conn.execute(
+            "INSERT INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,reason,updated_at) \
+             SELECT value, ?1, ?2, 'pending', 0, NULL, ?3 FROM json_each(?4) WHERE true \
+             ON CONFLICT(face_id,embedding_model,processing_version) DO UPDATE SET state='pending', updated_at=?3 WHERE state='done'",
+            params![model, processing, at, stale],
+        )?;
+    }
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO face_refresh_backlog(face_id,embedding_model,processing_version,state,attempts,reason,updated_at) \
-             SELECT fp.id, ?1, ?2, 'pending', 0, NULL, ?3 {OUTDATED}"
+             SELECT fp.id, ?1, ?2, 'pending', 0, NULL, ?3 {OUTDATED} {NOT_YET_EMBEDDED}"
         ),
         params![model, processing, at],
     )?;
@@ -195,7 +299,7 @@ pub(crate) fn seed(conn: &Connection, model: &str, processing: &str, at: f64) ->
     conn.execute(
         &format!(
             "UPDATE face_refresh_backlog SET state='pending',updated_at=?3 WHERE embedding_model=?1 AND processing_version=?2 \
-             AND state='done' AND face_id IN (SELECT fp.id {OUTDATED})"
+             AND state='done' AND face_id IN (SELECT fp.id {OUTDATED} {NOT_YET_EMBEDDED})"
         ),
         params![model, processing, at],
     )?;
@@ -227,7 +331,7 @@ pub(crate) fn enqueue(conn: &Connection, request: &CatalogRequest, model: Option
         "ok",
         Some("Updating faces for the current face model. People and names don't change.".into()),
     );
-    response.jobs = jobs(conn)?;
+    response.jobs = super::catalog::jobs_of_kind(conn, JOB_KIND)?;
     Ok(response)
 }
 
@@ -238,8 +342,8 @@ pub(crate) enum Source {
     Offline,
 }
 
-/// Missing: the photo is gone but its library location is there. Offline: the
-/// location itself (or the volume or drive it is on) is unreachable.
+/// Missing: the photo is gone but its library location is there. Offline: the location itself (or its volume) is
+/// unreachable.
 pub(crate) fn classify(path: &Path, roots: &[PathBuf]) -> Source {
     if path.exists() {
         return Source::Available;
@@ -267,12 +371,10 @@ pub(crate) fn roots(conn: &Connection) -> rusqlite::Result<Vec<PathBuf>> {
     statement.query_map([], |row| row.get::<_, String>(0).map(PathBuf::from))?.collect()
 }
 
-/// Re-embeds the faces of one photo. One result per box, in order.
+/// One result per box, in order.
 pub(crate) trait Backend: Send {
     fn model(&self) -> &str;
     fn embed(&mut self, path: &Path, boxes: &[String]) -> Vec<std::result::Result<Vec<f32>, &'static str>>;
-    /// Crop JPEGs (`face_crops/<id>.jpg`) for the boxes of the last `embed`, in
-    /// order, for backends that make them.
     fn take_crops(&mut self) -> Vec<Option<Vec<u8>>> {
         Vec::new()
     }
@@ -329,13 +431,11 @@ fn stat_matches(path: &Path, size: i64, modified: Option<f64>) -> bool {
         }
 }
 
-/// Runs the backend outside the database lock, one photo at a time.
 #[cfg(test)]
 pub(crate) fn embed_batch(batch: &[Pending], roots: &[PathBuf], backend: &mut dyn Backend) -> Vec<(i64, Outcome)> {
     embed_batch_with_crops(batch, roots, backend).0
 }
 
-/// [`embed_batch`] plus the crop JPEGs the backend made, by face.
 pub(crate) fn embed_batch_with_crops(batch: &[Pending], roots: &[PathBuf], backend: &mut dyn Backend) -> (Vec<(i64, Outcome)>, Vec<(i64, Vec<u8>)>) {
     let mut crops = Vec::new();
     let mut by_path: BTreeMap<&str, Vec<&Pending>> = BTreeMap::new();
@@ -381,16 +481,13 @@ fn valid(vector: &[f32]) -> bool {
     vector.len() == 128 && vector.iter().all(|value| value.is_finite()) && (0.95..=1.05).contains(&norm)
 }
 
-/// Stores one batch's outcomes. A vector is saved only while the face, its box
-/// and its photo's catalog size and time are unchanged.
 pub(crate) fn persist(conn: &Connection, model: &str, processing: &str, batch: &[Pending], outcomes: &[(i64, Outcome)], at: f64) -> rusqlite::Result<Vec<i64>> {
     let tx = conn.unchecked_transaction()?;
     let mut saved = Vec::new();
     for (face, outcome) in outcomes {
         let Some(item) = batch.iter().find(|item| item.face == *face) else { continue };
         let (state, reason) = match outcome {
-            // The Mac face space saves through `FaceAnalysisCache.persist`, as
-            // the Swift engine's `FaceRefreshJob` does.
+            // The Mac face space saves through `FaceAnalysisCache.persist`.
             Outcome::Embedded(vector) if processing.starts_with(super::face_clustering_mac::MAC_PREFIX) => {
                 let input = super::face_extract_mac::Input {
                     id: item.face,
@@ -463,7 +560,6 @@ fn require_running(conn: &Connection) -> Result<(String, String)> {
     }
 }
 
-/// Drains the backlog synchronously with `backend`.
 #[cfg(test)]
 pub(crate) fn drain(conn: &Connection, backend: &mut dyn Backend) -> Result<()> {
     loop {
@@ -498,7 +594,7 @@ pub(crate) fn schedule(sink: Sink, database: Arc<Mutex<Connection>>) {
 }
 
 async fn publish(sink: &Sink, database: &Arc<Mutex<Connection>>) {
-    if let Ok(jobs) = super::timeline::with_db(database, |conn| jobs(conn)).await {
+    if let Ok(jobs) = super::timeline::with_db(database, |conn| super::catalog::jobs_of_kind(conn, JOB_KIND)).await {
         let mut response = super::catalog::response(JOB_ID, "ok", None);
         response.jobs = jobs;
         sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response)))).await;
@@ -556,7 +652,7 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
     let failure = match outcome {
         Ok(()) => None,
         Err(error) if error.is::<Interrupted>() => return publish(sink, database).await,
-        Err(error) => Some(format!("{error:#}").chars().take(2_000).collect::<String>()),
+        Err(error) => Some(crate::util::user_message::job_failure_text(&error)),
     };
     let _ = super::timeline::with_db(database, move |conn| {
         match failure {
@@ -575,24 +671,25 @@ async fn run(sink: &Sink, database: &Arc<Mutex<Connection>>) {
     publish(sink, database).await;
 }
 
-/// Writes the crop JPEGs of the faces whose vectors were saved.
 fn save_crops(crops: &[(i64, Vec<u8>)], saved: &[i64]) {
-    if crops.is_empty() {
-        return;
+    if let Ok(dir) = crate::paths::faces_dir() {
+        save_crops_in(&dir, crops, saved);
     }
-    let Ok(dir) = crate::paths::faces_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
+}
+
+fn save_crops_in(dir: &Path, crops: &[(i64, Vec<u8>)], saved: &[i64]) {
+    if crops.is_empty() || std::fs::create_dir_all(dir).is_err() {
         return;
     }
     for (face, jpeg) in crops.iter().filter(|(face, _)| saved.contains(face)) {
         let temporary = dir.join(format!(".{face}.jpg.tmp"));
-        if std::fs::write(&temporary, jpeg).is_ok() && std::fs::rename(&temporary, dir.join(format!("{face}.jpg"))).is_err() {
+        let written = std::fs::write(&temporary, crate::util::face_crop_stamp::stamp(jpeg));
+        if written.is_ok() && std::fs::rename(&temporary, dir.join(format!("{face}.jpg"))).is_err() {
             let _ = std::fs::remove_file(&temporary);
         }
     }
 }
 
-/// Pixel box, top-left origin, on the upright decoded image.
 #[cfg_attr(all(target_os = "macos", feature = "apple-adapters"), allow(dead_code))]
 pub(crate) fn pixel_box(bbox: &str, width: u32, height: u32) -> std::result::Result<[f32; 4], &'static str> {
     let text = bbox.trim();
@@ -633,7 +730,6 @@ struct OnnxBackend {
     sface: crate::models::sface::SFace,
 }
 
-/// The app-hosted engine's backend: the Mac pipeline in `apple::faces`.
 #[cfg(all(target_os = "macos", feature = "apple-adapters"))]
 struct MacBackend {
     sface: Arc<crate::apple::faces::MacSFace>,
