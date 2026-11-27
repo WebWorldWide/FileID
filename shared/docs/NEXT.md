@@ -4,7 +4,7 @@ Short, current priorities only: open work, nothing else. History lives in `STATE
 
 ## Priorities (2026-11-26)
 
-The Mac app runs only the shared Rust engine and passed four acceptance rounds on the read-only 130k-file drive (`STATE.md`, 2026-11-24 to 2026-11-26). The evidence-backed checklist is `MAC_PRODUCTION_CHECKLIST.md`; the open rows there are the owner steps below. Round 7 (re-test of the round-6 defects on `c66f38e2`) has no recorded result yet: record it in `STATE.md`, then fix what it found.
+The Mac app runs only the shared Rust engine and passed acceptance rounds 4 to 7 on the read-only 130k-file drive (round 7: no blocker or major defect; every minor fixed and re-verified) (`STATE.md`, 2026-11-24 to 2026-11-26). The evidence-backed checklist is `MAC_PRODUCTION_CHECKLIST.md`; the open rows there are the owner steps below. Round 7 (re-test of the round-6 defects on `c66f38e2`) has no recorded result yet: record it in `STATE.md`, then fix what it found.
 
 ### 1. Owner-only release steps
 
