@@ -3377,6 +3377,7 @@ mod tests {
         assert!(face_is_excluded(0.0, 40.0_f32.to_radians(), 1.0, 200.0));
     }
 
+    #[cfg(not(all(target_os = "macos", feature = "apple-adapters")))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_photo_without_an_embedded_date_takes_its_takeout_sidecar_date() {
         let dir = std::env::temp_dir().join(format!("fileid-takeout-scan-{}", uuid::Uuid::new_v4()));
